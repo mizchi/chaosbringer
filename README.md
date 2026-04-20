@@ -1,4 +1,4 @@
-# @luna_ui/playwright-chaos
+# chaosbringer
 
 Playwright-based chaos testing library for web applications. Uses accessibility-aware weighted random actions to discover errors.
 
@@ -15,7 +15,7 @@ Playwright-based chaos testing library for web applications. Uses accessibility-
 ## Installation
 
 ```bash
-pnpm add @luna_ui/playwright-chaos playwright @playwright/test
+pnpm add chaosbringer playwright @playwright/test
 ```
 
 ## Playwright Test Integration
@@ -24,7 +24,7 @@ pnpm add @luna_ui/playwright-chaos playwright @playwright/test
 
 ```typescript
 import { test, expect } from '@playwright/test';
-import { chaosTest, chaosExpect } from '@luna_ui/playwright-chaos';
+import { chaosTest, chaosExpect } from 'chaosbringer';
 
 // Use the pre-configured chaosTest
 chaosTest('chaos test homepage', async ({ page, chaos }) => {
@@ -43,7 +43,7 @@ chaosTest('chaos test homepage', async ({ page, chaos }) => {
 
 ```typescript
 import { test as base } from '@playwright/test';
-import { withChaos, type ChaosFixtures } from '@luna_ui/playwright-chaos';
+import { withChaos, type ChaosFixtures } from 'chaosbringer';
 
 const test = base.extend<ChaosFixtures>(withChaos({
   maxActionsPerPage: 10,
@@ -77,16 +77,16 @@ chaosTest('crawl entire site', async ({ chaos }) => {
 
 ```bash
 # Basic crawl
-chaos-crawler --url http://localhost:3000
+chaosbringer --url http://localhost:3000
 
 # With analytics errors ignored (recommended for dev mode)
-chaos-crawler --url http://localhost:3000 --ignore-analytics
+chaosbringer --url http://localhost:3000 --ignore-analytics
 
 # CI mode with strict checking
-chaos-crawler --url http://localhost:3000 --strict --compact --ignore-analytics
+chaosbringer --url http://localhost:3000 --strict --compact --ignore-analytics
 
 # With screenshots
-chaos-crawler --url https://docs.example.com --max-pages 20 --screenshots
+chaosbringer --url https://docs.example.com --max-pages 20 --screenshots
 ```
 
 ### CLI Options

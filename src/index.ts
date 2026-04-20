@@ -1,5 +1,5 @@
 /**
- * @luna_ui/playwright-chaos
+ * chaosbringer
  *
  * Playwright-based chaos testing library for web applications.
  * Inspired by monkey testing with additional features for error detection and reporting.

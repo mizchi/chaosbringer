@@ -25,6 +25,13 @@ import type {
   SpaIssueInfo,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
+import {
+  matchesAnyPattern,
+  matchesSpaPattern as matchesSpaPatternPure,
+  isExternalUrl as isExternalUrlPure,
+  escapeSelector as escapeSelectorPure,
+  summarizePages,
+} from "./filters.js";
 
 const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   maxPages: 50,
@@ -273,49 +280,20 @@ export class ChaosCrawler {
   }
 
   private shouldExclude(url: string): boolean {
-    const patterns = this.options.excludePatterns || [];
-    return patterns.some((pattern) => {
-      try {
-        return new RegExp(pattern).test(url);
-      } catch {
-        return false;
-      }
-    });
+    return matchesAnyPattern(url, this.options.excludePatterns);
   }
 
   /** Check if URL matches SPA patterns */
   private matchesSpaPattern(url: string): string | null {
-    const patterns = this.options.spaPatterns || [];
-    for (const pattern of patterns) {
-      try {
-        if (new RegExp(pattern).test(url)) {
-          return pattern;
-        }
-      } catch {
-        // Invalid regex, skip
-      }
-    }
-    return null;
+    return matchesSpaPatternPure(url, this.options.spaPatterns);
   }
 
   private shouldIgnoreError(message: string): boolean {
-    const patterns = this.options.ignoreErrorPatterns || [];
-    return patterns.some((pattern) => {
-      try {
-        return new RegExp(pattern, "i").test(message);
-      } catch {
-        return false;
-      }
-    });
+    return matchesAnyPattern(message, this.options.ignoreErrorPatterns, "i");
   }
 
   private isExternalUrl(url: string): boolean {
-    try {
-      const urlOrigin = new URL(url).origin;
-      return urlOrigin !== this.baseOrigin;
-    } catch {
-      return false;
-    }
+    return isExternalUrlPure(url, this.baseOrigin);
   }
 
   private async setupNavigationBlocking(page: Page): Promise<void> {
@@ -846,7 +824,7 @@ export class ChaosCrawler {
   }
 
   private escapeSelector(text: string): string {
-    return text.replace(/"/g, '\\"').replace(/\n/g, " ").slice(0, 50);
+    return escapeSelectorPure(text);
   }
 
   /**
@@ -1026,50 +1004,6 @@ export class ChaosCrawler {
   }
 
   private calculateSummary(): CrawlSummary {
-    const successPages = this.results.filter((r) => r.status === "success").length;
-    const errorPages = this.results.filter((r) => r.status === "error").length;
-    const timeoutPages = this.results.filter((r) => r.status === "timeout").length;
-    const recoveredPages = this.results.filter((r) => r.status === "recovered").length;
-
-    const allErrors = this.results.flatMap((r) => r.errors);
-    const consoleErrors = allErrors.filter((e) => e.type === "console").length;
-    const networkErrors = allErrors.filter((e) => e.type === "network").length;
-    const jsExceptions = allErrors.filter((e) => e.type === "exception").length;
-    const unhandledRejections = allErrors.filter((e) => e.type === "unhandled-rejection").length;
-
-    const loadTimes = this.results.map((r) => r.loadTime);
-    const avgLoadTime = loadTimes.length > 0 ? loadTimes.reduce((a, b) => a + b, 0) / loadTimes.length : 0;
-
-    // Calculate average metrics
-    const metricsResults = this.results.filter((r) => r.metrics);
-    let avgMetrics: CrawlSummary["avgMetrics"] = undefined;
-
-    if (metricsResults.length > 0) {
-      const ttfbs = metricsResults.map((r) => r.metrics!.ttfb).filter((v): v is number => v !== undefined);
-      const fcps = metricsResults.map((r) => r.metrics!.fcp).filter((v): v is number => v !== undefined);
-      const lcps = metricsResults.map((r) => r.metrics!.lcp).filter((v): v is number => v !== undefined);
-
-      if (ttfbs.length > 0 || fcps.length > 0 || lcps.length > 0) {
-        avgMetrics = {
-          ttfb: ttfbs.length > 0 ? ttfbs.reduce((a, b) => a + b, 0) / ttfbs.length : 0,
-          fcp: fcps.length > 0 ? fcps.reduce((a, b) => a + b, 0) / fcps.length : 0,
-          lcp: lcps.length > 0 ? lcps.reduce((a, b) => a + b, 0) / lcps.length : 0,
-        };
-      }
-    }
-
-    return {
-      successPages,
-      errorPages,
-      timeoutPages,
-      recoveredPages,
-      consoleErrors,
-      networkErrors,
-      jsExceptions,
-      unhandledRejections,
-      avgLoadTime,
-      avgMetrics,
-      discovery: this.discoveryMetrics,
-    };
+    return summarizePages(this.results, this.discoveryMetrics);
   }
 }
