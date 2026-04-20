@@ -23,6 +23,7 @@ import type {
   DeadLinkInfo,
   DiscoveryMethod,
   SpaIssueInfo,
+  Invariant,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
@@ -54,6 +55,7 @@ const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   enableRecovery: true,
   recoveryHistorySize: 20,
   seed: 0, // Overwritten at construction time if unset
+  invariants: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -175,6 +177,56 @@ export class ChaosCrawler {
       errors.push(error);
       this.events.onError?.(error);
       this.logger.logPageError(error);
+    }
+  }
+
+  /**
+   * Evaluate all invariants declared for the given phase on the current page.
+   * Any invariant that returns false/throws/returns a string is recorded as
+   * a PageError with type "invariant-violation".
+   */
+  private async runInvariants(
+    phase: "afterLoad" | "afterActions",
+    page: Page,
+    url: string,
+    errors: PageError[]
+  ): Promise<void> {
+    const invariants = this.options.invariants || [];
+    for (const inv of invariants) {
+      const when = inv.when ?? "afterActions";
+      if (when !== phase) continue;
+      if (inv.urlPattern) {
+        try {
+          if (!new RegExp(inv.urlPattern).test(url)) continue;
+        } catch {
+          continue;
+        }
+      }
+
+      let failureReason: string | null = null;
+      try {
+        const result = await inv.check({ page, url, errors });
+        if (result === false) {
+          failureReason = `invariant "${inv.name}" returned false`;
+        } else if (typeof result === "string") {
+          failureReason = result;
+        }
+      } catch (err) {
+        failureReason = err instanceof Error ? err.message : String(err);
+      }
+
+      if (failureReason !== null) {
+        const error: PageError = {
+          type: "invariant-violation",
+          message: `[${inv.name}] ${failureReason}`,
+          invariantName: inv.name,
+          url,
+          timestamp: Date.now(),
+        };
+        errors.push(error);
+        this.events.onError?.(error);
+        this.logger.logPageError(error);
+      }
     }
   }
 
@@ -553,6 +605,8 @@ export class ChaosCrawler {
       // Drain any unhandled rejections captured during load.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
+      await this.runInvariants("afterLoad", page, url, errors);
+
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
       const links = await this.extractLinks(page);
@@ -562,6 +616,8 @@ export class ChaosCrawler {
 
       // Drain any rejections that fired during actions.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
+
+      await this.runInvariants("afterActions", page, url, errors);
 
       let screenshot: string | undefined;
       if (this.options.screenshots) {

@@ -7,6 +7,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "../../src/crawler.js";
+import type { Invariant } from "../../src/types.js";
 import { startFixtureServer } from "../site/server.js";
 
 let server: Awaited<ReturnType<typeof startFixtureServer>>;
@@ -68,5 +69,64 @@ describe("ChaosCrawler against fixture site", () => {
     // check if any appeared in blockedExternalNavigations as a weak signal.
     // (Keeping it assertion-free keeps the test deterministic under seed drift.)
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(0);
+  }, 120000);
+
+  it("surfaces invariant violations as PageErrors and exits non-zero", async () => {
+    const invariants: Invariant[] = [
+      {
+        name: "has-h1",
+        when: "afterLoad",
+        check: async ({ page }) => {
+          const count = await page.locator("h1").count();
+          return count > 0 || `no <h1> on this page`;
+        },
+      },
+      {
+        name: "no-loading-spinner-after-actions",
+        when: "afterActions",
+        urlPattern: "/spa/",
+        check: async ({ page }) => {
+          const text = (await page.locator("#app").textContent()) ?? "";
+          return !/loading/i.test(text) || `app still shows loading: "${text}"`;
+        },
+      },
+    ];
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 4,
+      maxActionsPerPage: 1,
+      headless: true,
+      seed: 1,
+      invariants,
+    });
+
+    const report = await crawler.start();
+    // All fixture pages have <h1>, so the has-h1 invariant should hold.
+    const hasH1Violations = report.pages
+      .flatMap((p) => p.errors)
+      .filter((e) => e.invariantName === "has-h1");
+    expect(hasH1Violations).toHaveLength(0);
+
+    // Visit the SPA page directly to check the spinner invariant wiring.
+    const crawler2 = new ChaosCrawler({
+      baseUrl: `${server.url}/spa/items/42`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+      invariants: [
+        {
+          name: "failing-invariant",
+          when: "afterLoad",
+          check: () => "always fails",
+        },
+      ],
+    });
+    const report2 = await crawler2.start();
+    expect(report2.summary.invariantViolations).toBeGreaterThanOrEqual(1);
+    expect(
+      report2.pages[0]!.errors.some((e) => e.type === "invariant-violation"),
+    ).toBe(true);
   }, 120000);
 });

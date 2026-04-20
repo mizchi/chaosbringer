@@ -35,6 +35,9 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Network Errors: ${report.summary.networkErrors}`);
   lines.push(`JS Exceptions: ${report.summary.jsExceptions}`);
   lines.push(`Unhandled Rejections: ${report.summary.unhandledRejections}`);
+  if (report.summary.invariantViolations > 0) {
+    lines.push(`Invariant Violations: ${report.summary.invariantViolations}`);
+  }
   lines.push(`Avg Load Time: ${report.summary.avgLoadTime.toFixed(0)}ms`);
 
   if (report.summary.avgMetrics) {
@@ -183,6 +186,10 @@ function truncate(str: string, maxLen: number): string {
 // CI-friendly exit code helper
 export function getExitCode(report: CrawlReport, strict = false): number {
   if (report.summary.errorPages > 0 || report.summary.timeoutPages > 0) {
+    return 1;
+  }
+  // Invariant violations always fail — the whole point of declaring them.
+  if (report.summary.invariantViolations > 0) {
     return 1;
   }
   if (strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {

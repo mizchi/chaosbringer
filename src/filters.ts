@@ -67,6 +67,7 @@ export function summarizePages(
   const networkErrors = allErrors.filter((e) => e.type === "network").length;
   const jsExceptions = allErrors.filter((e) => e.type === "exception").length;
   const unhandledRejections = allErrors.filter((e) => e.type === "unhandled-rejection").length;
+  const invariantViolations = allErrors.filter((e) => e.type === "invariant-violation").length;
 
   const loadTimes = results.map((r) => r.loadTime);
   const avgLoadTime =
@@ -103,6 +104,7 @@ export function summarizePages(
     networkErrors,
     jsExceptions,
     unhandledRejections,
+    invariantViolations,
     avgLoadTime,
     avgMetrics,
     discovery,

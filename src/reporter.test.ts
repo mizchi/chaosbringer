@@ -15,6 +15,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
     networkErrors: 0,
     jsExceptions: 0,
     unhandledRejections: 0,
+    invariantViolations: 0,
     avgLoadTime: 0,
     ...overrides,
   };
@@ -70,6 +71,12 @@ describe("getExitCode", () => {
 
   it("returns 0 for clean report in strict mode", () => {
     expect(getExitCode(makeReport(), true)).toBe(0);
+  });
+
+  it("returns 1 for invariant violations even in non-strict mode", () => {
+    const report = makeReport({ summary: makeSummary({ invariantViolations: 1 }) });
+    expect(getExitCode(report)).toBe(1);
+    expect(getExitCode(report, true)).toBe(1);
   });
 });
 
