@@ -26,4 +26,9 @@ export type {
   PerformanceMetrics,
   CrawlReport,
   CrawlSummary,
+  Invariant,
+  InvariantContext,
+  Fault,
+  FaultRule,
+  FaultInjectionStats,
 } from "./types.js";

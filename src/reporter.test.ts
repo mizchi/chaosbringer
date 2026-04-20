@@ -15,6 +15,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
     networkErrors: 0,
     jsExceptions: 0,
     unhandledRejections: 0,
+    invariantViolations: 0,
     avgLoadTime: 0,
     ...overrides,
   };
@@ -23,6 +24,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
 function makeReport(overrides: Partial<CrawlReport> = {}): CrawlReport {
   return {
     baseUrl: "http://localhost:3000",
+    seed: 42,
     startTime: 0,
     endTime: 1000,
     duration: 1000,
@@ -70,6 +72,12 @@ describe("getExitCode", () => {
   it("returns 0 for clean report in strict mode", () => {
     expect(getExitCode(makeReport(), true)).toBe(0);
   });
+
+  it("returns 1 for invariant violations even in non-strict mode", () => {
+    const report = makeReport({ summary: makeSummary({ invariantViolations: 1 }) });
+    expect(getExitCode(report)).toBe(1);
+    expect(getExitCode(report, true)).toBe(1);
+  });
 });
 
 describe("formatCompactReport", () => {
@@ -107,6 +115,11 @@ describe("formatCompactReport", () => {
   it("omits metrics line when not present", () => {
     const out = formatCompactReport(makeReport());
     expect(out).not.toContain("Metrics");
+  });
+
+  it("includes the seed so users can reproduce a run", () => {
+    const out = formatCompactReport(makeReport({ seed: 99999 }));
+    expect(out).toContain("seed=99999");
   });
 });
 

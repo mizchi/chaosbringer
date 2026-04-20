@@ -23,7 +23,9 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "lint": "biome check src/",
-    "crawl": "tsx src/cli.ts"
+    "crawl": "tsx src/cli.ts",
+    "fixture:serve": "tsx fixtures/site/server.ts",
+    "fixture:run": "tsx fixtures/runner/run.ts"
   },
   "files": [
     "dist",

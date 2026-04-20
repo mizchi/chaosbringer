@@ -13,6 +13,7 @@ export function formatReport(report: CrawlReport): string {
   lines.push("=".repeat(60));
   lines.push("");
   lines.push(`Base URL: ${report.baseUrl}`);
+  lines.push(`Seed: ${report.seed}`);
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {
@@ -34,14 +35,22 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Network Errors: ${report.summary.networkErrors}`);
   lines.push(`JS Exceptions: ${report.summary.jsExceptions}`);
   lines.push(`Unhandled Rejections: ${report.summary.unhandledRejections}`);
+  if (report.summary.invariantViolations > 0) {
+    lines.push(`Invariant Violations: ${report.summary.invariantViolations}`);
+  }
   lines.push(`Avg Load Time: ${report.summary.avgLoadTime.toFixed(0)}ms`);
 
   if (report.summary.avgMetrics) {
-    lines.push("");
-    lines.push("Performance Metrics (avg):");
-    lines.push(`  TTFB: ${report.summary.avgMetrics.ttfb.toFixed(0)}ms`);
-    lines.push(`  FCP: ${report.summary.avgMetrics.fcp.toFixed(0)}ms`);
-    lines.push(`  LCP: ${report.summary.avgMetrics.lcp.toFixed(0)}ms`);
+    const m = report.summary.avgMetrics;
+    const entries: string[] = [];
+    if (m.ttfb > 0) entries.push(`  TTFB: ${m.ttfb.toFixed(0)}ms`);
+    if (m.fcp > 0) entries.push(`  FCP: ${m.fcp.toFixed(0)}ms`);
+    if (m.lcp > 0) entries.push(`  LCP: ${m.lcp.toFixed(0)}ms`);
+    if (entries.length > 0) {
+      lines.push("");
+      lines.push("Performance Metrics (avg):");
+      lines.push(...entries);
+    }
   }
 
   // Error details
@@ -141,6 +150,16 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.faultInjections && report.faultInjections.length > 0) {
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("FAULT INJECTION");
+    lines.push("-".repeat(40));
+    for (const stats of report.faultInjections) {
+      lines.push(`  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}`);
+    }
+  }
+
   lines.push("");
   lines.push("=".repeat(60));
 
@@ -152,7 +171,7 @@ export function formatCompactReport(report: CrawlReport): string {
   const errors = report.summary.consoleErrors + report.summary.networkErrors + report.summary.jsExceptions;
 
   return [
-    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s`,
+    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})`,
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
@@ -177,6 +196,10 @@ function truncate(str: string, maxLen: number): string {
 // CI-friendly exit code helper
 export function getExitCode(report: CrawlReport, strict = false): number {
   if (report.summary.errorPages > 0 || report.summary.timeoutPages > 0) {
+    return 1;
+  }
+  // Invariant violations always fail — the whole point of declaring them.
+  if (report.summary.invariantViolations > 0) {
     return 1;
   }
   if (strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {

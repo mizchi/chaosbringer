@@ -41,6 +41,38 @@ export interface CrawlerOptions {
   enableRecovery?: boolean;
   /** Number of recent operations to keep for recovery dump */
   recoveryHistorySize?: number;
+  /** Seed for deterministic action selection. Random if omitted. */
+  seed?: number;
+  /** Assertions to evaluate on each page. */
+  invariants?: Invariant[];
+  /** Fault injection rules applied via Playwright's route API. */
+  faultInjection?: FaultRule[];
+}
+
+/** What to do when a FaultRule matches a request. */
+export type Fault =
+  | { kind: "abort"; errorCode?: string }
+  | { kind: "status"; status: number; body?: string; contentType?: string }
+  | { kind: "delay"; ms: number };
+
+export interface FaultRule {
+  /** Optional human-readable name used in stats. */
+  name?: string;
+  /** Regex string matched against the full request URL. */
+  urlPattern: string;
+  /** HTTP methods to match (case-insensitive). Empty = all methods. */
+  methods?: string[];
+  /** Action taken on a match. */
+  fault: Fault;
+  /** 0..1, default 1.0. Uses the crawler's seeded RNG. */
+  probability?: number;
+}
+
+/** Per-rule stats for fault injection, emitted on the final report. */
+export interface FaultInjectionStats {
+  rule: string;
+  matched: number;
+  injected: number;
 }
 
 export interface ActionWeights {
@@ -59,11 +91,46 @@ export interface ActionWeights {
 }
 
 export interface PageError {
-  type: "console" | "network" | "exception" | "crash" | "unhandled-rejection";
+  type:
+    | "console"
+    | "network"
+    | "exception"
+    | "crash"
+    | "unhandled-rejection"
+    | "invariant-violation";
   message: string;
   url?: string;
   stack?: string;
   timestamp: number;
+  /** Name of the invariant that failed (only for invariant-violation errors). */
+  invariantName?: string;
+}
+
+/**
+ * Assertion that must hold on every page the crawler visits. Failures are
+ * surfaced as PageError with type "invariant-violation".
+ *
+ * The `check` function may return false, throw, or return a string describing
+ * the violation. Returning true (or void) means the invariant holds.
+ */
+export interface Invariant {
+  /** Human-readable identifier used in error messages. */
+  name: string;
+  /** Check the invariant. Return false / throw / return a string to fail. */
+  check: (ctx: InvariantContext) => boolean | string | void | Promise<boolean | string | void>;
+  /** When to evaluate. Default: "afterActions". */
+  when?: "afterLoad" | "afterActions";
+  /** Restrict to URLs matching this regex (string). If omitted, run on every page. */
+  urlPattern?: string;
+}
+
+export interface InvariantContext {
+  /** Playwright Page object — use this to query the DOM / evaluate. */
+  page: import("playwright").Page;
+  /** URL of the page being checked. */
+  url: string;
+  /** Errors collected on this page so far. */
+  errors: readonly PageError[];
 }
 
 export interface PerformanceMetrics {
@@ -137,6 +204,8 @@ export interface ActionResult {
 
 export interface CrawlReport {
   baseUrl: string;
+  /** Seed used for random action selection (for reproducibility). */
+  seed: number;
   startTime: number;
   endTime: number;
   duration: number;
@@ -148,6 +217,8 @@ export interface CrawlReport {
   pages: PageResult[];
   actions: ActionResult[];
   summary: CrawlSummary;
+  /** Per-rule fault injection stats (present only when rules were configured). */
+  faultInjections?: FaultInjectionStats[];
 }
 
 export interface CrawlSummary {
@@ -159,6 +230,7 @@ export interface CrawlSummary {
   networkErrors: number;
   jsExceptions: number;
   unhandledRejections: number;
+  invariantViolations: number;
   avgLoadTime: number;
   avgMetrics?: {
     ttfb: number;

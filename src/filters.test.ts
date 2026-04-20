@@ -141,6 +141,8 @@ describe("summarizePages", () => {
           { type: "exception", message: "c", timestamp: 0 },
           { type: "unhandled-rejection", message: "d", timestamp: 0 },
           { type: "console", message: "e", timestamp: 0 },
+          { type: "invariant-violation", message: "f", timestamp: 0 },
+          { type: "invariant-violation", message: "g", timestamp: 0 },
         ],
       }),
     ]);
@@ -148,6 +150,7 @@ describe("summarizePages", () => {
     expect(s.networkErrors).toBe(1);
     expect(s.jsExceptions).toBe(1);
     expect(s.unhandledRejections).toBe(1);
+    expect(s.invariantViolations).toBe(2);
   });
 
   it("averages load times", () => {

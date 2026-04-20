@@ -23,6 +23,10 @@ import type {
   DeadLinkInfo,
   DiscoveryMethod,
   SpaIssueInfo,
+  Invariant,
+  FaultRule,
+  FaultInjectionStats,
+  Fault,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
@@ -32,6 +36,7 @@ import {
   escapeSelector as escapeSelectorPure,
   summarizePages,
 } from "./filters.js";
+import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 
 const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   maxPages: 50,
@@ -52,6 +57,9 @@ const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   logToConsole: false,
   enableRecovery: true,
   recoveryHistorySize: 20,
+  seed: 0, // Overwritten at construction time if unset
+  invariants: [],
+  faultInjection: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -93,8 +101,10 @@ export class ChaosCrawler {
   private blockedExternalCount = 0;
   private startTime = 0;
   private baseOrigin: string;
-  /** Recent action history for recovery */
-  private actionHistory: ActionResult[] = [];
+  /** Actions performed on the page currently being crawled. Reset on
+   * every new crawlPage call so the recovery dump only reports actions
+   * from the page that actually failed. */
+  private currentPageActions: ActionResult[] = [];
   /** Last successfully loaded URL for recovery */
   private lastSuccessfulUrl: string = "";
   /** Recovery count for reporting */
@@ -109,6 +119,16 @@ export class ChaosCrawler {
   };
   /** Current page being crawled (for source tracking) */
   private currentEntry: QueueEntry | null = null;
+  /** Deterministic RNG for reproducible action selection. */
+  private rng: Rng;
+  /** Fault injection rules compiled once at construction time. */
+  private compiledFaultRules: Array<{
+    rule: FaultRule;
+    pattern: RegExp;
+    methods?: string[];
+    matched: number;
+    injected: number;
+  }> = [];
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     // Filter out undefined values to preserve defaults
@@ -119,6 +139,9 @@ export class ChaosCrawler {
     this.actionWeights = { ...DEFAULT_ACTION_WEIGHTS, ...options.actionWeights };
     this.events = events;
     this.baseOrigin = new URL(options.baseUrl).origin;
+    this.rng = createRng(options.seed ?? randomSeed());
+    this.options.seed = this.rng.seed;
+    this.compiledFaultRules = compileFaultRules(options.faultInjection);
 
     // Initialize logger
     if (options.logFile) {
@@ -133,23 +156,125 @@ export class ChaosCrawler {
     }
   }
 
+  /** Seed used for this run (useful for reproducing failures). */
+  getSeed(): number {
+    return this.rng.seed;
+  }
+
+  /**
+   * Match drained rejections against already-captured `pageerror` entries and
+   * reclassify them as unhandled-rejection. Rejections in Chromium fire both
+   * the DOM event and Playwright's CDP-level pageerror, so we dedupe here.
+   */
+  private reclassifyRejections(
+    errors: PageError[],
+    rejections: Array<{ message: string; stack?: string }>,
+    url: string
+  ): void {
+    for (const rejection of rejections) {
+      if (this.shouldIgnoreError(rejection.message)) continue;
+      const existing = errors.find(
+        (e) => e.type === "exception" && e.message === rejection.message
+      );
+      if (existing) {
+        existing.type = "unhandled-rejection";
+        continue;
+      }
+      const error: PageError = {
+        type: "unhandled-rejection",
+        message: rejection.message,
+        stack: rejection.stack,
+        url,
+        timestamp: Date.now(),
+      };
+      errors.push(error);
+      this.events.onError?.(error);
+      this.logger.logPageError(error);
+    }
+  }
+
+  /**
+   * Evaluate all invariants declared for the given phase on the current page.
+   * Any invariant that returns false/throws/returns a string is recorded as
+   * a PageError with type "invariant-violation".
+   */
+  private async runInvariants(
+    phase: "afterLoad" | "afterActions",
+    page: Page,
+    url: string,
+    errors: PageError[]
+  ): Promise<void> {
+    const invariants = this.options.invariants || [];
+    for (const inv of invariants) {
+      const when = inv.when ?? "afterActions";
+      if (when !== phase) continue;
+      if (inv.urlPattern) {
+        try {
+          if (!new RegExp(inv.urlPattern).test(url)) continue;
+        } catch {
+          continue;
+        }
+      }
+
+      let failureReason: string | null = null;
+      try {
+        const result = await inv.check({ page, url, errors });
+        if (result === false) {
+          failureReason = `invariant "${inv.name}" returned false`;
+        } else if (typeof result === "string") {
+          failureReason = result;
+        }
+      } catch (err) {
+        failureReason = err instanceof Error ? err.message : String(err);
+      }
+
+      if (failureReason !== null) {
+        const error: PageError = {
+          type: "invariant-violation",
+          message: `[${inv.name}] ${failureReason}`,
+          invariantName: inv.name,
+          url,
+          timestamp: Date.now(),
+        };
+        errors.push(error);
+        this.events.onError?.(error);
+        this.logger.logPageError(error);
+      }
+    }
+  }
+
+  /** Pop and return any unhandled promise rejections captured since last call. */
+  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
+    try {
+      return await page.evaluate(() => {
+        // @ts-ignore
+        const bag = (window.__chaosRejections || []) as Array<{ message: string; stack?: string }>;
+        // @ts-ignore
+        window.__chaosRejections = [];
+        return bag;
+      });
+    } catch {
+      // Page may have navigated away; drop rejections rather than throwing.
+      return [];
+    }
+  }
+
   /** Get the logger instance for external use */
   getLogger(): Logger {
     return this.logger;
   }
 
-  /** Add action to history buffer */
+  /** Record an action for the current page's recovery dump. */
   private addToHistory(action: ActionResult): void {
-    this.actionHistory.push(action);
-    // Keep only recent actions
-    if (this.actionHistory.length > this.options.recoveryHistorySize) {
-      this.actionHistory.shift();
+    this.currentPageActions.push(action);
+    if (this.currentPageActions.length > this.options.recoveryHistorySize) {
+      this.currentPageActions.shift();
     }
   }
 
-  /** Get recent actions for recovery dump */
+  /** Actions performed on the current page (for recovery diagnostics). */
   getRecentActions(): ActionResult[] {
-    return [...this.actionHistory];
+    return [...this.currentPageActions];
   }
 
   /** Create recovery info from current state */
@@ -176,7 +301,7 @@ export class ChaosCrawler {
     this.blockedExternalCount = 0;
 
     // Reset recovery state
-    this.actionHistory = [];
+    this.currentPageActions = [];
     this.lastSuccessfulUrl = this.options.baseUrl;
     this.recoveryCount = 0;
 
@@ -268,8 +393,8 @@ export class ChaosCrawler {
     this.startTime = Date.now();
     this.baseOrigin = new URL(url).origin;
 
-    // Set up external navigation blocking
-    if (this.options.blockExternalNavigation) {
+    // Set up external navigation blocking and/or fault injection routing.
+    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -297,27 +422,45 @@ export class ChaosCrawler {
   }
 
   private async setupNavigationBlocking(page: Page): Promise<void> {
-    // Block navigation to external domains
+    const blockExternal = this.options.blockExternalNavigation;
+    const rules = this.compiledFaultRules;
+
+    // Install a single route handler that first considers fault injection,
+    // then falls back to external-navigation blocking, then continues.
     await page.route("**/*", async (route: Route) => {
       const request = route.request();
       const url = request.url();
+      const method = request.method().toUpperCase();
 
-      // Allow same-origin requests
-      if (!this.isExternalUrl(url)) {
-        await route.continue();
+      // 1. Fault injection has priority so tests can exercise backends that
+      // would otherwise be allowed through.
+      for (const compiled of rules) {
+        if (!compiled.pattern.test(url)) continue;
+        if (compiled.methods && !compiled.methods.includes(method)) continue;
+
+        compiled.matched++;
+        const prob = compiled.rule.probability ?? 1;
+        // prob 0 should never inject; prob 1 always injects; in between we
+        // use the crawler's seeded RNG so probability is reproducible.
+        if (prob < 1 && this.rng.next() >= prob) continue;
+
+        compiled.injected++;
+        await applyFault(route, compiled.rule.fault);
         return;
       }
 
-      // Block navigation requests to external domains
-      if (request.isNavigationRequest()) {
-        this.blockedExternalCount++;
-        this.events.onBlockedNavigation?.(url);
-        this.logger.logBlockedNavigation(url);
-        await route.abort("blockedbyclient");
-        return;
+      // 2. Block external navigation if requested.
+      if (blockExternal && this.isExternalUrl(url)) {
+        if (request.isNavigationRequest()) {
+          this.blockedExternalCount++;
+          this.events.onBlockedNavigation?.(url);
+          this.logger.logBlockedNavigation(url);
+          await route.abort("blockedbyclient");
+          return;
+        }
+        // Allow non-navigation external requests (images, scripts, etc.)
       }
 
-      // Allow non-navigation external requests (images, scripts, etc.)
       await route.continue();
     });
   }
@@ -326,7 +469,10 @@ export class ChaosCrawler {
     const page = await this.context!.newPage();
     const { url, sourceUrl, method, sourceElement } = entry;
 
-    if (this.options.blockExternalNavigation) {
+    // Scope recovery diagnostics to this page only.
+    this.currentPageActions = [];
+
+    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -433,13 +579,17 @@ export class ChaosCrawler {
       this.logger.logPageError(error);
     });
 
-    // Capture unhandled promise rejections
-    page.addInitScript(() => {
+    // Capture unhandled promise rejections. Claim them via preventDefault so
+    // they don't also fire as `pageerror` (which we'd misclassify as exception).
+    await page.addInitScript(() => {
+      // @ts-ignore - custom bag attached to window
+      window.__chaosRejections = [];
       window.addEventListener("unhandledrejection", (event) => {
         const message = event.reason?.message || String(event.reason);
         const stack = event.reason?.stack;
-        // @ts-ignore - custom event for playwright
-        window.__chaosUnhandledRejection = { message, stack };
+        // @ts-ignore
+        window.__chaosRejections.push({ message, stack });
+        event.preventDefault();
       });
     });
 
@@ -483,26 +633,10 @@ export class ChaosCrawler {
         waitUntil: "networkidle",
       });
 
-      // Check for unhandled rejections
-      const unhandledRejection = await page.evaluate(() => {
-        // @ts-ignore
-        const rejection = window.__chaosUnhandledRejection;
-        // @ts-ignore
-        window.__chaosUnhandledRejection = null;
-        return rejection;
-      });
+      // Drain any unhandled rejections captured during load.
+      this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
-      if (unhandledRejection) {
-        const error: PageError = {
-          type: "unhandled-rejection",
-          message: unhandledRejection.message,
-          stack: unhandledRejection.stack,
-          url,
-          timestamp: Date.now(),
-        };
-        errors.push(error);
-        this.events.onError?.(error);
-      }
+      await this.runInvariants("afterLoad", page, url, errors);
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
@@ -511,26 +645,10 @@ export class ChaosCrawler {
       // Perform random actions with accessibility-based weighting
       await this.performWeightedActions(page, url);
 
-      // Check for any rejections after actions
-      const postActionRejection = await page.evaluate(() => {
-        // @ts-ignore
-        const rejection = window.__chaosUnhandledRejection;
-        // @ts-ignore
-        window.__chaosUnhandledRejection = null;
-        return rejection;
-      });
+      // Drain any rejections that fired during actions.
+      this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
-      if (postActionRejection) {
-        const error: PageError = {
-          type: "unhandled-rejection",
-          message: postActionRejection.message,
-          stack: postActionRejection.stack,
-          url,
-          timestamp: Date.now(),
-        };
-        errors.push(error);
-        this.events.onError?.(error);
-      }
+      await this.runInvariants("afterActions", page, url, errors);
 
       let screenshot: string | undefined;
       if (this.options.screenshots) {
@@ -835,9 +953,6 @@ export class ChaosCrawler {
     this.logger.debug("action_targets", { count: targets.length, url });
     if (targets.length === 0) return;
 
-    // Calculate total weight
-    const totalWeight = targets.reduce((sum, t) => sum + t.weight, 0);
-
     let actionsPerformed = 0;
     let attempts = 0;
     const maxAttempts = this.options.maxActionsPerPage * 3; // Allow retries for skipped elements
@@ -846,21 +961,7 @@ export class ChaosCrawler {
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
 
-      // Weighted random selection
-      let random = Math.random() * totalWeight;
-      let selectedTarget: ActionTarget | null = null;
-
-      for (const target of targets) {
-        random -= target.weight;
-        if (random <= 0) {
-          selectedTarget = target;
-          break;
-        }
-      }
-
-      if (!selectedTarget) {
-        selectedTarget = targets[targets.length - 1];
-      }
+      const selectedTarget = weightedPick(targets, (t) => t.weight, this.rng);
 
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
@@ -890,7 +991,7 @@ export class ChaosCrawler {
 
     try {
       if (target.type === "scroll") {
-        const scrollY = Math.floor(Math.random() * 1000);
+        const scrollY = randomInt(this.rng, 1000);
         await page.evaluate((y) => window.scrollTo(0, y), scrollY);
         return {
           type: "scroll",
@@ -989,6 +1090,7 @@ export class ChaosCrawler {
 
     return {
       baseUrl: this.options.baseUrl,
+      seed: this.rng.seed,
       startTime: this.startTime,
       endTime,
       duration: endTime - this.startTime,
@@ -1000,10 +1102,73 @@ export class ChaosCrawler {
       pages: this.results,
       actions: this.actions,
       summary,
+      faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
     };
+  }
+
+  /** Per-rule fault injection stats (for reporting). */
+  getFaultStats(): FaultInjectionStats[] {
+    return this.compiledFaultRules.map((c, i) => ({
+      rule: c.rule.name ?? c.rule.urlPattern,
+      matched: c.matched,
+      injected: c.injected,
+    }));
   }
 
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
+  }
+}
+
+function compileFaultRules(rules: FaultRule[] | undefined): Array<{
+  rule: FaultRule;
+  pattern: RegExp;
+  methods?: string[];
+  matched: number;
+  injected: number;
+}> {
+  if (!rules || rules.length === 0) return [];
+  const compiled: Array<{
+    rule: FaultRule;
+    pattern: RegExp;
+    methods?: string[];
+    matched: number;
+    injected: number;
+  }> = [];
+  for (const rule of rules) {
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(rule.urlPattern);
+    } catch {
+      // Skip invalid regex silently; same policy as other pattern options.
+      continue;
+    }
+    compiled.push({
+      rule,
+      pattern,
+      methods: rule.methods?.map((m) => m.toUpperCase()),
+      matched: 0,
+      injected: 0,
+    });
+  }
+  return compiled;
+}
+
+async function applyFault(route: Route, fault: Fault): Promise<void> {
+  switch (fault.kind) {
+    case "abort":
+      await route.abort(fault.errorCode ?? "failed");
+      return;
+    case "status":
+      await route.fulfill({
+        status: fault.status,
+        body: fault.body ?? "",
+        contentType: fault.contentType ?? "text/plain",
+      });
+      return;
+    case "delay":
+      await new Promise((r) => setTimeout(r, fault.ms));
+      await route.continue();
+      return;
   }
 }
