@@ -71,6 +71,74 @@ describe("ChaosCrawler against fixture site", () => {
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(0);
   }, 120000);
 
+  it("marks a 500-injected page as recovered and fires onPageComplete with the final status", async () => {
+    const seen: Array<{ url: string; status: string }> = [];
+    const crawler = new ChaosCrawler(
+      {
+        baseUrl: server.url,
+        maxPages: 3,
+        maxActionsPerPage: 1,
+        headless: true,
+        seed: 7,
+        faultInjection: [
+          {
+            name: "kill-about",
+            urlPattern: "/about$",
+            fault: { kind: "status", status: 500, body: "<h1>500</h1>", contentType: "text/html" },
+          },
+        ],
+      },
+      {
+        onPageComplete: (r) => seen.push({ url: r.url, status: r.status }),
+      }
+    );
+    const report = await crawler.start();
+    const aboutEvent = seen.find((s) => s.url.endsWith("/about"));
+    expect(aboutEvent?.status).toBe("recovered");
+
+    const aboutPage = report.pages.find((p) => p.url.endsWith("/about"));
+    expect(aboutPage?.status).toBe("recovered");
+    expect(aboutPage?.recovery).toBeDefined();
+    expect(report.recoveryCount).toBeGreaterThanOrEqual(1);
+  }, 120000);
+
+  it("attributes errors fired after chaos-action navigation to the real URL", async () => {
+    // Seed 123 + home's chaos action reliably clicks into /api-consumer.
+    // The /api/data console error should then record error.url = /api-consumer,
+    // not the home URL, even if it lives in home's PageResult.
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 2,
+      maxActionsPerPage: 1,
+      headless: true,
+      seed: 123,
+      faultInjection: [
+        {
+          name: "api-500",
+          urlPattern: "/api/data$",
+          fault: { kind: "status", status: 500, body: '{"error":500}' },
+        },
+      ],
+    });
+    const report = await crawler.start();
+
+    const apiErrors = report.pages.flatMap((p) =>
+      p.errors.filter((e) => e.url?.endsWith("/api-consumer") || e.message.includes("/api/data"))
+    );
+    // Each error we attribute via /api/data should carry the real URL.
+    for (const err of apiErrors) {
+      expect(err.url).toMatch(/api-consumer/);
+    }
+
+    // Fault should never produce a spurious ERR_ABORTED network error
+    // alongside the 500 console error (requires non-empty body, which we now
+    // default).
+    const networkAborts = report.pages
+      .flatMap((p) => p.errors)
+      .filter((e) => e.type === "network" && e.message.includes("ERR_ABORTED"));
+    expect(networkAborts).toHaveLength(0);
+  }, 120000);
+
   it("injects faults into matching API requests and tracks per-rule stats", async () => {
     const crawler = new ChaosCrawler({
       baseUrl: `${server.url}/api-consumer`,
