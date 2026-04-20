@@ -23,6 +23,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
 function makeReport(overrides: Partial<CrawlReport> = {}): CrawlReport {
   return {
     baseUrl: "http://localhost:3000",
+    seed: 42,
     startTime: 0,
     endTime: 1000,
     duration: 1000,
@@ -107,6 +108,11 @@ describe("formatCompactReport", () => {
   it("omits metrics line when not present", () => {
     const out = formatCompactReport(makeReport());
     expect(out).not.toContain("Metrics");
+  });
+
+  it("includes the seed so users can reproduce a run", () => {
+    const out = formatCompactReport(makeReport({ seed: 99999 }));
+    expect(out).toContain("seed=99999");
   });
 });
 

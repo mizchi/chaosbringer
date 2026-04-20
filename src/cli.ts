@@ -45,6 +45,7 @@ const { values, positionals } = parseArgs({
     "log-file": { type: "string" },
     "log-level": { type: "string" },
     "log-console": { type: "boolean", default: false },
+    seed: { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -77,6 +78,7 @@ OPTIONS:
   --log-file <path>     Write execution log to file (JSON format)
   --log-level <level>   Log level: debug, info, warn, error (default: info)
   --log-console         Also output logs to console
+  --seed <n>            Seed for deterministic action selection (reproduces a run)
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
@@ -94,6 +96,9 @@ EXAMPLES:
 
   # With detailed logging to file
   chaosbringer --url http://localhost:3000 --log-file crawl.log --log-level debug
+
+  # Reproduce a failing run by passing its seed
+  chaosbringer --url http://localhost:3000 --seed 1234567
 
   # Exclude patterns and ignore specific errors
   chaosbringer --url http://localhost:3000 --exclude "/api/" --ignore-error "third-party"
@@ -124,6 +129,16 @@ if (logLevel && !validLogLevels.includes(logLevel)) {
   process.exit(1);
 }
 
+let seed: number | undefined;
+if (values.seed !== undefined) {
+  const parsed = Number(values.seed);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+    console.error(`Error: --seed must be a non-negative integer, got "${values.seed}"`);
+    process.exit(1);
+  }
+  seed = parsed;
+}
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -138,6 +153,7 @@ const options: CrawlerOptions = {
   logFile: values["log-file"],
   logLevel: logLevel,
   logToConsole: values["log-console"],
+  seed,
 };
 
 const outputPath = values.output || "chaos-report.json";

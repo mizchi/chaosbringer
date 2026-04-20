@@ -32,6 +32,7 @@ import {
   escapeSelector as escapeSelectorPure,
   summarizePages,
 } from "./filters.js";
+import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 
 const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   maxPages: 50,
@@ -52,6 +53,7 @@ const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   logToConsole: false,
   enableRecovery: true,
   recoveryHistorySize: 20,
+  seed: 0, // Overwritten at construction time if unset
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -109,6 +111,8 @@ export class ChaosCrawler {
   };
   /** Current page being crawled (for source tracking) */
   private currentEntry: QueueEntry | null = null;
+  /** Deterministic RNG for reproducible action selection. */
+  private rng: Rng;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     // Filter out undefined values to preserve defaults
@@ -119,6 +123,8 @@ export class ChaosCrawler {
     this.actionWeights = { ...DEFAULT_ACTION_WEIGHTS, ...options.actionWeights };
     this.events = events;
     this.baseOrigin = new URL(options.baseUrl).origin;
+    this.rng = createRng(options.seed ?? randomSeed());
+    this.options.seed = this.rng.seed;
 
     // Initialize logger
     if (options.logFile) {
@@ -131,6 +137,11 @@ export class ChaosCrawler {
     } else {
       this.logger = createNullLogger();
     }
+  }
+
+  /** Seed used for this run (useful for reproducing failures). */
+  getSeed(): number {
+    return this.rng.seed;
   }
 
   /** Get the logger instance for external use */
@@ -835,9 +846,6 @@ export class ChaosCrawler {
     this.logger.debug("action_targets", { count: targets.length, url });
     if (targets.length === 0) return;
 
-    // Calculate total weight
-    const totalWeight = targets.reduce((sum, t) => sum + t.weight, 0);
-
     let actionsPerformed = 0;
     let attempts = 0;
     const maxAttempts = this.options.maxActionsPerPage * 3; // Allow retries for skipped elements
@@ -846,21 +854,7 @@ export class ChaosCrawler {
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
 
-      // Weighted random selection
-      let random = Math.random() * totalWeight;
-      let selectedTarget: ActionTarget | null = null;
-
-      for (const target of targets) {
-        random -= target.weight;
-        if (random <= 0) {
-          selectedTarget = target;
-          break;
-        }
-      }
-
-      if (!selectedTarget) {
-        selectedTarget = targets[targets.length - 1];
-      }
+      const selectedTarget = weightedPick(targets, (t) => t.weight, this.rng);
 
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
@@ -890,7 +884,7 @@ export class ChaosCrawler {
 
     try {
       if (target.type === "scroll") {
-        const scrollY = Math.floor(Math.random() * 1000);
+        const scrollY = randomInt(this.rng, 1000);
         await page.evaluate((y) => window.scrollTo(0, y), scrollY);
         return {
           type: "scroll",
@@ -989,6 +983,7 @@ export class ChaosCrawler {
 
     return {
       baseUrl: this.options.baseUrl,
+      seed: this.rng.seed,
       startTime: this.startTime,
       endTime,
       duration: endTime - this.startTime,

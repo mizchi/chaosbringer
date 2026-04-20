@@ -13,6 +13,7 @@ export function formatReport(report: CrawlReport): string {
   lines.push("=".repeat(60));
   lines.push("");
   lines.push(`Base URL: ${report.baseUrl}`);
+  lines.push(`Seed: ${report.seed}`);
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {
@@ -152,7 +153,7 @@ export function formatCompactReport(report: CrawlReport): string {
   const errors = report.summary.consoleErrors + report.summary.networkErrors + report.summary.jsExceptions;
 
   return [
-    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s`,
+    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})`,
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",

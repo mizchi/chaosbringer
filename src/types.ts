@@ -41,6 +41,8 @@ export interface CrawlerOptions {
   enableRecovery?: boolean;
   /** Number of recent operations to keep for recovery dump */
   recoveryHistorySize?: number;
+  /** Seed for deterministic action selection. Random if omitted. */
+  seed?: number;
 }
 
 export interface ActionWeights {
@@ -137,6 +139,8 @@ export interface ActionResult {
 
 export interface CrawlReport {
   baseUrl: string;
+  /** Seed used for random action selection (for reproducibility). */
+  seed: number;
   startTime: number;
   endTime: number;
   duration: number;
