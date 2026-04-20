@@ -71,6 +71,72 @@ describe("ChaosCrawler against fixture site", () => {
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(0);
   }, 120000);
 
+  it("injects faults into matching API requests and tracks per-rule stats", async () => {
+    const crawler = new ChaosCrawler({
+      baseUrl: `${server.url}/api-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+      faultInjection: [
+        {
+          name: "api-500",
+          urlPattern: "/api/data$",
+          fault: { kind: "status", status: 500, body: "boom" },
+        },
+      ],
+      invariants: [
+        {
+          name: "api-consumer-renders-ok",
+          urlPattern: "/api-consumer$",
+          when: "afterLoad",
+          check: async ({ page }) => {
+            const status = (await page.locator("#status").textContent())?.trim() ?? "";
+            return status === "ok" || `status text was "${status}"`;
+          },
+        },
+      ],
+    });
+
+    const report = await crawler.start();
+    expect(report.faultInjections).toBeDefined();
+    const apiStats = report.faultInjections!.find((f) => f.rule === "api-500")!;
+    expect(apiStats.matched).toBeGreaterThanOrEqual(1);
+    expect(apiStats.injected).toBe(apiStats.matched);
+
+    // The invariant must fail because the API was forced to 500.
+    expect(report.summary.invariantViolations).toBeGreaterThanOrEqual(1);
+    expect(
+      report.pages[0]!.errors.some(
+        (e) => e.type === "invariant-violation" && e.invariantName === "api-consumer-renders-ok"
+      )
+    ).toBe(true);
+  }, 120000);
+
+  it("honours fault probability and is reproducible with the same seed", async () => {
+    // probability 0 means the rule never injects but still matches.
+    const crawler = new ChaosCrawler({
+      baseUrl: `${server.url}/api-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 99,
+      faultInjection: [
+        {
+          name: "never",
+          urlPattern: "/api/data$",
+          fault: { kind: "status", status: 500 },
+          probability: 0,
+        },
+      ],
+    });
+
+    const report = await crawler.start();
+    const stats = report.faultInjections!.find((f) => f.rule === "never")!;
+    expect(stats.matched).toBeGreaterThanOrEqual(1);
+    expect(stats.injected).toBe(0);
+  }, 120000);
+
   it("surfaces invariant violations as PageErrors and exits non-zero", async () => {
     const invariants: Invariant[] = [
       {

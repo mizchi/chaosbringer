@@ -150,6 +150,16 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.faultInjections && report.faultInjections.length > 0) {
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("FAULT INJECTION");
+    lines.push("-".repeat(40));
+    for (const stats of report.faultInjections) {
+      lines.push(`  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}`);
+    }
+  }
+
   lines.push("");
   lines.push("=".repeat(60));
 

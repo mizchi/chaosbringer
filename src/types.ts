@@ -45,6 +45,34 @@ export interface CrawlerOptions {
   seed?: number;
   /** Assertions to evaluate on each page. */
   invariants?: Invariant[];
+  /** Fault injection rules applied via Playwright's route API. */
+  faultInjection?: FaultRule[];
+}
+
+/** What to do when a FaultRule matches a request. */
+export type Fault =
+  | { kind: "abort"; errorCode?: string }
+  | { kind: "status"; status: number; body?: string; contentType?: string }
+  | { kind: "delay"; ms: number };
+
+export interface FaultRule {
+  /** Optional human-readable name used in stats. */
+  name?: string;
+  /** Regex string matched against the full request URL. */
+  urlPattern: string;
+  /** HTTP methods to match (case-insensitive). Empty = all methods. */
+  methods?: string[];
+  /** Action taken on a match. */
+  fault: Fault;
+  /** 0..1, default 1.0. Uses the crawler's seeded RNG. */
+  probability?: number;
+}
+
+/** Per-rule stats for fault injection, emitted on the final report. */
+export interface FaultInjectionStats {
+  rule: string;
+  matched: number;
+  injected: number;
 }
 
 export interface ActionWeights {
@@ -189,6 +217,8 @@ export interface CrawlReport {
   pages: PageResult[];
   actions: ActionResult[];
   summary: CrawlSummary;
+  /** Per-rule fault injection stats (present only when rules were configured). */
+  faultInjections?: FaultInjectionStats[];
 }
 
 export interface CrawlSummary {

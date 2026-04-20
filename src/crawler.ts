@@ -24,6 +24,9 @@ import type {
   DiscoveryMethod,
   SpaIssueInfo,
   Invariant,
+  FaultRule,
+  FaultInjectionStats,
+  Fault,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
@@ -56,6 +59,7 @@ const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   recoveryHistorySize: 20,
   seed: 0, // Overwritten at construction time if unset
   invariants: [],
+  faultInjection: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -117,6 +121,14 @@ export class ChaosCrawler {
   private currentEntry: QueueEntry | null = null;
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
+  /** Fault injection rules compiled once at construction time. */
+  private compiledFaultRules: Array<{
+    rule: FaultRule;
+    pattern: RegExp;
+    methods?: string[];
+    matched: number;
+    injected: number;
+  }> = [];
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     // Filter out undefined values to preserve defaults
@@ -129,6 +141,7 @@ export class ChaosCrawler {
     this.baseOrigin = new URL(options.baseUrl).origin;
     this.rng = createRng(options.seed ?? randomSeed());
     this.options.seed = this.rng.seed;
+    this.compiledFaultRules = compileFaultRules(options.faultInjection);
 
     // Initialize logger
     if (options.logFile) {
@@ -380,8 +393,8 @@ export class ChaosCrawler {
     this.startTime = Date.now();
     this.baseOrigin = new URL(url).origin;
 
-    // Set up external navigation blocking
-    if (this.options.blockExternalNavigation) {
+    // Set up external navigation blocking and/or fault injection routing.
+    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -409,27 +422,45 @@ export class ChaosCrawler {
   }
 
   private async setupNavigationBlocking(page: Page): Promise<void> {
-    // Block navigation to external domains
+    const blockExternal = this.options.blockExternalNavigation;
+    const rules = this.compiledFaultRules;
+
+    // Install a single route handler that first considers fault injection,
+    // then falls back to external-navigation blocking, then continues.
     await page.route("**/*", async (route: Route) => {
       const request = route.request();
       const url = request.url();
+      const method = request.method().toUpperCase();
 
-      // Allow same-origin requests
-      if (!this.isExternalUrl(url)) {
-        await route.continue();
+      // 1. Fault injection has priority so tests can exercise backends that
+      // would otherwise be allowed through.
+      for (const compiled of rules) {
+        if (!compiled.pattern.test(url)) continue;
+        if (compiled.methods && !compiled.methods.includes(method)) continue;
+
+        compiled.matched++;
+        const prob = compiled.rule.probability ?? 1;
+        // prob 0 should never inject; prob 1 always injects; in between we
+        // use the crawler's seeded RNG so probability is reproducible.
+        if (prob < 1 && this.rng.next() >= prob) continue;
+
+        compiled.injected++;
+        await applyFault(route, compiled.rule.fault);
         return;
       }
 
-      // Block navigation requests to external domains
-      if (request.isNavigationRequest()) {
-        this.blockedExternalCount++;
-        this.events.onBlockedNavigation?.(url);
-        this.logger.logBlockedNavigation(url);
-        await route.abort("blockedbyclient");
-        return;
+      // 2. Block external navigation if requested.
+      if (blockExternal && this.isExternalUrl(url)) {
+        if (request.isNavigationRequest()) {
+          this.blockedExternalCount++;
+          this.events.onBlockedNavigation?.(url);
+          this.logger.logBlockedNavigation(url);
+          await route.abort("blockedbyclient");
+          return;
+        }
+        // Allow non-navigation external requests (images, scripts, etc.)
       }
 
-      // Allow non-navigation external requests (images, scripts, etc.)
       await route.continue();
     });
   }
@@ -441,7 +472,7 @@ export class ChaosCrawler {
     // Scope recovery diagnostics to this page only.
     this.currentPageActions = [];
 
-    if (this.options.blockExternalNavigation) {
+    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -1071,10 +1102,73 @@ export class ChaosCrawler {
       pages: this.results,
       actions: this.actions,
       summary,
+      faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
     };
+  }
+
+  /** Per-rule fault injection stats (for reporting). */
+  getFaultStats(): FaultInjectionStats[] {
+    return this.compiledFaultRules.map((c, i) => ({
+      rule: c.rule.name ?? c.rule.urlPattern,
+      matched: c.matched,
+      injected: c.injected,
+    }));
   }
 
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
+  }
+}
+
+function compileFaultRules(rules: FaultRule[] | undefined): Array<{
+  rule: FaultRule;
+  pattern: RegExp;
+  methods?: string[];
+  matched: number;
+  injected: number;
+}> {
+  if (!rules || rules.length === 0) return [];
+  const compiled: Array<{
+    rule: FaultRule;
+    pattern: RegExp;
+    methods?: string[];
+    matched: number;
+    injected: number;
+  }> = [];
+  for (const rule of rules) {
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(rule.urlPattern);
+    } catch {
+      // Skip invalid regex silently; same policy as other pattern options.
+      continue;
+    }
+    compiled.push({
+      rule,
+      pattern,
+      methods: rule.methods?.map((m) => m.toUpperCase()),
+      matched: 0,
+      injected: 0,
+    });
+  }
+  return compiled;
+}
+
+async function applyFault(route: Route, fault: Fault): Promise<void> {
+  switch (fault.kind) {
+    case "abort":
+      await route.abort(fault.errorCode ?? "failed");
+      return;
+    case "status":
+      await route.fulfill({
+        status: fault.status,
+        body: fault.body ?? "",
+        contentType: fault.contentType ?? "text/plain",
+      });
+      return;
+    case "delay":
+      await new Promise((r) => setTimeout(r, fault.ms));
+      await route.continue();
+      return;
   }
 }

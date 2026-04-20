@@ -28,6 +28,7 @@ const pages: Record<string, Route> = {
           <li><a href="/unhandled-rejection">Page with unhandled promise rejection</a></li>
           <li><a href="/network-error">Page with network error</a></li>
           <li><a href="/form">Form page</a></li>
+          <li><a href="/api-consumer">API consumer (fetches /api/data)</a></li>
           <li><a href="/spa/items/42">SPA route</a></li>
           <li><a href="https://example.com/">External (should be blocked)</a></li>
         </ul>
@@ -109,6 +110,37 @@ const pages: Record<string, Route> = {
         <a href="/">back</a>
       `,
     }),
+  },
+
+  // Page that fetches /api/data on load; if the API fails the DOM reflects it.
+  // Useful for exercising fault injection + invariant assertions together.
+  "/api-consumer": {
+    body: html({
+      title: "API Consumer",
+      nav: true,
+      body: `
+        <h1>API Consumer</h1>
+        <p id="status">loading…</p>
+        <p id="value"></p>
+        <script>
+          fetch("/api/data")
+            .then((r) => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
+            .then((data) => {
+              document.getElementById("status").textContent = "ok";
+              document.getElementById("value").textContent = JSON.stringify(data);
+            })
+            .catch((err) => {
+              document.getElementById("status").textContent = "error: " + err.message;
+            });
+        </script>
+        <a href="/">back</a>
+      `,
+    }),
+  },
+
+  "/api/data": {
+    body: JSON.stringify({ ok: true, items: [1, 2, 3] }),
+    contentType: "application/json; charset=utf-8",
   },
 
   // SPA-like route that renders a shell and reports "not found" in the DOM

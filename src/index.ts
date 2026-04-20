@@ -28,4 +28,7 @@ export type {
   CrawlSummary,
   Invariant,
   InvariantContext,
+  Fault,
+  FaultRule,
+  FaultInjectionStats,
 } from "./types.js";
