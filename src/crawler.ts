@@ -95,8 +95,10 @@ export class ChaosCrawler {
   private blockedExternalCount = 0;
   private startTime = 0;
   private baseOrigin: string;
-  /** Recent action history for recovery */
-  private actionHistory: ActionResult[] = [];
+  /** Actions performed on the page currently being crawled. Reset on
+   * every new crawlPage call so the recovery dump only reports actions
+   * from the page that actually failed. */
+  private currentPageActions: ActionResult[] = [];
   /** Last successfully loaded URL for recovery */
   private lastSuccessfulUrl: string = "";
   /** Recovery count for reporting */
@@ -197,18 +199,17 @@ export class ChaosCrawler {
     return this.logger;
   }
 
-  /** Add action to history buffer */
+  /** Record an action for the current page's recovery dump. */
   private addToHistory(action: ActionResult): void {
-    this.actionHistory.push(action);
-    // Keep only recent actions
-    if (this.actionHistory.length > this.options.recoveryHistorySize) {
-      this.actionHistory.shift();
+    this.currentPageActions.push(action);
+    if (this.currentPageActions.length > this.options.recoveryHistorySize) {
+      this.currentPageActions.shift();
     }
   }
 
-  /** Get recent actions for recovery dump */
+  /** Actions performed on the current page (for recovery diagnostics). */
   getRecentActions(): ActionResult[] {
-    return [...this.actionHistory];
+    return [...this.currentPageActions];
   }
 
   /** Create recovery info from current state */
@@ -235,7 +236,7 @@ export class ChaosCrawler {
     this.blockedExternalCount = 0;
 
     // Reset recovery state
-    this.actionHistory = [];
+    this.currentPageActions = [];
     this.lastSuccessfulUrl = this.options.baseUrl;
     this.recoveryCount = 0;
 
@@ -384,6 +385,9 @@ export class ChaosCrawler {
   private async crawlPage(entry: QueueEntry): Promise<PageResult> {
     const page = await this.context!.newPage();
     const { url, sourceUrl, method, sourceElement } = entry;
+
+    // Scope recovery diagnostics to this page only.
+    this.currentPageActions = [];
 
     if (this.options.blockExternalNavigation) {
       await this.setupNavigationBlocking(page);
