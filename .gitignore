@@ -1,2 +1,4 @@
 chaos-report.json
 *.log
+node_modules/
+dist/
