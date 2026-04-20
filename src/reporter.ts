@@ -38,11 +38,16 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Avg Load Time: ${report.summary.avgLoadTime.toFixed(0)}ms`);
 
   if (report.summary.avgMetrics) {
-    lines.push("");
-    lines.push("Performance Metrics (avg):");
-    lines.push(`  TTFB: ${report.summary.avgMetrics.ttfb.toFixed(0)}ms`);
-    lines.push(`  FCP: ${report.summary.avgMetrics.fcp.toFixed(0)}ms`);
-    lines.push(`  LCP: ${report.summary.avgMetrics.lcp.toFixed(0)}ms`);
+    const m = report.summary.avgMetrics;
+    const entries: string[] = [];
+    if (m.ttfb > 0) entries.push(`  TTFB: ${m.ttfb.toFixed(0)}ms`);
+    if (m.fcp > 0) entries.push(`  FCP: ${m.fcp.toFixed(0)}ms`);
+    if (m.lcp > 0) entries.push(`  LCP: ${m.lcp.toFixed(0)}ms`);
+    if (entries.length > 0) {
+      lines.push("");
+      lines.push("Performance Metrics (avg):");
+      lines.push(...entries);
+    }
   }
 
   // Error details

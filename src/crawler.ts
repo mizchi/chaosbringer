@@ -144,6 +144,54 @@ export class ChaosCrawler {
     return this.rng.seed;
   }
 
+  /**
+   * Match drained rejections against already-captured `pageerror` entries and
+   * reclassify them as unhandled-rejection. Rejections in Chromium fire both
+   * the DOM event and Playwright's CDP-level pageerror, so we dedupe here.
+   */
+  private reclassifyRejections(
+    errors: PageError[],
+    rejections: Array<{ message: string; stack?: string }>,
+    url: string
+  ): void {
+    for (const rejection of rejections) {
+      if (this.shouldIgnoreError(rejection.message)) continue;
+      const existing = errors.find(
+        (e) => e.type === "exception" && e.message === rejection.message
+      );
+      if (existing) {
+        existing.type = "unhandled-rejection";
+        continue;
+      }
+      const error: PageError = {
+        type: "unhandled-rejection",
+        message: rejection.message,
+        stack: rejection.stack,
+        url,
+        timestamp: Date.now(),
+      };
+      errors.push(error);
+      this.events.onError?.(error);
+      this.logger.logPageError(error);
+    }
+  }
+
+  /** Pop and return any unhandled promise rejections captured since last call. */
+  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
+    try {
+      return await page.evaluate(() => {
+        // @ts-ignore
+        const bag = (window.__chaosRejections || []) as Array<{ message: string; stack?: string }>;
+        // @ts-ignore
+        window.__chaosRejections = [];
+        return bag;
+      });
+    } catch {
+      // Page may have navigated away; drop rejections rather than throwing.
+      return [];
+    }
+  }
+
   /** Get the logger instance for external use */
   getLogger(): Logger {
     return this.logger;
@@ -444,13 +492,17 @@ export class ChaosCrawler {
       this.logger.logPageError(error);
     });
 
-    // Capture unhandled promise rejections
-    page.addInitScript(() => {
+    // Capture unhandled promise rejections. Claim them via preventDefault so
+    // they don't also fire as `pageerror` (which we'd misclassify as exception).
+    await page.addInitScript(() => {
+      // @ts-ignore - custom bag attached to window
+      window.__chaosRejections = [];
       window.addEventListener("unhandledrejection", (event) => {
         const message = event.reason?.message || String(event.reason);
         const stack = event.reason?.stack;
-        // @ts-ignore - custom event for playwright
-        window.__chaosUnhandledRejection = { message, stack };
+        // @ts-ignore
+        window.__chaosRejections.push({ message, stack });
+        event.preventDefault();
       });
     });
 
@@ -494,26 +546,8 @@ export class ChaosCrawler {
         waitUntil: "networkidle",
       });
 
-      // Check for unhandled rejections
-      const unhandledRejection = await page.evaluate(() => {
-        // @ts-ignore
-        const rejection = window.__chaosUnhandledRejection;
-        // @ts-ignore
-        window.__chaosUnhandledRejection = null;
-        return rejection;
-      });
-
-      if (unhandledRejection) {
-        const error: PageError = {
-          type: "unhandled-rejection",
-          message: unhandledRejection.message,
-          stack: unhandledRejection.stack,
-          url,
-          timestamp: Date.now(),
-        };
-        errors.push(error);
-        this.events.onError?.(error);
-      }
+      // Drain any unhandled rejections captured during load.
+      this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
@@ -522,26 +556,8 @@ export class ChaosCrawler {
       // Perform random actions with accessibility-based weighting
       await this.performWeightedActions(page, url);
 
-      // Check for any rejections after actions
-      const postActionRejection = await page.evaluate(() => {
-        // @ts-ignore
-        const rejection = window.__chaosUnhandledRejection;
-        // @ts-ignore
-        window.__chaosUnhandledRejection = null;
-        return rejection;
-      });
-
-      if (postActionRejection) {
-        const error: PageError = {
-          type: "unhandled-rejection",
-          message: postActionRejection.message,
-          stack: postActionRejection.stack,
-          url,
-          timestamp: Date.now(),
-        };
-        errors.push(error);
-        this.events.onError?.(error);
-      }
+      // Drain any rejections that fired during actions.
+      this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
       let screenshot: string | undefined;
       if (this.options.screenshots) {
