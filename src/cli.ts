@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Chaos Crawler CLI
+ * Chaosbringer CLI
  *
  * Usage:
  *   pnpm tsx src/cli.ts [options]
- *   chaos-crawler [options]  (when installed globally)
+ *   chaosbringer [options]  (when installed globally)
  *
  * Options:
  *   --url <url>           Base URL to crawl (required)
@@ -55,10 +55,10 @@ const { values, positionals } = parseArgs({
 
 if (values.help) {
   console.log(`
-Chaos Crawler - Playwright-based chaos testing tool
+Chaosbringer - Playwright-based chaos testing tool
 
 USAGE:
-  chaos-crawler --url <url> [options]
+  chaosbringer --url <url> [options]
 
 OPTIONS:
   --url <url>           Base URL to crawl (required)
@@ -84,19 +84,19 @@ OPTIONS:
 
 EXAMPLES:
   # Basic crawl
-  chaos-crawler --url http://localhost:3000
+  chaosbringer --url http://localhost:3000
 
   # With screenshots and limited pages
-  chaos-crawler --url https://docs.example.com --max-pages 20 --screenshots
+  chaosbringer --url https://docs.example.com --max-pages 20 --screenshots
 
   # CI mode with strict checking (ignore analytics errors)
-  chaos-crawler --url http://localhost:3000 --strict --compact --ignore-analytics
+  chaosbringer --url http://localhost:3000 --strict --compact --ignore-analytics
 
   # With detailed logging to file
-  chaos-crawler --url http://localhost:3000 --log-file crawl.log --log-level debug
+  chaosbringer --url http://localhost:3000 --log-file crawl.log --log-level debug
 
   # Exclude patterns and ignore specific errors
-  chaos-crawler --url http://localhost:3000 --exclude "/api/" --ignore-error "third-party"
+  chaosbringer --url http://localhost:3000 --exclude "/api/" --ignore-error "third-party"
 `);
   process.exit(0);
 }

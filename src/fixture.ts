@@ -4,7 +4,7 @@
  * Usage:
  * ```typescript
  * import { test, expect } from '@playwright/test';
- * import { chaosTest, withChaos } from '@luna_ui/playwright-chaos/fixture';
+ * import { chaosTest, withChaos } from 'chaosbringer/fixture';
  *
  * // Option 1: Use chaosTest directly
  * chaosTest('chaos test homepage', async ({ page, chaos }) => {
