@@ -399,6 +399,8 @@ export class ChaosCrawler {
     }
 
     const result = await this.crawlPageWithExistingPage(page, url);
+    this.events.onPageComplete?.(result);
+    this.logger.logPageComplete(result);
     this.results.push(result);
 
     return result;
@@ -529,6 +531,8 @@ export class ChaosCrawler {
         this.lastSuccessfulUrl = url;
       }
 
+      this.events.onPageComplete?.(result);
+      this.logger.logPageComplete(result);
       return result;
     } finally {
       await page.close();
@@ -540,12 +544,19 @@ export class ChaosCrawler {
     const warnings: string[] = [];
     const blockedNavigations: string[] = [];
     const startTime = Date.now();
+    // Set to false once collection is done so spurious events fired during
+    // page.close() (in-flight requests getting cancelled as ERR_ABORTED, etc.)
+    // don't pollute the PageResult.
+    let collecting = true;
 
     this.events.onPageStart?.(url);
     this.logger.logPageStart(url);
 
-    // Set up error listeners
+    // Set up error listeners. Each error records `page.url()` at fire time
+    // so that errors triggered after a chaos-action navigation are attributed
+    // to the URL actually in the address bar, not the original crawlPage URL.
     page.on("console", (msg) => {
+      if (!collecting) return;
       const type = msg.type();
       const text = msg.text();
       if (type === "error") {
@@ -553,7 +564,7 @@ export class ChaosCrawler {
         const error: PageError = {
           type: "console",
           message: text,
-          url,
+          url: page.url(),
           timestamp: Date.now(),
         };
         errors.push(error);
@@ -566,12 +577,13 @@ export class ChaosCrawler {
 
     // Capture unhandled exceptions
     page.on("pageerror", (err) => {
+      if (!collecting) return;
       if (this.shouldIgnoreError(err.message)) return;
       const error: PageError = {
         type: "exception",
         message: err.message,
         stack: err.stack,
-        url,
+        url: page.url(),
         timestamp: Date.now(),
       };
       errors.push(error);
@@ -594,6 +606,7 @@ export class ChaosCrawler {
     });
 
     page.on("requestfailed", (request) => {
+      if (!collecting) return;
       const requestUrl = request.url();
       if (this.shouldIgnoreError(requestUrl)) return;
 
@@ -614,7 +627,7 @@ export class ChaosCrawler {
       const error: PageError = {
         type: "network",
         message: `${requestUrl} - ${failure?.errorText || "Unknown error"}`,
-        url,
+        url: page.url(),
         timestamp: Date.now(),
       };
       errors.push(error);
@@ -693,8 +706,13 @@ export class ChaosCrawler {
       };
     }
 
-    this.events.onPageComplete?.(result);
-    this.logger.logPageComplete(result);
+    // Stop collecting before the caller closes the page — any ERR_ABORTED
+    // for in-flight requests cancelled by close() would otherwise be logged
+    // against this result.
+    collecting = false;
+
+    // onPageComplete fires from the caller (crawlPage / testPage) after any
+    // recovery reclassification so the callback sees the final status.
     return result;
   }
 
@@ -1159,13 +1177,19 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
     case "abort":
       await route.abort(fault.errorCode ?? "failed");
       return;
-    case "status":
+    case "status": {
+      // Chromium emits a spurious ERR_ABORTED alongside the response when the
+      // body is empty, so synthesise a minimal JSON body by default. Callers
+      // can still opt into an empty body by passing `body: ""` explicitly.
+      const body =
+        fault.body !== undefined ? fault.body : JSON.stringify({ error: fault.status });
       await route.fulfill({
         status: fault.status,
-        body: fault.body ?? "",
-        contentType: fault.contentType ?? "text/plain",
+        body,
+        contentType: fault.contentType ?? "application/json",
       });
       return;
+    }
     case "delay":
       await new Promise((r) => setTimeout(r, fault.ms));
       await route.continue();
