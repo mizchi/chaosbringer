@@ -6,9 +6,11 @@
  */
 
 // Core
-export { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+export { ChaosCrawler, COMMON_IGNORE_PATTERNS, validateOptions } from "./crawler.js";
 export { formatReport, formatCompactReport, saveReport, printReport, getExitCode } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
+export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
+export { faults, type FaultHelperOptions } from "./faults.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
@@ -31,4 +33,5 @@ export type {
   Fault,
   FaultRule,
   FaultInjectionStats,
+  UrlMatcher,
 } from "./types.js";

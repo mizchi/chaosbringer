@@ -52,6 +52,26 @@ export function escapeSelector(text: string): string {
   return text.replace(/"/g, '\\"').replace(/\n/g, " ").slice(0, 50);
 }
 
+/**
+ * Canonical form used for queue dedupe. Drops the fragment, lowercases the
+ * host, and treats `http://x` and `http://x/` as the same URL. Trailing
+ * slashes on non-root paths are stripped so `/about` and `/about/` don't
+ * visit twice. Invalid input round-trips unchanged.
+ */
+export function normalizeUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.hash = "";
+    u.hostname = u.hostname.toLowerCase();
+    if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
+      u.pathname = u.pathname.replace(/\/+$/, "");
+    }
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
 /** Compute summary statistics from a list of page results. */
 export function summarizePages(
   results: readonly PageResult[],
@@ -61,6 +81,7 @@ export function summarizePages(
   const errorPages = results.filter((r) => r.status === "error").length;
   const timeoutPages = results.filter((r) => r.status === "timeout").length;
   const recoveredPages = results.filter((r) => r.status === "recovered").length;
+  const pagesWithErrors = results.filter((r) => r.errors.length > 0).length;
 
   const allErrors = results.flatMap((r) => r.errors);
   const consoleErrors = allErrors.filter((e) => e.type === "console").length;
@@ -100,6 +121,7 @@ export function summarizePages(
     errorPages,
     timeoutPages,
     recoveredPages,
+    pagesWithErrors,
     consoleErrors,
     networkErrors,
     jsExceptions,

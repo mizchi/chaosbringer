@@ -11,6 +11,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
     errorPages: 0,
     timeoutPages: 0,
     recoveredPages: 0,
+    pagesWithErrors: 0,
     consoleErrors: 0,
     networkErrors: 0,
     jsExceptions: 0,
@@ -25,6 +26,7 @@ function makeReport(overrides: Partial<CrawlReport> = {}): CrawlReport {
   return {
     baseUrl: "http://localhost:3000",
     seed: 42,
+    reproCommand: "chaosbringer --url http://localhost:3000 --seed 42",
     startTime: 0,
     endTime: 1000,
     duration: 1000,
@@ -120,6 +122,18 @@ describe("formatCompactReport", () => {
   it("includes the seed so users can reproduce a run", () => {
     const out = formatCompactReport(makeReport({ seed: 99999 }));
     expect(out).toContain("seed=99999");
+  });
+
+  it("reports FAIL in strict mode when console errors exist (matching getExitCode)", () => {
+    const report = makeReport({ summary: makeSummary({ consoleErrors: 1 }) });
+    expect(formatCompactReport(report)).toContain("[PASS]");
+    expect(formatCompactReport(report, true)).toContain("[FAIL]");
+  });
+
+  it("reports FAIL when any invariant violated, regardless of strict", () => {
+    const report = makeReport({ summary: makeSummary({ invariantViolations: 1 }) });
+    expect(formatCompactReport(report)).toContain("[FAIL]");
+    expect(formatCompactReport(report, true)).toContain("[FAIL]");
   });
 });
 

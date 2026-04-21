@@ -5,6 +5,7 @@ import {
   isExternalUrl,
   escapeSelector,
   summarizePages,
+  normalizeUrl,
 } from "./filters.js";
 import type { PageResult } from "./types.js";
 
@@ -78,6 +79,33 @@ describe("isExternalUrl", () => {
   });
 });
 
+describe("normalizeUrl", () => {
+  it("collapses bare host and host-with-slash to the same form", () => {
+    expect(normalizeUrl("http://127.0.0.1:4455")).toBe(normalizeUrl("http://127.0.0.1:4455/"));
+  });
+
+  it("strips trailing slash on non-root paths", () => {
+    expect(normalizeUrl("http://x/about/")).toBe("http://x/about");
+    expect(normalizeUrl("http://x/a/b/")).toBe("http://x/a/b");
+  });
+
+  it("keeps root as /", () => {
+    expect(normalizeUrl("http://x/")).toMatch(/\/$/);
+  });
+
+  it("drops fragment", () => {
+    expect(normalizeUrl("http://x/a#anchor")).toBe("http://x/a");
+  });
+
+  it("lowercases host", () => {
+    expect(normalizeUrl("http://EXAMPLE.COM/X")).toBe("http://example.com/X");
+  });
+
+  it("passes invalid URLs through unchanged", () => {
+    expect(normalizeUrl("not a url")).toBe("not a url");
+  });
+});
+
 describe("escapeSelector", () => {
   it("escapes double quotes", () => {
     expect(escapeSelector('say "hi"')).toBe('say \\"hi\\"');
@@ -94,11 +122,13 @@ describe("escapeSelector", () => {
 });
 
 function makeResult(overrides: Partial<PageResult> = {}): PageResult {
+  const errors = overrides.errors ?? [];
   return {
     url: "http://localhost/p",
     status: "success",
     loadTime: 100,
-    errors: [],
+    errors,
+    hasErrors: errors.length > 0,
     warnings: [],
     links: [],
     ...overrides,
@@ -173,6 +203,23 @@ describe("summarizePages", () => {
   it("leaves avgMetrics undefined when no page has metrics", () => {
     const s = summarizePages([makeResult({}), makeResult({})]);
     expect(s.avgMetrics).toBeUndefined();
+  });
+
+  it("counts pagesWithErrors independently from navigation status", () => {
+    const s = summarizePages([
+      makeResult({
+        status: "success",
+        errors: [{ type: "console", message: "oops", timestamp: 0 }],
+      }),
+      makeResult({ status: "success" }),
+      makeResult({
+        status: "recovered",
+        errors: [{ type: "network", message: "x", timestamp: 0 }],
+      }),
+    ]);
+    expect(s.successPages).toBe(2);
+    expect(s.recoveredPages).toBe(1);
+    expect(s.pagesWithErrors).toBe(2);
   });
 
   it("passes discovery through unchanged", () => {

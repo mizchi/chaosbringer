@@ -66,14 +66,15 @@ OPTIONS:
   --max-pages <n>       Max pages to visit (default: 50)
   --max-actions <n>     Max random actions per page (default: 5)
   --timeout <ms>        Page load timeout (default: 30000)
-  --headless            Run headless (default: true)
-  --no-headless         Show browser window
+  --no-headless         Show the browser window (headless is the default)
   --screenshots         Take screenshots
   --screenshot-dir      Screenshot directory (default: ./screenshots)
   --output <path>       Output report path (default: chaos-report.json)
   --exclude <pattern>   Exclude URL patterns (regex, can be repeated)
   --ignore-error <p>    Ignore error patterns (regex, can be repeated)
-  --ignore-analytics    Ignore common analytics script errors
+  --ignore-analytics    Ignore common analytics script errors (googletagmanager,
+                        google-analytics, hotjar, clarity, segment, amplitude,
+                        cloudflareinsights, facebook.net, and net::ERR_FAILED)
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
   --log-level <level>   Log level: debug, info, warn, error (default: info)
@@ -176,9 +177,12 @@ async function main() {
     },
     onPageComplete: (result) => {
       if (!isQuiet && !isCompact) {
-        const status = result.status === "success" ? "OK" : result.status.toUpperCase();
-        const errors = result.errors.length > 0 ? ` (${result.errors.length} errors)` : "";
-        console.log(` ${status}${errors} [${result.loadTime}ms]`);
+        // OK = navigation succeeded. Page-level errors are shown separately
+        // so a user reading the line above can tell an OK-but-noisy page
+        // apart from one that failed to load.
+        const baseLabel = result.status === "success" ? "OK" : result.status.toUpperCase();
+        const label = result.hasErrors ? `${baseLabel} (${result.errors.length} errors)` : baseLabel;
+        console.log(` ${label} [${result.loadTime}ms]`);
       }
     },
     onProgress: (visited, total) => {
@@ -195,16 +199,15 @@ async function main() {
       console.log(""); // New line after progress
     }
 
-    // Save report
+    // Print report first, then save + announce the file. This way the main
+    // textual output is one contiguous block and the "saved to" line is the
+    // last thing on screen — friendlier for scrolling CI logs.
+    printReport(report, isCompact, isStrict);
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);
     }
 
-    // Print report
-    printReport(report, isCompact);
-
-    // Exit with appropriate code
     const exitCode = getExitCode(report, isStrict);
     process.exit(exitCode);
   } catch (err) {

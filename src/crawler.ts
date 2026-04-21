@@ -27,6 +27,7 @@ import type {
   FaultRule,
   FaultInjectionStats,
   Fault,
+  UrlMatcher,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
@@ -35,6 +36,7 @@ import {
   isExternalUrl as isExternalUrlPure,
   escapeSelector as escapeSelectorPure,
   summarizePages,
+  normalizeUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 
@@ -131,6 +133,8 @@ export class ChaosCrawler {
   }> = [];
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
+    validateOptions(options);
+
     // Filter out undefined values to preserve defaults
     const filteredOptions = Object.fromEntries(
       Object.entries(options).filter(([_, v]) => v !== undefined)
@@ -209,11 +213,9 @@ export class ChaosCrawler {
       const when = inv.when ?? "afterActions";
       if (when !== phase) continue;
       if (inv.urlPattern) {
-        try {
-          if (!new RegExp(inv.urlPattern).test(url)) continue;
-        } catch {
-          continue;
-        }
+        const re = toRegExp(inv.urlPattern);
+        if (re && !re.test(url)) continue;
+        if (!re) continue; // Invalid pattern — silently skip (already flagged by validateOptions).
       }
 
       let failureReason: string | null = null;
@@ -292,7 +294,7 @@ export class ChaosCrawler {
     this.startTime = Date.now();
     this.visited.clear();
     this.queue = [{
-      url: this.options.baseUrl,
+      url: normalizeUrl(this.options.baseUrl),
       sourceUrl: "",
       method: "initial",
     }];
@@ -352,8 +354,9 @@ export class ChaosCrawler {
         this.results.push(result);
 
         // Add discovered links to queue with source tracking
-        for (const link of result.links) {
-          const alreadyQueued = this.queue.some(e => e.url === link);
+        for (const rawLink of result.links) {
+          const link = normalizeUrl(rawLink);
+          const alreadyQueued = this.queue.some((e) => e.url === link);
           if (!this.visited.has(link) && !alreadyQueued) {
             this.queue.push({
               url: link,
@@ -676,6 +679,7 @@ export class ChaosCrawler {
         statusCode: response?.status(),
         loadTime,
         errors,
+        hasErrors: errors.length > 0,
         warnings,
         metrics,
         links,
@@ -687,20 +691,22 @@ export class ChaosCrawler {
       const loadTime = Date.now() - startTime;
       const isTimeout = err instanceof Error && err.message.includes("Timeout");
 
+      const combinedErrors: PageError[] = [
+        ...errors,
+        {
+          type: "exception",
+          message: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+          url,
+          timestamp: Date.now(),
+        },
+      ];
       result = {
         url,
         status: isTimeout ? "timeout" : "error",
         loadTime,
-        errors: [
-          ...errors,
-          {
-            type: "exception",
-            message: err instanceof Error ? err.message : String(err),
-            stack: err instanceof Error ? err.stack : undefined,
-            url,
-            timestamp: Date.now(),
-          },
-        ],
+        errors: combinedErrors,
+        hasErrors: combinedErrors.length > 0,
         warnings,
         links: [],
       };
@@ -887,8 +893,8 @@ export class ChaosCrawler {
           // Boost unvisited links significantly
           if (t.href) {
             try {
-              const absoluteUrl = new URL(t.href, this.baseOrigin).toString();
-              const isQueued = this.queue.some(e => e.url === absoluteUrl);
+              const absoluteUrl = normalizeUrl(new URL(t.href, this.baseOrigin).toString());
+              const isQueued = this.queue.some((e) => e.url === absoluteUrl);
               if (!this.visited.has(absoluteUrl) && !isQueued) {
                 weight *= 3; // Strong boost for unvisited links
               } else if (this.visited.has(absoluteUrl)) {
@@ -1055,8 +1061,8 @@ export class ChaosCrawler {
         // Track link clicks that navigate (only if not already tracked)
         if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
           try {
-            const absoluteUrl = new URL(href, url).toString();
-            const alreadyQueued = this.queue.some(e => e.url === absoluteUrl);
+            const absoluteUrl = normalizeUrl(new URL(href, url).toString());
+            const alreadyQueued = this.queue.some((e) => e.url === absoluteUrl);
             if (!this.visited.has(absoluteUrl) && !alreadyQueued) {
               this.queue.push({
                 url: absoluteUrl,
@@ -1109,6 +1115,7 @@ export class ChaosCrawler {
     return {
       baseUrl: this.options.baseUrl,
       seed: this.rng.seed,
+      reproCommand: this.buildReproCommand(),
       startTime: this.startTime,
       endTime,
       duration: endTime - this.startTime,
@@ -1124,10 +1131,29 @@ export class ChaosCrawler {
     };
   }
 
+  /** Build a shell command that reruns this crawl with the same seed / limits. */
+  private buildReproCommand(): string {
+    const parts: string[] = ["chaosbringer", "--url", shellQuote(this.options.baseUrl)];
+    parts.push("--seed", String(this.rng.seed));
+    if (this.options.maxPages !== DEFAULT_OPTIONS.maxPages) {
+      parts.push("--max-pages", String(this.options.maxPages));
+    }
+    if (this.options.maxActionsPerPage !== DEFAULT_OPTIONS.maxActionsPerPage) {
+      parts.push("--max-actions", String(this.options.maxActionsPerPage));
+    }
+    for (const p of this.options.excludePatterns ?? []) {
+      parts.push("--exclude", shellQuote(p));
+    }
+    for (const p of this.options.spaPatterns ?? []) {
+      parts.push("--spa", shellQuote(p));
+    }
+    return parts.join(" ");
+  }
+
   /** Per-rule fault injection stats (for reporting). */
   getFaultStats(): FaultInjectionStats[] {
-    return this.compiledFaultRules.map((c, i) => ({
-      rule: c.rule.name ?? c.rule.urlPattern,
+    return this.compiledFaultRules.map((c) => ({
+      rule: c.rule.name ?? c.pattern.toString(),
       matched: c.matched,
       injected: c.injected,
     }));
@@ -1135,6 +1161,98 @@ export class ChaosCrawler {
 
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
+  }
+}
+
+/**
+ * Validate user-supplied options up front so downstream code can assume
+ * well-formed inputs. Every error starts with `chaosbringer:` and names
+ * the field, so users don't get an anonymous `TypeError: Invalid URL`.
+ */
+export function validateOptions(options: CrawlerOptions): void {
+  // baseUrl — parse and surface a named error.
+  try {
+    // eslint-disable-next-line no-new
+    new URL(options.baseUrl);
+  } catch {
+    throw new Error(
+      `chaosbringer: "baseUrl" must be an absolute URL (got ${JSON.stringify(options.baseUrl)})`
+    );
+  }
+
+  const requirePositive = (name: string, value: number | undefined, min: number): void => {
+    if (value === undefined) return;
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < min) {
+      throw new Error(
+        `chaosbringer: "${name}" must be an integer >= ${min} (got ${JSON.stringify(value)})`
+      );
+    }
+  };
+  requirePositive("maxPages", options.maxPages, 1);
+  requirePositive("maxActionsPerPage", options.maxActionsPerPage, 0);
+  requirePositive("timeout", options.timeout, 1);
+  requirePositive("recoveryHistorySize", options.recoveryHistorySize, 0);
+
+  if (options.seed !== undefined) {
+    if (!Number.isFinite(options.seed) || !Number.isInteger(options.seed) || options.seed < 0) {
+      throw new Error(
+        `chaosbringer: "seed" must be a non-negative integer (got ${JSON.stringify(options.seed)})`
+      );
+    }
+  }
+
+  const assertRegexString = (label: string, pattern: string | undefined): void => {
+    if (pattern === undefined) return;
+    try {
+      // eslint-disable-next-line no-new
+      new RegExp(pattern);
+    } catch {
+      throw new Error(`chaosbringer: ${label} has invalid regex: ${JSON.stringify(pattern)}`);
+    }
+  };
+
+  const assertMatcher = (label: string, m: UrlMatcher | undefined): void => {
+    if (m === undefined) return;
+    if (m instanceof RegExp) return; // Already compiled, always valid.
+    assertRegexString(label, m);
+  };
+
+  for (const p of options.excludePatterns ?? []) assertRegexString(`excludePatterns entry`, p);
+  for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
+  for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
+
+  for (const rule of options.faultInjection ?? []) {
+    const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
+    assertMatcher(`${label} urlPattern`, rule.urlPattern);
+    if (rule.probability !== undefined) {
+      const p = rule.probability;
+      if (!Number.isFinite(p) || p < 0 || p > 1) {
+        throw new Error(
+          `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+  }
+
+  for (const inv of options.invariants ?? []) {
+    assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
+  }
+}
+
+/** Shell-quote a value for inclusion in a reproducible CLI invocation. */
+function shellQuote(s: string): string {
+  if (s === "") return "''";
+  if (/^[A-Za-z0-9_\-:/.=?&@%+,]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid regex. */
+function toRegExp(m: UrlMatcher): RegExp | null {
+  if (m instanceof RegExp) return m;
+  try {
+    return new RegExp(m);
+  } catch {
+    return null;
   }
 }
 
@@ -1154,11 +1272,9 @@ function compileFaultRules(rules: FaultRule[] | undefined): Array<{
     injected: number;
   }> = [];
   for (const rule of rules) {
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(rule.urlPattern);
-    } catch {
-      // Skip invalid regex silently; same policy as other pattern options.
+    const pattern = toRegExp(rule.urlPattern);
+    if (!pattern) {
+      // Skip invalid regex silently; validateOptions will have already raised.
       continue;
     }
     compiled.push({

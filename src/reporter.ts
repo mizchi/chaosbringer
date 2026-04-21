@@ -14,6 +14,7 @@ export function formatReport(report: CrawlReport): string {
   lines.push("");
   lines.push(`Base URL: ${report.baseUrl}`);
   lines.push(`Seed: ${report.seed}`);
+  lines.push(`Repro: ${report.reproCommand}`);
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {
@@ -30,6 +31,11 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Timeouts: ${report.summary.timeoutPages}`);
   if (report.summary.recoveredPages > 0) {
     lines.push(`Recovered (404/5xx): ${report.summary.recoveredPages}`);
+  }
+  if (report.summary.pagesWithErrors > 0) {
+    // A page can have status=success but still hold console/exception errors,
+    // so surface that count separately from navigation outcomes.
+    lines.push(`Pages with errors: ${report.summary.pagesWithErrors}`);
   }
   lines.push(`Console Errors: ${report.summary.consoleErrors}`);
   lines.push(`Network Errors: ${report.summary.networkErrors}`);
@@ -166,8 +172,11 @@ export function formatReport(report: CrawlReport): string {
   return lines.join("\n");
 }
 
-export function formatCompactReport(report: CrawlReport): string {
-  const status = report.summary.errorPages > 0 || report.summary.timeoutPages > 0 ? "FAIL" : "PASS";
+export function formatCompactReport(report: CrawlReport, strict = false): string {
+  // Use the same rule as getExitCode so the human label matches the exit
+  // code. Previously the label ignored strict mode and console errors,
+  // producing `[PASS]` runs that exited 1. See #6.
+  const status = getExitCode(report, strict) === 0 ? "PASS" : "FAIL";
   const errors = report.summary.consoleErrors + report.summary.networkErrors + report.summary.jsExceptions;
 
   return [
@@ -184,8 +193,8 @@ export function saveReport(report: CrawlReport, path: string): void {
   writeFileSync(path, JSON.stringify(report, null, 2));
 }
 
-export function printReport(report: CrawlReport, compact = false): void {
-  console.log(compact ? formatCompactReport(report) : formatReport(report));
+export function printReport(report: CrawlReport, compact = false, strict = false): void {
+  console.log(compact ? formatCompactReport(report, strict) : formatReport(report));
 }
 
 function truncate(str: string, maxLen: number): string {

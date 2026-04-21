@@ -55,11 +55,14 @@ export type Fault =
   | { kind: "status"; status: number; body?: string; contentType?: string }
   | { kind: "delay"; ms: number };
 
+/** Anything that can match a URL. String inputs are compiled with `new RegExp`. */
+export type UrlMatcher = string | RegExp;
+
 export interface FaultRule {
   /** Optional human-readable name used in stats. */
   name?: string;
-  /** Regex string matched against the full request URL. */
-  urlPattern: string;
+  /** URL matcher — a regex literal or a regex string. */
+  urlPattern: UrlMatcher;
   /** HTTP methods to match (case-insensitive). Empty = all methods. */
   methods?: string[];
   /** Action taken on a match. */
@@ -120,8 +123,8 @@ export interface Invariant {
   check: (ctx: InvariantContext) => boolean | string | void | Promise<boolean | string | void>;
   /** When to evaluate. Default: "afterActions". */
   when?: "afterLoad" | "afterActions";
-  /** Restrict to URLs matching this regex (string). If omitted, run on every page. */
-  urlPattern?: string;
+  /** Restrict to URLs matching this matcher (regex literal or regex string). Omit to run on every page. */
+  urlPattern?: UrlMatcher;
 }
 
 export interface InvariantContext {
@@ -150,10 +153,18 @@ export interface PerformanceMetrics {
 
 export interface PageResult {
   url: string;
+  /**
+   * Outcome of the navigation, not the page overall. A page can have
+   * `status: "success"` but still contain console errors / exceptions /
+   * unhandled rejections — check `hasErrors` or `errors.length` to
+   * judge page health.
+   */
   status: "success" | "error" | "timeout" | "recovered";
   statusCode?: number;
   loadTime: number;
   errors: PageError[];
+  /** True when `errors.length > 0`. Computed once when the result is built. */
+  hasErrors: boolean;
   warnings: string[];
   metrics?: PerformanceMetrics;
   links: string[];
@@ -206,6 +217,12 @@ export interface CrawlReport {
   baseUrl: string;
   /** Seed used for random action selection (for reproducibility). */
   seed: number;
+  /**
+   * Copy-pasteable CLI invocation that reproduces this run. Only includes
+   * CLI-expressible options; programmatic-only options (invariants,
+   * faultInjection) cannot be encoded in a shell command and are omitted.
+   */
+  reproCommand: string;
   startTime: number;
   endTime: number;
   duration: number;
@@ -226,6 +243,8 @@ export interface CrawlSummary {
   errorPages: number;
   timeoutPages: number;
   recoveredPages: number;
+  /** Pages where `errors.length > 0`, independent of navigation status. */
+  pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
   jsExceptions: number;
