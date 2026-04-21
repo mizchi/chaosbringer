@@ -153,10 +153,18 @@ export interface PerformanceMetrics {
 
 export interface PageResult {
   url: string;
+  /**
+   * Outcome of the navigation, not the page overall. A page can have
+   * `status: "success"` but still contain console errors / exceptions /
+   * unhandled rejections — check `hasErrors` or `errors.length` to
+   * judge page health.
+   */
   status: "success" | "error" | "timeout" | "recovered";
   statusCode?: number;
   loadTime: number;
   errors: PageError[];
+  /** True when `errors.length > 0`. Computed once when the result is built. */
+  hasErrors: boolean;
   warnings: string[];
   metrics?: PerformanceMetrics;
   links: string[];
@@ -229,6 +237,8 @@ export interface CrawlSummary {
   errorPages: number;
   timeoutPages: number;
   recoveredPages: number;
+  /** Pages where `errors.length > 0`, independent of navigation status. */
+  pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
   jsExceptions: number;

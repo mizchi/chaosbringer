@@ -679,6 +679,7 @@ export class ChaosCrawler {
         statusCode: response?.status(),
         loadTime,
         errors,
+        hasErrors: errors.length > 0,
         warnings,
         metrics,
         links,
@@ -690,20 +691,22 @@ export class ChaosCrawler {
       const loadTime = Date.now() - startTime;
       const isTimeout = err instanceof Error && err.message.includes("Timeout");
 
+      const combinedErrors: PageError[] = [
+        ...errors,
+        {
+          type: "exception",
+          message: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+          url,
+          timestamp: Date.now(),
+        },
+      ];
       result = {
         url,
         status: isTimeout ? "timeout" : "error",
         loadTime,
-        errors: [
-          ...errors,
-          {
-            type: "exception",
-            message: err instanceof Error ? err.message : String(err),
-            stack: err instanceof Error ? err.stack : undefined,
-            url,
-            timestamp: Date.now(),
-          },
-        ],
+        errors: combinedErrors,
+        hasErrors: combinedErrors.length > 0,
         warnings,
         links: [],
       };

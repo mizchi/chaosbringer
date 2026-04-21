@@ -81,6 +81,7 @@ export function summarizePages(
   const errorPages = results.filter((r) => r.status === "error").length;
   const timeoutPages = results.filter((r) => r.status === "timeout").length;
   const recoveredPages = results.filter((r) => r.status === "recovered").length;
+  const pagesWithErrors = results.filter((r) => r.errors.length > 0).length;
 
   const allErrors = results.flatMap((r) => r.errors);
   const consoleErrors = allErrors.filter((e) => e.type === "console").length;
@@ -120,6 +121,7 @@ export function summarizePages(
     errorPages,
     timeoutPages,
     recoveredPages,
+    pagesWithErrors,
     consoleErrors,
     networkErrors,
     jsExceptions,

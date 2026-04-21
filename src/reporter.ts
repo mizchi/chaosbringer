@@ -31,6 +31,11 @@ export function formatReport(report: CrawlReport): string {
   if (report.summary.recoveredPages > 0) {
     lines.push(`Recovered (404/5xx): ${report.summary.recoveredPages}`);
   }
+  if (report.summary.pagesWithErrors > 0) {
+    // A page can have status=success but still hold console/exception errors,
+    // so surface that count separately from navigation outcomes.
+    lines.push(`Pages with errors: ${report.summary.pagesWithErrors}`);
+  }
   lines.push(`Console Errors: ${report.summary.consoleErrors}`);
   lines.push(`Network Errors: ${report.summary.networkErrors}`);
   lines.push(`JS Exceptions: ${report.summary.jsExceptions}`);

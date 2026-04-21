@@ -11,6 +11,7 @@ function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
     errorPages: 0,
     timeoutPages: 0,
     recoveredPages: 0,
+    pagesWithErrors: 0,
     consoleErrors: 0,
     networkErrors: 0,
     jsExceptions: 0,

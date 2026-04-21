@@ -122,11 +122,13 @@ describe("escapeSelector", () => {
 });
 
 function makeResult(overrides: Partial<PageResult> = {}): PageResult {
+  const errors = overrides.errors ?? [];
   return {
     url: "http://localhost/p",
     status: "success",
     loadTime: 100,
-    errors: [],
+    errors,
+    hasErrors: errors.length > 0,
     warnings: [],
     links: [],
     ...overrides,
@@ -201,6 +203,23 @@ describe("summarizePages", () => {
   it("leaves avgMetrics undefined when no page has metrics", () => {
     const s = summarizePages([makeResult({}), makeResult({})]);
     expect(s.avgMetrics).toBeUndefined();
+  });
+
+  it("counts pagesWithErrors independently from navigation status", () => {
+    const s = summarizePages([
+      makeResult({
+        status: "success",
+        errors: [{ type: "console", message: "oops", timestamp: 0 }],
+      }),
+      makeResult({ status: "success" }),
+      makeResult({
+        status: "recovered",
+        errors: [{ type: "network", message: "x", timestamp: 0 }],
+      }),
+    ]);
+    expect(s.successPages).toBe(2);
+    expect(s.recoveredPages).toBe(1);
+    expect(s.pagesWithErrors).toBe(2);
   });
 
   it("passes discovery through unchanged", () => {
