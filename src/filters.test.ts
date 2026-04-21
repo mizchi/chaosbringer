@@ -5,6 +5,7 @@ import {
   isExternalUrl,
   escapeSelector,
   summarizePages,
+  normalizeUrl,
 } from "./filters.js";
 import type { PageResult } from "./types.js";
 
@@ -75,6 +76,33 @@ describe("isExternalUrl", () => {
 
   it("returns false for invalid URLs", () => {
     expect(isExternalUrl("not a url", base)).toBe(false);
+  });
+});
+
+describe("normalizeUrl", () => {
+  it("collapses bare host and host-with-slash to the same form", () => {
+    expect(normalizeUrl("http://127.0.0.1:4455")).toBe(normalizeUrl("http://127.0.0.1:4455/"));
+  });
+
+  it("strips trailing slash on non-root paths", () => {
+    expect(normalizeUrl("http://x/about/")).toBe("http://x/about");
+    expect(normalizeUrl("http://x/a/b/")).toBe("http://x/a/b");
+  });
+
+  it("keeps root as /", () => {
+    expect(normalizeUrl("http://x/")).toMatch(/\/$/);
+  });
+
+  it("drops fragment", () => {
+    expect(normalizeUrl("http://x/a#anchor")).toBe("http://x/a");
+  });
+
+  it("lowercases host", () => {
+    expect(normalizeUrl("http://EXAMPLE.COM/X")).toBe("http://example.com/X");
+  });
+
+  it("passes invalid URLs through unchanged", () => {
+    expect(normalizeUrl("not a url")).toBe("not a url");
   });
 });
 

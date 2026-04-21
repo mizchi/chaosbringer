@@ -35,6 +35,7 @@ import {
   isExternalUrl as isExternalUrlPure,
   escapeSelector as escapeSelectorPure,
   summarizePages,
+  normalizeUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 
@@ -294,7 +295,7 @@ export class ChaosCrawler {
     this.startTime = Date.now();
     this.visited.clear();
     this.queue = [{
-      url: this.options.baseUrl,
+      url: normalizeUrl(this.options.baseUrl),
       sourceUrl: "",
       method: "initial",
     }];
@@ -354,8 +355,9 @@ export class ChaosCrawler {
         this.results.push(result);
 
         // Add discovered links to queue with source tracking
-        for (const link of result.links) {
-          const alreadyQueued = this.queue.some(e => e.url === link);
+        for (const rawLink of result.links) {
+          const link = normalizeUrl(rawLink);
+          const alreadyQueued = this.queue.some((e) => e.url === link);
           if (!this.visited.has(link) && !alreadyQueued) {
             this.queue.push({
               url: link,
@@ -889,8 +891,8 @@ export class ChaosCrawler {
           // Boost unvisited links significantly
           if (t.href) {
             try {
-              const absoluteUrl = new URL(t.href, this.baseOrigin).toString();
-              const isQueued = this.queue.some(e => e.url === absoluteUrl);
+              const absoluteUrl = normalizeUrl(new URL(t.href, this.baseOrigin).toString());
+              const isQueued = this.queue.some((e) => e.url === absoluteUrl);
               if (!this.visited.has(absoluteUrl) && !isQueued) {
                 weight *= 3; // Strong boost for unvisited links
               } else if (this.visited.has(absoluteUrl)) {
@@ -1057,8 +1059,8 @@ export class ChaosCrawler {
         // Track link clicks that navigate (only if not already tracked)
         if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
           try {
-            const absoluteUrl = new URL(href, url).toString();
-            const alreadyQueued = this.queue.some(e => e.url === absoluteUrl);
+            const absoluteUrl = normalizeUrl(new URL(href, url).toString());
+            const alreadyQueued = this.queue.some((e) => e.url === absoluteUrl);
             if (!this.visited.has(absoluteUrl) && !alreadyQueued) {
               this.queue.push({
                 url: absoluteUrl,
