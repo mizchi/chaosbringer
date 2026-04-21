@@ -55,11 +55,14 @@ export type Fault =
   | { kind: "status"; status: number; body?: string; contentType?: string }
   | { kind: "delay"; ms: number };
 
+/** Anything that can match a URL. String inputs are compiled with `new RegExp`. */
+export type UrlMatcher = string | RegExp;
+
 export interface FaultRule {
   /** Optional human-readable name used in stats. */
   name?: string;
-  /** Regex string matched against the full request URL. */
-  urlPattern: string;
+  /** URL matcher — a regex literal or a regex string. */
+  urlPattern: UrlMatcher;
   /** HTTP methods to match (case-insensitive). Empty = all methods. */
   methods?: string[];
   /** Action taken on a match. */
@@ -120,8 +123,8 @@ export interface Invariant {
   check: (ctx: InvariantContext) => boolean | string | void | Promise<boolean | string | void>;
   /** When to evaluate. Default: "afterActions". */
   when?: "afterLoad" | "afterActions";
-  /** Restrict to URLs matching this regex (string). If omitted, run on every page. */
-  urlPattern?: string;
+  /** Restrict to URLs matching this matcher (regex literal or regex string). Omit to run on every page. */
+  urlPattern?: UrlMatcher;
 }
 
 export interface InvariantContext {

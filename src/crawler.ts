@@ -27,6 +27,7 @@ import type {
   FaultRule,
   FaultInjectionStats,
   Fault,
+  UrlMatcher,
 } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
@@ -212,11 +213,9 @@ export class ChaosCrawler {
       const when = inv.when ?? "afterActions";
       if (when !== phase) continue;
       if (inv.urlPattern) {
-        try {
-          if (!new RegExp(inv.urlPattern).test(url)) continue;
-        } catch {
-          continue;
-        }
+        const re = toRegExp(inv.urlPattern);
+        if (re && !re.test(url)) continue;
+        if (!re) continue; // Invalid pattern — silently skip (already flagged by validateOptions).
       }
 
       let failureReason: string | null = null;
@@ -1130,8 +1129,8 @@ export class ChaosCrawler {
 
   /** Per-rule fault injection stats (for reporting). */
   getFaultStats(): FaultInjectionStats[] {
-    return this.compiledFaultRules.map((c, i) => ({
-      rule: c.rule.name ?? c.rule.urlPattern,
+    return this.compiledFaultRules.map((c) => ({
+      rule: c.rule.name ?? c.pattern.toString(),
       matched: c.matched,
       injected: c.injected,
     }));
@@ -1179,7 +1178,7 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   }
 
-  const assertRegex = (label: string, pattern: string | undefined): void => {
+  const assertRegexString = (label: string, pattern: string | undefined): void => {
     if (pattern === undefined) return;
     try {
       // eslint-disable-next-line no-new
@@ -1189,13 +1188,19 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   };
 
-  for (const p of options.excludePatterns ?? []) assertRegex(`excludePatterns entry`, p);
-  for (const p of options.ignoreErrorPatterns ?? []) assertRegex(`ignoreErrorPatterns entry`, p);
-  for (const p of options.spaPatterns ?? []) assertRegex(`spaPatterns entry`, p);
+  const assertMatcher = (label: string, m: UrlMatcher | undefined): void => {
+    if (m === undefined) return;
+    if (m instanceof RegExp) return; // Already compiled, always valid.
+    assertRegexString(label, m);
+  };
+
+  for (const p of options.excludePatterns ?? []) assertRegexString(`excludePatterns entry`, p);
+  for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
+  for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
   for (const rule of options.faultInjection ?? []) {
     const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
-    assertRegex(`${label} urlPattern`, rule.urlPattern);
+    assertMatcher(`${label} urlPattern`, rule.urlPattern);
     if (rule.probability !== undefined) {
       const p = rule.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -1207,7 +1212,17 @@ export function validateOptions(options: CrawlerOptions): void {
   }
 
   for (const inv of options.invariants ?? []) {
-    assertRegex(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
+    assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
+  }
+}
+
+/** Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid regex. */
+function toRegExp(m: UrlMatcher): RegExp | null {
+  if (m instanceof RegExp) return m;
+  try {
+    return new RegExp(m);
+  } catch {
+    return null;
   }
 }
 
@@ -1227,11 +1242,9 @@ function compileFaultRules(rules: FaultRule[] | undefined): Array<{
     injected: number;
   }> = [];
   for (const rule of rules) {
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(rule.urlPattern);
-    } catch {
-      // Skip invalid regex silently; same policy as other pattern options.
+    const pattern = toRegExp(rule.urlPattern);
+    if (!pattern) {
+      // Skip invalid regex silently; validateOptions will have already raised.
       continue;
     }
     compiled.push({

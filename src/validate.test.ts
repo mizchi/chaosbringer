@@ -95,4 +95,24 @@ describe("validateOptions", () => {
       /excludePatterns/
     );
   });
+
+  it("accepts a RegExp literal for fault urlPattern", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [{ name: "r", urlPattern: /\/api\//, fault: { kind: "abort" } }],
+        })
+      )
+    ).not.toThrow();
+  });
+
+  it("accepts a RegExp literal for invariant urlPattern", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          invariants: [{ name: "r", urlPattern: /home/, check: () => true }],
+        })
+      )
+    ).not.toThrow();
+  });
 });

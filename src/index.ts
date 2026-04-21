@@ -31,4 +31,5 @@ export type {
   Fault,
   FaultRule,
   FaultInjectionStats,
+  UrlMatcher,
 } from "./types.js";
