@@ -15,6 +15,10 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Base URL: ${report.baseUrl}`);
   lines.push(`Seed: ${report.seed}`);
   lines.push(`Repro: ${report.reproCommand}`);
+  if (report.har) {
+    const arrow = report.har.mode === "record" ? "→" : "←";
+    lines.push(`HAR:   ${report.har.mode} ${arrow} ${report.har.path}`);
+  }
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {

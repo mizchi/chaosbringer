@@ -47,6 +47,22 @@ export interface CrawlerOptions {
   invariants?: Invariant[];
   /** Fault injection rules applied via Playwright's route API. */
   faultInjection?: FaultRule[];
+  /** HAR record/replay configuration for deterministic network state. */
+  har?: HarConfig;
+}
+
+/** `record` captures responses to a HAR file; `replay` serves them back. */
+export type HarMode = "record" | "replay";
+
+export interface HarConfig {
+  /** Filesystem path to the HAR file. */
+  path: string;
+  mode: HarMode;
+  /**
+   * When replaying and a request has no match in the HAR, fall through to the
+   * network (`"fallback"`, default) or fail it (`"abort"`).
+   */
+  notFound?: "fallback" | "abort";
 }
 
 import type { ErrorCluster } from "./clusters.js";
@@ -245,6 +261,8 @@ export interface CrawlReport {
    * repeatedly. Always populated, even when empty.
    */
   errorClusters: ErrorCluster[];
+  /** Echo of the HAR config used for this run, if any. */
+  har?: HarConfig;
 }
 
 export interface CrawlSummary {

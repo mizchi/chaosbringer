@@ -35,4 +35,6 @@ export type {
   FaultRule,
   FaultInjectionStats,
   UrlMatcher,
+  HarConfig,
+  HarMode,
 } from "./types.js";
