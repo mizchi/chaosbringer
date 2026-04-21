@@ -169,6 +169,51 @@ const { passed } = await chaos({ baseUrl: "http://localhost:3000", invariants })
 
 Violations always fail the run (exit 1), whether or not `strict` is set — a declared invariant is a stronger signal than console noise.
 
+## HAR record / replay
+
+Chaosbringer can capture network traffic to a HAR file on one run and replay it on the next. A replay run is deterministic even if the backend is flaky — every request that was in the HAR gets served from the HAR, not the network.
+
+```bash
+# First run: capture responses
+chaosbringer --url http://localhost:3000 --seed 42 --har-record chaos.har
+
+# Later: replay without the server running
+chaosbringer --url http://localhost:3000 --seed 42 --har-replay chaos.har
+```
+
+Programmatic:
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  seed: 42,
+  har: { path: "chaos.har", mode: "record" },
+});
+
+// Replay
+await chaos({
+  baseUrl: "http://localhost:3000",
+  seed: 42,
+  har: { path: "chaos.har", mode: "replay", notFound: "abort" },
+});
+```
+
+- `notFound: "fallback"` (default) lets unmatched URLs fall through to the real network.
+- `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
+- Fault injection rules still apply in replay mode and take precedence over HAR responses.
+
+## Error clustering
+
+`CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
+
+```
+ERROR CLUSTERS
+  [console]×42 [5 urls] Failed to load resource: the server responded with a status of <n> (Not Found)
+  [exception]×3 fixture: boom
+```
+
+Use it to triage noisy fuzz runs — high-count clusters are the first thing to look at.
+
 ## Exit codes
 
 | Condition | Exit |
@@ -241,6 +286,8 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--log-level <level>` | `debug` / `info` / `warn` / `error` | info |
 | `--log-console` | Also log to console | false |
 | `--seed <n>` | Seed for deterministic action selection | random |
+| `--har-record <path>` | Capture network traffic to a HAR file | — |
+| `--har-replay <path>` | Replay network traffic from a HAR file | — |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
 | `--quiet` | Minimal output | false |

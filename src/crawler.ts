@@ -39,8 +39,11 @@ import {
   normalizeUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
+import { clusterErrors } from "./clusters.js";
 
-const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
+// `har` has no meaningful default (it's opt-in), so we carve it out of the
+// Required<> type instead of inventing a sentinel.
+const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl" | "har">> = {
   maxPages: 50,
   maxActionsPerPage: 5,
   timeout: 30000,
@@ -333,7 +336,18 @@ export class ChaosCrawler {
     this.context = await this.browser.newContext({
       viewport: this.options.viewport,
       userAgent: this.options.userAgent || undefined,
+      // Record mode: ask Playwright to capture all network into the HAR.
+      recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
     });
+
+    // Replay mode: serve every matching request from the HAR before it hits
+    // the network. Fault injection (installed per-page) still wins because
+    // page.route runs before context.route in Playwright.
+    if (this.options.har?.mode === "replay") {
+      await this.context.routeFromHAR(this.options.har.path, {
+        notFound: this.options.har.notFound ?? "fallback",
+      });
+    }
 
     try {
       while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
@@ -368,6 +382,9 @@ export class ChaosCrawler {
         }
       }
     } finally {
+      // Close the context explicitly so the HAR file (record mode) is flushed
+      // before `browser.close()` tears everything down.
+      await this.context?.close();
       await this.browser.close();
     }
 
@@ -466,7 +483,9 @@ export class ChaosCrawler {
         // Allow non-navigation external requests (images, scripts, etc.)
       }
 
-      await route.continue();
+      // route.fallback() (not continue) so context-level routes — notably
+      // routeFromHAR for replay — still get a chance to serve this request.
+      await route.fallback();
     });
   }
 
@@ -1128,6 +1147,8 @@ export class ChaosCrawler {
       actions: this.actions,
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
+      errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
+      har: this.options.har,
     };
   }
 
@@ -1237,6 +1258,18 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const inv of options.invariants ?? []) {
     assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
   }
+
+  if (options.har) {
+    const { path, mode } = options.har;
+    if (typeof path !== "string" || path.length === 0) {
+      throw new Error(`chaosbringer: "har.path" must be a non-empty string`);
+    }
+    if (mode !== "record" && mode !== "replay") {
+      throw new Error(
+        `chaosbringer: "har.mode" must be "record" or "replay" (got ${JSON.stringify(mode)})`
+      );
+    }
+  }
 }
 
 /** Shell-quote a value for inclusion in a reproducible CLI invocation. */
@@ -1308,7 +1341,7 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
     }
     case "delay":
       await new Promise((r) => setTimeout(r, fault.ms));
-      await route.continue();
+      await route.fallback();
       return;
   }
 }

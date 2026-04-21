@@ -6,6 +6,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ChaosCrawler } from "../../src/crawler.js";
 import type { Invariant } from "../../src/types.js";
 import { startFixtureServer } from "../site/server.js";
@@ -69,6 +72,68 @@ describe("ChaosCrawler against fixture site", () => {
     // check if any appeared in blockedExternalNavigations as a weak signal.
     // (Keeping it assertion-free keeps the test deterministic under seed drift.)
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(0);
+  }, 120000);
+
+  it("records to HAR, then replays the same crawl with the server gone", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "chaosbringer-har-"));
+    const harPath = join(tmp, "replay.har");
+    try {
+      // 1. Record against the live fixture.
+      const live = await startFixtureServer(0);
+      const record = new ChaosCrawler({
+        baseUrl: live.url,
+        maxPages: 3,
+        maxActionsPerPage: 0,
+        headless: true,
+        seed: 11,
+        har: { path: harPath, mode: "record" },
+      });
+      const recordReport = await record.start();
+      await live.close();
+
+      expect(existsSync(harPath)).toBe(true);
+      expect(statSync(harPath).size).toBeGreaterThan(200);
+      expect(recordReport.har?.mode).toBe("record");
+      const recordedUrl = recordReport.baseUrl;
+
+      // 2. Replay against the HAR with the fixture server SHUT DOWN.
+      // notFound: "abort" ensures we're really hitting the HAR, not the network.
+      const replay = new ChaosCrawler({
+        baseUrl: recordedUrl,
+        maxPages: 3,
+        maxActionsPerPage: 0,
+        headless: true,
+        seed: 11,
+        har: { path: harPath, mode: "replay", notFound: "abort" },
+      });
+      const replayReport = await replay.start();
+      expect(replayReport.har?.mode).toBe("replay");
+      // Home page must load from HAR without the server running. The queue
+      // URL gets normalized with a trailing slash on root paths, so match by
+      // startsWith rather than strict equality.
+      expect(replayReport.pagesVisited).toBeGreaterThanOrEqual(1);
+      const home = replayReport.pages.find((p) => p.url.startsWith(recordedUrl));
+      expect(home).toBeDefined();
+      expect(home?.status).toBe("success");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 120000);
+
+  it("groups repeated identical errors into a single cluster", async () => {
+    const crawler = new ChaosCrawler({
+      baseUrl: `${server.url}/broken-link`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+    });
+    const report = await crawler.start();
+    // broken-link responds 404, which yields a console error. Clusters must
+    // be populated and carry the navigation URL.
+    expect(report.errorClusters.length).toBeGreaterThan(0);
+    const c404 = report.errorClusters.find((c) => c.fingerprint.includes("status of <n>"));
+    expect(c404?.count).toBeGreaterThanOrEqual(1);
   }, 120000);
 
   it("marks a 500-injected page as recovered and fires onPageComplete with the final status", async () => {

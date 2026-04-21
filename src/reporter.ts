@@ -15,6 +15,10 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Base URL: ${report.baseUrl}`);
   lines.push(`Seed: ${report.seed}`);
   lines.push(`Repro: ${report.reproCommand}`);
+  if (report.har) {
+    const arrow = report.har.mode === "record" ? "→" : "←";
+    lines.push(`HAR:   ${report.har.mode} ${arrow} ${report.har.path}`);
+  }
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {
@@ -153,6 +157,18 @@ export function formatReport(report: CrawlReport): string {
           lines.push(`    - ${action.type}${target}`);
         }
       }
+    }
+  }
+
+  if (report.errorClusters.length > 0) {
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("ERROR CLUSTERS");
+    lines.push("-".repeat(40));
+    for (const cluster of report.errorClusters) {
+      const countStr = cluster.count > 1 ? `×${cluster.count}` : "";
+      const urlStr = cluster.urls.length > 1 ? ` [${cluster.urls.length} urls]` : "";
+      lines.push(`  [${cluster.type}]${countStr}${urlStr} ${truncate(cluster.fingerprint, 80)}`);
     }
   }
 

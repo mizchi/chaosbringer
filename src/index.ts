@@ -11,6 +11,7 @@ export { formatReport, formatCompactReport, saveReport, printReport, getExitCode
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
 export { faults, type FaultHelperOptions } from "./faults.js";
+export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
@@ -34,4 +35,6 @@ export type {
   FaultRule,
   FaultInjectionStats,
   UrlMatcher,
+  HarConfig,
+  HarMode,
 } from "./types.js";

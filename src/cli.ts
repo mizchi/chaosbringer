@@ -46,6 +46,8 @@ const { values, positionals } = parseArgs({
     "log-level": { type: "string" },
     "log-console": { type: "boolean", default: false },
     seed: { type: "string" },
+    "har-record": { type: "string" },
+    "har-replay": { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -80,6 +82,8 @@ OPTIONS:
   --log-level <level>   Log level: debug, info, warn, error (default: info)
   --log-console         Also output logs to console
   --seed <n>            Seed for deterministic action selection (reproduces a run)
+  --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
+  --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
@@ -140,6 +144,14 @@ if (values.seed !== undefined) {
   seed = parsed;
 }
 
+let har: CrawlerOptions["har"];
+if (values["har-record"] && values["har-replay"]) {
+  console.error("Error: --har-record and --har-replay are mutually exclusive");
+  process.exit(1);
+}
+if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
+if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -155,6 +167,7 @@ const options: CrawlerOptions = {
   logLevel: logLevel,
   logToConsole: values["log-console"],
   seed,
+  har,
 };
 
 const outputPath = values.output || "chaos-report.json";
