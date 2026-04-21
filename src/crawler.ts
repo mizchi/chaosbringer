@@ -131,6 +131,8 @@ export class ChaosCrawler {
   }> = [];
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
+    validateOptions(options);
+
     // Filter out undefined values to preserve defaults
     const filteredOptions = Object.fromEntries(
       Object.entries(options).filter(([_, v]) => v !== undefined)
@@ -1135,6 +1137,75 @@ export class ChaosCrawler {
 
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
+  }
+}
+
+/**
+ * Validate user-supplied options up front so downstream code can assume
+ * well-formed inputs. Every error starts with `chaosbringer:` and names
+ * the field, so users don't get an anonymous `TypeError: Invalid URL`.
+ */
+export function validateOptions(options: CrawlerOptions): void {
+  // baseUrl — parse and surface a named error.
+  try {
+    // eslint-disable-next-line no-new
+    new URL(options.baseUrl);
+  } catch {
+    throw new Error(
+      `chaosbringer: "baseUrl" must be an absolute URL (got ${JSON.stringify(options.baseUrl)})`
+    );
+  }
+
+  const requirePositive = (name: string, value: number | undefined, min: number): void => {
+    if (value === undefined) return;
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < min) {
+      throw new Error(
+        `chaosbringer: "${name}" must be an integer >= ${min} (got ${JSON.stringify(value)})`
+      );
+    }
+  };
+  requirePositive("maxPages", options.maxPages, 1);
+  requirePositive("maxActionsPerPage", options.maxActionsPerPage, 0);
+  requirePositive("timeout", options.timeout, 1);
+  requirePositive("recoveryHistorySize", options.recoveryHistorySize, 0);
+
+  if (options.seed !== undefined) {
+    if (!Number.isFinite(options.seed) || !Number.isInteger(options.seed) || options.seed < 0) {
+      throw new Error(
+        `chaosbringer: "seed" must be a non-negative integer (got ${JSON.stringify(options.seed)})`
+      );
+    }
+  }
+
+  const assertRegex = (label: string, pattern: string | undefined): void => {
+    if (pattern === undefined) return;
+    try {
+      // eslint-disable-next-line no-new
+      new RegExp(pattern);
+    } catch {
+      throw new Error(`chaosbringer: ${label} has invalid regex: ${JSON.stringify(pattern)}`);
+    }
+  };
+
+  for (const p of options.excludePatterns ?? []) assertRegex(`excludePatterns entry`, p);
+  for (const p of options.ignoreErrorPatterns ?? []) assertRegex(`ignoreErrorPatterns entry`, p);
+  for (const p of options.spaPatterns ?? []) assertRegex(`spaPatterns entry`, p);
+
+  for (const rule of options.faultInjection ?? []) {
+    const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
+    assertRegex(`${label} urlPattern`, rule.urlPattern);
+    if (rule.probability !== undefined) {
+      const p = rule.probability;
+      if (!Number.isFinite(p) || p < 0 || p > 1) {
+        throw new Error(
+          `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+  }
+
+  for (const inv of options.invariants ?? []) {
+    assertRegex(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
   }
 }
 

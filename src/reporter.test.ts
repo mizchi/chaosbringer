@@ -121,6 +121,18 @@ describe("formatCompactReport", () => {
     const out = formatCompactReport(makeReport({ seed: 99999 }));
     expect(out).toContain("seed=99999");
   });
+
+  it("reports FAIL in strict mode when console errors exist (matching getExitCode)", () => {
+    const report = makeReport({ summary: makeSummary({ consoleErrors: 1 }) });
+    expect(formatCompactReport(report)).toContain("[PASS]");
+    expect(formatCompactReport(report, true)).toContain("[FAIL]");
+  });
+
+  it("reports FAIL when any invariant violated, regardless of strict", () => {
+    const report = makeReport({ summary: makeSummary({ invariantViolations: 1 }) });
+    expect(formatCompactReport(report)).toContain("[FAIL]");
+    expect(formatCompactReport(report, true)).toContain("[FAIL]");
+  });
 });
 
 describe("saveReport", () => {

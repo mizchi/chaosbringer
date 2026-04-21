@@ -6,7 +6,7 @@
  */
 
 // Core
-export { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+export { ChaosCrawler, COMMON_IGNORE_PATTERNS, validateOptions } from "./crawler.js";
 export { formatReport, formatCompactReport, saveReport, printReport, getExitCode } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 

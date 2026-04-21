@@ -202,7 +202,7 @@ async function main() {
     }
 
     // Print report
-    printReport(report, isCompact);
+    printReport(report, isCompact, isStrict);
 
     // Exit with appropriate code
     const exitCode = getExitCode(report, isStrict);
