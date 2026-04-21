@@ -14,6 +14,7 @@ export function formatReport(report: CrawlReport): string {
   lines.push("");
   lines.push(`Base URL: ${report.baseUrl}`);
   lines.push(`Seed: ${report.seed}`);
+  lines.push(`Repro: ${report.reproCommand}`);
   lines.push(`Duration: ${(report.duration / 1000).toFixed(2)}s`);
   lines.push(`Pages Visited: ${report.pagesVisited}`);
   if (report.blockedExternalNavigations > 0) {

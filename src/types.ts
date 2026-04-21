@@ -217,6 +217,12 @@ export interface CrawlReport {
   baseUrl: string;
   /** Seed used for random action selection (for reproducibility). */
   seed: number;
+  /**
+   * Copy-pasteable CLI invocation that reproduces this run. Only includes
+   * CLI-expressible options; programmatic-only options (invariants,
+   * faultInjection) cannot be encoded in a shell command and are omitted.
+   */
+  reproCommand: string;
   startTime: number;
   endTime: number;
   duration: number;

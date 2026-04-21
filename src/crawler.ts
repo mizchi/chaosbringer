@@ -1115,6 +1115,7 @@ export class ChaosCrawler {
     return {
       baseUrl: this.options.baseUrl,
       seed: this.rng.seed,
+      reproCommand: this.buildReproCommand(),
       startTime: this.startTime,
       endTime,
       duration: endTime - this.startTime,
@@ -1128,6 +1129,25 @@ export class ChaosCrawler {
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
     };
+  }
+
+  /** Build a shell command that reruns this crawl with the same seed / limits. */
+  private buildReproCommand(): string {
+    const parts: string[] = ["chaosbringer", "--url", shellQuote(this.options.baseUrl)];
+    parts.push("--seed", String(this.rng.seed));
+    if (this.options.maxPages !== DEFAULT_OPTIONS.maxPages) {
+      parts.push("--max-pages", String(this.options.maxPages));
+    }
+    if (this.options.maxActionsPerPage !== DEFAULT_OPTIONS.maxActionsPerPage) {
+      parts.push("--max-actions", String(this.options.maxActionsPerPage));
+    }
+    for (const p of this.options.excludePatterns ?? []) {
+      parts.push("--exclude", shellQuote(p));
+    }
+    for (const p of this.options.spaPatterns ?? []) {
+      parts.push("--spa", shellQuote(p));
+    }
+    return parts.join(" ");
   }
 
   /** Per-rule fault injection stats (for reporting). */
@@ -1217,6 +1237,13 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const inv of options.invariants ?? []) {
     assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
   }
+}
+
+/** Shell-quote a value for inclusion in a reproducible CLI invocation. */
+function shellQuote(s: string): string {
+  if (s === "") return "''";
+  if (/^[A-Za-z0-9_\-:/.=?&@%+,]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid regex. */

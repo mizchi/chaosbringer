@@ -26,6 +26,7 @@ function makeReport(overrides: Partial<CrawlReport> = {}): CrawlReport {
   return {
     baseUrl: "http://localhost:3000",
     seed: 42,
+    reproCommand: "chaosbringer --url http://localhost:3000 --seed 42",
     startTime: 0,
     endTime: 1000,
     duration: 1000,
