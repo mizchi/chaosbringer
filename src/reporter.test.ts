@@ -38,6 +38,7 @@ function makeReport(overrides: Partial<CrawlReport> = {}): CrawlReport {
     pages: [],
     actions: [],
     summary: makeSummary(),
+    errorClusters: [],
     ...overrides,
   };
 }

@@ -49,6 +49,9 @@ export interface CrawlerOptions {
   faultInjection?: FaultRule[];
 }
 
+import type { ErrorCluster } from "./clusters.js";
+export type { ErrorCluster };
+
 /** What to do when a FaultRule matches a request. */
 export type Fault =
   | { kind: "abort"; errorCode?: string }
@@ -236,6 +239,12 @@ export interface CrawlReport {
   summary: CrawlSummary;
   /** Per-rule fault injection stats (present only when rules were configured). */
   faultInjections?: FaultInjectionStats[];
+  /**
+   * Errors grouped into clusters by fingerprint (type + normalised message).
+   * Use `ErrorCluster.count` to triage noisy runs where the same issue fires
+   * repeatedly. Always populated, even when empty.
+   */
+  errorClusters: ErrorCluster[];
 }
 
 export interface CrawlSummary {

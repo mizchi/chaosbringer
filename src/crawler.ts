@@ -39,6 +39,7 @@ import {
   normalizeUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
+import { clusterErrors } from "./clusters.js";
 
 const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl">> = {
   maxPages: 50,
@@ -1128,6 +1129,7 @@ export class ChaosCrawler {
       actions: this.actions,
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
+      errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
     };
   }
 

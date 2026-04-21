@@ -156,6 +156,18 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.errorClusters.length > 0) {
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("ERROR CLUSTERS");
+    lines.push("-".repeat(40));
+    for (const cluster of report.errorClusters) {
+      const countStr = cluster.count > 1 ? `×${cluster.count}` : "";
+      const urlStr = cluster.urls.length > 1 ? ` [${cluster.urls.length} urls]` : "";
+      lines.push(`  [${cluster.type}]${countStr}${urlStr} ${truncate(cluster.fingerprint, 80)}`);
+    }
+  }
+
   if (report.faultInjections && report.faultInjections.length > 0) {
     lines.push("");
     lines.push("-".repeat(40));
