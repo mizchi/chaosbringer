@@ -236,6 +236,26 @@ await chaos({
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
 - Fault injection rules still apply in replay mode and take precedence over HAR responses.
 
+## Performance budget
+
+Declare a per-metric budget (in ms). Any page whose measured metric exceeds its limit is recorded as an invariant violation (`perf-budget.<metric>`), which fails the run just like any other invariant.
+
+```bash
+# CLI — comma-separated pairs, or repeat the flag
+chaosbringer --url http://localhost:3000 --budget ttfb=200,fcp=1800,lcp=2500
+```
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  performanceBudget: { ttfb: 200, fcp: 1800, lcp: 2500 },
+});
+```
+
+Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
+
+Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
+
 ## Baseline diff (regression detection)
 
 Pass a previous report to `--baseline` and the current run is diffed against it — new error clusters and newly failing pages are surfaced separately from ones that were already broken.
@@ -356,6 +376,7 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
 | `--har-replay <path>` | Replay network traffic from a HAR file | — |
 | `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
+| `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |

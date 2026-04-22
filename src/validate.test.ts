@@ -129,4 +129,31 @@ describe("validateOptions", () => {
       /storageState/
     );
   });
+
+  it("accepts a well-formed performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: 200, fcp: 1800, lcp: 2500 } }))
+    ).not.toThrow();
+  });
+
+  it("rejects unknown keys in performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { wat: 100 } as any }))
+    ).toThrow(/performanceBudget\.wat/);
+  });
+
+  it("rejects non-positive performanceBudget values", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: 0 } }))
+    ).toThrow(/performanceBudget\.ttfb/);
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: -1 } }))
+    ).toThrow(/performanceBudget\.ttfb/);
+  });
+
+  it("rejects non-object performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: 500 as any }))
+    ).toThrow(/performanceBudget/);
+  });
 });

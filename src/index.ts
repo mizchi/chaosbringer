@@ -13,6 +13,7 @@ export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
 export { faults, type FaultHelperOptions } from "./faults.js";
 export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.js";
 export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
+export { checkPerformanceBudget } from "./budget.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
@@ -38,7 +39,10 @@ export type {
   UrlMatcher,
   HarConfig,
   HarMode,
+  PerformanceBudget,
+  PerfBudgetKey,
   ReportDiff,
   ClusterDiffEntry,
   PageDiffEntry,
 } from "./types.js";
+export { PERF_BUDGET_KEYS } from "./types.js";

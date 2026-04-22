@@ -50,6 +50,12 @@ export interface CrawlerOptions {
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
   /**
+   * Per-metric performance budget (in ms). Keys match PerformanceMetrics;
+   * omitted keys are not enforced. A breach is recorded as an invariant
+   * violation, so it always fails the run.
+   */
+  performanceBudget?: PerformanceBudget;
+  /**
    * Path to a Playwright storage state file (cookies + localStorage) to
    * preload into the browser context. Lets the crawler start a run as an
    * already-authenticated user — generate the file with
@@ -177,6 +183,32 @@ export interface PerformanceMetrics {
   /** Full page load */
   load?: number;
 }
+
+/**
+ * Per-metric budget (in ms). A page whose measured metric exceeds the budget
+ * is recorded as an invariant violation named `perf-budget.<metric>`, which
+ * forces a non-zero exit and shows up in the diff section.
+ */
+export interface PerformanceBudget {
+  ttfb?: number;
+  fcp?: number;
+  lcp?: number;
+  tbt?: number;
+  domContentLoaded?: number;
+  load?: number;
+}
+
+/** Keys of PerformanceMetrics that a budget can target. */
+export const PERF_BUDGET_KEYS = [
+  "ttfb",
+  "fcp",
+  "lcp",
+  "tbt",
+  "domContentLoaded",
+  "load",
+] as const satisfies ReadonlyArray<keyof PerformanceMetrics>;
+
+export type PerfBudgetKey = (typeof PERF_BUDGET_KEYS)[number];
 
 export interface PageResult {
   url: string;

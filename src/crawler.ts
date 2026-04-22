@@ -29,6 +29,7 @@ import type {
   Fault,
   UrlMatcher,
 } from "./types.js";
+import { PERF_BUDGET_KEYS } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -40,10 +41,14 @@ import {
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
+import { checkPerformanceBudget } from "./budget.js";
 
-// Options that are opt-in with no meaningful default (HAR, storage state) are
-// carved out of the Required<> type instead of inventing sentinels.
-const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl" | "har" | "storageState">> = {
+// Options that are opt-in with no meaningful default (HAR, storage state,
+// perf budget) are carved out of the Required<> type instead of inventing
+// sentinels.
+const DEFAULT_OPTIONS: Required<
+  Omit<CrawlerOptions, "baseUrl" | "har" | "storageState" | "performanceBudget">
+> = {
   maxPages: 50,
   maxActionsPerPage: 5,
   timeout: 30000,
@@ -678,6 +683,7 @@ export class ChaosCrawler {
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
+      this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
 
       // Perform random actions with accessibility-based weighting
@@ -742,6 +748,25 @@ export class ChaosCrawler {
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
     return result;
+  }
+
+  /**
+   * Compare measured metrics against the configured budget and push one
+   * invariant-violation per breached metric. Delegates to a pure helper
+   * (`checkPerformanceBudget`) so the check is unit-testable without a
+   * running browser.
+   */
+  private enforcePerformanceBudget(
+    metrics: PerformanceMetrics,
+    url: string,
+    errors: PageError[]
+  ): void {
+    const violations = checkPerformanceBudget(metrics, this.options.performanceBudget, url);
+    for (const error of violations) {
+      errors.push(error);
+      this.events.onError?.(error);
+      this.logger.logPageError(error);
+    }
   }
 
   private async collectMetrics(page: Page): Promise<PerformanceMetrics> {
@@ -1174,6 +1199,13 @@ export class ChaosCrawler {
     if (this.options.storageState) {
       parts.push("--storage-state", shellQuote(this.options.storageState));
     }
+    if (this.options.performanceBudget) {
+      const budget = this.options.performanceBudget;
+      const entries = PERF_BUDGET_KEYS.filter((k) => typeof budget[k] === "number")
+        .map((k) => `${k}=${budget[k]}`)
+        .join(",");
+      if (entries.length > 0) parts.push("--budget", entries);
+    }
     return parts.join(" ");
   }
 
@@ -1282,6 +1314,29 @@ export function validateOptions(options: CrawlerOptions): void {
       throw new Error(
         `chaosbringer: "storageState" must be a non-empty path string (got ${JSON.stringify(options.storageState)})`
       );
+    }
+  }
+
+  if (options.performanceBudget !== undefined) {
+    const budget = options.performanceBudget;
+    if (budget === null || typeof budget !== "object" || Array.isArray(budget)) {
+      throw new Error(
+        `chaosbringer: "performanceBudget" must be an object (got ${JSON.stringify(budget)})`
+      );
+    }
+    const allowed = new Set<string>(PERF_BUDGET_KEYS);
+    for (const key of Object.keys(budget)) {
+      if (!allowed.has(key)) {
+        throw new Error(
+          `chaosbringer: "performanceBudget.${key}" is not a known metric (allowed: ${PERF_BUDGET_KEYS.join(", ")})`
+        );
+      }
+      const val = (budget as Record<string, unknown>)[key];
+      if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) {
+        throw new Error(
+          `chaosbringer: "performanceBudget.${key}" must be a positive number of ms (got ${JSON.stringify(val)})`
+        );
+      }
     }
   }
 }

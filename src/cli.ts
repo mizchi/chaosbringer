@@ -50,6 +50,7 @@ const { values, positionals } = parseArgs({
     "har-record": { type: "string" },
     "har-replay": { type: "string" },
     "storage-state": { type: "string" },
+    budget: { type: "string", multiple: true },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
@@ -89,6 +90,7 @@ OPTIONS:
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
+  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
@@ -159,6 +161,25 @@ if (values["har-record"] && values["har-replay"]) {
 if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
 if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
 
+let performanceBudget: CrawlerOptions["performanceBudget"];
+if (values.budget && values.budget.length > 0) {
+  performanceBudget = {};
+  for (const raw of values.budget) {
+    for (const entry of raw.split(",")) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq <= 0) {
+        console.error(`Error: --budget expects key=ms pairs (got "${trimmed}")`);
+        process.exit(1);
+      }
+      const key = trimmed.slice(0, eq).trim();
+      const ms = Number(trimmed.slice(eq + 1).trim());
+      (performanceBudget as Record<string, number>)[key] = ms;
+    }
+  }
+}
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -176,6 +197,7 @@ const options: CrawlerOptions = {
   seed,
   har,
   storageState: values["storage-state"],
+  performanceBudget,
 };
 
 const outputPath = values.output || "chaos-report.json";
