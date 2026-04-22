@@ -232,6 +232,54 @@ export interface ActionResult {
   timestamp: number;
 }
 
+/**
+ * One entry in a cluster-level diff between two runs. `before` is the count in
+ * the baseline report; `after` is the count in the current report. New clusters
+ * have `before: 0`; resolved clusters have `after: 0`.
+ */
+export interface ClusterDiffEntry {
+  key: string;
+  type: PageError["type"];
+  fingerprint: string;
+  before: number;
+  after: number;
+}
+
+/**
+ * One entry in a page-level diff. A page is considered "failed" when it has
+ * any errors, or its navigation ended in `error` / `timeout`. Pages appear in
+ * the diff only when their failed/clean state differs between runs.
+ */
+export interface PageDiffEntry {
+  url: string;
+  /** null when the page did not exist in the baseline. */
+  before: { errors: number; status: PageResult["status"] } | null;
+  /** null when the page was not visited in the current run. */
+  after: { errors: number; status: PageResult["status"] } | null;
+}
+
+/**
+ * Diff between a baseline report and the current report. Produced by
+ * `diffReports(prev, curr)`, attached to the current report as `report.diff`
+ * when a baseline was supplied.
+ */
+export interface ReportDiff {
+  /** Path the baseline was loaded from, if known. */
+  baselinePath?: string;
+  /** Seed of the baseline run — useful for asserting like-vs-like. */
+  baselineSeed: number;
+  /** Clusters present in the current run but not the baseline. */
+  newClusters: ClusterDiffEntry[];
+  /** Clusters present in the baseline but not the current run. */
+  resolvedClusters: ClusterDiffEntry[];
+  /** Clusters present in both runs (with potentially different counts). */
+  unchangedClusters: ClusterDiffEntry[];
+  /** Pages that are failing in the current run but were clean in the baseline (or not visited). */
+  newFailedPages: PageDiffEntry[];
+  /** Pages that were failing in the baseline but are clean / absent in the current run. */
+  resolvedFailedPages: PageDiffEntry[];
+}
+
 export interface CrawlReport {
   baseUrl: string;
   /** Seed used for random action selection (for reproducibility). */
@@ -263,6 +311,8 @@ export interface CrawlReport {
   errorClusters: ErrorCluster[];
   /** Echo of the HAR config used for this run, if any. */
   har?: HarConfig;
+  /** Diff against a baseline report, present only when a baseline was supplied. */
+  diff?: ReportDiff;
 }
 
 export interface CrawlSummary {

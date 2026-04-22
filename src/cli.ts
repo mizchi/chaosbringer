@@ -25,6 +25,7 @@
 
 import { parseArgs } from "node:util";
 import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+import { diffReports, loadBaseline } from "./diff.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import type { CrawlerOptions } from "./types.js";
 
@@ -48,6 +49,8 @@ const { values, positionals } = parseArgs({
     seed: { type: "string" },
     "har-record": { type: "string" },
     "har-replay": { type: "string" },
+    baseline: { type: "string" },
+    "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -84,6 +87,8 @@ OPTIONS:
   --seed <n>            Seed for deterministic action selection (reproduces a run)
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
+  --baseline <path>     Diff this run against a previous report (warns if missing)
+  --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
@@ -174,6 +179,8 @@ const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
 const isStrict = values.strict;
+const baselinePath = values.baseline;
+const isBaselineStrict = values["baseline-strict"];
 
 async function main() {
   if (!isQuiet) {
@@ -212,16 +219,28 @@ async function main() {
       console.log(""); // New line after progress
     }
 
+    if (baselinePath) {
+      const prev = loadBaseline(baselinePath);
+      if (prev) {
+        report.diff = diffReports(prev, report, { baselinePath });
+      } else if (!isQuiet) {
+        // First CI run won't have a baseline yet. Warn, but keep going — the
+        // report we write here becomes the baseline for next time.
+        console.warn(`Baseline not found at ${baselinePath} — skipping diff.`);
+      }
+    }
+
     // Print report first, then save + announce the file. This way the main
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
-    printReport(report, isCompact, isStrict);
+    const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
+    printReport(report, isCompact, exitOptions);
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);
     }
 
-    const exitCode = getExitCode(report, isStrict);
+    const exitCode = getExitCode(report, exitOptions);
     process.exit(exitCode);
   } catch (err) {
     console.error("Crawl failed:", err);

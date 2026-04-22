@@ -202,6 +202,39 @@ await chaos({
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
 - Fault injection rules still apply in replay mode and take precedence over HAR responses.
 
+## Baseline diff (regression detection)
+
+Pass a previous report to `--baseline` and the current run is diffed against it — new error clusters and newly failing pages are surfaced separately from ones that were already broken.
+
+```bash
+# First run: writes chaos-report.json as usual (no baseline yet, warns and continues)
+chaosbringer --url http://localhost:3000 --baseline chaos-report.json
+
+# Subsequent runs: compare against the prior report
+chaosbringer --url http://localhost:3000 --baseline chaos-report.json --baseline-strict
+```
+
+- `--baseline <path>` — diff against this report. A missing file produces a warning, not an error (the run still writes its own report so a later invocation has a baseline to compare against).
+- `--baseline-strict` — exit 1 when the diff contains new clusters or newly failing pages. Resolved / unchanged entries never fail the run.
+
+Programmatic:
+
+```ts
+import { chaos } from "chaosbringer";
+
+const { report, passed } = await chaos({
+  baseUrl: "http://localhost:3000",
+  baseline: "chaos-report.json",
+  baselineStrict: true,
+});
+
+for (const c of report.diff?.newClusters ?? []) {
+  console.log(`NEW [${c.type}]×${c.after}: ${c.fingerprint}`);
+}
+```
+
+Clusters are matched by the same fingerprint used for `errorClusters` (URL / line:col / long numeric ids stripped), so `HTTP 500 on /api/users/42` and `HTTP 500 on /api/users/99` collapse to the same entry. Pages are matched by URL.
+
 ## Error clustering
 
 `CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
@@ -288,6 +321,8 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--seed <n>` | Seed for deterministic action selection | random |
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
 | `--har-replay <path>` | Replay network traffic from a HAR file | — |
+| `--baseline <path>` | Diff this run against a previous report | — |
+| `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
 | `--quiet` | Minimal output | false |
