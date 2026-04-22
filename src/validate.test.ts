@@ -115,4 +115,18 @@ describe("validateOptions", () => {
       )
     ).not.toThrow();
   });
+
+  it("accepts a storageState path string", () => {
+    expect(() => validateOptions(base({ storageState: "./auth.json" }))).not.toThrow();
+  });
+
+  it("rejects an empty storageState", () => {
+    expect(() => validateOptions(base({ storageState: "" }))).toThrow(/storageState/);
+  });
+
+  it("rejects a non-string storageState", () => {
+    expect(() => validateOptions(base({ storageState: 42 as unknown as string }))).toThrow(
+      /storageState/
+    );
+  });
 });

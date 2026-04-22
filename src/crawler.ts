@@ -41,9 +41,9 @@ import {
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
 
-// `har` has no meaningful default (it's opt-in), so we carve it out of the
-// Required<> type instead of inventing a sentinel.
-const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl" | "har">> = {
+// Options that are opt-in with no meaningful default (HAR, storage state) are
+// carved out of the Required<> type instead of inventing sentinels.
+const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl" | "har" | "storageState">> = {
   maxPages: 50,
   maxActionsPerPage: 5,
   timeout: 30000,
@@ -338,6 +338,9 @@ export class ChaosCrawler {
       userAgent: this.options.userAgent || undefined,
       // Record mode: ask Playwright to capture all network into the HAR.
       recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
+      // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
+      // and validates the file; we don't touch it.
+      storageState: this.options.storageState || undefined,
     });
 
     // Replay mode: serve every matching request from the HAR before it hits
@@ -1168,6 +1171,9 @@ export class ChaosCrawler {
     for (const p of this.options.spaPatterns ?? []) {
       parts.push("--spa", shellQuote(p));
     }
+    if (this.options.storageState) {
+      parts.push("--storage-state", shellQuote(this.options.storageState));
+    }
     return parts.join(" ");
   }
 
@@ -1267,6 +1273,14 @@ export function validateOptions(options: CrawlerOptions): void {
     if (mode !== "record" && mode !== "replay") {
       throw new Error(
         `chaosbringer: "har.mode" must be "record" or "replay" (got ${JSON.stringify(mode)})`
+      );
+    }
+  }
+
+  if (options.storageState !== undefined) {
+    if (typeof options.storageState !== "string" || options.storageState.length === 0) {
+      throw new Error(
+        `chaosbringer: "storageState" must be a non-empty path string (got ${JSON.stringify(options.storageState)})`
       );
     }
   }

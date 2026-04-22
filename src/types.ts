@@ -49,6 +49,14 @@ export interface CrawlerOptions {
   faultInjection?: FaultRule[];
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
+  /**
+   * Path to a Playwright storage state file (cookies + localStorage) to
+   * preload into the browser context. Lets the crawler start a run as an
+   * already-authenticated user — generate the file with
+   * `await context.storageState({ path })` in a login script, then point
+   * this at it. The file is not modified by the crawl.
+   */
+  storageState?: string;
 }
 
 /** `record` captures responses to a HAR file; `replay` serves them back. */

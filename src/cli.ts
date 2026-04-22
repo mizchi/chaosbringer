@@ -49,6 +49,7 @@ const { values, positionals } = parseArgs({
     seed: { type: "string" },
     "har-record": { type: "string" },
     "har-replay": { type: "string" },
+    "storage-state": { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
@@ -87,6 +88,7 @@ OPTIONS:
   --seed <n>            Seed for deterministic action selection (reproduces a run)
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
+  --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
@@ -173,6 +175,7 @@ const options: CrawlerOptions = {
   logToConsole: values["log-console"],
   seed,
   har,
+  storageState: values["storage-state"],
 };
 
 const outputPath = values.output || "chaos-report.json";

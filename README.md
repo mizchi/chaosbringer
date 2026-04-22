@@ -169,6 +169,40 @@ const { passed } = await chaos({ baseUrl: "http://localhost:3000", invariants })
 
 Violations always fail the run (exit 1), whether or not `strict` is set — a declared invariant is a stronger signal than console noise.
 
+## Authenticated crawls (storage state)
+
+To crawl pages behind a login, point chaosbringer at a Playwright `storageState` file — the JSON containing cookies + localStorage that a logged-in browser context produces. Run a one-off login script once, save the state, then reuse it for every chaos run.
+
+```ts
+// auth-setup.ts — run once, or as a Playwright global setup
+import { chromium } from "playwright";
+
+const browser = await chromium.launch();
+const context = await browser.newContext();
+const page = await context.newPage();
+await page.goto("http://localhost:3000/login");
+await page.getByLabel("Email").fill("ci@example.com");
+await page.getByLabel("Password").fill(process.env.TEST_PASSWORD!);
+await page.getByRole("button", { name: "Sign in" }).click();
+await page.waitForURL("**/dashboard");
+await context.storageState({ path: "auth.json" });
+await browser.close();
+```
+
+```bash
+# Chaos-test the authenticated surface
+chaosbringer --url http://localhost:3000/dashboard --storage-state auth.json
+```
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000/dashboard",
+  storageState: "auth.json",
+});
+```
+
+The file is read by Playwright and not modified by the crawl. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
+
 ## HAR record / replay
 
 Chaosbringer can capture network traffic to a HAR file on one run and replay it on the next. A replay run is deterministic even if the backend is flaky — every request that was in the HAR gets served from the HAR, not the network.
@@ -321,6 +355,7 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--seed <n>` | Seed for deterministic action selection | random |
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
 | `--har-replay <path>` | Replay network traffic from a HAR file | — |
+| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |
