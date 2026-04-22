@@ -42,7 +42,15 @@ import {
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
 import { checkPerformanceBudget } from "./budget.js";
-import { TRACE_FORMAT_VERSION, actionToTraceEntry, writeTrace, type TraceEntry } from "./trace.js";
+import {
+  TRACE_FORMAT_VERSION,
+  actionToTraceEntry,
+  groupTrace,
+  readTrace,
+  writeTrace,
+  type TraceAction,
+  type TraceEntry,
+} from "./trace.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
 // perf budget, trace) are carved out of the Required<> type instead of
@@ -135,6 +143,12 @@ export class ChaosCrawler {
   private currentEntry: QueueEntry | null = null;
   /** JSONL trace entries collected when `traceOut` is set. */
   private trace: TraceEntry[] = [];
+  /**
+   * Actions to replay on the current page. Non-null only while a replay run
+   * is mid-flight; the action dispatcher branches on this to decide between
+   * random-weighted and playback.
+   */
+  private currentReplayActions: TraceAction[] | null = null;
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
   /** Fault injection rules compiled once at construction time. */
@@ -375,38 +389,67 @@ export class ChaosCrawler {
     }
 
     try {
-      while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
-        const entry = this.queue.shift()!;
-        if (this.visited.has(entry.url)) continue;
-        if (this.shouldExclude(entry.url)) {
-          this.logger.debug("page_excluded", { url: entry.url });
-          continue;
+      if (this.options.traceReplay) {
+        // Replay: iterate the recorded (visit, actions) groups in order.
+        // Link discovery is skipped — only URLs in the trace are visited,
+        // exactly as many times as the trace visits them.
+        const groups = groupTrace(readTrace(this.options.traceReplay));
+        const limit = Math.min(groups.length, this.options.maxPages);
+        for (let i = 0; i < limit; i++) {
+          const group = groups[i]!;
+          if (this.shouldExclude(group.url)) {
+            this.logger.debug("page_excluded", { url: group.url });
+            continue;
+          }
+          this.currentEntry = { url: group.url, sourceUrl: "", method: "initial" };
+          this.currentReplayActions = group.actions;
+          this.discoveryMetrics.uniquePages++;
+          this.events.onProgress?.(i + 1, limit);
+          this.logger.logProgress(i + 1, limit);
+          if (this.options.traceOut) {
+            this.trace.push({ kind: "visit", url: group.url });
+          }
+          try {
+            const result = await this.crawlPage(this.currentEntry);
+            this.results.push(result);
+          } finally {
+            this.currentReplayActions = null;
+          }
         }
+      } else {
+        while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
+          const entry = this.queue.shift()!;
+          if (this.visited.has(entry.url)) continue;
+          if (this.shouldExclude(entry.url)) {
+            this.logger.debug("page_excluded", { url: entry.url });
+            continue;
+          }
 
-        this.visited.add(entry.url);
-        this.currentEntry = entry;
-        this.discoveryMetrics.uniquePages++;
-        this.events.onProgress?.(this.visited.size, this.options.maxPages);
-        this.logger.logProgress(this.visited.size, this.options.maxPages);
+          this.visited.add(entry.url);
+          this.currentEntry = entry;
+          this.discoveryMetrics.uniquePages++;
+          this.events.onProgress?.(this.visited.size, this.options.maxPages);
+          this.logger.logProgress(this.visited.size, this.options.maxPages);
 
-        if (this.options.traceOut) {
-          this.trace.push({ kind: "visit", url: entry.url });
-        }
+          if (this.options.traceOut) {
+            this.trace.push({ kind: "visit", url: entry.url });
+          }
 
-        const result = await this.crawlPage(entry);
-        this.results.push(result);
+          const result = await this.crawlPage(entry);
+          this.results.push(result);
 
-        // Add discovered links to queue with source tracking
-        for (const rawLink of result.links) {
-          const link = normalizeUrl(rawLink);
-          const alreadyQueued = this.queue.some((e) => e.url === link);
-          if (!this.visited.has(link) && !alreadyQueued) {
-            this.queue.push({
-              url: link,
-              sourceUrl: entry.url,
-              method: "extracted",
-            });
-            this.discoveryMetrics.extractedLinks++;
+          // Add discovered links to queue with source tracking
+          for (const rawLink of result.links) {
+            const link = normalizeUrl(rawLink);
+            const alreadyQueued = this.queue.some((e) => e.url === link);
+            if (!this.visited.has(link) && !alreadyQueued) {
+              this.queue.push({
+                url: link,
+                sourceUrl: entry.url,
+                method: "extracted",
+              });
+              this.discoveryMetrics.extractedLinks++;
+            }
           }
         }
       }
@@ -710,8 +753,13 @@ export class ChaosCrawler {
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
 
-      // Perform random actions with accessibility-based weighting
-      await this.performWeightedActions(page, url);
+      // Replay mode bypasses the weighted random driver — playback owns
+      // exactly what runs and in what order.
+      if (this.currentReplayActions) {
+        await this.performReplayActions(page, url, this.currentReplayActions);
+      } else {
+        await this.performWeightedActions(page, url);
+      }
 
       // Drain any rejections that fired during actions.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
@@ -1076,6 +1124,87 @@ export class ChaosCrawler {
       this.logger.logAction(result);
 
       // Small delay between actions
+      await page.waitForTimeout(100);
+    }
+  }
+
+  /**
+   * Play back a sequence of recorded actions on the current page. Actions
+   * whose selectors no longer resolve are recorded as failed — the run
+   * continues so downstream errors can still surface. Scroll actions
+   * reconstruct the Y offset from the recorded `target` string.
+   */
+  private async performReplayActions(
+    page: Page,
+    url: string,
+    actions: readonly TraceAction[]
+  ): Promise<void> {
+    for (const action of actions) {
+      const timestamp = Date.now();
+      let result: ActionResult;
+      try {
+        if (action.type === "scroll") {
+          const m = /scrollY:\s*(\d+)/i.exec(action.target ?? "");
+          const y = m ? Number(m[1]) : 0;
+          await page.evaluate((yy) => window.scrollTo(0, yy), y);
+          result = { type: "scroll", target: `scrollY: ${y}`, success: true, timestamp };
+        } else if (!action.selector) {
+          result = {
+            type: action.type,
+            target: action.target,
+            success: false,
+            error: "replay: entry has no selector",
+            timestamp,
+          };
+        } else {
+          const element = page.locator(action.selector).first();
+          const visible = await element.isVisible().catch(() => false);
+          if (!visible) {
+            result = {
+              type: action.type,
+              target: action.target,
+              selector: action.selector,
+              success: false,
+              error: "replay: element not visible",
+              timestamp,
+            };
+          } else if (action.type === "input") {
+            await element.fill("test input", { timeout: 1000 });
+            result = {
+              type: "input",
+              target: action.target,
+              selector: action.selector,
+              success: true,
+              timestamp,
+            };
+          } else {
+            await element.click({ timeout: 2000 });
+            result = {
+              type: "click",
+              target: action.target,
+              selector: action.selector,
+              success: true,
+              timestamp,
+            };
+          }
+        }
+      } catch (err) {
+        result = {
+          type: action.type,
+          target: action.target,
+          selector: action.selector,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          timestamp,
+        };
+      }
+      this.actions.push(result);
+      this.addToHistory(result);
+      if (this.options.traceOut) {
+        this.trace.push(actionToTraceEntry(result, url));
+      }
+      this.events.onAction?.(result);
+      this.logger.logAction(result);
       await page.waitForTimeout(100);
     }
   }
