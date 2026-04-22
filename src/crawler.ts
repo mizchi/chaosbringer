@@ -42,12 +42,16 @@ import {
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
 import { checkPerformanceBudget } from "./budget.js";
+import { TRACE_FORMAT_VERSION, actionToTraceEntry, writeTrace, type TraceEntry } from "./trace.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
-// perf budget) are carved out of the Required<> type instead of inventing
-// sentinels.
+// perf budget, trace) are carved out of the Required<> type instead of
+// inventing sentinels.
 const DEFAULT_OPTIONS: Required<
-  Omit<CrawlerOptions, "baseUrl" | "har" | "storageState" | "performanceBudget">
+  Omit<
+    CrawlerOptions,
+    "baseUrl" | "har" | "storageState" | "performanceBudget" | "traceOut" | "traceReplay"
+  >
 > = {
   maxPages: 50,
   maxActionsPerPage: 5,
@@ -129,6 +133,8 @@ export class ChaosCrawler {
   };
   /** Current page being crawled (for source tracking) */
   private currentEntry: QueueEntry | null = null;
+  /** JSONL trace entries collected when `traceOut` is set. */
+  private trace: TraceEntry[] = [];
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
   /** Fault injection rules compiled once at construction time. */
@@ -308,7 +314,18 @@ export class ChaosCrawler {
     }];
     this.results = [];
     this.actions = [];
+    this.trace = [];
     this.blockedExternalCount = 0;
+
+    if (this.options.traceOut) {
+      this.trace.push({
+        kind: "meta",
+        v: TRACE_FORMAT_VERSION,
+        seed: this.rng.seed,
+        baseUrl: this.options.baseUrl,
+        startTime: this.startTime,
+      });
+    }
 
     // Reset recovery state
     this.currentPageActions = [];
@@ -372,6 +389,10 @@ export class ChaosCrawler {
         this.events.onProgress?.(this.visited.size, this.options.maxPages);
         this.logger.logProgress(this.visited.size, this.options.maxPages);
 
+        if (this.options.traceOut) {
+          this.trace.push({ kind: "visit", url: entry.url });
+        }
+
         const result = await this.crawlPage(entry);
         this.results.push(result);
 
@@ -394,6 +415,9 @@ export class ChaosCrawler {
       // before `browser.close()` tears everything down.
       await this.context?.close();
       await this.browser.close();
+      if (this.options.traceOut && this.trace.length > 0) {
+        writeTrace(this.options.traceOut, this.trace);
+      }
     }
 
     const endTime = Date.now();
@@ -1045,6 +1069,9 @@ export class ChaosCrawler {
       actionsPerformed++;
       this.actions.push(result);
       this.addToHistory(result);  // Add to recovery history
+      if (this.options.traceOut) {
+        this.trace.push(actionToTraceEntry(result, url));
+      }
       this.events.onAction?.(result);
       this.logger.logAction(result);
 
@@ -1206,6 +1233,12 @@ export class ChaosCrawler {
         .join(",");
       if (entries.length > 0) parts.push("--budget", entries);
     }
+    if (this.options.traceOut) {
+      parts.push("--trace-out", shellQuote(this.options.traceOut));
+    }
+    if (this.options.traceReplay) {
+      parts.push("--trace-replay", shellQuote(this.options.traceReplay));
+    }
     return parts.join(" ");
   }
 
@@ -1316,6 +1349,15 @@ export function validateOptions(options: CrawlerOptions): void {
       );
     }
   }
+
+  const assertNonEmptyStringOpt = (name: string, v: unknown): void => {
+    if (v === undefined) return;
+    if (typeof v !== "string" || v.length === 0) {
+      throw new Error(`chaosbringer: "${name}" must be a non-empty path string (got ${JSON.stringify(v)})`);
+    }
+  };
+  assertNonEmptyStringOpt("traceOut", options.traceOut);
+  assertNonEmptyStringOpt("traceReplay", options.traceReplay);
 
   if (options.performanceBudget !== undefined) {
     const budget = options.performanceBudget;

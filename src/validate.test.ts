@@ -156,4 +156,12 @@ describe("validateOptions", () => {
       validateOptions(base({ performanceBudget: 500 as any }))
     ).toThrow(/performanceBudget/);
   });
+
+  it("rejects an empty traceOut path", () => {
+    expect(() => validateOptions(base({ traceOut: "" }))).toThrow(/traceOut/);
+  });
+
+  it("rejects an empty traceReplay path", () => {
+    expect(() => validateOptions(base({ traceReplay: "" }))).toThrow(/traceReplay/);
+  });
 });

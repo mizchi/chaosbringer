@@ -56,6 +56,18 @@ export interface CrawlerOptions {
    */
   performanceBudget?: PerformanceBudget;
   /**
+   * Path to write a JSONL trace of every navigation + action performed. Used
+   * as input to replay mode and to the `minimize` subcommand — the exact
+   * crawl can be replayed without rerolling the RNG.
+   */
+  traceOut?: string;
+  /**
+   * Path to a trace file produced by `traceOut`. When set, the crawler
+   * ignores its weighted-random driver and plays back the recorded visits
+   * and actions verbatim.
+   */
+  traceReplay?: string;
+  /**
    * Path to a Playwright storage state file (cookies + localStorage) to
    * preload into the browser context. Lets the crawler start a run as an
    * already-authenticated user — generate the file with

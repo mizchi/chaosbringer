@@ -285,6 +285,30 @@ Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted
 
 Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
 
+## Trace record / replay / minimize
+
+For failures that are hard to diagnose from a seed alone, record the exact sequence of visits + actions to a JSONL file, then replay or minimize that sequence.
+
+```bash
+# Record
+chaosbringer --url http://localhost:3000 --seed 42 --trace-out chaos.trace.jsonl
+
+# Replay the exact sequence (no RNG, no discovery)
+chaosbringer --url http://localhost:3000 --trace-replay chaos.trace.jsonl
+
+# Shrink the trace to the minimum subsequence that still reproduces a failure
+chaosbringer minimize --url http://localhost:3000 \
+  --trace chaos.trace.jsonl \
+  --match "Cannot read properties of undefined" \
+  --trace-out min.trace.jsonl
+```
+
+A trace is line-delimited JSON: a leading `meta` entry with the seed + baseUrl, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+
+Replay skips link discovery and the RNG entirely: only URLs listed as `visit` entries are loaded, and only the recorded actions are performed. Missing selectors are logged as failed actions and the run continues.
+
+`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Output goes to `--trace-out` (defaults to `min.trace.jsonl`).
+
 ## Baseline diff (regression detection)
 
 Pass a previous report to `--baseline` and the current run is diffed against it — new error clusters and newly failing pages are surfaced separately from ones that were already broken.
@@ -408,6 +432,8 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
 | `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
+| `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
+| `--trace-replay <path>` | Replay a previously recorded trace | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |

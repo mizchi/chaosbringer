@@ -54,6 +54,8 @@ const { values, positionals } = parseArgs({
     budget: { type: "string", multiple: true },
     axe: { type: "boolean", default: false },
     "axe-tags": { type: "string" },
+    "trace-out": { type: "string" },
+    "trace-replay": { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
@@ -96,6 +98,8 @@ OPTIONS:
   --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
   --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
+  --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
+  --trace-replay <path> Replay a previously recorded trace instead of random actions
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
@@ -203,6 +207,8 @@ const options: CrawlerOptions = {
   har,
   storageState: values["storage-state"],
   performanceBudget,
+  traceOut: values["trace-out"],
+  traceReplay: values["trace-replay"],
   invariants: values.axe
     ? [
         axe({

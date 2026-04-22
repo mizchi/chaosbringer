@@ -15,6 +15,21 @@ export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.j
 export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
 export { checkPerformanceBudget } from "./budget.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
+export {
+  TRACE_FORMAT_VERSION,
+  actionToTraceEntry,
+  groupTrace,
+  metaOf,
+  parseTrace,
+  readTrace,
+  serializeTrace,
+  writeTrace,
+  type TraceAction,
+  type TraceEntry,
+  type TraceGroup,
+  type TraceMeta,
+  type TraceVisit,
+} from "./trace.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
