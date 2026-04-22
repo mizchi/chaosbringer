@@ -14,6 +14,7 @@ export { faults, type FaultHelperOptions } from "./faults.js";
 export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.js";
 export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
 export { checkPerformanceBudget } from "./budget.js";
+export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";

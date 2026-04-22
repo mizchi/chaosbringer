@@ -236,6 +236,35 @@ await chaos({
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
 - Fault injection rules still apply in replay mode and take precedence over HAR responses.
 
+## Accessibility (axe-core)
+
+Install `axe-core` as a peer and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
+
+```bash
+pnpm add axe-core
+chaosbringer --url http://localhost:3000 --axe
+chaosbringer --url http://localhost:3000 --axe --axe-tags wcag2aa,best-practice
+```
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  invariants: [
+    invariants.axe({
+      tags: ["wcag2aa"],
+      exclude: [".third-party-widget"],
+      disableRules: ["color-contrast"],
+    }),
+  ],
+});
+```
+
+`axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
+
+A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+
 ## Performance budget
 
 Declare a per-metric budget (in ms). Any page whose measured metric exceeds its limit is recorded as an invariant violation (`perf-budget.<metric>`), which fails the run just like any other invariant.
@@ -377,6 +406,8 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--har-replay <path>` | Replay network traffic from a HAR file | — |
 | `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
 | `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
+| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
+| `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |

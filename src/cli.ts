@@ -26,6 +26,7 @@
 import { parseArgs } from "node:util";
 import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
 import { diffReports, loadBaseline } from "./diff.js";
+import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import type { CrawlerOptions } from "./types.js";
 
@@ -51,6 +52,8 @@ const { values, positionals } = parseArgs({
     "har-replay": { type: "string" },
     "storage-state": { type: "string" },
     budget: { type: "string", multiple: true },
+    axe: { type: "boolean", default: false },
+    "axe-tags": { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
@@ -91,6 +94,8 @@ OPTIONS:
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
   --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
+  --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
+  --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
@@ -198,6 +203,18 @@ const options: CrawlerOptions = {
   har,
   storageState: values["storage-state"],
   performanceBudget,
+  invariants: values.axe
+    ? [
+        axe({
+          tags: values["axe-tags"]
+            ? values["axe-tags"]
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : undefined,
+        }),
+      ]
+    : undefined,
 };
 
 const outputPath = values.output || "chaos-report.json";

@@ -43,16 +43,21 @@
   ],
   "peerDependencies": {
     "@playwright/test": "^1.40.0",
+    "axe-core": "^4.0.0",
     "playwright": "^1.40.0"
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
+      "optional": true
+    },
+    "axe-core": {
       "optional": true
     }
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
     "@types/node": "^22.0.0",
+    "axe-core": "^4.11.3",
     "playwright": "^1.52.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
