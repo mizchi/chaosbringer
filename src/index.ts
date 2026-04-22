@@ -30,6 +30,14 @@ export {
   type TraceMeta,
   type TraceVisit,
 } from "./trace.js";
+export {
+  ddmin,
+  minimizeTrace,
+  reportMatches,
+  traceWithActions,
+  type MinimizeOptions,
+  type MinimizeResult,
+} from "./minimize.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";

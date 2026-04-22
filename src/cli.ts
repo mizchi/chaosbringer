@@ -30,6 +30,21 @@ import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import type { CrawlerOptions } from "./types.js";
 
+// Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
+// flags (e.g. --match for `minimize`) don't trip the main options map.
+const rawSub = process.argv[2];
+const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
+if (subcommand === "minimize") {
+  const { runMinimizeCli } = await import("./minimize.js");
+  try {
+    await runMinimizeCli(process.argv.slice(3));
+    process.exit(0);
+  } catch (err) {
+    console.error("minimize failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+
 const { values, positionals } = parseArgs({
   options: {
     url: { type: "string" },

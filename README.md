@@ -406,6 +406,22 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 });
 ```
 
+## Subcommands
+
+### `minimize`
+
+Shrink a recorded trace to the minimum subsequence of actions that still reproduces a failure. Drives ddmin (delta debugging) by repeatedly running the crawler in replay mode with subsets of the recorded actions; the reproduction predicate matches an error cluster fingerprint against a regex.
+
+```bash
+chaosbringer minimize \
+  --url http://localhost:3000 \
+  --trace chaos.trace.jsonl \
+  --match "Cannot read properties of undefined" \
+  --trace-out min.trace.jsonl
+```
+
+`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+
 ## CLI reference
 
 | Option | Description | Default |
