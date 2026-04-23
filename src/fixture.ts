@@ -32,6 +32,13 @@ export interface ChaosFixture {
   /** Assert no errors were found */
   expectNoErrors(result: PageResult | CrawlReport): void;
 
+  /**
+   * Assert the crawl discovered no dead links. Prints each dead link's
+   * source page so the reviewer can find the broken anchor without
+   * cross-referencing the full report.
+   */
+  expectNoDeadLinks(result: CrawlReport): void;
+
   /** Get the underlying crawler instance */
   crawler: ChaosCrawler;
 }
@@ -97,6 +104,15 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
             }
           }
         },
+
+        expectNoDeadLinks(result: CrawlReport): void {
+          const dead = result.summary.discovery?.deadLinks ?? [];
+          if (dead.length === 0) return;
+          const lines = dead.map(
+            (d) => `  ${d.url} (${d.statusCode}) ← ${d.sourceUrl || "(initial)"}`
+          );
+          throw new Error(`Found ${dead.length} dead links:\n${lines.join("\n")}`);
+        },
       };
 
       await use(fixture);
@@ -159,5 +175,20 @@ export const chaosExpect = {
     expect(result.loadTime, `Page load time ${result.loadTime}ms exceeded ${maxMs}ms`).toBeLessThanOrEqual(
       maxMs
     );
+  },
+
+  toHaveNoDeadLinks(result: CrawlReport) {
+    const dead = result.summary.discovery?.deadLinks ?? [];
+    if (dead.length === 0) {
+      expect(dead).toHaveLength(0);
+      return;
+    }
+    const detail = dead
+      .map((d) => `  ${d.url} (${d.statusCode}) ← ${d.sourceUrl || "(initial)"}`)
+      .join("\n");
+    expect(
+      dead,
+      `Expected no dead links but found ${dead.length}:\n${detail}`
+    ).toHaveLength(0);
   },
 };
