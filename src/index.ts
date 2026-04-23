@@ -38,6 +38,13 @@ export {
   type MinimizeOptions,
   type MinimizeResult,
 } from "./minimize.js";
+export {
+  flakeReport,
+  formatFlakeReport,
+  type FlakeAnalysis,
+  type ClusterOccurrence,
+  type PageOccurrence,
+} from "./flake.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";

@@ -44,6 +44,16 @@ if (subcommand === "minimize") {
     process.exit(1);
   }
 }
+if (subcommand === "flake") {
+  const { runFlakeCli } = await import("./flake.js");
+  try {
+    await runFlakeCli(process.argv.slice(3));
+    process.exit(0);
+  } catch (err) {
+    console.error("flake failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {
