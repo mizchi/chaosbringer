@@ -390,12 +390,11 @@ export class ChaosCrawler {
 
     try {
       if (this.options.traceReplay) {
-        // Replay: iterate the recorded (visit, actions) groups in order.
-        // Link discovery is skipped — only URLs in the trace are visited,
-        // exactly as many times as the trace visits them.
+        // Replay: iterate every recorded (visit, actions) group. The trace
+        // itself defines the scope — applying maxPages here would silently
+        // truncate larger traces, so the cap only applies to live crawls.
         const groups = groupTrace(readTrace(this.options.traceReplay));
-        const limit = Math.min(groups.length, this.options.maxPages);
-        for (let i = 0; i < limit; i++) {
+        for (let i = 0; i < groups.length; i++) {
           const group = groups[i]!;
           if (this.shouldExclude(group.url)) {
             this.logger.debug("page_excluded", { url: group.url });
@@ -404,8 +403,8 @@ export class ChaosCrawler {
           this.currentEntry = { url: group.url, sourceUrl: "", method: "initial" };
           this.currentReplayActions = group.actions;
           this.discoveryMetrics.uniquePages++;
-          this.events.onProgress?.(i + 1, limit);
-          this.logger.logProgress(i + 1, limit);
+          this.events.onProgress?.(i + 1, groups.length);
+          this.logger.logProgress(i + 1, groups.length);
           if (this.options.traceOut) {
             this.trace.push({ kind: "visit", url: group.url });
           }
@@ -1143,7 +1142,19 @@ export class ChaosCrawler {
       const timestamp = Date.now();
       let result: ActionResult;
       try {
-        if (action.type === "scroll") {
+        if (action.blockedExternal) {
+          // The original run detected an external link and did not click it.
+          // Faithfully reproduce that non-action — clicking would introduce
+          // behavior the source trace never performed.
+          result = {
+            type: action.type,
+            target: action.target,
+            selector: action.selector,
+            success: true,
+            blockedExternal: true,
+            timestamp,
+          };
+        } else if (action.type === "scroll") {
           const m = /scrollY:\s*(\d+)/i.exec(action.target ?? "");
           const y = m ? Number(m[1]) : 0;
           await page.evaluate((yy) => window.scrollTo(0, yy), y);
