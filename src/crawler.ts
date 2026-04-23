@@ -44,6 +44,7 @@ import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./rand
 import { clusterErrors } from "./clusters.js";
 import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
+import { fetchSitemapUrls } from "./sitemap.js";
 import {
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
@@ -68,6 +69,7 @@ const DEFAULT_OPTIONS: Required<
     | "traceReplay"
     | "device"
     | "network"
+    | "seedFromSitemap"
   >
 > = {
   maxPages: 50,
@@ -350,6 +352,10 @@ export class ChaosCrawler {
       });
     }
 
+    if (this.options.seedFromSitemap) {
+      await this.seedQueueFromSitemap(this.options.seedFromSitemap);
+    }
+
     // Reset recovery state
     this.currentPageActions = [];
     this.lastSuccessfulUrl = this.options.baseUrl;
@@ -534,6 +540,50 @@ export class ChaosCrawler {
 
   private isExternalUrl(url: string): boolean {
     return isExternalUrlPure(url, this.baseOrigin);
+  }
+
+  /**
+   * Pull URLs out of a sitemap (index-aware) and prepend them to the queue.
+   * URLs outside the baseUrl origin are dropped — the crawler's
+   * blockExternalNavigation would block them anyway, and queueing them
+   * wastes visit budget.
+   */
+  private async seedQueueFromSitemap(source: string): Promise<void> {
+    let urls: string[];
+    try {
+      urls = await fetchSitemapUrls(source);
+    } catch (err) {
+      this.logger.warn("sitemap_fetch_failed", {
+        source,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    const baseOrigin = this.baseOrigin;
+    const queuedUrls = new Set(this.queue.map((q) => q.url));
+    let added = 0;
+    let skippedExternal = 0;
+    for (const raw of urls) {
+      let normalized: string;
+      try {
+        normalized = normalizeUrl(new URL(raw, this.options.baseUrl).toString());
+      } catch {
+        continue;
+      }
+      try {
+        if (new URL(normalized).origin !== baseOrigin) {
+          skippedExternal++;
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (queuedUrls.has(normalized)) continue;
+      queuedUrls.add(normalized);
+      this.queue.push({ url: normalized, sourceUrl: source, method: "extracted" });
+      added++;
+    }
+    this.logger.info("sitemap_seeded", { source, added, skippedExternal, total: urls.length });
   }
 
   /**
@@ -1426,6 +1476,9 @@ export class ChaosCrawler {
     if (this.options.network) {
       parts.push("--network", shellQuote(this.options.network));
     }
+    if (this.options.seedFromSitemap) {
+      parts.push("--seed-from-sitemap", shellQuote(this.options.seedFromSitemap));
+    }
     return parts.join(" ");
   }
 
@@ -1545,6 +1598,7 @@ export function validateOptions(options: CrawlerOptions): void {
   };
   assertNonEmptyStringOpt("traceOut", options.traceOut);
   assertNonEmptyStringOpt("traceReplay", options.traceReplay);
+  assertNonEmptyStringOpt("seedFromSitemap", options.seedFromSitemap);
 
   if (options.device !== undefined) {
     if (typeof options.device !== "string" || options.device.length === 0) {

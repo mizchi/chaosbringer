@@ -184,4 +184,12 @@ describe("validateOptions", () => {
   it("rejects an unknown network profile", () => {
     expect(() => validateOptions(base({ network: "turbo" as any }))).toThrow(/network/);
   });
+
+  it("accepts a seedFromSitemap path", () => {
+    expect(() => validateOptions(base({ seedFromSitemap: "http://x/sitemap.xml" }))).not.toThrow();
+  });
+
+  it("rejects an empty seedFromSitemap", () => {
+    expect(() => validateOptions(base({ seedFromSitemap: "" }))).toThrow(/seedFromSitemap/);
+  });
 });

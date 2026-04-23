@@ -68,6 +68,14 @@ export interface CrawlerOptions {
    */
   traceReplay?: string;
   /**
+   * URL or filesystem path to a sitemap.xml (or sitemap index). Every URL
+   * listed — including URLs resolved via nested indexes — is prepended to
+   * the crawl queue before discovered links, filtered to the same origin
+   * as `baseUrl`. Useful for sites whose nav is JS-rendered and so missed
+   * by the crawler's link extraction.
+   */
+  seedFromSitemap?: string;
+  /**
    * Name of a Playwright device descriptor to emulate (e.g. "iPhone 14",
    * "Pixel 7", "iPad Pro 11"). Applied to the browser context — sets
    * viewport, userAgent, deviceScaleFactor, isMobile, and hasTouch.

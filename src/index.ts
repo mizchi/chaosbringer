@@ -85,3 +85,9 @@ export type {
 } from "./types.js";
 export { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 export { networkConditionsFor, type NetworkConditions } from "./network.js";
+export {
+  fetchSitemapUrls,
+  isSitemapIndex,
+  parseSitemap,
+  type FetchSitemapOptions,
+} from "./sitemap.js";

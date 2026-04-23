@@ -84,6 +84,7 @@ const { values, positionals } = parseArgs({
     "trace-replay": { type: "string" },
     device: { type: "string" },
     network: { type: "string" },
+    "seed-from-sitemap": { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     "github-annotations": { type: "boolean", default: false },
@@ -131,6 +132,7 @@ OPTIONS:
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
   --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
+  --seed-from-sitemap <url|path>  Prepend URLs listed in a sitemap.xml (or sitemap index)
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -243,6 +245,7 @@ const options: CrawlerOptions = {
   traceReplay: values["trace-replay"],
   device: values.device,
   network: values.network as CrawlerOptions["network"],
+  seedFromSitemap: values["seed-from-sitemap"],
   invariants: values.axe
     ? [
         axe({
