@@ -8,10 +8,18 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`.
+- **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
+- **Performance budgets** per TTFB / FCP / LCP / TBT — budget breaches fail the run.
 - **Error detection**: console errors, failed requests, JS exceptions, unhandled rejections, invariant violations.
 - **Recovery from 404 / 5xx** — records what actions preceded the failure.
+- **HAR record / replay** + **trace record / replay / minimize** for fully deterministic runs and delta-debugged repros.
+- **Baseline diff** — surface new clusters / newly failing pages vs a previous run.
+- **Flake detection** — rerun the same crawl N times and flag clusters / pages whose outcome varies.
+- **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
+- **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
+- **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary.
 - **Playwright Test integration** for when you'd rather run chaos inside an existing test file.
-- **CLI** for running from a shell or CI.
+- **CLI** for running from a shell or CI, with `minimize` / `flake` subcommands.
 
 ## Install
 
@@ -168,6 +176,34 @@ const { passed } = await chaos({ baseUrl: "http://localhost:3000", invariants })
 ```
 
 Violations always fail the run (exit 1), whether or not `strict` is set — a declared invariant is a stronger signal than console noise.
+
+## Device emulation & network throttling
+
+Emulate mobile devices or throttle the network to catch bugs that only surface on slow connections or small viewports.
+
+```bash
+chaosbringer --url http://localhost:3000 --device "iPhone 14" --network slow-3g
+```
+
+- `--device <name>` — any Playwright device descriptor (`iPhone 14`, `Pixel 7`, `iPad Pro 11`, `Desktop Chrome`, …). Sets viewport, user-agent, device pixel ratio, mobile / touch flags via `newContext({ ...devices[name] })`. Unknown names fail validation up-front.
+- `--network <profile>` — `slow-3g`, `fast-3g`, or `offline`. Attaches a CDP session per page and calls `Network.emulateNetworkConditions` with the same values Chrome DevTools' presets use.
+
+Combining the two lets you measure perf budgets under realistic conditions: `chaosbringer --url … --device "Pixel 7" --network slow-3g --budget lcp=4000`.
+
+## Sitemap seeding
+
+Prepend every URL in a sitemap.xml (or sitemap index) to the crawl queue — essential for sites whose nav is JS-rendered and so gets missed by DOM link extraction.
+
+```bash
+chaosbringer --url https://docs.example.com --seed-from-sitemap https://docs.example.com/sitemap.xml
+```
+
+Accepts a URL or a local path. Sitemap indexes are followed breadth-first; referenced URLs outside the baseUrl origin are dropped to avoid wasting visit budget. A runaway index (suspected cycle) fails fast.
+
+```ts
+import { fetchSitemapUrls } from "chaosbringer";
+const urls = await fetchSitemapUrls("https://docs.example.com/sitemap.xml");
+```
 
 ## Authenticated crawls (storage state)
 
@@ -342,6 +378,16 @@ for (const c of report.diff?.newClusters ?? []) {
 
 Clusters are matched by the same fingerprint used for `errorClusters` (URL / line:col / long numeric ids stripped), so `HTTP 500 on /api/users/42` and `HTTP 500 on /api/users/99` collapse to the same entry. Pages are matched by URL.
 
+## GitHub Actions annotations
+
+Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster and dead link. GitHub surfaces these on the Checks tab alongside test output.
+
+```bash
+chaosbringer --url http://localhost:3000 --strict --github-annotations
+```
+
+Severity maps from cluster type: invariants / exceptions / network errors / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
+
 ## Error clustering
 
 `CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
@@ -403,8 +449,11 @@ Or crawl from within a fixture-based test:
 chaosTest("crawl entire site", async ({ chaos }) => {
   const report = await chaos.crawl("http://localhost:3000");
   chaos.expectNoErrors(report);
+  chaos.expectNoDeadLinks(report);
 });
 ```
+
+`expectNoDeadLinks` / `chaosExpect.toHaveNoDeadLinks` surface each broken URL together with the page it was found on, so a CI failure points straight at the broken anchor without cross-referencing the full JSON report.
 
 ## Subcommands
 
@@ -421,6 +470,16 @@ chaosbringer minimize \
 ```
 
 `--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+
+### `flake`
+
+Run the same crawl N times and separate error clusters into stable (fire every run) vs flaky (fire in some runs but not others); pages are split the same way by failed / clean outcome. Useful for triaging whether a failure is a real bug or a race.
+
+```bash
+chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
+```
+
+With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it. `--output <path>` also writes the analysis as JSON.
 
 ## CLI reference
 
@@ -450,8 +509,12 @@ chaosbringer minimize \
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
 | `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
 | `--trace-replay <path>` | Replay a previously recorded trace | — |
+| `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
+| `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
+| `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
+| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
 | `--quiet` | Minimal output | false |
