@@ -70,10 +70,12 @@ export type {
   UrlMatcher,
   HarConfig,
   HarMode,
+  NetworkProfile,
   PerformanceBudget,
   PerfBudgetKey,
   ReportDiff,
   ClusterDiffEntry,
   PageDiffEntry,
 } from "./types.js";
-export { PERF_BUDGET_KEYS } from "./types.js";
+export { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
+export { networkConditionsFor, type NetworkConditions } from "./network.js";

@@ -3,7 +3,7 @@
  */
 
 import type { Browser, BrowserContext, Page, Route } from "playwright";
-import { chromium } from "playwright";
+import { chromium, devices } from "playwright";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -28,8 +28,9 @@ import type {
   FaultInjectionStats,
   Fault,
   UrlMatcher,
+  NetworkProfile,
 } from "./types.js";
-import { PERF_BUDGET_KEYS } from "./types.js";
+import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -42,6 +43,7 @@ import {
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
 import { checkPerformanceBudget } from "./budget.js";
+import { networkConditionsFor } from "./network.js";
 import {
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
@@ -53,12 +55,19 @@ import {
 } from "./trace.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
-// perf budget, trace) are carved out of the Required<> type instead of
-// inventing sentinels.
+// perf budget, trace, device/network) are carved out of the Required<>
+// type instead of inventing sentinels.
 const DEFAULT_OPTIONS: Required<
   Omit<
     CrawlerOptions,
-    "baseUrl" | "har" | "storageState" | "performanceBudget" | "traceOut" | "traceReplay"
+    | "baseUrl"
+    | "har"
+    | "storageState"
+    | "performanceBudget"
+    | "traceOut"
+    | "traceReplay"
+    | "device"
+    | "network"
   >
 > = {
   maxPages: 50,
@@ -369,9 +378,19 @@ export class ChaosCrawler {
     }
 
     this.browser = await chromium.launch({ headless: this.options.headless });
+    // Device descriptor overrides viewport / userAgent / device pixel ratio;
+    // explicit options in CrawlerOptions still win because they come later.
+    const deviceDesc =
+      this.options.device && devices[this.options.device]
+        ? devices[this.options.device]
+        : undefined;
     this.context = await this.browser.newContext({
-      viewport: this.options.viewport,
-      userAgent: this.options.userAgent || undefined,
+      ...deviceDesc,
+      // Device descriptor's viewport wins when set — device emulation is
+      // only meaningful if the viewport matches. Otherwise fall back to
+      // the configured default.
+      viewport: deviceDesc?.viewport ?? this.options.viewport,
+      userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
       // Record mode: ask Playwright to capture all network into the HAR.
       recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
       // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
@@ -517,6 +536,24 @@ export class ChaosCrawler {
     return isExternalUrlPure(url, this.baseOrigin);
   }
 
+  /**
+   * Attach a CDP session to the page and apply a throttling preset. Called
+   * per-page because `Network.emulateNetworkConditions` is a Page-level
+   * setting in Playwright — there's no context-wide equivalent.
+   */
+  private async applyNetworkProfile(page: Page, profile: NetworkProfile): Promise<void> {
+    try {
+      const client = await this.context!.newCDPSession(page);
+      await client.send("Network.enable");
+      await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
+    } catch (err) {
+      this.logger.warn("network_profile_failed", {
+        profile,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async setupNavigationBlocking(page: Page): Promise<void> {
     const blockExternal = this.options.blockExternalNavigation;
     const rules = this.compiledFaultRules;
@@ -569,6 +606,10 @@ export class ChaosCrawler {
 
     // Scope recovery diagnostics to this page only.
     this.currentPageActions = [];
+
+    if (this.options.network) {
+      await this.applyNetworkProfile(page, this.options.network);
+    }
 
     if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
@@ -1379,6 +1420,12 @@ export class ChaosCrawler {
     if (this.options.traceReplay) {
       parts.push("--trace-replay", shellQuote(this.options.traceReplay));
     }
+    if (this.options.device) {
+      parts.push("--device", shellQuote(this.options.device));
+    }
+    if (this.options.network) {
+      parts.push("--network", shellQuote(this.options.network));
+    }
     return parts.join(" ");
   }
 
@@ -1498,6 +1545,28 @@ export function validateOptions(options: CrawlerOptions): void {
   };
   assertNonEmptyStringOpt("traceOut", options.traceOut);
   assertNonEmptyStringOpt("traceReplay", options.traceReplay);
+
+  if (options.device !== undefined) {
+    if (typeof options.device !== "string" || options.device.length === 0) {
+      throw new Error(
+        `chaosbringer: "device" must be a non-empty Playwright device name (got ${JSON.stringify(options.device)})`
+      );
+    }
+    if (!devices[options.device]) {
+      throw new Error(
+        `chaosbringer: "device" ${JSON.stringify(options.device)} is not a known Playwright device descriptor`
+      );
+    }
+  }
+
+  if (options.network !== undefined) {
+    const allowed = new Set<string>(NETWORK_PROFILES);
+    if (typeof options.network !== "string" || !allowed.has(options.network)) {
+      throw new Error(
+        `chaosbringer: "network" must be one of ${NETWORK_PROFILES.join(", ")} (got ${JSON.stringify(options.network)})`
+      );
+    }
+  }
 
   if (options.performanceBudget !== undefined) {
     const budget = options.performanceBudget;

@@ -164,4 +164,24 @@ describe("validateOptions", () => {
   it("rejects an empty traceReplay path", () => {
     expect(() => validateOptions(base({ traceReplay: "" }))).toThrow(/traceReplay/);
   });
+
+  it("accepts a known Playwright device name", () => {
+    expect(() => validateOptions(base({ device: "iPhone 14" }))).not.toThrow();
+  });
+
+  it("rejects an unknown Playwright device name", () => {
+    expect(() => validateOptions(base({ device: "NotAPhone 42" }))).toThrow(/device/);
+  });
+
+  it("rejects an empty device name", () => {
+    expect(() => validateOptions(base({ device: "" }))).toThrow(/device/);
+  });
+
+  it("accepts a known network profile", () => {
+    expect(() => validateOptions(base({ network: "slow-3g" }))).not.toThrow();
+  });
+
+  it("rejects an unknown network profile", () => {
+    expect(() => validateOptions(base({ network: "turbo" as any }))).toThrow(/network/);
+  });
 });

@@ -81,6 +81,8 @@ const { values, positionals } = parseArgs({
     "axe-tags": { type: "string" },
     "trace-out": { type: "string" },
     "trace-replay": { type: "string" },
+    device: { type: "string" },
+    network: { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
@@ -125,6 +127,8 @@ OPTIONS:
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
   --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
   --trace-replay <path> Replay a previously recorded trace instead of random actions
+  --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
+  --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --compact             Compact output format
@@ -234,6 +238,8 @@ const options: CrawlerOptions = {
   performanceBudget,
   traceOut: values["trace-out"],
   traceReplay: values["trace-replay"],
+  device: values.device,
+  network: values.network as CrawlerOptions["network"],
   invariants: values.axe
     ? [
         axe({

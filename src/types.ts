@@ -68,6 +68,17 @@ export interface CrawlerOptions {
    */
   traceReplay?: string;
   /**
+   * Name of a Playwright device descriptor to emulate (e.g. "iPhone 14",
+   * "Pixel 7", "iPad Pro 11"). Applied to the browser context — sets
+   * viewport, userAgent, deviceScaleFactor, isMobile, and hasTouch.
+   */
+  device?: string;
+  /**
+   * Network throttling preset applied via CDP on every page. Supported:
+   * "slow-3g" / "fast-3g" / "offline". Omit to use the default network.
+   */
+  network?: NetworkProfile;
+  /**
    * Path to a Playwright storage state file (cookies + localStorage) to
    * preload into the browser context. Lets the crawler start a run as an
    * already-authenticated user — generate the file with
@@ -209,6 +220,11 @@ export interface PerformanceBudget {
   domContentLoaded?: number;
   load?: number;
 }
+
+/** Supported network throttling presets applied via CDP. */
+export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
+
+export const NETWORK_PROFILES = ["slow-3g", "fast-3g", "offline"] as const satisfies ReadonlyArray<NetworkProfile>;
 
 /** Keys of PerformanceMetrics that a budget can target. */
 export const PERF_BUDGET_KEYS = [
