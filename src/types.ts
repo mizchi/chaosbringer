@@ -49,6 +49,51 @@ export interface CrawlerOptions {
   faultInjection?: FaultRule[];
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
+  /**
+   * Per-metric performance budget (in ms). Keys match PerformanceMetrics;
+   * omitted keys are not enforced. A breach is recorded as an invariant
+   * violation, so it always fails the run.
+   */
+  performanceBudget?: PerformanceBudget;
+  /**
+   * Path to write a JSONL trace of every navigation + action performed. Used
+   * as input to replay mode and to the `minimize` subcommand — the exact
+   * crawl can be replayed without rerolling the RNG.
+   */
+  traceOut?: string;
+  /**
+   * Path to a trace file produced by `traceOut`. When set, the crawler
+   * ignores its weighted-random driver and plays back the recorded visits
+   * and actions verbatim.
+   */
+  traceReplay?: string;
+  /**
+   * URL or filesystem path to a sitemap.xml (or sitemap index). Every URL
+   * listed — including URLs resolved via nested indexes — is prepended to
+   * the crawl queue before discovered links, filtered to the same origin
+   * as `baseUrl`. Useful for sites whose nav is JS-rendered and so missed
+   * by the crawler's link extraction.
+   */
+  seedFromSitemap?: string;
+  /**
+   * Name of a Playwright device descriptor to emulate (e.g. "iPhone 14",
+   * "Pixel 7", "iPad Pro 11"). Applied to the browser context — sets
+   * viewport, userAgent, deviceScaleFactor, isMobile, and hasTouch.
+   */
+  device?: string;
+  /**
+   * Network throttling preset applied via CDP on every page. Supported:
+   * "slow-3g" / "fast-3g" / "offline". Omit to use the default network.
+   */
+  network?: NetworkProfile;
+  /**
+   * Path to a Playwright storage state file (cookies + localStorage) to
+   * preload into the browser context. Lets the crawler start a run as an
+   * already-authenticated user — generate the file with
+   * `await context.storageState({ path })` in a login script, then point
+   * this at it. The file is not modified by the crawl.
+   */
+  storageState?: string;
 }
 
 /** `record` captures responses to a HAR file; `replay` serves them back. */
@@ -170,6 +215,37 @@ export interface PerformanceMetrics {
   load?: number;
 }
 
+/**
+ * Per-metric budget (in ms). A page whose measured metric exceeds the budget
+ * is recorded as an invariant violation named `perf-budget.<metric>`, which
+ * forces a non-zero exit and shows up in the diff section.
+ */
+export interface PerformanceBudget {
+  ttfb?: number;
+  fcp?: number;
+  lcp?: number;
+  tbt?: number;
+  domContentLoaded?: number;
+  load?: number;
+}
+
+/** Supported network throttling presets applied via CDP. */
+export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
+
+export const NETWORK_PROFILES = ["slow-3g", "fast-3g", "offline"] as const satisfies ReadonlyArray<NetworkProfile>;
+
+/** Keys of PerformanceMetrics that a budget can target. */
+export const PERF_BUDGET_KEYS = [
+  "ttfb",
+  "fcp",
+  "lcp",
+  "tbt",
+  "domContentLoaded",
+  "load",
+] as const satisfies ReadonlyArray<keyof PerformanceMetrics>;
+
+export type PerfBudgetKey = (typeof PERF_BUDGET_KEYS)[number];
+
 export interface PageResult {
   url: string;
   /**
@@ -232,6 +308,54 @@ export interface ActionResult {
   timestamp: number;
 }
 
+/**
+ * One entry in a cluster-level diff between two runs. `before` is the count in
+ * the baseline report; `after` is the count in the current report. New clusters
+ * have `before: 0`; resolved clusters have `after: 0`.
+ */
+export interface ClusterDiffEntry {
+  key: string;
+  type: PageError["type"];
+  fingerprint: string;
+  before: number;
+  after: number;
+}
+
+/**
+ * One entry in a page-level diff. A page is considered "failed" when it has
+ * any errors, or its navigation ended in `error` / `timeout`. Pages appear in
+ * the diff only when their failed/clean state differs between runs.
+ */
+export interface PageDiffEntry {
+  url: string;
+  /** null when the page did not exist in the baseline. */
+  before: { errors: number; status: PageResult["status"] } | null;
+  /** null when the page was not visited in the current run. */
+  after: { errors: number; status: PageResult["status"] } | null;
+}
+
+/**
+ * Diff between a baseline report and the current report. Produced by
+ * `diffReports(prev, curr)`, attached to the current report as `report.diff`
+ * when a baseline was supplied.
+ */
+export interface ReportDiff {
+  /** Path the baseline was loaded from, if known. */
+  baselinePath?: string;
+  /** Seed of the baseline run — useful for asserting like-vs-like. */
+  baselineSeed: number;
+  /** Clusters present in the current run but not the baseline. */
+  newClusters: ClusterDiffEntry[];
+  /** Clusters present in the baseline but not the current run. */
+  resolvedClusters: ClusterDiffEntry[];
+  /** Clusters present in both runs (with potentially different counts). */
+  unchangedClusters: ClusterDiffEntry[];
+  /** Pages that are failing in the current run but were clean in the baseline (or not visited). */
+  newFailedPages: PageDiffEntry[];
+  /** Pages that were failing in the baseline but are clean / absent in the current run. */
+  resolvedFailedPages: PageDiffEntry[];
+}
+
 export interface CrawlReport {
   baseUrl: string;
   /** Seed used for random action selection (for reproducibility). */
@@ -263,6 +387,8 @@ export interface CrawlReport {
   errorClusters: ErrorCluster[];
   /** Echo of the HAR config used for this run, if any. */
   har?: HarConfig;
+  /** Diff against a baseline report, present only when a baseline was supplied. */
+  diff?: ReportDiff;
 }
 
 export interface CrawlSummary {

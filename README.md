@@ -169,6 +169,40 @@ const { passed } = await chaos({ baseUrl: "http://localhost:3000", invariants })
 
 Violations always fail the run (exit 1), whether or not `strict` is set — a declared invariant is a stronger signal than console noise.
 
+## Authenticated crawls (storage state)
+
+To crawl pages behind a login, point chaosbringer at a Playwright `storageState` file — the JSON containing cookies + localStorage that a logged-in browser context produces. Run a one-off login script once, save the state, then reuse it for every chaos run.
+
+```ts
+// auth-setup.ts — run once, or as a Playwright global setup
+import { chromium } from "playwright";
+
+const browser = await chromium.launch();
+const context = await browser.newContext();
+const page = await context.newPage();
+await page.goto("http://localhost:3000/login");
+await page.getByLabel("Email").fill("ci@example.com");
+await page.getByLabel("Password").fill(process.env.TEST_PASSWORD!);
+await page.getByRole("button", { name: "Sign in" }).click();
+await page.waitForURL("**/dashboard");
+await context.storageState({ path: "auth.json" });
+await browser.close();
+```
+
+```bash
+# Chaos-test the authenticated surface
+chaosbringer --url http://localhost:3000/dashboard --storage-state auth.json
+```
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000/dashboard",
+  storageState: "auth.json",
+});
+```
+
+The file is read by Playwright and not modified by the crawl. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
+
 ## HAR record / replay
 
 Chaosbringer can capture network traffic to a HAR file on one run and replay it on the next. A replay run is deterministic even if the backend is flaky — every request that was in the HAR gets served from the HAR, not the network.
@@ -201,6 +235,112 @@ await chaos({
 - `notFound: "fallback"` (default) lets unmatched URLs fall through to the real network.
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
 - Fault injection rules still apply in replay mode and take precedence over HAR responses.
+
+## Accessibility (axe-core)
+
+Install `axe-core` as a peer and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
+
+```bash
+pnpm add axe-core
+chaosbringer --url http://localhost:3000 --axe
+chaosbringer --url http://localhost:3000 --axe --axe-tags wcag2aa,best-practice
+```
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  invariants: [
+    invariants.axe({
+      tags: ["wcag2aa"],
+      exclude: [".third-party-widget"],
+      disableRules: ["color-contrast"],
+    }),
+  ],
+});
+```
+
+`axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
+
+A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+
+## Performance budget
+
+Declare a per-metric budget (in ms). Any page whose measured metric exceeds its limit is recorded as an invariant violation (`perf-budget.<metric>`), which fails the run just like any other invariant.
+
+```bash
+# CLI — comma-separated pairs, or repeat the flag
+chaosbringer --url http://localhost:3000 --budget ttfb=200,fcp=1800,lcp=2500
+```
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  performanceBudget: { ttfb: 200, fcp: 1800, lcp: 2500 },
+});
+```
+
+Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
+
+Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
+
+## Trace record / replay / minimize
+
+For failures that are hard to diagnose from a seed alone, record the exact sequence of visits + actions to a JSONL file, then replay or minimize that sequence.
+
+```bash
+# Record
+chaosbringer --url http://localhost:3000 --seed 42 --trace-out chaos.trace.jsonl
+
+# Replay the exact sequence (no RNG, no discovery)
+chaosbringer --url http://localhost:3000 --trace-replay chaos.trace.jsonl
+
+# Shrink the trace to the minimum subsequence that still reproduces a failure
+chaosbringer minimize --url http://localhost:3000 \
+  --trace chaos.trace.jsonl \
+  --match "Cannot read properties of undefined" \
+  --trace-out min.trace.jsonl
+```
+
+A trace is line-delimited JSON: a leading `meta` entry with the seed + baseUrl, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+
+Replay skips link discovery and the RNG entirely: only URLs listed as `visit` entries are loaded, and only the recorded actions are performed. Missing selectors are logged as failed actions and the run continues.
+
+`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Output goes to `--trace-out` (defaults to `min.trace.jsonl`).
+
+## Baseline diff (regression detection)
+
+Pass a previous report to `--baseline` and the current run is diffed against it — new error clusters and newly failing pages are surfaced separately from ones that were already broken.
+
+```bash
+# First run: writes chaos-report.json as usual (no baseline yet, warns and continues)
+chaosbringer --url http://localhost:3000 --baseline chaos-report.json
+
+# Subsequent runs: compare against the prior report
+chaosbringer --url http://localhost:3000 --baseline chaos-report.json --baseline-strict
+```
+
+- `--baseline <path>` — diff against this report. A missing file produces a warning, not an error (the run still writes its own report so a later invocation has a baseline to compare against).
+- `--baseline-strict` — exit 1 when the diff contains new clusters or newly failing pages. Resolved / unchanged entries never fail the run.
+
+Programmatic:
+
+```ts
+import { chaos } from "chaosbringer";
+
+const { report, passed } = await chaos({
+  baseUrl: "http://localhost:3000",
+  baseline: "chaos-report.json",
+  baselineStrict: true,
+});
+
+for (const c of report.diff?.newClusters ?? []) {
+  console.log(`NEW [${c.type}]×${c.after}: ${c.fingerprint}`);
+}
+```
+
+Clusters are matched by the same fingerprint used for `errorClusters` (URL / line:col / long numeric ids stripped), so `HTTP 500 on /api/users/42` and `HTTP 500 on /api/users/99` collapse to the same entry. Pages are matched by URL.
 
 ## Error clustering
 
@@ -266,6 +406,22 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 });
 ```
 
+## Subcommands
+
+### `minimize`
+
+Shrink a recorded trace to the minimum subsequence of actions that still reproduces a failure. Drives ddmin (delta debugging) by repeatedly running the crawler in replay mode with subsets of the recorded actions; the reproduction predicate matches an error cluster fingerprint against a regex.
+
+```bash
+chaosbringer minimize \
+  --url http://localhost:3000 \
+  --trace chaos.trace.jsonl \
+  --match "Cannot read properties of undefined" \
+  --trace-out min.trace.jsonl
+```
+
+`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+
 ## CLI reference
 
 | Option | Description | Default |
@@ -288,6 +444,14 @@ chaosTest("crawl entire site", async ({ chaos }) => {
 | `--seed <n>` | Seed for deterministic action selection | random |
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
 | `--har-replay <path>` | Replay network traffic from a HAR file | — |
+| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
+| `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
+| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
+| `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
+| `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
+| `--trace-replay <path>` | Replay a previously recorded trace | — |
+| `--baseline <path>` | Diff this run against a previous report | — |
+| `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
 | `--quiet` | Minimal output | false |

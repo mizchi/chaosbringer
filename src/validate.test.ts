@@ -115,4 +115,81 @@ describe("validateOptions", () => {
       )
     ).not.toThrow();
   });
+
+  it("accepts a storageState path string", () => {
+    expect(() => validateOptions(base({ storageState: "./auth.json" }))).not.toThrow();
+  });
+
+  it("rejects an empty storageState", () => {
+    expect(() => validateOptions(base({ storageState: "" }))).toThrow(/storageState/);
+  });
+
+  it("rejects a non-string storageState", () => {
+    expect(() => validateOptions(base({ storageState: 42 as unknown as string }))).toThrow(
+      /storageState/
+    );
+  });
+
+  it("accepts a well-formed performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: 200, fcp: 1800, lcp: 2500 } }))
+    ).not.toThrow();
+  });
+
+  it("rejects unknown keys in performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { wat: 100 } as any }))
+    ).toThrow(/performanceBudget\.wat/);
+  });
+
+  it("rejects non-positive performanceBudget values", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: 0 } }))
+    ).toThrow(/performanceBudget\.ttfb/);
+    expect(() =>
+      validateOptions(base({ performanceBudget: { ttfb: -1 } }))
+    ).toThrow(/performanceBudget\.ttfb/);
+  });
+
+  it("rejects non-object performanceBudget", () => {
+    expect(() =>
+      validateOptions(base({ performanceBudget: 500 as any }))
+    ).toThrow(/performanceBudget/);
+  });
+
+  it("rejects an empty traceOut path", () => {
+    expect(() => validateOptions(base({ traceOut: "" }))).toThrow(/traceOut/);
+  });
+
+  it("rejects an empty traceReplay path", () => {
+    expect(() => validateOptions(base({ traceReplay: "" }))).toThrow(/traceReplay/);
+  });
+
+  it("accepts a known Playwright device name", () => {
+    expect(() => validateOptions(base({ device: "iPhone 14" }))).not.toThrow();
+  });
+
+  it("rejects an unknown Playwright device name", () => {
+    expect(() => validateOptions(base({ device: "NotAPhone 42" }))).toThrow(/device/);
+  });
+
+  it("rejects an empty device name", () => {
+    expect(() => validateOptions(base({ device: "" }))).toThrow(/device/);
+  });
+
+  it("accepts a known network profile", () => {
+    expect(() => validateOptions(base({ network: "slow-3g" }))).not.toThrow();
+  });
+
+  it("rejects an unknown network profile", () => {
+    expect(() => validateOptions(base({ network: "turbo" as any }))).toThrow(/network/);
+  });
+
+  it("accepts a seedFromSitemap path", () => {
+    expect(() => validateOptions(base({ seedFromSitemap: "http://x/sitemap.xml" }))).not.toThrow();
+  });
+
+  it("rejects an empty seedFromSitemap", () => {
+    expect(() => validateOptions(base({ seedFromSitemap: "" }))).toThrow(/seedFromSitemap/);
+  });
 });

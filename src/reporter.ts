@@ -182,21 +182,64 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.diff) {
+    const d = report.diff;
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push(`DIFF vs BASELINE${d.baselinePath ? ` (${d.baselinePath})` : ""}`);
+    lines.push("-".repeat(40));
+    lines.push(
+      `  New clusters: ${d.newClusters.length}   Resolved: ${d.resolvedClusters.length}   Unchanged: ${d.unchangedClusters.length}`
+    );
+    lines.push(
+      `  New failing pages: ${d.newFailedPages.length}   Resolved: ${d.resolvedFailedPages.length}`
+    );
+    if (d.newClusters.length > 0) {
+      lines.push("  NEW clusters:");
+      for (const c of d.newClusters) {
+        lines.push(`    + [${c.type}]×${c.after} ${truncate(c.fingerprint, 72)}`);
+      }
+    }
+    if (d.newFailedPages.length > 0) {
+      lines.push("  NEW failing pages:");
+      for (const p of d.newFailedPages) {
+        const before = p.before ? `${p.before.status}/${p.before.errors}err` : "(new URL)";
+        const after = p.after ? `${p.after.status}/${p.after.errors}err` : "(missing)";
+        lines.push(`    + ${p.url}   ${before} → ${after}`);
+      }
+    }
+    if (d.resolvedClusters.length > 0) {
+      lines.push("  RESOLVED clusters:");
+      for (const c of d.resolvedClusters) {
+        lines.push(`    - [${c.type}]×${c.before} ${truncate(c.fingerprint, 72)}`);
+      }
+    }
+    if (d.resolvedFailedPages.length > 0) {
+      lines.push("  RESOLVED pages:");
+      for (const p of d.resolvedFailedPages) {
+        lines.push(`    - ${p.url}`);
+      }
+    }
+  }
+
   lines.push("");
   lines.push("=".repeat(60));
 
   return lines.join("\n");
 }
 
-export function formatCompactReport(report: CrawlReport, strict = false): string {
+export function formatCompactReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
   // Use the same rule as getExitCode so the human label matches the exit
   // code. Previously the label ignored strict mode and console errors,
   // producing `[PASS]` runs that exited 1. See #6.
   const status = getExitCode(report, strict) === 0 ? "PASS" : "FAIL";
   const errors = report.summary.consoleErrors + report.summary.networkErrors + report.summary.jsExceptions;
+  const diffSuffix = report.diff
+    ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
+    : "";
 
   return [
-    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})`,
+    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}`,
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
@@ -209,7 +252,7 @@ export function saveReport(report: CrawlReport, path: string): void {
   writeFileSync(path, JSON.stringify(report, null, 2));
 }
 
-export function printReport(report: CrawlReport, compact = false, strict = false): void {
+export function printReport(report: CrawlReport, compact = false, strict: boolean | ExitCodeOptions = false): void {
   console.log(compact ? formatCompactReport(report, strict) : formatReport(report));
 }
 
@@ -218,8 +261,18 @@ function truncate(str: string, maxLen: number): string {
   return str.slice(0, maxLen - 3) + "...";
 }
 
-// CI-friendly exit code helper
-export function getExitCode(report: CrawlReport, strict = false): number {
+export interface ExitCodeOptions {
+  /** Treat console errors / JS exceptions as failures. */
+  strict?: boolean;
+  /** Fail when `report.diff` shows new clusters or newly failing pages. */
+  baselineStrict?: boolean;
+}
+
+// CI-friendly exit code helper. The second argument is accepted as either a
+// boolean (legacy `strict`) or an options object so callers can opt into
+// baseline-strict without a larger API change.
+export function getExitCode(report: CrawlReport, strict: boolean | ExitCodeOptions = false): number {
+  const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
   if (report.summary.errorPages > 0 || report.summary.timeoutPages > 0) {
     return 1;
   }
@@ -227,8 +280,13 @@ export function getExitCode(report: CrawlReport, strict = false): number {
   if (report.summary.invariantViolations > 0) {
     return 1;
   }
-  if (strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {
+  if (opts.strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {
     return 1;
+  }
+  if (opts.baselineStrict && report.diff) {
+    if (report.diff.newClusters.length > 0 || report.diff.newFailedPages.length > 0) {
+      return 1;
+    }
   }
   return 0;
 }

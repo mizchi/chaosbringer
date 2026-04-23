@@ -3,7 +3,7 @@
  */
 
 import type { Browser, BrowserContext, Page, Route } from "playwright";
-import { chromium } from "playwright";
+import { chromium, devices } from "playwright";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -28,7 +28,9 @@ import type {
   FaultInjectionStats,
   Fault,
   UrlMatcher,
+  NetworkProfile,
 } from "./types.js";
+import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -40,10 +42,36 @@ import {
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
+import { checkPerformanceBudget } from "./budget.js";
+import { networkConditionsFor } from "./network.js";
+import { fetchSitemapUrls } from "./sitemap.js";
+import {
+  TRACE_FORMAT_VERSION,
+  actionToTraceEntry,
+  groupTrace,
+  readTrace,
+  writeTrace,
+  type TraceAction,
+  type TraceEntry,
+} from "./trace.js";
 
-// `har` has no meaningful default (it's opt-in), so we carve it out of the
-// Required<> type instead of inventing a sentinel.
-const DEFAULT_OPTIONS: Required<Omit<CrawlerOptions, "baseUrl" | "har">> = {
+// Options that are opt-in with no meaningful default (HAR, storage state,
+// perf budget, trace, device/network) are carved out of the Required<>
+// type instead of inventing sentinels.
+const DEFAULT_OPTIONS: Required<
+  Omit<
+    CrawlerOptions,
+    | "baseUrl"
+    | "har"
+    | "storageState"
+    | "performanceBudget"
+    | "traceOut"
+    | "traceReplay"
+    | "device"
+    | "network"
+    | "seedFromSitemap"
+  >
+> = {
   maxPages: 50,
   maxActionsPerPage: 5,
   timeout: 30000,
@@ -124,6 +152,14 @@ export class ChaosCrawler {
   };
   /** Current page being crawled (for source tracking) */
   private currentEntry: QueueEntry | null = null;
+  /** JSONL trace entries collected when `traceOut` is set. */
+  private trace: TraceEntry[] = [];
+  /**
+   * Actions to replay on the current page. Non-null only while a replay run
+   * is mid-flight; the action dispatcher branches on this to decide between
+   * random-weighted and playback.
+   */
+  private currentReplayActions: TraceAction[] | null = null;
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
   /** Fault injection rules compiled once at construction time. */
@@ -303,7 +339,22 @@ export class ChaosCrawler {
     }];
     this.results = [];
     this.actions = [];
+    this.trace = [];
     this.blockedExternalCount = 0;
+
+    if (this.options.traceOut) {
+      this.trace.push({
+        kind: "meta",
+        v: TRACE_FORMAT_VERSION,
+        seed: this.rng.seed,
+        baseUrl: this.options.baseUrl,
+        startTime: this.startTime,
+      });
+    }
+
+    if (this.options.seedFromSitemap) {
+      await this.seedQueueFromSitemap(this.options.seedFromSitemap);
+    }
 
     // Reset recovery state
     this.currentPageActions = [];
@@ -333,11 +384,24 @@ export class ChaosCrawler {
     }
 
     this.browser = await chromium.launch({ headless: this.options.headless });
+    // Device descriptor overrides viewport / userAgent / device pixel ratio;
+    // explicit options in CrawlerOptions still win because they come later.
+    const deviceDesc =
+      this.options.device && devices[this.options.device]
+        ? devices[this.options.device]
+        : undefined;
     this.context = await this.browser.newContext({
-      viewport: this.options.viewport,
-      userAgent: this.options.userAgent || undefined,
+      ...deviceDesc,
+      // Device descriptor's viewport wins when set — device emulation is
+      // only meaningful if the viewport matches. Otherwise fall back to
+      // the configured default.
+      viewport: deviceDesc?.viewport ?? this.options.viewport,
+      userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
       // Record mode: ask Playwright to capture all network into the HAR.
       recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
+      // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
+      // and validates the file; we don't touch it.
+      storageState: this.options.storageState || undefined,
     });
 
     // Replay mode: serve every matching request from the HAR before it hits
@@ -350,34 +414,66 @@ export class ChaosCrawler {
     }
 
     try {
-      while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
-        const entry = this.queue.shift()!;
-        if (this.visited.has(entry.url)) continue;
-        if (this.shouldExclude(entry.url)) {
-          this.logger.debug("page_excluded", { url: entry.url });
-          continue;
+      if (this.options.traceReplay) {
+        // Replay: iterate every recorded (visit, actions) group. The trace
+        // itself defines the scope — applying maxPages here would silently
+        // truncate larger traces, so the cap only applies to live crawls.
+        const groups = groupTrace(readTrace(this.options.traceReplay));
+        for (let i = 0; i < groups.length; i++) {
+          const group = groups[i]!;
+          if (this.shouldExclude(group.url)) {
+            this.logger.debug("page_excluded", { url: group.url });
+            continue;
+          }
+          this.currentEntry = { url: group.url, sourceUrl: "", method: "initial" };
+          this.currentReplayActions = group.actions;
+          this.discoveryMetrics.uniquePages++;
+          this.events.onProgress?.(i + 1, groups.length);
+          this.logger.logProgress(i + 1, groups.length);
+          if (this.options.traceOut) {
+            this.trace.push({ kind: "visit", url: group.url });
+          }
+          try {
+            const result = await this.crawlPage(this.currentEntry);
+            this.results.push(result);
+          } finally {
+            this.currentReplayActions = null;
+          }
         }
+      } else {
+        while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
+          const entry = this.queue.shift()!;
+          if (this.visited.has(entry.url)) continue;
+          if (this.shouldExclude(entry.url)) {
+            this.logger.debug("page_excluded", { url: entry.url });
+            continue;
+          }
 
-        this.visited.add(entry.url);
-        this.currentEntry = entry;
-        this.discoveryMetrics.uniquePages++;
-        this.events.onProgress?.(this.visited.size, this.options.maxPages);
-        this.logger.logProgress(this.visited.size, this.options.maxPages);
+          this.visited.add(entry.url);
+          this.currentEntry = entry;
+          this.discoveryMetrics.uniquePages++;
+          this.events.onProgress?.(this.visited.size, this.options.maxPages);
+          this.logger.logProgress(this.visited.size, this.options.maxPages);
 
-        const result = await this.crawlPage(entry);
-        this.results.push(result);
+          if (this.options.traceOut) {
+            this.trace.push({ kind: "visit", url: entry.url });
+          }
 
-        // Add discovered links to queue with source tracking
-        for (const rawLink of result.links) {
-          const link = normalizeUrl(rawLink);
-          const alreadyQueued = this.queue.some((e) => e.url === link);
-          if (!this.visited.has(link) && !alreadyQueued) {
-            this.queue.push({
-              url: link,
-              sourceUrl: entry.url,
-              method: "extracted",
-            });
-            this.discoveryMetrics.extractedLinks++;
+          const result = await this.crawlPage(entry);
+          this.results.push(result);
+
+          // Add discovered links to queue with source tracking
+          for (const rawLink of result.links) {
+            const link = normalizeUrl(rawLink);
+            const alreadyQueued = this.queue.some((e) => e.url === link);
+            if (!this.visited.has(link) && !alreadyQueued) {
+              this.queue.push({
+                url: link,
+                sourceUrl: entry.url,
+                method: "extracted",
+              });
+              this.discoveryMetrics.extractedLinks++;
+            }
           }
         }
       }
@@ -386,6 +482,9 @@ export class ChaosCrawler {
       // before `browser.close()` tears everything down.
       await this.context?.close();
       await this.browser.close();
+      if (this.options.traceOut && this.trace.length > 0) {
+        writeTrace(this.options.traceOut, this.trace);
+      }
     }
 
     const endTime = Date.now();
@@ -443,6 +542,68 @@ export class ChaosCrawler {
     return isExternalUrlPure(url, this.baseOrigin);
   }
 
+  /**
+   * Pull URLs out of a sitemap (index-aware) and prepend them to the queue.
+   * URLs outside the baseUrl origin are dropped — the crawler's
+   * blockExternalNavigation would block them anyway, and queueing them
+   * wastes visit budget.
+   */
+  private async seedQueueFromSitemap(source: string): Promise<void> {
+    let urls: string[];
+    try {
+      urls = await fetchSitemapUrls(source);
+    } catch (err) {
+      this.logger.warn("sitemap_fetch_failed", {
+        source,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    const baseOrigin = this.baseOrigin;
+    const queuedUrls = new Set(this.queue.map((q) => q.url));
+    let added = 0;
+    let skippedExternal = 0;
+    for (const raw of urls) {
+      let normalized: string;
+      try {
+        normalized = normalizeUrl(new URL(raw, this.options.baseUrl).toString());
+      } catch {
+        continue;
+      }
+      try {
+        if (new URL(normalized).origin !== baseOrigin) {
+          skippedExternal++;
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (queuedUrls.has(normalized)) continue;
+      queuedUrls.add(normalized);
+      this.queue.push({ url: normalized, sourceUrl: source, method: "extracted" });
+      added++;
+    }
+    this.logger.info("sitemap_seeded", { source, added, skippedExternal, total: urls.length });
+  }
+
+  /**
+   * Attach a CDP session to the page and apply a throttling preset. Called
+   * per-page because `Network.emulateNetworkConditions` is a Page-level
+   * setting in Playwright — there's no context-wide equivalent.
+   */
+  private async applyNetworkProfile(page: Page, profile: NetworkProfile): Promise<void> {
+    try {
+      const client = await this.context!.newCDPSession(page);
+      await client.send("Network.enable");
+      await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
+    } catch (err) {
+      this.logger.warn("network_profile_failed", {
+        profile,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async setupNavigationBlocking(page: Page): Promise<void> {
     const blockExternal = this.options.blockExternalNavigation;
     const rules = this.compiledFaultRules;
@@ -495,6 +656,10 @@ export class ChaosCrawler {
 
     // Scope recovery diagnostics to this page only.
     this.currentPageActions = [];
+
+    if (this.options.network) {
+      await this.applyNetworkProfile(page, this.options.network);
+    }
 
     if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
       await this.setupNavigationBlocking(page);
@@ -675,10 +840,16 @@ export class ChaosCrawler {
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
+      this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
 
-      // Perform random actions with accessibility-based weighting
-      await this.performWeightedActions(page, url);
+      // Replay mode bypasses the weighted random driver — playback owns
+      // exactly what runs and in what order.
+      if (this.currentReplayActions) {
+        await this.performReplayActions(page, url, this.currentReplayActions);
+      } else {
+        await this.performWeightedActions(page, url);
+      }
 
       // Drain any rejections that fired during actions.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
@@ -739,6 +910,25 @@ export class ChaosCrawler {
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
     return result;
+  }
+
+  /**
+   * Compare measured metrics against the configured budget and push one
+   * invariant-violation per breached metric. Delegates to a pure helper
+   * (`checkPerformanceBudget`) so the check is unit-testable without a
+   * running browser.
+   */
+  private enforcePerformanceBudget(
+    metrics: PerformanceMetrics,
+    url: string,
+    errors: PageError[]
+  ): void {
+    const violations = checkPerformanceBudget(metrics, this.options.performanceBudget, url);
+    for (const error of violations) {
+      errors.push(error);
+      this.events.onError?.(error);
+      this.logger.logPageError(error);
+    }
   }
 
   private async collectMetrics(page: Page): Promise<PerformanceMetrics> {
@@ -1017,10 +1207,106 @@ export class ChaosCrawler {
       actionsPerformed++;
       this.actions.push(result);
       this.addToHistory(result);  // Add to recovery history
+      if (this.options.traceOut) {
+        this.trace.push(actionToTraceEntry(result, url));
+      }
       this.events.onAction?.(result);
       this.logger.logAction(result);
 
       // Small delay between actions
+      await page.waitForTimeout(100);
+    }
+  }
+
+  /**
+   * Play back a sequence of recorded actions on the current page. Actions
+   * whose selectors no longer resolve are recorded as failed — the run
+   * continues so downstream errors can still surface. Scroll actions
+   * reconstruct the Y offset from the recorded `target` string.
+   */
+  private async performReplayActions(
+    page: Page,
+    url: string,
+    actions: readonly TraceAction[]
+  ): Promise<void> {
+    for (const action of actions) {
+      const timestamp = Date.now();
+      let result: ActionResult;
+      try {
+        if (action.blockedExternal) {
+          // The original run detected an external link and did not click it.
+          // Faithfully reproduce that non-action — clicking would introduce
+          // behavior the source trace never performed.
+          result = {
+            type: action.type,
+            target: action.target,
+            selector: action.selector,
+            success: true,
+            blockedExternal: true,
+            timestamp,
+          };
+        } else if (action.type === "scroll") {
+          const m = /scrollY:\s*(\d+)/i.exec(action.target ?? "");
+          const y = m ? Number(m[1]) : 0;
+          await page.evaluate((yy) => window.scrollTo(0, yy), y);
+          result = { type: "scroll", target: `scrollY: ${y}`, success: true, timestamp };
+        } else if (!action.selector) {
+          result = {
+            type: action.type,
+            target: action.target,
+            success: false,
+            error: "replay: entry has no selector",
+            timestamp,
+          };
+        } else {
+          const element = page.locator(action.selector).first();
+          const visible = await element.isVisible().catch(() => false);
+          if (!visible) {
+            result = {
+              type: action.type,
+              target: action.target,
+              selector: action.selector,
+              success: false,
+              error: "replay: element not visible",
+              timestamp,
+            };
+          } else if (action.type === "input") {
+            await element.fill("test input", { timeout: 1000 });
+            result = {
+              type: "input",
+              target: action.target,
+              selector: action.selector,
+              success: true,
+              timestamp,
+            };
+          } else {
+            await element.click({ timeout: 2000 });
+            result = {
+              type: "click",
+              target: action.target,
+              selector: action.selector,
+              success: true,
+              timestamp,
+            };
+          }
+        }
+      } catch (err) {
+        result = {
+          type: action.type,
+          target: action.target,
+          selector: action.selector,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          timestamp,
+        };
+      }
+      this.actions.push(result);
+      this.addToHistory(result);
+      if (this.options.traceOut) {
+        this.trace.push(actionToTraceEntry(result, url));
+      }
+      this.events.onAction?.(result);
+      this.logger.logAction(result);
       await page.waitForTimeout(100);
     }
   }
@@ -1168,6 +1454,31 @@ export class ChaosCrawler {
     for (const p of this.options.spaPatterns ?? []) {
       parts.push("--spa", shellQuote(p));
     }
+    if (this.options.storageState) {
+      parts.push("--storage-state", shellQuote(this.options.storageState));
+    }
+    if (this.options.performanceBudget) {
+      const budget = this.options.performanceBudget;
+      const entries = PERF_BUDGET_KEYS.filter((k) => typeof budget[k] === "number")
+        .map((k) => `${k}=${budget[k]}`)
+        .join(",");
+      if (entries.length > 0) parts.push("--budget", entries);
+    }
+    if (this.options.traceOut) {
+      parts.push("--trace-out", shellQuote(this.options.traceOut));
+    }
+    if (this.options.traceReplay) {
+      parts.push("--trace-replay", shellQuote(this.options.traceReplay));
+    }
+    if (this.options.device) {
+      parts.push("--device", shellQuote(this.options.device));
+    }
+    if (this.options.network) {
+      parts.push("--network", shellQuote(this.options.network));
+    }
+    if (this.options.seedFromSitemap) {
+      parts.push("--seed-from-sitemap", shellQuote(this.options.seedFromSitemap));
+    }
     return parts.join(" ");
   }
 
@@ -1268,6 +1579,69 @@ export function validateOptions(options: CrawlerOptions): void {
       throw new Error(
         `chaosbringer: "har.mode" must be "record" or "replay" (got ${JSON.stringify(mode)})`
       );
+    }
+  }
+
+  if (options.storageState !== undefined) {
+    if (typeof options.storageState !== "string" || options.storageState.length === 0) {
+      throw new Error(
+        `chaosbringer: "storageState" must be a non-empty path string (got ${JSON.stringify(options.storageState)})`
+      );
+    }
+  }
+
+  const assertNonEmptyStringOpt = (name: string, v: unknown): void => {
+    if (v === undefined) return;
+    if (typeof v !== "string" || v.length === 0) {
+      throw new Error(`chaosbringer: "${name}" must be a non-empty path string (got ${JSON.stringify(v)})`);
+    }
+  };
+  assertNonEmptyStringOpt("traceOut", options.traceOut);
+  assertNonEmptyStringOpt("traceReplay", options.traceReplay);
+  assertNonEmptyStringOpt("seedFromSitemap", options.seedFromSitemap);
+
+  if (options.device !== undefined) {
+    if (typeof options.device !== "string" || options.device.length === 0) {
+      throw new Error(
+        `chaosbringer: "device" must be a non-empty Playwright device name (got ${JSON.stringify(options.device)})`
+      );
+    }
+    if (!devices[options.device]) {
+      throw new Error(
+        `chaosbringer: "device" ${JSON.stringify(options.device)} is not a known Playwright device descriptor`
+      );
+    }
+  }
+
+  if (options.network !== undefined) {
+    const allowed = new Set<string>(NETWORK_PROFILES);
+    if (typeof options.network !== "string" || !allowed.has(options.network)) {
+      throw new Error(
+        `chaosbringer: "network" must be one of ${NETWORK_PROFILES.join(", ")} (got ${JSON.stringify(options.network)})`
+      );
+    }
+  }
+
+  if (options.performanceBudget !== undefined) {
+    const budget = options.performanceBudget;
+    if (budget === null || typeof budget !== "object" || Array.isArray(budget)) {
+      throw new Error(
+        `chaosbringer: "performanceBudget" must be an object (got ${JSON.stringify(budget)})`
+      );
+    }
+    const allowed = new Set<string>(PERF_BUDGET_KEYS);
+    for (const key of Object.keys(budget)) {
+      if (!allowed.has(key)) {
+        throw new Error(
+          `chaosbringer: "performanceBudget.${key}" is not a known metric (allowed: ${PERF_BUDGET_KEYS.join(", ")})`
+        );
+      }
+      const val = (budget as Record<string, unknown>)[key];
+      if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) {
+        throw new Error(
+          `chaosbringer: "performanceBudget.${key}" must be a positive number of ms (got ${JSON.stringify(val)})`
+        );
+      }
     }
   }
 }

@@ -25,8 +25,36 @@
 
 import { parseArgs } from "node:util";
 import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+import { diffReports, loadBaseline } from "./diff.js";
+import { printGithubAnnotations } from "./github.js";
+import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import type { CrawlerOptions } from "./types.js";
+
+// Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
+// flags (e.g. --match for `minimize`) don't trip the main options map.
+const rawSub = process.argv[2];
+const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
+if (subcommand === "minimize") {
+  const { runMinimizeCli } = await import("./minimize.js");
+  try {
+    await runMinimizeCli(process.argv.slice(3));
+    process.exit(0);
+  } catch (err) {
+    console.error("minimize failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+if (subcommand === "flake") {
+  const { runFlakeCli } = await import("./flake.js");
+  try {
+    await runFlakeCli(process.argv.slice(3));
+    process.exit(0);
+  } catch (err) {
+    console.error("flake failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {
@@ -48,6 +76,18 @@ const { values, positionals } = parseArgs({
     seed: { type: "string" },
     "har-record": { type: "string" },
     "har-replay": { type: "string" },
+    "storage-state": { type: "string" },
+    budget: { type: "string", multiple: true },
+    axe: { type: "boolean", default: false },
+    "axe-tags": { type: "string" },
+    "trace-out": { type: "string" },
+    "trace-replay": { type: "string" },
+    device: { type: "string" },
+    network: { type: "string" },
+    "seed-from-sitemap": { type: "string" },
+    baseline: { type: "string" },
+    "baseline-strict": { type: "boolean", default: false },
+    "github-annotations": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -84,6 +124,18 @@ OPTIONS:
   --seed <n>            Seed for deterministic action selection (reproduces a run)
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
+  --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
+  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
+  --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
+  --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
+  --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
+  --trace-replay <path> Replay a previously recorded trace instead of random actions
+  --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
+  --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
+  --seed-from-sitemap <url|path>  Prepend URLs listed in a sitemap.xml (or sitemap index)
+  --baseline <path>     Diff this run against a previous report (warns if missing)
+  --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
+  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
@@ -152,6 +204,25 @@ if (values["har-record"] && values["har-replay"]) {
 if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
 if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
 
+let performanceBudget: CrawlerOptions["performanceBudget"];
+if (values.budget && values.budget.length > 0) {
+  performanceBudget = {};
+  for (const raw of values.budget) {
+    for (const entry of raw.split(",")) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq <= 0) {
+        console.error(`Error: --budget expects key=ms pairs (got "${trimmed}")`);
+        process.exit(1);
+      }
+      const key = trimmed.slice(0, eq).trim();
+      const ms = Number(trimmed.slice(eq + 1).trim());
+      (performanceBudget as Record<string, number>)[key] = ms;
+    }
+  }
+}
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -168,12 +239,34 @@ const options: CrawlerOptions = {
   logToConsole: values["log-console"],
   seed,
   har,
+  storageState: values["storage-state"],
+  performanceBudget,
+  traceOut: values["trace-out"],
+  traceReplay: values["trace-replay"],
+  device: values.device,
+  network: values.network as CrawlerOptions["network"],
+  seedFromSitemap: values["seed-from-sitemap"],
+  invariants: values.axe
+    ? [
+        axe({
+          tags: values["axe-tags"]
+            ? values["axe-tags"]
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : undefined,
+        }),
+      ]
+    : undefined,
 };
 
 const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
 const isStrict = values.strict;
+const baselinePath = values.baseline;
+const isBaselineStrict = values["baseline-strict"];
+const emitGithub = values["github-annotations"];
 
 async function main() {
   if (!isQuiet) {
@@ -212,16 +305,31 @@ async function main() {
       console.log(""); // New line after progress
     }
 
+    if (baselinePath) {
+      const prev = loadBaseline(baselinePath);
+      if (prev) {
+        report.diff = diffReports(prev, report, { baselinePath });
+      } else if (!isQuiet) {
+        // First CI run won't have a baseline yet. Warn, but keep going — the
+        // report we write here becomes the baseline for next time.
+        console.warn(`Baseline not found at ${baselinePath} — skipping diff.`);
+      }
+    }
+
     // Print report first, then save + announce the file. This way the main
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
-    printReport(report, isCompact, isStrict);
+    const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
+    printReport(report, isCompact, exitOptions);
+    if (emitGithub) {
+      printGithubAnnotations(report, { strict: isStrict });
+    }
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);
     }
 
-    const exitCode = getExitCode(report, isStrict);
+    const exitCode = getExitCode(report, exitOptions);
     process.exit(exitCode);
   } catch (err) {
     console.error("Crawl failed:", err);
