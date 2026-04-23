@@ -26,6 +26,7 @@
 import { parseArgs } from "node:util";
 import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
 import { diffReports, loadBaseline } from "./diff.js";
+import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import type { CrawlerOptions } from "./types.js";
@@ -85,6 +86,7 @@ const { values, positionals } = parseArgs({
     network: { type: "string" },
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
+    "github-annotations": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -131,6 +133,7 @@ OPTIONS:
   --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
+  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
@@ -260,6 +263,7 @@ const isCompact = values.compact;
 const isStrict = values.strict;
 const baselinePath = values.baseline;
 const isBaselineStrict = values["baseline-strict"];
+const emitGithub = values["github-annotations"];
 
 async function main() {
   if (!isQuiet) {
@@ -314,6 +318,9 @@ async function main() {
     // last thing on screen — friendlier for scrolling CI logs.
     const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
     printReport(report, isCompact, exitOptions);
+    if (emitGithub) {
+      printGithubAnnotations(report, { strict: isStrict });
+    }
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);

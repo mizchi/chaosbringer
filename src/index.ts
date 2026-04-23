@@ -45,6 +45,12 @@ export {
   type ClusterOccurrence,
   type PageOccurrence,
 } from "./flake.js";
+export {
+  buildGithubAnnotations,
+  formatGithubAnnotation,
+  printGithubAnnotations,
+  type AnnotationLine,
+} from "./github.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
