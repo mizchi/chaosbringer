@@ -314,6 +314,8 @@ export interface ActionResult {
   success: boolean;
   error?: string;
   blockedExternal?: boolean;
+  /** True when the action was skipped because the target URL is owned by another shard. */
+  shardSkipped?: boolean;
   timestamp: number;
 }
 

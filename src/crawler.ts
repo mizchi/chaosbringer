@@ -1380,12 +1380,25 @@ export class ChaosCrawler {
           };
         }
 
-        // Track link clicks that navigate (only if not already tracked)
+        // In shard mode, navigating away to a URL owned by another shard
+        // would contaminate this page's error counts with cross-shard work
+        // and break disjointness. Record the click as a non-action instead
+        // of executing it — the owning shard crawls that URL itself.
         if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
           try {
             const absoluteUrl = normalizeUrl(new URL(href, url).toString());
+            if (!this.ownsUrl(absoluteUrl)) {
+              return {
+                type: "click",
+                target: target.name || target.selector,
+                selector: target.selector,
+                success: true,
+                shardSkipped: true,
+                timestamp,
+              };
+            }
             const alreadyQueued = this.queue.some((e) => e.url === absoluteUrl);
-            if (!this.visited.has(absoluteUrl) && !alreadyQueued && this.ownsUrl(absoluteUrl)) {
+            if (!this.visited.has(absoluteUrl) && !alreadyQueued) {
               this.queue.push({
                 url: absoluteUrl,
                 sourceUrl: url,

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { ErrorCluster } from "./clusters.js";
 import { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
@@ -136,15 +135,6 @@ describe("parseShardArg", () => {
 });
 
 describe("mergeReports", () => {
-  const cluster = (key: string, count: number, urls: string[] = []): ErrorCluster => ({
-    key,
-    type: "console",
-    fingerprint: key.split("|")[1] ?? "",
-    sample: { type: "console", message: "boom", timestamp: 0 },
-    count,
-    urls,
-  });
-
   it("throws on empty input", () => {
     expect(() => mergeReports([])).toThrow(/at least one/);
   });
@@ -190,20 +180,54 @@ describe("mergeReports", () => {
     expect(merged.duration).toBe(800);
   });
 
-  it("merges clusters by key, summing counts and unioning urls", () => {
+  it("recomputes clusters from merged page errors", () => {
+    const err = (url: string, msg: string): PageError => ({
+      type: "console",
+      message: msg,
+      url,
+      timestamp: 0,
+    });
     const a = report({
-      errorClusters: [cluster("console|boom", 3, ["http://localhost:3000/a"])],
+      pages: [
+        page("http://localhost:3000/a", [err("http://localhost:3000/a", "boom")]),
+      ],
     });
     const b = report({
-      errorClusters: [cluster("console|boom", 5, ["http://localhost:3000/b"])],
+      pages: [
+        page("http://localhost:3000/b", [
+          err("http://localhost:3000/b", "boom"),
+          err("http://localhost:3000/b", "boom"),
+        ]),
+      ],
     });
     const merged = mergeReports([a, b]);
-    const merged_cluster = merged.errorClusters.find((c) => c.key === "console|boom");
-    expect(merged_cluster).toBeDefined();
-    expect(merged_cluster!.urls.sort()).toEqual([
+    const c = merged.errorClusters.find((x) => x.fingerprint.includes("boom"));
+    expect(c).toBeDefined();
+    expect(c!.count).toBe(3);
+    expect(c!.urls.sort()).toEqual([
       "http://localhost:3000/a",
       "http://localhost:3000/b",
     ]);
+  });
+
+  it("drops phantom clusters when a duplicate page is deduplicated", () => {
+    // baseUrl appears in both shards (typical when both seed from baseUrl).
+    // If only one copy survives, the surviving errors must drive clustering
+    // — clusters from the dropped copy cannot reappear in the output.
+    const err = (msg: string): PageError => ({
+      type: "console",
+      message: msg,
+      url: "http://localhost:3000/",
+      timestamp: 0,
+    });
+    const first = page("http://localhost:3000/", [err("kept")]);
+    const duplicate = page("http://localhost:3000/", [err("dropped")]);
+    const a = report({ pages: [first] });
+    const b = report({ pages: [duplicate] });
+    const merged = mergeReports([a, b]);
+    const fingerprints = merged.errorClusters.map((c) => c.fingerprint);
+    expect(fingerprints).toContain("kept");
+    expect(fingerprints).not.toContain("dropped");
   });
 
   it("recomputes totalErrors from merged pages", () => {

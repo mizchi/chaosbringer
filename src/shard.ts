@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { clusterErrors, type ErrorCluster } from "./clusters.js";
+import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
 import { printReport, getExitCode } from "./reporter.js";
 import type {
@@ -114,35 +114,11 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   };
   const summary = summarizePages(mergedPages, discovery);
 
-  // Re-cluster: take each source cluster, combine counts/urls/invariantNames
-  // by the `type|fingerprint` key. We don't re-run clusterErrors() on raw
-  // errors to preserve the source shard's fingerprinting (avoids duplicate
-  // work and is numerically identical given clusterErrors is deterministic).
-  const clusterByKey = new Map<string, ErrorCluster>();
-  for (const r of reports) {
-    for (const c of r.errorClusters) {
-      const existing = clusterByKey.get(c.key);
-      if (existing) {
-        existing.count += c.count;
-        for (const u of c.urls) {
-          if (!existing.urls.includes(u)) existing.urls.push(u);
-        }
-        if (c.invariantNames) {
-          existing.invariantNames ??= [];
-          for (const n of c.invariantNames) {
-            if (!existing.invariantNames.includes(n)) existing.invariantNames.push(n);
-          }
-        }
-      } else {
-        clusterByKey.set(c.key, {
-          ...c,
-          urls: [...c.urls],
-          invariantNames: c.invariantNames ? [...c.invariantNames] : undefined,
-        });
-      }
-    }
-  }
-  const errorClusters = [...clusterByKey.values()].sort((a, b) => b.count - a.count);
+  // Error clusters are recomputed directly from the merged page list so
+  // they stay consistent with `pages` / `totalErrors` after URL dedup. If a
+  // duplicate `baseUrl` copy is dropped, its errors are gone too and must
+  // not reappear as phantom clusters.
+  const errorClusters = clusterErrors(mergedPages.flatMap((p) => p.errors));
 
   // Merge fault-injection stats by rule name.
   const faultByRule = new Map<string, FaultInjectionStats>();
@@ -159,19 +135,8 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   }
   const faultInjections = faultByRule.size > 0 ? [...faultByRule.values()] : undefined;
 
-  // Recompute totals from merged pages. Using the raw error count keeps
-  // totalErrors consistent with the deduplicated page list (which may drop
-  // duplicate baseUrl entries across shards).
   const totalErrors = mergedPages.reduce((sum, p) => sum + p.errors.length, 0);
   const totalWarnings = mergedPages.reduce((sum, p) => sum + p.warnings.length, 0);
-
-  // Rebuild cluster list if any fingerprint in `errorClusters` is missing
-  // because a page was deduplicated. Clustering the merged errors directly
-  // gives the authoritative count.
-  const rebuiltClusters = clusterErrors(mergedPages.flatMap((p) => p.errors));
-  const finalClusters = rebuiltClusters.length >= errorClusters.length
-    ? rebuiltClusters
-    : errorClusters;
 
   return {
     baseUrl: first.baseUrl,
@@ -189,7 +154,7 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
     actions,
     summary,
     faultInjections,
-    errorClusters: finalClusters,
+    errorClusters,
     har: first.har,
     diff: undefined,
   };
