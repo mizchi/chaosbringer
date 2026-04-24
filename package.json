@@ -44,7 +44,9 @@
   "peerDependencies": {
     "@playwright/test": "^1.40.0",
     "axe-core": "^4.0.0",
-    "playwright": "^1.40.0"
+    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0",
+    "playwright": "^1.40.0",
+    "pngjs": "^7.0.0"
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
@@ -52,13 +54,23 @@
     },
     "axe-core": {
       "optional": true
+    },
+    "pixelmatch": {
+      "optional": true
+    },
+    "pngjs": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
     "@types/node": "^22.0.0",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
     "axe-core": "^4.11.3",
+    "pixelmatch": "^7.1.0",
     "playwright": "^1.52.0",
+    "pngjs": "^7.0.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^3.0.7"

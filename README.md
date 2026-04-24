@@ -11,6 +11,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
 - **Performance budgets** per TTFB / FCP / LCP / TBT — budget breaches fail the run.
+- **Visual regression** via pixelmatch — compare per-page screenshots against baselines, fail on diff.
 - **Error detection**: console errors, failed requests, JS exceptions, unhandled rejections, invariant violations.
 - **Recovery from 404 / 5xx** — records what actions preceded the failure.
 - **HAR record / replay** + **trace record / replay / minimize** for fully deterministic runs and delta-debugged repros.
@@ -303,6 +304,46 @@ await chaos({
 
 A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
 
+## Visual regression
+
+Compare each page's screenshot against a baseline PNG on disk. Differences beyond the configured budget are recorded as invariant violations (`visual-regression`), which fail the run.
+
+```bash
+# First run: baselines don't exist yet — chaosbringer records them and passes.
+chaosbringer --url http://localhost:3000 --visual-baseline ./__snapshots__
+
+# Subsequent runs: compare against the recorded baselines.
+chaosbringer --url http://localhost:3000 --visual-baseline ./__snapshots__ \
+  --visual-max-diff-pixels 100 \
+  --visual-diff-dir ./__diffs__
+
+# After an intentional UI change, overwrite the baselines.
+chaosbringer --url http://localhost:3000 --visual-baseline ./__snapshots__ --visual-update
+```
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  invariants: [
+    invariants.visualRegression({
+      baselineDir: "./__snapshots__",
+      threshold: 0.1,          // pixelmatch color distance (0..1)
+      maxDiffPixels: 100,      // absolute tolerance
+      maxDiffRatio: 0.001,     // or proportional tolerance
+      diffDir: "./__diffs__",
+    }),
+  ],
+});
+```
+
+- Baseline filenames are derived from each page's URL (path + query, sanitized) so different routes don't collide.
+- `pixelmatch` and `pngjs` are optional peer deps — install them explicitly (`pnpm add pixelmatch pngjs`). The invariant fails with a clear install hint when they're missing.
+- Dimension mismatches between baseline and current are treated as full-diff failures — resize or re-record the baseline intentionally rather than auto-accepting.
+- Takes `fullPage: true` screenshots by default. Flip to viewport-only via `fullPage: false` in the programmatic API if your layout is sensitive to scroll position.
+- Pair with `--device iPhone 14` to record device-specific baselines; the baseline dir is per-crawl so split baselines across devices by using different dirs.
+
 ## Performance budget
 
 Declare a per-metric budget (in ms). Any page whose measured metric exceeds its limit is recorded as an invariant violation (`perf-budget.<metric>`), which fails the run just like any other invariant.
@@ -535,6 +576,12 @@ const merged = mergeReports([r0, r1, r2, r3]);
 | `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
 | `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
+| `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`) | — |
+| `--visual-threshold <n>` | pixelmatch color distance (0..1) | 0.1 |
+| `--visual-max-diff-pixels <n>` | Absolute pixel budget before failing | 0 |
+| `--visual-max-diff-ratio <n>` | Ratio pixel budget (0..1) | — |
+| `--visual-diff-dir <dir>` | Write diff PNGs here on failure | — |
+| `--visual-update` | Overwrite baselines with current screenshots (for intentional UI updates) | false |
 | `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
 | `--trace-replay <path>` | Replay a previously recorded trace | — |
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
