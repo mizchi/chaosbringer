@@ -1028,11 +1028,17 @@ export class ChaosCrawler {
           const m = rest.match(/^url\s*=\s*(.*)$/i);
           if (!m) continue;
           let url = m[1]!.trim();
-          if (
-            (url.startsWith('"') && url.endsWith('"')) ||
-            (url.startsWith("'") && url.endsWith("'"))
-          ) {
-            url = url.slice(1, -1);
+          if (url.length === 0) continue;
+          if (url.startsWith('"') || url.startsWith("'")) {
+            const quote = url[0]!;
+            const end = url.indexOf(quote, 1);
+            if (end === -1) continue;
+            url = url.slice(1, end);
+          } else {
+            // Terminate at the next parameter separator — `0;url=/a;foo=bar`
+            // must queue `/a`, not `/a;foo=bar`.
+            const sep = url.indexOf(";");
+            if (sep !== -1) url = url.slice(0, sep).trim();
           }
           pushResolved(url);
         }

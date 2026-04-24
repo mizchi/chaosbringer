@@ -46,4 +46,21 @@ describe("parseMetaRefreshUrl", () => {
     // Not a real directive, but shouldn't crash.
     expect(parseMetaRefreshUrl("0;foo=bar")).toBeNull();
   });
+
+  it("stops unquoted URLs at the next parameter separator", () => {
+    expect(parseMetaRefreshUrl("0;url=/next;")).toBe("/next");
+    expect(parseMetaRefreshUrl("0;url=/next;foo=bar")).toBe("/next");
+    expect(parseMetaRefreshUrl("0; url = /next ; charset=utf-8")).toBe("/next");
+  });
+
+  it("preserves semicolons inside a quoted URL", () => {
+    // Rare but technically allowed — quotes delimit the value.
+    expect(parseMetaRefreshUrl("0;url='/next;with-semi'")).toBe("/next;with-semi");
+    expect(parseMetaRefreshUrl(`0;url="/a?x=1;y=2"`)).toBe("/a?x=1;y=2");
+  });
+
+  it("returns null on an unterminated quoted URL", () => {
+    expect(parseMetaRefreshUrl("0;url='/next")).toBeNull();
+    expect(parseMetaRefreshUrl(`0;url="/next`)).toBeNull();
+  });
 });

@@ -26,14 +26,26 @@ export function parseMetaRefreshUrl(content: string | null | undefined): string 
   const semi = content.indexOf(";");
   if (semi === -1) return null;
   const rest = content.slice(semi + 1).trim();
-  // Case-insensitive `url=`
   const m = rest.match(/^url\s*=\s*(.*)$/i);
   if (!m) return null;
   let url = m[1]!.trim();
   if (url.length === 0) return null;
-  // Strip surrounding single/double quotes.
-  if ((url.startsWith('"') && url.endsWith('"')) || (url.startsWith("'") && url.endsWith("'"))) {
-    url = url.slice(1, -1);
+
+  // Quoted URLs delimit with the matching quote — the URL may legitimately
+  // contain `;`, so we can't just split on it. Unterminated quotes are a
+  // malformed directive; return null rather than a truncated URL.
+  if (url.startsWith('"') || url.startsWith("'")) {
+    const quote = url[0]!;
+    const end = url.indexOf(quote, 1);
+    if (end === -1) return null;
+    url = url.slice(1, end);
+  } else {
+    // Unquoted: terminate at the next parameter separator. Without this,
+    // `0;url=/next;foo=bar` would captured as `/next;foo=bar` and queue
+    // the wrong URL.
+    const sep = url.indexOf(";");
+    if (sep !== -1) url = url.slice(0, sep).trim();
   }
+
   return url.length > 0 ? url : null;
 }
