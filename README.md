@@ -5,6 +5,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 ## Features
 
 - **Weighted random actions** targeted by ARIA role and visible text (nav links > buttons > inputs > scroll).
+- **Thorough link extraction** — `<a>`, `<area>`, `<iframe>`, `<link rel="canonical"/"alternate">`, and `<meta http-equiv="refresh">` feed the queue, so dead-link coverage isn't limited to clickable anchors.
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`.

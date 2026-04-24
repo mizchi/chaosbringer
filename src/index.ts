@@ -52,6 +52,7 @@ export {
   type AnnotationLine,
 } from "./github.js";
 export { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
+export { parseMetaRefreshUrl } from "./links.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
