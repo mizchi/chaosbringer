@@ -20,12 +20,14 @@ function solidPng(width: number, height: number, rgba: [number, number, number, 
 }
 
 describe("screenshotFilename", () => {
-  it("maps / to index.png", () => {
-    expect(screenshotFilename("http://localhost:3000/")).toBe("index.png");
+  it("produces a readable prefix for / -> index", () => {
+    expect(screenshotFilename("http://localhost:3000/")).toMatch(/^index__[0-9a-f]{8}\.png$/);
   });
 
-  it("maps a nested path", () => {
-    expect(screenshotFilename("http://x/docs/intro/")).toBe("docs_intro.png");
+  it("includes the nested path as the prefix", () => {
+    expect(screenshotFilename("http://x/docs/intro/")).toMatch(
+      /^docs_intro__[0-9a-f]{8}\.png$/
+    );
   });
 
   it("incorporates the query so different searches don't collide", () => {
@@ -40,8 +42,19 @@ describe("screenshotFilename", () => {
     expect(name).toMatch(/^[A-Za-z0-9._-]+$/);
   });
 
-  it("falls back to index when the URL is unparseable", () => {
-    expect(screenshotFilename("not-a-url")).toBe("not-a-url.png");
+  it("disambiguates URLs that sanitize to the same prefix (injective via hash)", () => {
+    // Before the hash suffix, both of these flattened to "a_b.png".
+    const ab = screenshotFilename("http://x/a/b");
+    const a_b = screenshotFilename("http://x/a_b");
+    expect(ab).not.toBe(a_b);
+  });
+
+  it("is deterministic", () => {
+    expect(screenshotFilename("http://x/foo")).toBe(screenshotFilename("http://x/foo"));
+  });
+
+  it("handles unparseable input by hashing the raw string", () => {
+    expect(screenshotFilename("not-a-url")).toMatch(/^not-a-url__[0-9a-f]{8}\.png$/);
   });
 });
 

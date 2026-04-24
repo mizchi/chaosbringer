@@ -14,6 +14,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fnv1a } from "./shard.js";
 import type { Invariant, UrlMatcher } from "./types.js";
 
 export interface VisualRegressionOptions {
@@ -46,21 +47,25 @@ export interface VisualRegressionOptions {
 }
 
 /**
- * Derive a filename-safe key from a URL. Encodes the path and query so two
- * different routes don't collide; strips the scheme/host since baselines
- * are per-site anyway.
+ * Derive a filename-safe key from a URL. The readable prefix carries the
+ * path + query (sanitized), and an 8-hex-char hash of the full URL is
+ * appended so collisions between routes that sanitize to the same prefix
+ * (e.g. `/a/b` and `/a_b` both flatten to `a_b`) are impossible in
+ * practice. The hash is FNV-1a — non-cryptographic, just deterministic
+ * and uniformly distributed enough for filename disambiguation.
  */
 export function screenshotFilename(url: string): string {
-  let u: URL;
+  let prefix: string;
   try {
-    u = new URL(url);
+    const u = new URL(url);
+    const path = u.pathname === "/" || u.pathname === "" ? "index" : u.pathname;
+    const query = u.search ? `__${u.search.slice(1)}` : "";
+    prefix = sanitize(path + query);
   } catch {
-    // Not a URL — treat the whole string as a path.
-    return sanitize(url) + ".png";
+    prefix = sanitize(url);
   }
-  const path = u.pathname === "/" || u.pathname === "" ? "index" : u.pathname;
-  const query = u.search ? `__${u.search.slice(1)}` : "";
-  return sanitize(path + query) + ".png";
+  const hash = fnv1a(url).toString(16).padStart(8, "0");
+  return `${prefix}__${hash}.png`;
 }
 
 function sanitize(s: string): string {

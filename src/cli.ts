@@ -257,6 +257,32 @@ if (values.shard) {
   shardCount = parsed.shardCount;
 }
 
+function parseNumberFlag(
+  flag: string,
+  raw: string | undefined,
+  opts: { min?: number; max?: number; integer?: boolean }
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    console.error(`Error: ${flag} must be a finite number (got ${JSON.stringify(raw)})`);
+    process.exit(1);
+  }
+  if (opts.integer && !Number.isInteger(n)) {
+    console.error(`Error: ${flag} must be an integer (got ${n})`);
+    process.exit(1);
+  }
+  if (opts.min !== undefined && n < opts.min) {
+    console.error(`Error: ${flag} must be >= ${opts.min} (got ${n})`);
+    process.exit(1);
+  }
+  if (opts.max !== undefined && n > opts.max) {
+    console.error(`Error: ${flag} must be <= ${opts.max} (got ${n})`);
+    process.exit(1);
+  }
+  return n;
+}
+
 function buildInvariants(): Invariant[] | undefined {
   const list: Invariant[] = [];
   if (values.axe) {
@@ -275,15 +301,20 @@ function buildInvariants(): Invariant[] | undefined {
     list.push(
       visualRegression({
         baselineDir: values["visual-baseline"],
-        threshold: values["visual-threshold"] !== undefined
-          ? Number(values["visual-threshold"])
-          : undefined,
-        maxDiffPixels: values["visual-max-diff-pixels"] !== undefined
-          ? Number(values["visual-max-diff-pixels"])
-          : undefined,
-        maxDiffRatio: values["visual-max-diff-ratio"] !== undefined
-          ? Number(values["visual-max-diff-ratio"])
-          : undefined,
+        threshold: parseNumberFlag("--visual-threshold", values["visual-threshold"], {
+          min: 0,
+          max: 1,
+        }),
+        maxDiffPixels: parseNumberFlag(
+          "--visual-max-diff-pixels",
+          values["visual-max-diff-pixels"],
+          { min: 0, integer: true }
+        ),
+        maxDiffRatio: parseNumberFlag(
+          "--visual-max-diff-ratio",
+          values["visual-max-diff-ratio"],
+          { min: 0, max: 1 }
+        ),
         diffDir: values["visual-diff-dir"],
         updateBaseline: values["visual-update"],
       })
