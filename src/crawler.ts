@@ -974,12 +974,78 @@ export class ChaosCrawler {
   private async extractLinks(page: Page): Promise<string[]> {
     try {
       const links = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("a[href]"))
-          .map((a) => (a as HTMLAnchorElement).href)
-          .filter((href) => href && !href.startsWith("javascript:") && !href.startsWith("mailto:"));
+        const out = new Set<string>();
+        const pushResolved = (raw: string | null | undefined) => {
+          if (!raw) return;
+          const trimmed = raw.trim();
+          if (!trimmed) return;
+          if (
+            trimmed.startsWith("javascript:") ||
+            trimmed.startsWith("mailto:") ||
+            trimmed.startsWith("tel:")
+          ) {
+            return;
+          }
+          try {
+            const absolute = new URL(trimmed, document.baseURI).toString();
+            out.add(absolute);
+          } catch {
+            // Malformed URL — skip.
+          }
+        };
+
+        // <a href> — primary navigation
+        for (const a of Array.from(document.querySelectorAll("a[href]"))) {
+          pushResolved(a.getAttribute("href"));
+        }
+        // <area href> — image map regions
+        for (const area of Array.from(document.querySelectorAll("area[href]"))) {
+          pushResolved(area.getAttribute("href"));
+        }
+        // <iframe src> — embedded pages
+        for (const iframe of Array.from(document.querySelectorAll("iframe[src]"))) {
+          pushResolved(iframe.getAttribute("src"));
+        }
+        // <link rel="canonical"> / rel="alternate" — SEO-level navigation
+        for (const link of Array.from(
+          document.querySelectorAll(
+            'link[rel~="canonical"][href], link[rel~="alternate"][href]'
+          )
+        )) {
+          pushResolved(link.getAttribute("href"));
+        }
+        // <meta http-equiv="refresh" content="N; url=..."> — meta redirect
+        for (const meta of Array.from(
+          document.querySelectorAll('meta[http-equiv]')
+        )) {
+          const httpEquiv = meta.getAttribute("http-equiv");
+          if (!httpEquiv || httpEquiv.toLowerCase() !== "refresh") continue;
+          const content = meta.getAttribute("content");
+          if (!content) continue;
+          const semi = content.indexOf(";");
+          if (semi === -1) continue;
+          const rest = content.slice(semi + 1).trim();
+          const m = rest.match(/^url\s*=\s*(.*)$/i);
+          if (!m) continue;
+          let url = m[1]!.trim();
+          if (url.length === 0) continue;
+          if (url.startsWith('"') || url.startsWith("'")) {
+            const quote = url[0]!;
+            const end = url.indexOf(quote, 1);
+            if (end === -1) continue;
+            url = url.slice(1, end);
+          } else {
+            // Terminate at the next parameter separator — `0;url=/a;foo=bar`
+            // must queue `/a`, not `/a;foo=bar`.
+            const sep = url.indexOf(";");
+            if (sep !== -1) url = url.slice(0, sep).trim();
+          }
+          pushResolved(url);
+        }
+
+        return Array.from(out);
       });
 
-      // Filter to same-origin links only
       return links.filter((link) => !this.isExternalUrl(link));
     } catch {
       return [];
