@@ -192,4 +192,29 @@ describe("validateOptions", () => {
   it("rejects an empty seedFromSitemap", () => {
     expect(() => validateOptions(base({ seedFromSitemap: "" }))).toThrow(/seedFromSitemap/);
   });
+
+  it("accepts a valid shard pair", () => {
+    expect(() => validateOptions(base({ shardIndex: 0, shardCount: 1 }))).not.toThrow();
+    expect(() => validateOptions(base({ shardIndex: 3, shardCount: 4 }))).not.toThrow();
+  });
+
+  it("rejects shardIndex without shardCount", () => {
+    expect(() => validateOptions(base({ shardIndex: 0 }))).toThrow(/shardIndex.*shardCount/);
+  });
+
+  it("rejects shardCount without shardIndex", () => {
+    expect(() => validateOptions(base({ shardCount: 2 }))).toThrow(/shardIndex.*shardCount/);
+  });
+
+  it("rejects a negative shardIndex", () => {
+    expect(() => validateOptions(base({ shardIndex: -1, shardCount: 2 }))).toThrow(/shardIndex/);
+  });
+
+  it("rejects an out-of-range shardIndex", () => {
+    expect(() => validateOptions(base({ shardIndex: 4, shardCount: 4 }))).toThrow(/shardIndex/);
+  });
+
+  it("rejects shardCount < 1", () => {
+    expect(() => validateOptions(base({ shardIndex: 0, shardCount: 0 }))).toThrow(/shardCount/);
+  });
 });

@@ -17,9 +17,10 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Flake detection** — rerun the same crawl N times and flag clusters / pages whose outcome varies.
 - **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
 - **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
+- **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
 - **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary.
 - **Playwright Test integration** for when you'd rather run chaos inside an existing test file.
-- **CLI** for running from a shell or CI, with `minimize` / `flake` subcommands.
+- **CLI** for running from a shell or CI, with `minimize` / `flake` / `shard` subcommands.
 
 ## Install
 
@@ -481,6 +482,32 @@ chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
 
 With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it. `--output <path>` also writes the analysis as JSON.
 
+### `shard`
+
+Split a crawl across N processes and merge the reports. Each worker is spawned with `--shard i/N` and hashes discovered URLs (FNV-1a) mod N; it only processes URLs whose hash matches its index, so shards do disjoint work. `baseUrl` is always processed by every shard so each has a seed for BFS.
+
+```bash
+chaosbringer shard \
+  --count 4 \
+  --url http://localhost:3000 \
+  --seed-from-sitemap http://localhost:3000/sitemap.xml \
+  --output chaos-report.json
+```
+
+All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are forwarded verbatim to each worker. For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
+
+Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean.
+
+You can also run shards by hand (e.g. as separate CI matrix jobs):
+
+```bash
+chaosbringer --url ... --shard 0/4 --output shard-0.json
+chaosbringer --url ... --shard 1/4 --output shard-1.json
+# ... then merge in Node / TS:
+import { mergeReports } from "chaosbringer";
+const merged = mergeReports([r0, r1, r2, r3]);
+```
+
 ## CLI reference
 
 | Option | Description | Default |
@@ -512,6 +539,7 @@ With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
 | `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
+| `--shard <i/N>` | Run as shard i of N. See the `shard` subcommand to spawn + merge. | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
