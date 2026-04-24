@@ -44,6 +44,7 @@ import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./rand
 import { clusterErrors } from "./clusters.js";
 import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
+import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
 import {
   TRACE_FORMAT_VERSION,
@@ -70,6 +71,8 @@ const DEFAULT_OPTIONS: Required<
     | "device"
     | "network"
     | "seedFromSitemap"
+    | "shardIndex"
+    | "shardCount"
   >
 > = {
   maxPages: 50,
@@ -466,7 +469,7 @@ export class ChaosCrawler {
           for (const rawLink of result.links) {
             const link = normalizeUrl(rawLink);
             const alreadyQueued = this.queue.some((e) => e.url === link);
-            if (!this.visited.has(link) && !alreadyQueued) {
+            if (!this.visited.has(link) && !alreadyQueued && this.ownsUrl(link)) {
               this.queue.push({
                 url: link,
                 sourceUrl: entry.url,
@@ -529,6 +532,19 @@ export class ChaosCrawler {
     return matchesAnyPattern(url, this.options.excludePatterns);
   }
 
+  /**
+   * Shard ownership gate. Returns true when this shard should enqueue `url`.
+   * Single-shard configs always return true. Multi-shard configs drop every
+   * URL whose hash doesn't match this shard's index — except `baseUrl`, which
+   * every shard must process so it has a seed for BFS.
+   */
+  private ownsUrl(url: string): boolean {
+    const count = this.options.shardCount;
+    if (count === undefined || count <= 1) return true;
+    if (url === normalizeUrl(this.options.baseUrl)) return true;
+    return shardOwns(url, this.options.shardIndex ?? 0, count);
+  }
+
   /** Check if URL matches SPA patterns */
   private matchesSpaPattern(url: string): string | null {
     return matchesSpaPatternPure(url, this.options.spaPatterns);
@@ -579,6 +595,7 @@ export class ChaosCrawler {
         continue;
       }
       if (queuedUrls.has(normalized)) continue;
+      if (!this.ownsUrl(normalized)) continue;
       queuedUrls.add(normalized);
       this.queue.push({ url: normalized, sourceUrl: source, method: "extracted" });
       added++;
@@ -1368,7 +1385,7 @@ export class ChaosCrawler {
           try {
             const absoluteUrl = normalizeUrl(new URL(href, url).toString());
             const alreadyQueued = this.queue.some((e) => e.url === absoluteUrl);
-            if (!this.visited.has(absoluteUrl) && !alreadyQueued) {
+            if (!this.visited.has(absoluteUrl) && !alreadyQueued && this.ownsUrl(absoluteUrl)) {
               this.queue.push({
                 url: absoluteUrl,
                 sourceUrl: url,
@@ -1479,6 +1496,9 @@ export class ChaosCrawler {
     if (this.options.seedFromSitemap) {
       parts.push("--seed-from-sitemap", shellQuote(this.options.seedFromSitemap));
     }
+    if (this.options.shardCount !== undefined && this.options.shardCount > 1) {
+      parts.push("--shard", `${this.options.shardIndex ?? 0}/${this.options.shardCount}`);
+    }
     return parts.join(" ");
   }
 
@@ -1524,6 +1544,31 @@ export function validateOptions(options: CrawlerOptions): void {
   requirePositive("maxActionsPerPage", options.maxActionsPerPage, 0);
   requirePositive("timeout", options.timeout, 1);
   requirePositive("recoveryHistorySize", options.recoveryHistorySize, 0);
+
+  if (options.shardIndex !== undefined || options.shardCount !== undefined) {
+    if (options.shardCount === undefined || options.shardIndex === undefined) {
+      throw new Error(
+        `chaosbringer: "shardIndex" and "shardCount" must be set together`
+      );
+    }
+    if (
+      !Number.isInteger(options.shardCount) ||
+      options.shardCount < 1
+    ) {
+      throw new Error(
+        `chaosbringer: "shardCount" must be an integer >= 1 (got ${JSON.stringify(options.shardCount)})`
+      );
+    }
+    if (
+      !Number.isInteger(options.shardIndex) ||
+      options.shardIndex < 0 ||
+      options.shardIndex >= options.shardCount
+    ) {
+      throw new Error(
+        `chaosbringer: "shardIndex" must be an integer in [0, ${options.shardCount}) (got ${JSON.stringify(options.shardIndex)})`
+      );
+    }
+  }
 
   if (options.seed !== undefined) {
     if (!Number.isFinite(options.seed) || !Number.isInteger(options.seed) || options.seed < 0) {

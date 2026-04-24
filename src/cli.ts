@@ -29,6 +29,7 @@ import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
+import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions } from "./types.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
@@ -52,6 +53,16 @@ if (subcommand === "flake") {
     process.exit(0);
   } catch (err) {
     console.error("flake failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+if (subcommand === "shard") {
+  const { runShardCli } = await import("./shard.js");
+  try {
+    await runShardCli(process.argv.slice(3));
+    process.exit(0);
+  } catch (err) {
+    console.error("shard failed:", err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
@@ -88,6 +99,7 @@ const { values, positionals } = parseArgs({
     baseline: { type: "string" },
     "baseline-strict": { type: "boolean", default: false },
     "github-annotations": { type: "boolean", default: false },
+    shard: { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -133,6 +145,7 @@ OPTIONS:
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
   --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
   --seed-from-sitemap <url|path>  Prepend URLs listed in a sitemap.xml (or sitemap index)
+  --shard <i/N>         Run as shard i of N (filter URLs by hash). Merge with the shard subcommand.
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -223,6 +236,14 @@ if (values.budget && values.budget.length > 0) {
   }
 }
 
+let shardIndex: number | undefined;
+let shardCount: number | undefined;
+if (values.shard) {
+  const parsed = parseShardArg(values.shard);
+  shardIndex = parsed.shardIndex;
+  shardCount = parsed.shardCount;
+}
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -246,6 +267,8 @@ const options: CrawlerOptions = {
   device: values.device,
   network: values.network as CrawlerOptions["network"],
   seedFromSitemap: values["seed-from-sitemap"],
+  shardIndex,
+  shardCount,
   invariants: values.axe
     ? [
         axe({

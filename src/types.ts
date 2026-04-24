@@ -94,6 +94,15 @@ export interface CrawlerOptions {
    * this at it. The file is not modified by the crawl.
    */
   storageState?: string;
+  /**
+   * 0-based index of this shard in a parallel run. Must be paired with
+   * `shardCount`. The crawler hashes every discovered URL and only processes
+   * those where `hash(url) % shardCount === shardIndex`. `baseUrl` is always
+   * processed regardless of hash so every shard can seed its BFS.
+   */
+  shardIndex?: number;
+  /** Total number of shards in a parallel run. Must be >= 1. */
+  shardCount?: number;
 }
 
 /** `record` captures responses to a HAR file; `replay` serves them back. */

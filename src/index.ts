@@ -51,6 +51,7 @@ export {
   printGithubAnnotations,
   type AnnotationLine,
 } from "./github.js";
+export { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
