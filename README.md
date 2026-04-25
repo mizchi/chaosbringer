@@ -15,6 +15,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Error detection**: console errors, failed requests, JS exceptions, unhandled rejections, invariant violations.
 - **Recovery from 404 / 5xx** — records what actions preceded the failure.
 - **HAR record / replay** + **trace record / replay / minimize** for fully deterministic runs and delta-debugged repros.
+- **Failure artifact bundles** — every failing page dumps a directory with screenshot, HTML, errors, trace prefix, and a `repro.sh` to replay it.
 - **Baseline diff** — surface new clusters / newly failing pages vs a previous run.
 - **Flake detection** — rerun the same crawl N times and flag clusters / pages whose outcome varies.
 - **Action heatmap** — pure aggregation of `report.actions[]` exposing the most-hit and most-failed targets.
@@ -379,6 +380,39 @@ await chaos({
 - Takes `fullPage: true` screenshots by default. Flip to viewport-only via `fullPage: false` in the programmatic API if your layout is sensitive to scroll position.
 - Pair with `--device iPhone 14` to record device-specific baselines; the baseline dir is per-crawl so split baselines across devices by using different dirs.
 
+## Failure artifact bundles
+
+When a page errors, times out, recovers from a 4xx/5xx, or surfaces an invariant violation, the crawler can dump a self-contained bundle so the failure is reproducible without re-running the whole crawl.
+
+```bash
+chaosbringer --url http://localhost:3000 --failure-artifacts ./failures
+```
+
+```ts
+import { chaos } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  failureArtifacts: { dir: "./failures", maxArtifacts: 50 },
+});
+```
+
+Each failing page becomes a numbered subdirectory under `--failure-artifacts <dir>`:
+
+```
+failures/0000__checkout_review__a91c2f0e/
+├── screenshot.png   # full-page PNG at the moment of failure
+├── page.html        # `await page.content()` snapshot
+├── errors.json      # full PageError[] (console / exception / network / invariant)
+├── trace.jsonl      # meta + visits + actions, sliced up to and including this page
+├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl`
+└── info.json        # URL, status, sourceUrl, recovery, seed, timestamps
+```
+
+`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. Combine with `--strict` or `--baseline` to gate CI on the same shape of failure.
+
+`maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
+
 ## Performance budget
 
 Declare a per-metric budget (in ms). Any page whose measured metric exceeds its limit is recorded as an invariant violation (`perf-budget.<metric>`), which fails the run just like any other invariant.
@@ -617,6 +651,8 @@ const merged = mergeReports([r0, r1, r2, r3]);
 | `--visual-max-diff-ratio <n>` | Ratio pixel budget (0..1) | — |
 | `--visual-diff-dir <dir>` | Write diff PNGs here on failure | — |
 | `--visual-update` | Overwrite baselines with current screenshots (for intentional UI updates) | false |
+| `--failure-artifacts <dir>` | Per-failure bundle (screenshot + html + errors + trace + repro.sh) | — |
+| `--failure-max <n>` | Cap the number of failure bundles per run | unlimited |
 | `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
 | `--trace-replay <path>` | Replay a previously recorded trace | — |
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
