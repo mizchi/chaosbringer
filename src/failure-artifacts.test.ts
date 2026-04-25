@@ -55,6 +55,25 @@ describe("shouldSaveArtifacts", () => {
   it("returns false on a clean success", () => {
     expect(shouldSaveArtifacts(page("http://x/"))).toBe(false);
   });
+
+  it("returns true for HTTP 404 even when status is still 'success' and errors is empty", () => {
+    // The crawler captures bundles BEFORE the recovery branch flips status
+    // to 'recovered'. A plain 404 with no JS errors must still trigger.
+    expect(
+      shouldSaveArtifacts(page("http://x/", { statusCode: 404 }))
+    ).toBe(true);
+  });
+
+  it("returns true for HTTP 500", () => {
+    expect(
+      shouldSaveArtifacts(page("http://x/", { statusCode: 500 }))
+    ).toBe(true);
+  });
+
+  it("returns false for HTTP 200 / 3xx", () => {
+    expect(shouldSaveArtifacts(page("http://x/", { statusCode: 200 }))).toBe(false);
+    expect(shouldSaveArtifacts(page("http://x/", { statusCode: 301 }))).toBe(false);
+  });
 });
 
 describe("failureBundleKey", () => {

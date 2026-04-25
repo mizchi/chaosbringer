@@ -546,11 +546,15 @@ export class ChaosCrawler {
   /**
    * True when trace entries should be recorded in memory. `traceOut`
    * obviously needs them; `failureArtifacts` also needs an in-memory trace
-   * so it can serialize the prefix-up-to-failure into each bundle even
-   * when the user hasn't opted into a global trace file.
+   * so it can serialize the prefix-up-to-failure into each bundle — but
+   * only when `saveTrace` isn't explicitly disabled. Recording for a
+   * caller that has opted out wastes memory on long crawls.
    */
   private isRecordingTrace(): boolean {
-    return Boolean(this.options.traceOut) || Boolean(this.options.failureArtifacts);
+    if (this.options.traceOut) return true;
+    const fa = this.options.failureArtifacts;
+    if (fa && fa.saveTrace !== false) return true;
+    return false;
   }
 
   /**
