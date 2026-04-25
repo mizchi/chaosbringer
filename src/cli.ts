@@ -30,7 +30,8 @@ import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions } from "./types.js";
+import type { CrawlerOptions, Invariant } from "./types.js";
+import { visualRegression } from "./visual.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
@@ -91,6 +92,12 @@ const { values, positionals } = parseArgs({
     budget: { type: "string", multiple: true },
     axe: { type: "boolean", default: false },
     "axe-tags": { type: "string" },
+    "visual-baseline": { type: "string" },
+    "visual-threshold": { type: "string" },
+    "visual-max-diff-pixels": { type: "string" },
+    "visual-max-diff-ratio": { type: "string" },
+    "visual-diff-dir": { type: "string" },
+    "visual-update": { type: "boolean", default: false },
     "trace-out": { type: "string" },
     "trace-replay": { type: "string" },
     device: { type: "string" },
@@ -140,6 +147,12 @@ OPTIONS:
   --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
   --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
+  --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires pixelmatch + pngjs)
+  --visual-threshold <n>   pixelmatch color threshold 0..1 (default 0.1)
+  --visual-max-diff-pixels <n>  Absolute pixel budget; fail when exceeded (default 0)
+  --visual-max-diff-ratio <n>   Ratio pixel budget (0..1); evaluated alongside max-diff-pixels
+  --visual-diff-dir <dir>  Write diff PNGs here on failure
+  --visual-update       Overwrite baselines with current screenshots (for intentional UI updates)
   --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
@@ -244,6 +257,72 @@ if (values.shard) {
   shardCount = parsed.shardCount;
 }
 
+function parseNumberFlag(
+  flag: string,
+  raw: string | undefined,
+  opts: { min?: number; max?: number; integer?: boolean }
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    console.error(`Error: ${flag} must be a finite number (got ${JSON.stringify(raw)})`);
+    process.exit(1);
+  }
+  if (opts.integer && !Number.isInteger(n)) {
+    console.error(`Error: ${flag} must be an integer (got ${n})`);
+    process.exit(1);
+  }
+  if (opts.min !== undefined && n < opts.min) {
+    console.error(`Error: ${flag} must be >= ${opts.min} (got ${n})`);
+    process.exit(1);
+  }
+  if (opts.max !== undefined && n > opts.max) {
+    console.error(`Error: ${flag} must be <= ${opts.max} (got ${n})`);
+    process.exit(1);
+  }
+  return n;
+}
+
+function buildInvariants(): Invariant[] | undefined {
+  const list: Invariant[] = [];
+  if (values.axe) {
+    list.push(
+      axe({
+        tags: values["axe-tags"]
+          ? values["axe-tags"]
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : undefined,
+      })
+    );
+  }
+  if (values["visual-baseline"]) {
+    list.push(
+      visualRegression({
+        baselineDir: values["visual-baseline"],
+        threshold: parseNumberFlag("--visual-threshold", values["visual-threshold"], {
+          min: 0,
+          max: 1,
+        }),
+        maxDiffPixels: parseNumberFlag(
+          "--visual-max-diff-pixels",
+          values["visual-max-diff-pixels"],
+          { min: 0, integer: true }
+        ),
+        maxDiffRatio: parseNumberFlag(
+          "--visual-max-diff-ratio",
+          values["visual-max-diff-ratio"],
+          { min: 0, max: 1 }
+        ),
+        diffDir: values["visual-diff-dir"],
+        updateBaseline: values["visual-update"],
+      })
+    );
+  }
+  return list.length > 0 ? list : undefined;
+}
+
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
@@ -269,18 +348,7 @@ const options: CrawlerOptions = {
   seedFromSitemap: values["seed-from-sitemap"],
   shardIndex,
   shardCount,
-  invariants: values.axe
-    ? [
-        axe({
-          tags: values["axe-tags"]
-            ? values["axe-tags"]
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean)
-            : undefined,
-        }),
-      ]
-    : undefined,
+  invariants: buildInvariants(),
 };
 
 const outputPath = values.output || "chaos-report.json";

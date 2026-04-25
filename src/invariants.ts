@@ -7,6 +7,7 @@
  */
 
 import type { Invariant } from "./types.js";
+import { visualRegression } from "./visual.js";
 
 export interface AxeInvariantOptions {
   /** Display name for reporting. Default: `a11y-axe`. */
@@ -141,4 +142,4 @@ export function axe(options: AxeInvariantOptions = {}): Invariant {
 }
 
 /** Exported as a namespace so consumers can write `invariants.axe(...)`. */
-export const invariants = { axe };
+export const invariants = { axe, visualRegression };

@@ -16,6 +16,14 @@ export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
 export { checkPerformanceBudget } from "./budget.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
+  compareScreenshotBuffers,
+  formatVisualDiff,
+  screenshotFilename,
+  visualRegression,
+  type CompareResult,
+  type VisualRegressionOptions,
+} from "./visual.js";
+export {
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
   groupTrace,
