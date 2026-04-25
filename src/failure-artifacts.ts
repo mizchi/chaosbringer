@@ -22,13 +22,19 @@ import type { FailureArtifactsOptions, PageResult } from "./types.js";
 
 /**
  * True when this page result should trigger a failure bundle. We bundle on
- * any of: navigation error, timeout, crashed page, or any collected
- * PageError (console / exception / network / invariant). Recovered pages
- * are intentionally included — they recovered from a 404/5xx, but the
- * underlying URL is still broken and worth capturing.
+ * any of: navigation error, timeout, crashed page, an HTTP 4xx/5xx status,
+ * or any collected PageError (console / exception / network / invariant).
+ *
+ * The HTTP-status check matters because the crawler hooks this *before*
+ * the recovery branch flips a 404/5xx response from `status: "success"`
+ * to `status: "recovered"`. Without the statusCode check a plain 404 page
+ * with no JS errors would fall through and never get bundled.
  */
 export function shouldSaveArtifacts(result: PageResult): boolean {
   if (result.status === "error" || result.status === "timeout" || result.status === "recovered") {
+    return true;
+  }
+  if (typeof result.statusCode === "number" && result.statusCode >= 400) {
     return true;
   }
   if (result.errors.length > 0) return true;
