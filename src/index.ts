@@ -61,6 +61,14 @@ export {
 } from "./github.js";
 export { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
 export { parseMetaRefreshUrl } from "./links.js";
+export {
+  buildReproScript,
+  failureBundleKey,
+  shouldSaveArtifacts,
+  writeFailureBundle,
+  type FailureBundleInfo,
+  type WriteFailureBundleArgs,
+} from "./failure-artifacts.js";
 
 // Playwright Test integration
 export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
@@ -92,6 +100,7 @@ export type {
   ReportDiff,
   ClusterDiffEntry,
   PageDiffEntry,
+  FailureArtifactsOptions,
 } from "./types.js";
 export { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 export { networkConditionsFor, type NetworkConditions } from "./network.js";
