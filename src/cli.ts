@@ -428,9 +428,11 @@ async function main() {
     if (wantsHeatmap) {
       const entries = buildActionHeatmap(report.actions);
       if (values.heatmap && !isQuiet) {
-        const top = values["heatmap-top"]
-          ? Math.max(0, Number.parseInt(values["heatmap-top"], 10))
-          : 20;
+        const top =
+          parseNumberFlag("--heatmap-top", values["heatmap-top"], {
+            min: 0,
+            integer: true,
+          }) ?? 20;
         console.log("");
         console.log(formatHeatmap(entries, top));
       }
