@@ -46,6 +46,7 @@ import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
+import { shouldSaveArtifacts, writeFailureBundle } from "./failure-artifacts.js";
 import {
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
@@ -73,6 +74,7 @@ const DEFAULT_OPTIONS: Required<
     | "seedFromSitemap"
     | "shardIndex"
     | "shardCount"
+    | "failureArtifacts"
   >
 > = {
   maxPages: 50,
@@ -145,6 +147,8 @@ export class ChaosCrawler {
   private lastSuccessfulUrl: string = "";
   /** Recovery count for reporting */
   private recoveryCount = 0;
+  /** How many failure-artifact bundles have been written. Used as a sequence + cap. */
+  private failureArtifactCount = 0;
   /** Discovery metrics */
   private discoveryMetrics: DiscoveryMetrics = {
     extractedLinks: 0,
@@ -344,8 +348,9 @@ export class ChaosCrawler {
     this.actions = [];
     this.trace = [];
     this.blockedExternalCount = 0;
+    this.failureArtifactCount = 0;
 
-    if (this.options.traceOut) {
+    if (this.isRecordingTrace()) {
       this.trace.push({
         kind: "meta",
         v: TRACE_FORMAT_VERSION,
@@ -433,7 +438,7 @@ export class ChaosCrawler {
           this.discoveryMetrics.uniquePages++;
           this.events.onProgress?.(i + 1, groups.length);
           this.logger.logProgress(i + 1, groups.length);
-          if (this.options.traceOut) {
+          if (this.isRecordingTrace()) {
             this.trace.push({ kind: "visit", url: group.url });
           }
           try {
@@ -458,7 +463,7 @@ export class ChaosCrawler {
           this.events.onProgress?.(this.visited.size, this.options.maxPages);
           this.logger.logProgress(this.visited.size, this.options.maxPages);
 
-          if (this.options.traceOut) {
+          if (this.isRecordingTrace()) {
             this.trace.push({ kind: "visit", url: entry.url });
           }
 
@@ -538,6 +543,84 @@ export class ChaosCrawler {
    * URL whose hash doesn't match this shard's index — except `baseUrl`, which
    * every shard must process so it has a seed for BFS.
    */
+  /**
+   * True when trace entries should be recorded in memory. `traceOut`
+   * obviously needs them; `failureArtifacts` also needs an in-memory trace
+   * so it can serialize the prefix-up-to-failure into each bundle — but
+   * only when `saveTrace` isn't explicitly disabled. Recording for a
+   * caller that has opted out wastes memory on long crawls.
+   */
+  private isRecordingTrace(): boolean {
+    if (this.options.traceOut) return true;
+    const fa = this.options.failureArtifacts;
+    if (fa && fa.saveTrace !== false) return true;
+    return false;
+  }
+
+  /**
+   * If failure artefacts are enabled and the page result qualifies, capture
+   * a screenshot + HTML + trace snapshot and dump a bundle directory.
+   * Errors here are intentionally swallowed: the bundle is diagnostic, not
+   * load-bearing — losing one bundle shouldn't take the crawler down.
+   */
+  private async maybeWriteFailureBundle(page: Page, result: PageResult): Promise<void> {
+    const opts = this.options.failureArtifacts;
+    if (!opts) return;
+    if (!shouldSaveArtifacts(result)) return;
+    if (
+      typeof opts.maxArtifacts === "number" &&
+      this.failureArtifactCount >= opts.maxArtifacts
+    ) {
+      return;
+    }
+
+    const sequence = this.failureArtifactCount;
+    this.failureArtifactCount++;
+
+    let screenshot: Buffer | undefined;
+    if ((opts.saveScreenshot ?? true)) {
+      try {
+        screenshot = await page.screenshot({ fullPage: true, type: "png" });
+      } catch (err) {
+        this.logger.warn("failure_artifact_screenshot_failed", {
+          url: result.url,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    let html: string | undefined;
+    if ((opts.saveHtml ?? true)) {
+      try {
+        html = await page.content();
+      } catch (err) {
+        this.logger.warn("failure_artifact_html_failed", {
+          url: result.url,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    try {
+      const bundleDir = writeFailureBundle({
+        options: opts,
+        baseUrl: this.options.baseUrl,
+        seed: this.rng.seed,
+        sequence,
+        result,
+        screenshot,
+        html,
+        trace: (opts.saveTrace ?? true) ? this.trace : undefined,
+      });
+      this.logger.info("failure_artifact_written", { url: result.url, bundleDir });
+    } catch (err) {
+      this.logger.warn("failure_artifact_write_failed", {
+        url: result.url,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private ownsUrl(url: string): boolean {
     const count = this.options.shardCount;
     if (count === undefined || count <= 1) return true;
@@ -689,6 +772,11 @@ export class ChaosCrawler {
       result.discoveryMethod = method;
       result.sourceUrl = sourceUrl;
       result.sourceElement = sourceElement;
+
+      // Capture failure artefacts BEFORE the recovery branch navigates the
+      // page away — otherwise the screenshot would show the recovered URL
+      // rather than the failing one.
+      await this.maybeWriteFailureBundle(page, result);
 
       // Handle recovery from 404 or error status
       if (
@@ -1290,7 +1378,7 @@ export class ChaosCrawler {
       actionsPerformed++;
       this.actions.push(result);
       this.addToHistory(result);  // Add to recovery history
-      if (this.options.traceOut) {
+      if (this.isRecordingTrace()) {
         this.trace.push(actionToTraceEntry(result, url));
       }
       this.events.onAction?.(result);
@@ -1385,7 +1473,7 @@ export class ChaosCrawler {
       }
       this.actions.push(result);
       this.addToHistory(result);
-      if (this.options.traceOut) {
+      if (this.isRecordingTrace()) {
         this.trace.push(actionToTraceEntry(result, url));
       }
       this.events.onAction?.(result);
@@ -1742,6 +1830,28 @@ export function validateOptions(options: CrawlerOptions): void {
     if (typeof options.network !== "string" || !allowed.has(options.network)) {
       throw new Error(
         `chaosbringer: "network" must be one of ${NETWORK_PROFILES.join(", ")} (got ${JSON.stringify(options.network)})`
+      );
+    }
+  }
+
+  if (options.failureArtifacts !== undefined) {
+    const fa = options.failureArtifacts;
+    if (fa === null || typeof fa !== "object" || Array.isArray(fa)) {
+      throw new Error(
+        `chaosbringer: "failureArtifacts" must be an object with a "dir" string`
+      );
+    }
+    if (typeof fa.dir !== "string" || fa.dir.length === 0) {
+      throw new Error(
+        `chaosbringer: "failureArtifacts.dir" must be a non-empty string`
+      );
+    }
+    if (
+      fa.maxArtifacts !== undefined &&
+      (!Number.isInteger(fa.maxArtifacts) || fa.maxArtifacts < 0)
+    ) {
+      throw new Error(
+        `chaosbringer: "failureArtifacts.maxArtifacts" must be a non-negative integer`
       );
     }
   }

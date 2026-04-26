@@ -103,6 +103,28 @@ export interface CrawlerOptions {
   shardIndex?: number;
   /** Total number of shards in a parallel run. Must be >= 1. */
   shardCount?: number;
+  /**
+   * Per-failure artifact bundling. When set, every page that errors,
+   * times out, crashes, or surfaces invariant violations gets its own
+   * directory under `dir` containing the screenshot, HTML, error list,
+   * trace up to that point, and a `repro.sh` to replay it. Designed to
+   * make a CI failure self-contained — drop the bundle into an issue
+   * and the reader can reproduce locally.
+   */
+  failureArtifacts?: FailureArtifactsOptions;
+}
+
+export interface FailureArtifactsOptions {
+  /** Directory under which one subdirectory per failure is created. */
+  dir: string;
+  /** Save the page's HTML (default: true). */
+  saveHtml?: boolean;
+  /** Save the screenshot (default: true). */
+  saveScreenshot?: boolean;
+  /** Save the trace up to and including the failing page (default: true). */
+  saveTrace?: boolean;
+  /** Cap the number of bundles per run (default: unlimited). */
+  maxArtifacts?: number;
 }
 
 /** `record` captures responses to a HAR file; `replay` serves them back. */

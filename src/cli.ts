@@ -100,6 +100,8 @@ const { values, positionals } = parseArgs({
     "visual-max-diff-ratio": { type: "string" },
     "visual-diff-dir": { type: "string" },
     "visual-update": { type: "boolean", default: false },
+    "failure-artifacts": { type: "string" },
+    "failure-max": { type: "string" },
     "trace-out": { type: "string" },
     "trace-replay": { type: "string" },
     device: { type: "string" },
@@ -158,6 +160,8 @@ OPTIONS:
   --visual-max-diff-ratio <n>   Ratio pixel budget (0..1); evaluated alongside max-diff-pixels
   --visual-diff-dir <dir>  Write diff PNGs here on failure
   --visual-update       Overwrite baselines with current screenshots (for intentional UI updates)
+  --failure-artifacts <dir>  Write a bundle (screenshot + html + errors + trace + repro.sh) per failing page
+  --failure-max <n>     Cap the number of failure bundles per run (default: unlimited)
   --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
@@ -356,6 +360,15 @@ const options: CrawlerOptions = {
   seedFromSitemap: values["seed-from-sitemap"],
   shardIndex,
   shardCount,
+  failureArtifacts: values["failure-artifacts"]
+    ? {
+        dir: values["failure-artifacts"],
+        maxArtifacts: parseNumberFlag("--failure-max", values["failure-max"], {
+          min: 0,
+          integer: true,
+        }),
+      }
+    : undefined,
   invariants: buildInvariants(),
 };
 

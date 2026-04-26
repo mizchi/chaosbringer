@@ -217,4 +217,29 @@ describe("validateOptions", () => {
   it("rejects shardCount < 1", () => {
     expect(() => validateOptions(base({ shardIndex: 0, shardCount: 0 }))).toThrow(/shardCount/);
   });
+
+  it("accepts a valid failureArtifacts config", () => {
+    expect(() => validateOptions(base({ failureArtifacts: { dir: "./failures" } }))).not.toThrow();
+    expect(() =>
+      validateOptions(base({ failureArtifacts: { dir: "./failures", maxArtifacts: 10 } }))
+    ).not.toThrow();
+  });
+
+  it("rejects failureArtifacts without a dir", () => {
+    expect(() =>
+      validateOptions(base({ failureArtifacts: {} as unknown as { dir: string } }))
+    ).toThrow(/failureArtifacts.dir/);
+  });
+
+  it("rejects an empty failureArtifacts.dir", () => {
+    expect(() =>
+      validateOptions(base({ failureArtifacts: { dir: "" } }))
+    ).toThrow(/failureArtifacts.dir/);
+  });
+
+  it("rejects a negative maxArtifacts", () => {
+    expect(() =>
+      validateOptions(base({ failureArtifacts: { dir: "./x", maxArtifacts: -1 } }))
+    ).toThrow(/maxArtifacts/);
+  });
 });
