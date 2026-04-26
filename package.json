@@ -21,6 +21,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
     "lint": "biome check src/",

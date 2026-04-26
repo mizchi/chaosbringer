@@ -34,6 +34,20 @@ npx playwright install chromium
 
 `chaosbringer` targets ESM. Programmatic consumers need `"type": "module"` (or `.mts` files) and `playwright` as a peer dependency.
 
+### Installing from a git ref
+
+`chaosbringer` is currently distributed via GitHub (no npm package yet). Both forms work:
+
+```bash
+# pin a commit SHA
+pnpm add chaosbringer@github:mizchi/chaosbringer#<sha>
+
+# track main
+pnpm add chaosbringer@github:mizchi/chaosbringer
+```
+
+The repository ships a built `dist/` directory and a `prepare` script, so `pnpm install` / `npm install` works out of the box without a manual build step. If you're hacking on `chaosbringer` itself, run `pnpm build` to refresh `dist/` before committing.
+
 ## Quick start — CLI
 
 ```bash
