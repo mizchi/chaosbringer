@@ -29,6 +29,8 @@ import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
+import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
+import { writeFileSync } from "node:fs";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
@@ -107,6 +109,9 @@ const { values, positionals } = parseArgs({
     "baseline-strict": { type: "boolean", default: false },
     "github-annotations": { type: "boolean", default: false },
     shard: { type: "string" },
+    heatmap: { type: "boolean", default: false },
+    "heatmap-top": { type: "string" },
+    "heatmap-out": { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -159,6 +164,9 @@ OPTIONS:
   --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
   --seed-from-sitemap <url|path>  Prepend URLs listed in a sitemap.xml (or sitemap index)
   --shard <i/N>         Run as shard i of N (filter URLs by hash). Merge with the shard subcommand.
+  --heatmap             Print an action-frequency heatmap after the report
+  --heatmap-top <n>     Limit the heatmap to the top N targets (default 20)
+  --heatmap-out <path>  Also write the heatmap as JSON
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -415,6 +423,24 @@ async function main() {
     if (emitGithub) {
       printGithubAnnotations(report, { strict: isStrict });
     }
+
+    const wantsHeatmap = values.heatmap || Boolean(values["heatmap-out"]);
+    if (wantsHeatmap) {
+      const entries = buildActionHeatmap(report.actions);
+      if (values.heatmap && !isQuiet) {
+        const top = values["heatmap-top"]
+          ? Math.max(0, Number.parseInt(values["heatmap-top"], 10))
+          : 20;
+        console.log("");
+        console.log(formatHeatmap(entries, top));
+      }
+      const heatmapOut = values["heatmap-out"];
+      if (heatmapOut) {
+        writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
+        if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+      }
+    }
+
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);

@@ -60,6 +60,7 @@ export {
   type AnnotationLine,
 } from "./github.js";
 export { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
+export { buildActionHeatmap, formatHeatmap, type ActionHeatmapEntry } from "./heatmap.js";
 export { parseMetaRefreshUrl } from "./links.js";
 
 // Playwright Test integration

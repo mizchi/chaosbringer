@@ -17,6 +17,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **HAR record / replay** + **trace record / replay / minimize** for fully deterministic runs and delta-debugged repros.
 - **Baseline diff** — surface new clusters / newly failing pages vs a previous run.
 - **Flake detection** — rerun the same crawl N times and flag clusters / pages whose outcome varies.
+- **Action heatmap** — pure aggregation of `report.actions[]` exposing the most-hit and most-failed targets.
 - **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
 - **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
 - **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
@@ -304,6 +305,26 @@ await chaos({
 
 A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
 
+## Action heatmap
+
+Aggregate `report.actions[]` into per-target stats — count, success rate, blocked-external count, shard-skipped count — sorted by frequency. Useful when you want to know which targets the chaos driver is hitting most and which ones disproportionately fail.
+
+```bash
+chaosbringer --url http://localhost:3000 --heatmap --heatmap-top 30
+chaosbringer --url http://localhost:3000 --heatmap-out heatmap.json
+```
+
+```ts
+import { buildActionHeatmap, formatHeatmap, chaos } from "chaosbringer";
+
+const { report } = await chaos({ baseUrl: "http://localhost:3000" });
+const entries = buildActionHeatmap(report.actions);
+console.log(formatHeatmap(entries, 20));
+// entries is sorted by count desc, then failureCount desc, then key asc.
+```
+
+It's pure aggregation over the existing `actions` array — works on any report (current run, baseline, or one loaded from disk). Action types remain distinct, so `click Search` and `input Search` count separately.
+
 ## Visual regression
 
 Compare each page's screenshot against a baseline PNG on disk. Differences beyond the configured budget are recorded as invariant violations (`visual-regression`), which fail the run.
@@ -588,6 +609,9 @@ const merged = mergeReports([r0, r1, r2, r3]);
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
 | `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
 | `--shard <i/N>` | Run as shard i of N. See the `shard` subcommand to spawn + merge. | — |
+| `--heatmap` | Print an action-frequency heatmap after the report | false |
+| `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |
+| `--heatmap-out <path>` | Write the heatmap as JSON | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
