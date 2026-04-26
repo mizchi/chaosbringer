@@ -47,7 +47,7 @@ pnpm add chaosbringer@github:mizchi/chaosbringer#<sha>
 pnpm add chaosbringer@github:mizchi/chaosbringer
 ```
 
-The repository ships a built `dist/` directory and a `prepare` script, so `pnpm install` / `npm install` works out of the box without a manual build step. If you're hacking on `chaosbringer` itself, run `pnpm build` to refresh `dist/` before committing.
+The package's `prepare` script runs `tsc` on install, so `pnpm install` / `npm install` builds `dist/` automatically — no manual step needed.
 
 ## Quick start — CLI
 

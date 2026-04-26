@@ -1,1 +1,0 @@
-{"version":3,"file":"budget.d.ts","sourceRoot":"","sources":["../src/budget.ts"],"names":[],"mappings":"AAAA;;;;GAIG;AAEH,OAAO,KAAK,EAAE,SAAS,EAAE,iBAAiB,EAAE,kBAAkB,EAAE,MAAM,YAAY,CAAC;AAGnF;;;;GAIG;AACH,wBAAgB,sBAAsB,CACpC,OAAO,EAAE,kBAAkB,EAC3B,MAAM,EAAE,iBAAiB,GAAG,SAAS,EACrC,GAAG,EAAE,MAAM,EACX,GAAG,GAAE,MAAmB,GACvB,SAAS,EAAE,CAkBb"}
