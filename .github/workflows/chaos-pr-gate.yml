@@ -1,0 +1,110 @@
+name: chaos-pr-gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  chaos-crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Download latest baseline (best-effort)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p baseline
+          run_id=$(gh run list \
+            --workflow=chaos-baseline.yml \
+            --branch=main \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            -q '.[0].databaseId' \
+            -R ${{ github.repository }})
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --name chaos-baseline -D ./baseline -R ${{ github.repository }} || true
+          fi
+          if [ -f baseline/chaos-report.json ]; then
+            echo "BASELINE=baseline/chaos-report.json" >> "$GITHUB_ENV"
+          else
+            echo "no baseline available; running without --baseline"
+          fi
+
+      - name: Start fixture server
+        run: |
+          PORT=4455 pnpm fixture:serve &
+          echo $! > .fixture.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4455/ > /dev/null; then
+              echo "fixture server up"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "fixture server did not start" >&2
+          exit 1
+
+      - name: Run chaos crawl with strict + baseline
+        run: |
+          pnpm exec chaosbringer \
+            --url http://127.0.0.1:4455 \
+            --max-pages 30 \
+            --max-actions-per-page 5 \
+            --seed 1 \
+            --strict \
+            --output chaos-report.json \
+            --failure-artifacts failure-artifacts \
+            ${BASELINE:+--baseline "$BASELINE"} \
+            ${BASELINE:+--baseline-strict}
+
+      - name: Stop fixture server
+        if: always()
+        run: kill "$(cat .fixture.pid)" 2>/dev/null || true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report-pr-${{ github.event.pull_request.number }}
+          path: chaos-report.json
+          if-no-files-found: warn
+
+      - name: Upload failure bundles
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-failures-pr-${{ github.event.pull_request.number }}
+          path: failure-artifacts/
+          if-no-files-found: ignore
