@@ -2,3 +2,7 @@ chaos-report.json
 *.log
 node_modules/
 dist/
+.flaker/
+flake.json
+heatmap.json
+failure-artifacts/

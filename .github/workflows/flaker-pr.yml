@@ -1,0 +1,52 @@
+name: flaker-pr
+
+# Advisory PR job: runs the merge-gate selection of vitest suites and reports
+# whether they pass. continue-on-error keeps this non-blocking until
+# `flaker status` drift shows `ready`.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  flaker-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Restore flaker data
+        uses: actions/cache@v4
+        with:
+          path: .flaker/data
+          key: flaker-data-restore-${{ github.run_id }}
+          restore-keys: |
+            flaker-data-
+
+      - name: flaker run --gate merge
+        run: pnpm flaker:run:merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,58 @@
+[repo]
+owner = "mizchi"
+name = "chaosbringer"
+
+[storage]
+path = ".flaker/data"
+
+[adapter]
+type = "vitest"
+
+[runner]
+type = "vitest"
+command = "pnpm exec vitest run"
+
+# Optional: used by `flaker run --runner actrun`
+# [runner.actrun]
+# workflow = ".github/workflows/ci.yml"
+# job = "test"
+# local = true
+# trust = true
+
+[affected]
+# Resolver options:
+#   "simple"    — directory-name matching (default, single-package or fallback)
+#   "workspace" — pnpm/npm/yarn workspaces (monorepo)
+#   "glob"      — glob rules in flaker.affected.toml (custom rules)
+#   "bitflow"   — Starlark-based dependency graph
+#   "moon"      — MoonBit moon.pkg imports
+resolver = "simple"
+config = ""
+
+[quarantine]
+# Day 1: keep auto = false until CI history accumulates and `flaker status`
+# shows promotion drift. Flip to true once detection is stable (Week 1-2).
+auto = false
+flaky_rate_threshold_percentage = 30
+min_runs = 5
+
+[flaky]
+window_days = 14
+detection_threshold_ratio = 0.02
+
+[profile.local]
+strategy = "affected"
+max_duration_seconds = 60
+fallback_strategy = "weighted"
+skip_flaky_tagged = true
+
+[profile.ci]
+strategy = "hybrid"
+sample_percentage = 30
+# adaptive needs >=30 commits of FNR history to converge; enable once
+# `flaker status` reports moderate+ data confidence.
+adaptive = false
+skip_flaky_tagged = true
+
+[profile.scheduled]
+strategy = "full"
