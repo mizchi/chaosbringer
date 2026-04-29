@@ -1,0 +1,50 @@
+name: flaker-nightly
+
+# Nightly reconciliation: pull GitHub Actions history, calibrate, run cold-start
+# / quarantine apply per the planner. Idempotent — safe to re-run anytime.
+on:
+  schedule:
+    - cron: "47 17 * * *"  # 02:47 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Cache flaker data
+        uses: actions/cache@v4
+        with:
+          path: .flaker/data
+          key: flaker-data-${{ github.run_id }}
+          restore-keys: |
+            flaker-data-
+
+      - name: flaker apply
+        run: pnpm flaker:apply
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: flaker status (markdown)
+        run: pnpm flaker:status --markdown > flaker-status.md || true
+
+      - name: Upload status
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaker-status
+          path: flaker-status.md
+          retention-days: 30

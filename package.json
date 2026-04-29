@@ -43,7 +43,14 @@
     "lint": "biome check src/",
     "crawl": "tsx src/cli.ts",
     "fixture:serve": "tsx fixtures/site/server.ts",
-    "fixture:run": "tsx fixtures/runner/run.ts"
+    "fixture:run": "tsx fixtures/runner/run.ts",
+    "flaker": "NODE_OPTIONS=--preserve-symlinks-main flaker",
+    "flaker:plan": "NODE_OPTIONS=--preserve-symlinks-main flaker plan",
+    "flaker:apply": "NODE_OPTIONS=--preserve-symlinks-main flaker apply",
+    "flaker:status": "NODE_OPTIONS=--preserve-symlinks-main flaker status",
+    "flaker:doctor": "NODE_OPTIONS=--preserve-symlinks-main flaker doctor",
+    "flaker:run:iteration": "NODE_OPTIONS=--preserve-symlinks-main flaker run --gate iteration",
+    "flaker:run:merge": "NODE_OPTIONS=--preserve-symlinks-main flaker run --gate merge"
   },
   "files": [
     "dist",
@@ -79,7 +86,11 @@
       "optional": true
     }
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["duckdb", "esbuild"]
+  },
   "devDependencies": {
+    "@mizchi/flaker": "^0.10.6",
     "@playwright/test": "^1.52.0",
     "@types/node": "^22.0.0",
     "@types/pixelmatch": "^5.2.6",

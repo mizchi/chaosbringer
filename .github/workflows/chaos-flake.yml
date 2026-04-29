@@ -1,0 +1,87 @@
+name: chaos-flake
+
+# Weekly: run the chaos crawler N times to detect flaky clusters and pages,
+# then open or close GitHub issues for each persistent flaky cluster.
+on:
+  schedule:
+    - cron: "33 19 * * 1"  # Mon 04:33 JST
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: number of crawl repetitions
+        default: "10"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  flake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Start fixture server
+        run: |
+          PORT=4455 pnpm fixture:serve &
+          echo $! > .fixture.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4455/ > /dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          exit 1
+
+      - name: chaosbringer flake
+        run: |
+          pnpm exec chaosbringer flake \
+            --url http://127.0.0.1:4455 \
+            --runs ${{ github.event.inputs.runs || '10' }} \
+            --max-pages 30 \
+            --max-actions-per-page 5 \
+            --output flake.json \
+          || true   # exit 1 means flakes were found; we want to process them
+
+      - name: Stop fixture server
+        if: always()
+        run: kill "$(cat .fixture.pid)" 2>/dev/null || true
+
+      - name: Reconcile flake issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: pnpm tsx scripts/chaos-flake-issues.ts flake.json
+
+      - name: Upload flake report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-flake-report
+          path: flake.json
+          retention-days: 90

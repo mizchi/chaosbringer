@@ -1,0 +1,79 @@
+name: chaos-baseline
+
+# Nightly + after each merge to main: produce baseline + heatmap, upload as
+# `chaos-baseline` artifact. PR-gate workflow downloads this for --baseline.
+on:
+  schedule:
+    - cron: "17 18 * * *"  # 03:17 JST
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Start fixture server
+        run: |
+          PORT=4455 pnpm fixture:serve &
+          echo $! > .fixture.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4455/ > /dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          exit 1
+
+      - name: Crawl + heatmap
+        run: |
+          pnpm exec chaosbringer \
+            --url http://127.0.0.1:4455 \
+            --max-pages 30 \
+            --max-actions-per-page 5 \
+            --seed 1 \
+            --output chaos-report.json \
+            --heatmap-out heatmap.json
+
+      - name: Stop fixture server
+        if: always()
+        run: kill "$(cat .fixture.pid)" 2>/dev/null || true
+
+      - name: Upload baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-baseline
+          path: |
+            chaos-report.json
+            heatmap.json
+          retention-days: 30

@@ -1,0 +1,36 @@
+name: flaker-confirm
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Test suite (file path)"
+        required: true
+      test_name:
+        description: "Test name"
+        required: true
+      repeat:
+        description: "Number of repetitions"
+        default: "5"
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+
+      - name: Run confirmation tests
+        run: |
+          for i in \$(seq 1 ${{ inputs.repeat }}); do
+            echo "--- Run \$i/${{ inputs.repeat }} ---"
+            pnpm exec vitest run "${{ inputs.suite }}" \\
+              -t "${{ inputs.test_name }}" \\
+              --reporter json \\
+              --outputFile "result-\$i.json" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flaker-confirm-results
+          path: result-*.json
