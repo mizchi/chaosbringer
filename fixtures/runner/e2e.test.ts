@@ -10,6 +10,8 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChaosCrawler } from "../../src/crawler.js";
+import { faults } from "../../src/faults.js";
+import { stateMachineInvariant } from "../../src/state-machine-invariants.js";
 import type { Invariant } from "../../src/types.js";
 import { startFixtureServer } from "../site/server.js";
 
@@ -327,5 +329,135 @@ describe("ChaosCrawler against fixture site", () => {
     expect(
       report2.pages[0]!.errors.some((e) => e.type === "invariant-violation"),
     ).toBe(true);
+  }, 120000);
+
+  it("fires lifecycle faults at every stage and reports per-fault stats", async () => {
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 3,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+      lifecycleFaults: [
+        // beforeNavigation: applied before page.goto on every page.
+        faults.cpu(2),
+        // afterLoad: clears localStorage on every page.
+        faults.clearStorage({ scopes: ["localStorage"] }),
+        // beforeActions: drops Service Worker caches on every page.
+        faults.evictCache(),
+        // afterLoad on /about only: tampers a fixed key.
+        faults.tamperStorage({
+          scope: "localStorage",
+          key: "auth",
+          value: "expired",
+          urlPattern: /\/about\b/,
+        }),
+      ],
+    });
+    const report = await crawler.start();
+
+    expect(report.lifecycleFaults).toBeDefined();
+    const stats = report.lifecycleFaults!;
+    expect(stats.length).toBe(4);
+
+    // All four entries must have run without throwing for their executor.
+    for (const s of stats) {
+      expect(s.errored).toBe(0);
+      expect(s.fired).toBeLessThanOrEqual(s.matched);
+    }
+
+    // Probability defaults to 1 → unconditional faults fire on every match.
+    const cpu = stats.find((s) => s.name === "cpu-throttle:2x")!;
+    expect(cpu.matched).toBeGreaterThan(0);
+    expect(cpu.fired).toBe(cpu.matched);
+
+    const clr = stats.find((s) => s.name === "clear-storage:localStorage")!;
+    expect(clr.matched).toBeGreaterThan(0);
+    expect(clr.fired).toBe(clr.matched);
+
+    const ev = stats.find((s) => s.name === "evict-cache")!;
+    expect(ev.matched).toBeGreaterThan(0);
+    expect(ev.fired).toBe(ev.matched);
+
+    // The tamper-storage fault is URL-restricted: matched / fired stay 0
+    // when /about wasn't visited. We only check it never errored.
+    const tamp = stats.find((s) => s.name === "tamper-storage:localStorage.auth")!;
+    expect(tamp.errored).toBe(0);
+  }, 120000);
+
+  it("carries state across pages and flags illegal state-machine transitions", async () => {
+    type RouteState = "home" | "about" | "spa" | "other";
+
+    // derive() classifies pages by URL path. Transitions only allow the
+    // home → about / about → home / home → spa cycle. Reaching any "other"
+    // page from anywhere except home is illegal — the fixture has plenty of
+    // such pages (/console-error, /js-exception, …) so the crawler will
+    // reliably trip the invariant during its BFS.
+    const transitions: Partial<Record<RouteState, readonly RouteState[]>> = {
+      home: ["about", "spa"],
+      about: ["home"],
+      spa: ["home"],
+      other: ["home"],
+    };
+
+    const sm = stateMachineInvariant<RouteState>({
+      name: "route",
+      initial: "home",
+      transitions,
+      when: "afterLoad",
+      derive: ({ url }) => {
+        const path = new URL(url).pathname.replace(/\/$/, "") || "/";
+        if (path === "/") return "home";
+        if (path === "/about") return "about";
+        if (path.startsWith("/spa/")) return "spa";
+        return "other";
+      },
+    });
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 5,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 4,
+      invariants: [sm],
+    });
+    const report = await crawler.start();
+
+    const violations = report.pages
+      .flatMap((p) => p.errors)
+      .filter((e) => e.invariantName === "route");
+
+    // The crawler discovers /console-error and /js-exception from /, so an
+    // "home → other" or "about → other" violation must surface.
+    expect(violations.length).toBeGreaterThanOrEqual(1);
+    expect(violations[0]!.message).toMatch(/illegal transition .* → "other"/);
+
+    // A second crawler run must reset state (no leftover label from the
+    // previous Map). Configure a tighter SM and assert it sees `home` as the
+    // first label, not "spa" (which the previous run might have arrived at).
+    const seenInitial: RouteState[] = [];
+    const sm2 = stateMachineInvariant<RouteState>({
+      name: "route",
+      initial: "home",
+      transitions,
+      when: "afterLoad",
+      derive: ({ url, prev }) => {
+        seenInitial.push(prev);
+        const path = new URL(url).pathname.replace(/\/$/, "") || "/";
+        if (path === "/") return "home";
+        return "other";
+      },
+    });
+    const crawler2 = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 9,
+      invariants: [sm2],
+    });
+    await crawler2.start();
+    expect(seenInitial[0]).toBe("home");
   }, 120000);
 });

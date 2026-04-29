@@ -1,0 +1,37 @@
+name: release-please
+
+# workflow_dispatch: maintainer starts a release (Release PR is created).
+# pull_request closed on main + head.ref starts with release-please--:
+#   fires automatically after Release PR merge so release-please itself
+#   creates tag + GitHub Release (no second manual dispatch needed).
+# Regular feat:/fix: PR merges are ignored by the job-level if-guard.
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.pull_request.merged == true &&
+         startsWith(github.event.pull_request.head.ref, 'release-please--'))
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: 3420845
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

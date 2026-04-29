@@ -8,7 +8,8 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Thorough link extraction** — `<a>`, `<area>`, `<iframe>`, `<link rel="canonical"/"alternate">`, and `<meta http-equiv="refresh">` feed the queue, so dead-link coverage isn't limited to clickable anchors.
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
-- **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`.
+- **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
+- **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
 - **Performance budgets** per TTFB / FCP / LCP / TBT — budget breaches fail the run.
 - **Visual regression** via pixelmatch — compare per-page screenshots against baselines, fail on diff.
@@ -166,6 +167,85 @@ await chaos({
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`.
 
+## Lifecycle faults (client-side)
+
+`faultInjection` is request-scoped; **lifecycle faults** are page-scoped client-side perturbations that fire at well-defined stages of every page visit. Use them to simulate slow CPUs, stale auth tokens, evicted Service Worker caches, and other browser-side conditions that aren't expressible at the network layer.
+
+```ts
+import { chaos, faults } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  lifecycleFaults: [
+    // Throttle the CPU 4× before navigation, so the load itself is slow.
+    faults.cpu(4),
+
+    // Wipe localStorage + cookies right after the page loads.
+    faults.clearStorage({ scopes: ["localStorage", "cookies"] }),
+
+    // Drop every Service Worker cache before chaos clicks fire — only on /app/*.
+    faults.evictCache({ urlPattern: /\/app\// }),
+
+    // Replace the auth token with an expired value on the dashboard, with a
+    // 50% probability per visit.
+    faults.tamperStorage({
+      scope: "localStorage",
+      key: "auth_token",
+      value: "expired",
+      urlPattern: /\/dashboard/,
+      probability: 0.5,
+    }),
+  ],
+});
+```
+
+### Stages
+
+Each lifecycle fault declares a `when` stage:
+
+| Stage | Fires | Typical use |
+| --- | --- | --- |
+| `beforeNavigation` | Before `page.goto`. | CDP-level conditions that need to apply during the load (CPU throttle). |
+| `afterLoad` | Right after navigation, before `afterLoad` invariants. | In-page mutations (storage wipes / tamper). |
+| `beforeActions` | After `afterLoad` invariants, before chaos clicks. | One-shot evictions that should not affect invariants but should precede user simulation (Service Worker cache). |
+| `betweenActions` | After every chaos action. | Sustained-pressure faults that need re-application across the action loop. |
+
+Helpers default to a sensible stage per action kind (`cpu` → `beforeNavigation`, `clearStorage` / `tamperStorage` → `afterLoad`, `evictCache` → `beforeActions`); pass `when` to override.
+
+### Action kinds
+
+- **`faults.cpu(rate, opts?)`** — `rate` ≥ 1 multiplier (1 = no throttle, 4 ≈ 4× slower) applied via CDP `Emulation.setCPUThrottlingRate`.
+- **`faults.clearStorage({ scopes, ... })`** — wipes one or more of `localStorage`, `sessionStorage`, `cookies`, `indexedDB`. Cookies are cleared at the BrowserContext level; the rest run in-page via `page.evaluate`.
+- **`faults.evictCache(opts?)`** — drops entries from the Service Worker `caches` API. With no `cacheNames`, every cache is dropped.
+- **`faults.tamperStorage({ scope, key, value, ... })`** — sets a single key in `localStorage` or `sessionStorage`. Useful for forcing logged-in apps into "stale auth token" / "corrupted client state" scenarios without touching the rest of storage.
+
+### Common options
+
+Every lifecycle helper accepts the same overrides:
+
+| Option | Description |
+| --- | --- |
+| `when` | Override the helper's default stage. |
+| `urlPattern` | Restrict the fault to URLs matching this regex / regex string. Omit to apply on every page. |
+| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 fault doesn't shift the seed sequence for chaos action selection. |
+| `name` | Override the auto-derived stats label (e.g. `cpu-throttle:4x`). |
+
+### Stats
+
+Every fault gets one row in `report.lifecycleFaults` with `matched` (URL-pattern matches), `fired` (post-probability), and `errored` (executor threw — e.g. SecurityError on opaque origins). Misbehaving faults are caught and counted; they never abort the rest of the crawl.
+
+```json
+{
+  "lifecycleFaults": [
+    { "name": "cpu-throttle:4x", "matched": 12, "fired": 12, "errored": 0 },
+    { "name": "clear-storage:localStorage", "matched": 12, "fired": 6, "errored": 0 },
+    { "name": "tamper-storage:localStorage.auth_token", "matched": 3, "fired": 1, "errored": 0 }
+  ]
+}
+```
+
+Like network-side fault injection, lifecycle faults are programmatic-only — they're not expressible as flat shell flags and so are absent from the CLI.
+
 ## Invariants
 
 Invariants are assertions that must hold on every page. They run either `afterLoad` (right after navigation) or `afterActions` (default — after chaos clicks/inputs). Returning `false`, throwing, or returning a string all count as a failure; returning `true` or `void` means the invariant held.
@@ -195,6 +275,66 @@ const { passed } = await chaos({ baseUrl: "http://localhost:3000", invariants })
 ```
 
 Violations always fail the run (exit 1), whether or not `strict` is set — a declared invariant is a stronger signal than console noise.
+
+### Trans-page state — `ctx.state`
+
+Each invariant's `check()` receives a `ctx.state: Map<string, unknown>` shared with every other invariant on every page. The same instance is passed for the lifetime of one `crawler.start()` call and reset on the next, so invariants can carry data across pages and flag regressions that need history (monotonic counters, set-membership, ordered events).
+
+```ts
+const cartCountMonotonic: Invariant = {
+  name: "cart-monotonic-after-add",
+  when: "afterActions",
+  async check({ page, state }) {
+    const n = Number((await page.locator("[data-cart-count]").textContent()) ?? "0");
+    const prev = (state.get("cart:max") as number | undefined) ?? 0;
+    if (n + 1 < prev) {
+      // Allow one decrement to model a removed item; flag larger drops.
+      return `cart count went from ${prev} to ${n}`;
+    }
+    state.set("cart:max", Math.max(prev, n));
+  },
+};
+```
+
+Use `state.set` / `state.get` directly, or build on top via `stateMachine()` below.
+
+### State-machine invariants
+
+For discrete app modes (`anonymous` → `logged-in` → `in-checkout` → `purchased`), `invariants.stateMachine()` compiles down to a regular `Invariant` that detects illegal transitions across pages.
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+type Auth = "anonymous" | "logged-in" | "in-checkout" | "purchased";
+
+const auth = invariants.stateMachine<Auth>({
+  name: "auth-flow",
+  initial: "anonymous",
+  // Self-loops are legal automatically. Terminal states have no outgoing edges.
+  transitions: {
+    anonymous: ["logged-in"],
+    "logged-in": ["anonymous", "in-checkout"],
+    "in-checkout": ["logged-in", "purchased"],
+    // `purchased` left out → terminal: leaving it is illegal.
+  },
+  // Run after chaos clicks so post-action page state is reflected.
+  when: "afterActions",
+  async derive({ page }) {
+    if (await page.locator("[data-receipt]").count() > 0) return "purchased";
+    if (await page.locator("[data-checkout-step]").count() > 0) return "in-checkout";
+    if (await page.locator("[data-user-id]").count() > 0) return "logged-in";
+    return "anonymous";
+  },
+});
+
+await chaos({ baseUrl: "http://localhost:3000", invariants: [auth] });
+```
+
+When `derive()` returns a label that the previous label's transition list doesn't allow, the invariant fails with `illegal transition "<prev>" → "<next>" (allowed: …)` — surfaced as a regular `invariant-violation` PageError, clustered like any other.
+
+`derive()` receives `{ page, url, prev, errors }` so the caller can branch on the previous label or the current URL when classifying the page.
+
+The state-machine helper is one preset on top of `ctx.state`; for non-discrete properties (counters, set membership, ordered event log), drop down to a plain `Invariant` and use `state.set` / `state.get` directly.
 
 ## Device emulation & network throttling
 
