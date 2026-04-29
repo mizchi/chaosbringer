@@ -27,10 +27,23 @@ import type {
   FaultRule,
   FaultInjectionStats,
   Fault,
+  LifecycleFault,
+  LifecycleFaultStats,
+  LifecycleStage,
   UrlMatcher,
   NetworkProfile,
 } from "./types.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
+import {
+  compileLifecycleFaults,
+  executeLifecycleAction,
+  lifecycleFaultsAtStage,
+  lifecycleMatchesUrl,
+  lifecycleStatsFrom,
+  PlaywrightLifecycleExecutor,
+  shouldFireProbability,
+  type CompiledLifecycleFault,
+} from "./lifecycle-faults.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -98,6 +111,7 @@ const DEFAULT_OPTIONS: Required<
   seed: 0, // Overwritten at construction time if unset
   invariants: [],
   faultInjection: [],
+  lifecycleFaults: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -177,6 +191,13 @@ export class ChaosCrawler {
     matched: number;
     injected: number;
   }> = [];
+  /** Page-lifecycle faults compiled once at construction time. */
+  private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
+  /**
+   * Per-page lifecycle executor — created on `applyLifecycleStage` first
+   * call for each page and dropped when the page is closed.
+   */
+  private lifecycleExecutor: PlaywrightLifecycleExecutor | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -192,6 +213,7 @@ export class ChaosCrawler {
     this.rng = createRng(options.seed ?? randomSeed());
     this.options.seed = this.rng.seed;
     this.compiledFaultRules = compileFaultRules(options.faultInjection);
+    this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
 
     // Initialize logger
     if (options.logFile) {
@@ -687,6 +709,43 @@ export class ChaosCrawler {
   }
 
   /**
+   * Run every lifecycle fault that targets `stage` and matches `url`. Errors
+   * are caught and recorded in the fault's stats counter — a misbehaving
+   * fault should not abort the rest of the crawl.
+   */
+  private async applyLifecycleStage(
+    stage: LifecycleStage,
+    page: Page,
+    url: string,
+  ): Promise<void> {
+    const compiled = lifecycleFaultsAtStage(this.compiledLifecycleFaults, stage);
+    if (compiled.length === 0) return;
+
+    if (this.lifecycleExecutor === null) {
+      this.lifecycleExecutor = new PlaywrightLifecycleExecutor(page, this.context!);
+    }
+    const executor = this.lifecycleExecutor;
+
+    for (const c of compiled) {
+      if (!lifecycleMatchesUrl(c, url)) continue;
+      c.matched++;
+      if (!shouldFireProbability(c.fault.probability, this.rng)) continue;
+      try {
+        await executeLifecycleAction(c.fault.action, executor);
+        c.fired++;
+      } catch (err) {
+        c.errored++;
+        this.logger.warn("lifecycle_fault_failed", {
+          name: c.name,
+          stage,
+          url,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /**
    * Attach a CDP session to the page and apply a throttling preset. Called
    * per-page because `Network.emulateNetworkConditions` is a Page-level
    * setting in Playwright — there's no context-wide equivalent.
@@ -756,6 +815,9 @@ export class ChaosCrawler {
 
     // Scope recovery diagnostics to this page only.
     this.currentPageActions = [];
+    // Drop the previous page's lifecycle executor — next stage call
+    // re-creates one against the current page.
+    this.lifecycleExecutor = null;
 
     if (this.options.network) {
       await this.applyNetworkProfile(page, this.options.network);
@@ -933,6 +995,10 @@ export class ChaosCrawler {
     let result: PageResult;
 
     try {
+      // beforeNavigation lifecycle faults — applied before the load itself,
+      // so e.g. CDP CPU throttling slows the navigation request.
+      await this.applyLifecycleStage("beforeNavigation", page, url);
+
       const response = await page.goto(url, {
         timeout: this.options.timeout,
         waitUntil: "networkidle",
@@ -941,12 +1007,20 @@ export class ChaosCrawler {
       // Drain any unhandled rejections captured during load.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
+      // afterLoad lifecycle faults — page exists, DOM is reachable, but no
+      // chaos actions have run yet. Storage wipes and tampering happen here.
+      await this.applyLifecycleStage("afterLoad", page, url);
+
       await this.runInvariants("afterLoad", page, url, errors);
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
+
+      // beforeActions lifecycle faults — invariants have passed, the chaos
+      // driver is about to start. Service Worker cache eviction lives here.
+      await this.applyLifecycleStage("beforeActions", page, url);
 
       // Replay mode bypasses the weighted random driver — playback owns
       // exactly what runs and in what order.
@@ -1384,6 +1458,11 @@ export class ChaosCrawler {
       this.events.onAction?.(result);
       this.logger.logAction(result);
 
+      // betweenActions lifecycle faults — re-applied after each chaos action
+      // so sustained-pressure faults (CPU throttle, repeated tamper) keep
+      // their pressure across the loop.
+      await this.applyLifecycleStage("betweenActions", page, url);
+
       // Small delay between actions
       await page.waitForTimeout(100);
     }
@@ -1617,6 +1696,10 @@ export class ChaosCrawler {
       actions: this.actions,
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
+      lifecycleFaults:
+        this.compiledLifecycleFaults.length > 0
+          ? lifecycleStatsFrom(this.compiledLifecycleFaults)
+          : undefined,
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
     };
@@ -1774,6 +1857,68 @@ export function validateOptions(options: CrawlerOptions): void {
         throw new Error(
           `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
         );
+      }
+    }
+  }
+
+  const VALID_STAGES = new Set([
+    "beforeNavigation",
+    "afterLoad",
+    "beforeActions",
+    "betweenActions",
+  ]);
+  const VALID_SCOPES = new Set(["localStorage", "sessionStorage", "cookies", "indexedDB"]);
+  for (const fault of options.lifecycleFaults ?? []) {
+    const label = fault.name
+      ? `lifecycleFaults entry "${fault.name}"`
+      : `lifecycleFaults entry`;
+    if (!VALID_STAGES.has(fault.when)) {
+      throw new Error(
+        `chaosbringer: ${label} "when" must be one of beforeNavigation/afterLoad/beforeActions/betweenActions (got ${JSON.stringify(fault.when)})`
+      );
+    }
+    assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    if (fault.probability !== undefined) {
+      const p = fault.probability;
+      if (!Number.isFinite(p) || p < 0 || p > 1) {
+        throw new Error(
+          `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+    const a = fault.action;
+    if (a.kind === "cpu-throttle") {
+      if (!Number.isFinite(a.rate) || a.rate < 1) {
+        throw new Error(
+          `chaosbringer: ${label} cpu-throttle rate must be a finite number >= 1 (got ${JSON.stringify(a.rate)})`
+        );
+      }
+    } else if (a.kind === "clear-storage") {
+      if (!Array.isArray(a.scopes) || a.scopes.length === 0) {
+        throw new Error(`chaosbringer: ${label} clear-storage requires at least one scope`);
+      }
+      for (const scope of a.scopes) {
+        if (!VALID_SCOPES.has(scope)) {
+          throw new Error(
+            `chaosbringer: ${label} clear-storage scope must be one of localStorage/sessionStorage/cookies/indexedDB (got ${JSON.stringify(scope)})`
+          );
+        }
+      }
+    } else if (a.kind === "tamper-storage") {
+      if (a.scope !== "localStorage" && a.scope !== "sessionStorage") {
+        throw new Error(
+          `chaosbringer: ${label} tamper-storage scope must be localStorage or sessionStorage (got ${JSON.stringify(a.scope)})`
+        );
+      }
+      if (typeof a.key !== "string" || a.key.length === 0) {
+        throw new Error(`chaosbringer: ${label} tamper-storage key must be a non-empty string`);
+      }
+      if (typeof a.value !== "string") {
+        throw new Error(`chaosbringer: ${label} tamper-storage value must be a string`);
+      }
+    } else if (a.kind === "evict-cache") {
+      if (a.cacheNames !== undefined && !Array.isArray(a.cacheNames)) {
+        throw new Error(`chaosbringer: ${label} evict-cache cacheNames must be an array of strings`);
       }
     }
   }
