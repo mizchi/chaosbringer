@@ -10,7 +10,19 @@ export { ChaosCrawler, COMMON_IGNORE_PATTERNS, validateOptions } from "./crawler
 export { formatReport, formatCompactReport, saveReport, printReport, getExitCode, type ExitCodeOptions } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
-export { faults, type FaultHelperOptions } from "./faults.js";
+export { faults, type FaultHelperOptions, type LifecycleHelperOptions } from "./faults.js";
+export {
+  compileLifecycleFaults,
+  executeLifecycleAction,
+  lifecycleFaultName,
+  lifecycleFaultsAtStage,
+  lifecycleMatchesUrl,
+  lifecycleStatsFrom,
+  PlaywrightLifecycleExecutor,
+  shouldFireProbability,
+  type CompiledLifecycleFault,
+  type LifecycleActionExecutor,
+} from "./lifecycle-faults.js";
 export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.js";
 export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
 export { checkPerformanceBudget } from "./budget.js";
@@ -101,6 +113,11 @@ export type {
   Fault,
   FaultRule,
   FaultInjectionStats,
+  LifecycleAction,
+  LifecycleFault,
+  LifecycleFaultStats,
+  LifecycleStage,
+  StorageScope,
   UrlMatcher,
   HarConfig,
   HarMode,

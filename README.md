@@ -8,6 +8,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Thorough link extraction** — `<a>`, `<area>`, `<iframe>`, `<link rel="canonical"/"alternate">`, and `<meta http-equiv="refresh">` feed the queue, so dead-link coverage isn't limited to clickable anchors.
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
+- **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
 - **Performance budgets** per TTFB / FCP / LCP / TBT — budget breaches fail the run.
@@ -151,6 +152,85 @@ await chaos({
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`.
+
+## Lifecycle faults (client-side)
+
+`faultInjection` is request-scoped; **lifecycle faults** are page-scoped client-side perturbations that fire at well-defined stages of every page visit. Use them to simulate slow CPUs, stale auth tokens, evicted Service Worker caches, and other browser-side conditions that aren't expressible at the network layer.
+
+```ts
+import { chaos, faults } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  lifecycleFaults: [
+    // Throttle the CPU 4× before navigation, so the load itself is slow.
+    faults.cpu(4),
+
+    // Wipe localStorage + cookies right after the page loads.
+    faults.clearStorage({ scopes: ["localStorage", "cookies"] }),
+
+    // Drop every Service Worker cache before chaos clicks fire — only on /app/*.
+    faults.evictCache({ urlPattern: /\/app\// }),
+
+    // Replace the auth token with an expired value on the dashboard, with a
+    // 50% probability per visit.
+    faults.tamperStorage({
+      scope: "localStorage",
+      key: "auth_token",
+      value: "expired",
+      urlPattern: /\/dashboard/,
+      probability: 0.5,
+    }),
+  ],
+});
+```
+
+### Stages
+
+Each lifecycle fault declares a `when` stage:
+
+| Stage | Fires | Typical use |
+| --- | --- | --- |
+| `beforeNavigation` | Before `page.goto`. | CDP-level conditions that need to apply during the load (CPU throttle). |
+| `afterLoad` | Right after navigation, before `afterLoad` invariants. | In-page mutations (storage wipes / tamper). |
+| `beforeActions` | After `afterLoad` invariants, before chaos clicks. | One-shot evictions that should not affect invariants but should precede user simulation (Service Worker cache). |
+| `betweenActions` | After every chaos action. | Sustained-pressure faults that need re-application across the action loop. |
+
+Helpers default to a sensible stage per action kind (`cpu` → `beforeNavigation`, `clearStorage` / `tamperStorage` → `afterLoad`, `evictCache` → `beforeActions`); pass `when` to override.
+
+### Action kinds
+
+- **`faults.cpu(rate, opts?)`** — `rate` ≥ 1 multiplier (1 = no throttle, 4 ≈ 4× slower) applied via CDP `Emulation.setCPUThrottlingRate`.
+- **`faults.clearStorage({ scopes, ... })`** — wipes one or more of `localStorage`, `sessionStorage`, `cookies`, `indexedDB`. Cookies are cleared at the BrowserContext level; the rest run in-page via `page.evaluate`.
+- **`faults.evictCache(opts?)`** — drops entries from the Service Worker `caches` API. With no `cacheNames`, every cache is dropped.
+- **`faults.tamperStorage({ scope, key, value, ... })`** — sets a single key in `localStorage` or `sessionStorage`. Useful for forcing logged-in apps into "stale auth token" / "corrupted client state" scenarios without touching the rest of storage.
+
+### Common options
+
+Every lifecycle helper accepts the same overrides:
+
+| Option | Description |
+| --- | --- |
+| `when` | Override the helper's default stage. |
+| `urlPattern` | Restrict the fault to URLs matching this regex / regex string. Omit to apply on every page. |
+| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 fault doesn't shift the seed sequence for chaos action selection. |
+| `name` | Override the auto-derived stats label (e.g. `cpu-throttle:4x`). |
+
+### Stats
+
+Every fault gets one row in `report.lifecycleFaults` with `matched` (URL-pattern matches), `fired` (post-probability), and `errored` (executor threw — e.g. SecurityError on opaque origins). Misbehaving faults are caught and counted; they never abort the rest of the crawl.
+
+```json
+{
+  "lifecycleFaults": [
+    { "name": "cpu-throttle:4x", "matched": 12, "fired": 12, "errored": 0 },
+    { "name": "clear-storage:localStorage", "matched": 12, "fired": 6, "errored": 0 },
+    { "name": "tamper-storage:localStorage.auth_token", "matched": 3, "fired": 1, "errored": 0 }
+  ]
+}
+```
+
+Like network-side fault injection, lifecycle faults are programmatic-only — they're not expressible as flat shell flags and so are absent from the CLI.
 
 ## Invariants
 

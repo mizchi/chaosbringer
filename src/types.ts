@@ -47,6 +47,13 @@ export interface CrawlerOptions {
   invariants?: Invariant[];
   /** Fault injection rules applied via Playwright's route API. */
   faultInjection?: FaultRule[];
+  /**
+   * Page-lifecycle fault injection. Each fault fires at a specific stage of a
+   * page visit and perturbs the browser side (CPU throttle, storage wipe,
+   * Service Worker cache eviction, …). Distinct from `faultInjection`, which
+   * acts on individual network requests.
+   */
+  lifecycleFaults?: LifecycleFault[];
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
   /**
@@ -171,6 +178,92 @@ export interface FaultInjectionStats {
   rule: string;
   matched: number;
   injected: number;
+}
+
+/**
+ * When during a page's lifecycle a `LifecycleFault` fires.
+ *
+ * - `beforeNavigation`: before `page.goto` — for CDP-level conditions that need to
+ *   apply during the load itself (CPU throttle, virtual time).
+ * - `afterLoad`: right after navigation completes, before any chaos actions or
+ *   `afterLoad` invariants run — for in-page mutations (storage clears, tamper).
+ * - `beforeActions`: after `afterLoad` invariants pass, before the first chaos
+ *   action — for one-shot evictions that should not affect invariants but should
+ *   precede user simulation (Service Worker cache eviction).
+ * - `betweenActions`: after every chaos action — for sustained pressure faults
+ *   that need re-application across the action loop.
+ */
+export type LifecycleStage =
+  | "beforeNavigation"
+  | "afterLoad"
+  | "beforeActions"
+  | "betweenActions";
+
+/** Where a `clear-storage` / `tamper-storage` action targets. */
+export type StorageScope = "localStorage" | "sessionStorage" | "cookies" | "indexedDB";
+
+/**
+ * What a lifecycle fault does when it fires.
+ *
+ * Distinct from network-side `Fault` (which is request-scoped). These are
+ * page-scoped client-side perturbations applied via the Playwright Page /
+ * BrowserContext / CDP session.
+ */
+export type LifecycleAction =
+  /**
+   * Apply CPU throttling via CDP `Emulation.setCPUThrottlingRate`.
+   * `rate` is a multiplier ≥ 1 (1 = no throttle, 4 = ~4× slower).
+   */
+  | { kind: "cpu-throttle"; rate: number }
+  /** Wipe one or more storage scopes. */
+  | { kind: "clear-storage"; scopes: StorageScope[] }
+  /**
+   * Drop entries from the Service Worker `caches` API. When `cacheNames` is
+   * omitted, every cache is dropped.
+   */
+  | { kind: "evict-cache"; cacheNames?: string[] }
+  /**
+   * Set a single key/value in `localStorage` or `sessionStorage`. Useful for
+   * forcing a logged-in app into "stale auth token" state and similar
+   * targeted-corruption scenarios.
+   */
+  | {
+      kind: "tamper-storage";
+      scope: "localStorage" | "sessionStorage";
+      key: string;
+      value: string;
+    };
+
+/**
+ * Page-level fault injected at a specific lifecycle stage. Network-level faults
+ * stay on `FaultRule` (URL-matched, applied via Playwright `route()`).
+ */
+export interface LifecycleFault {
+  /** Optional human-readable name used in stats. Auto-derived when omitted. */
+  name?: string;
+  /** When during the page lifecycle this fault fires. */
+  when: LifecycleStage;
+  /**
+   * Restrict to URLs matching this matcher. Omit to apply on every page. For
+   * `beforeNavigation` faults the about-to-be-navigated URL is matched.
+   */
+  urlPattern?: UrlMatcher;
+  /** 0..1, default 1.0. Uses the crawler's seeded RNG. */
+  probability?: number;
+  /** What to do when the fault fires. */
+  action: LifecycleAction;
+}
+
+/** Per-fault stats emitted on the final report. */
+export interface LifecycleFaultStats {
+  /** `name` from the `LifecycleFault`, or an auto-derived label. */
+  name: string;
+  /** Pages whose URL matched (regardless of probability). */
+  matched: number;
+  /** Pages where the fault actually fired (after the probability roll). */
+  fired: number;
+  /** Pages where the fault threw while firing. */
+  errored: number;
 }
 
 export interface ActionWeights {
@@ -420,6 +513,12 @@ export interface CrawlReport {
   summary: CrawlSummary;
   /** Per-rule fault injection stats (present only when rules were configured). */
   faultInjections?: FaultInjectionStats[];
+  /**
+   * Per-fault lifecycle fault stats (present only when `lifecycleFaults` was
+   * configured). One row per `LifecycleFault`, regardless of how many pages
+   * matched.
+   */
+  lifecycleFaults?: LifecycleFaultStats[];
   /**
    * Errors grouped into clusters by fingerprint (type + normalised message).
    * Use `ErrorCluster.count` to triage noisy runs where the same issue fires
