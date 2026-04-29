@@ -198,6 +198,12 @@ export class ChaosCrawler {
    * call for each page and dropped when the page is closed.
    */
   private lifecycleExecutor: PlaywrightLifecycleExecutor | null = null;
+  /**
+   * Run-scoped key/value bag shared with every invariant via
+   * `InvariantContext.state`. Reset on `start()` so reusing a crawler for
+   * multiple runs doesn't leak stale state.
+   */
+  private invariantState: Map<string, unknown> = new Map();
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -288,7 +294,7 @@ export class ChaosCrawler {
 
       let failureReason: string | null = null;
       try {
-        const result = await inv.check({ page, url, errors });
+        const result = await inv.check({ page, url, errors, state: this.invariantState });
         if (result === false) {
           failureReason = `invariant "${inv.name}" returned false`;
         } else if (typeof result === "string") {
@@ -371,6 +377,7 @@ export class ChaosCrawler {
     this.trace = [];
     this.blockedExternalCount = 0;
     this.failureArtifactCount = 0;
+    this.invariantState = new Map();
 
     if (this.isRecordingTrace()) {
       this.trace.push({
