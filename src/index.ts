@@ -16,6 +16,15 @@ export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
 export { checkPerformanceBudget } from "./budget.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
+  stateMachineCurrent,
+  stateMachineInvariant,
+  stateMachineKey,
+  validateTransition,
+  type StateMachineDeriveContext,
+  type StateMachineInvariantOptions,
+  type TransitionVerdict,
+} from "./state-machine-invariants.js";
+export {
   compareScreenshotBuffers,
   formatVisualDiff,
   screenshotFilename,

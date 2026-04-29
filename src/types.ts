@@ -229,6 +229,14 @@ export interface InvariantContext {
   url: string;
   /** Errors collected on this page so far. */
   errors: readonly PageError[];
+  /**
+   * Mutable, run-scoped key/value bag shared between invariants. The same
+   * `Map` instance is passed to every invariant on every page during a run,
+   * so invariants can carry state across pages and detect trans-page issues
+   * (state-machine transitions, monotonic counters, set-membership
+   * regressions). Reset at the start of each `crawler.start()` call.
+   */
+  state: Map<string, unknown>;
 }
 
 export interface PerformanceMetrics {

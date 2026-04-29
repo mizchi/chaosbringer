@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChaosCrawler } from "../../src/crawler.js";
+import { stateMachineInvariant } from "../../src/state-machine-invariants.js";
 import type { Invariant } from "../../src/types.js";
 import { startFixtureServer } from "../site/server.js";
 
@@ -327,5 +328,81 @@ describe("ChaosCrawler against fixture site", () => {
     expect(
       report2.pages[0]!.errors.some((e) => e.type === "invariant-violation"),
     ).toBe(true);
+  }, 120000);
+
+  it("carries state across pages and flags illegal state-machine transitions", async () => {
+    type RouteState = "home" | "about" | "spa" | "other";
+
+    // derive() classifies pages by URL path. Transitions only allow the
+    // home → about / about → home / home → spa cycle. Reaching any "other"
+    // page from anywhere except home is illegal — the fixture has plenty of
+    // such pages (/console-error, /js-exception, …) so the crawler will
+    // reliably trip the invariant during its BFS.
+    const transitions: Partial<Record<RouteState, readonly RouteState[]>> = {
+      home: ["about", "spa"],
+      about: ["home"],
+      spa: ["home"],
+      other: ["home"],
+    };
+
+    const sm = stateMachineInvariant<RouteState>({
+      name: "route",
+      initial: "home",
+      transitions,
+      when: "afterLoad",
+      derive: ({ url }) => {
+        const path = new URL(url).pathname.replace(/\/$/, "") || "/";
+        if (path === "/") return "home";
+        if (path === "/about") return "about";
+        if (path.startsWith("/spa/")) return "spa";
+        return "other";
+      },
+    });
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 5,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 4,
+      invariants: [sm],
+    });
+    const report = await crawler.start();
+
+    const violations = report.pages
+      .flatMap((p) => p.errors)
+      .filter((e) => e.invariantName === "route");
+
+    // The crawler discovers /console-error and /js-exception from /, so an
+    // "home → other" or "about → other" violation must surface.
+    expect(violations.length).toBeGreaterThanOrEqual(1);
+    expect(violations[0]!.message).toMatch(/illegal transition .* → "other"/);
+
+    // A second crawler run must reset state (no leftover label from the
+    // previous Map). Configure a tighter SM and assert it sees `home` as the
+    // first label, not "spa" (which the previous run might have arrived at).
+    const seenInitial: RouteState[] = [];
+    const sm2 = stateMachineInvariant<RouteState>({
+      name: "route",
+      initial: "home",
+      transitions,
+      when: "afterLoad",
+      derive: ({ url, prev }) => {
+        seenInitial.push(prev);
+        const path = new URL(url).pathname.replace(/\/$/, "") || "/";
+        if (path === "/") return "home";
+        return "other";
+      },
+    });
+    const crawler2 = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 9,
+      invariants: [sm2],
+    });
+    await crawler2.start();
+    expect(seenInitial[0]).toBe("home");
   }, 120000);
 });
