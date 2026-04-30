@@ -85,6 +85,53 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('name="https://other.example.com/x"');
   });
 
+  it("matches the baseUrl on a path boundary, not a raw prefix", () => {
+    // /application must NOT be truncated to "lication" just because the
+    // baseUrl path is /app — the testcase name must not be "lication".
+    const xml = buildJunitXml(
+      report([page("https://site.example.com/application")], {
+        baseUrl: "https://site.example.com/app",
+      })
+    );
+    expect(xml).not.toContain('name="lication"');
+    expect(xml).toContain('name="https://site.example.com/application"');
+  });
+
+  it("strips the baseUrl prefix when the baseUrl has a path subtree", () => {
+    const xml = buildJunitXml(
+      report([page("https://site.example.com/app/page")], {
+        baseUrl: "https://site.example.com/app",
+      })
+    );
+    expect(xml).toContain('name="/page"');
+  });
+
+  it("preserves the leading slash even when the baseUrl ends with /", () => {
+    const xml = buildJunitXml(
+      report([page("http://localhost:3000/docs/intro")], {
+        baseUrl: "http://localhost:3000/",
+      })
+    );
+    expect(xml).toContain('name="/docs/intro"');
+  });
+
+  it("includes the query and hash in the test name", () => {
+    const xml = buildJunitXml(
+      report([page("http://localhost:3000/search?q=foo#hits")])
+    );
+    // attribute is XML-escaped: ? stays, # stays, & is escaped if present
+    expect(xml).toContain('name="/search?q=foo#hits"');
+  });
+
+  it("falls back to the full URL when the page is on the same origin but outside the baseUrl path", () => {
+    const xml = buildJunitXml(
+      report([page("https://site.example.com/other")], {
+        baseUrl: "https://site.example.com/app",
+      })
+    );
+    expect(xml).toContain('name="https://site.example.com/other"');
+  });
+
   it("emits <error> for status=timeout", () => {
     const xml = buildJunitXml(
       report([page("http://localhost:3000/slow", { status: "timeout" })])

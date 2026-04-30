@@ -81,14 +81,45 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
   return `${head}/>`;
 }
 
-/** Strip the baseUrl prefix so test names stay short in CI dashboards. */
+/**
+ * Strip the baseUrl prefix so test names stay short in CI dashboards. Uses
+ * URL parsing + path-boundary matching, not raw `startsWith`, so:
+ *   - `baseUrl="https://site/app"` does not consume the `app` of
+ *     `https://site/application` (leaving `lication`).
+ *   - `baseUrl="http://localhost:3000/"` (trailing slash) preserves the
+ *     leading `/` on stripped paths.
+ *
+ * Different origins, or pages outside the baseUrl path subtree, fall back
+ * to the full URL.
+ */
 function pageTestName(url: string, baseUrl: string): string {
-  if (url === baseUrl) return "/";
-  if (url.startsWith(baseUrl)) {
-    const tail = url.slice(baseUrl.length);
-    return tail.length > 0 ? tail : "/";
+  let baseU: URL;
+  let pageU: URL;
+  try {
+    baseU = new URL(baseUrl);
+    pageU = new URL(url);
+  } catch {
+    return url;
   }
-  return url;
+  if (baseU.origin !== pageU.origin) return url;
+
+  // Strip a single trailing slash so "/" and "" behave the same.
+  const basePath = baseU.pathname.replace(/\/$/, "");
+  const pagePath = pageU.pathname;
+
+  let tail: string;
+  if (basePath === "") {
+    tail = pagePath || "/";
+  } else if (pagePath === basePath) {
+    tail = "/";
+  } else if (pagePath.startsWith(`${basePath}/`)) {
+    tail = pagePath.slice(basePath.length);
+  } else {
+    // Same origin but not a descendant of baseUrl — return the full URL so
+    // CI doesn't merge unrelated routes.
+    return url;
+  }
+  return tail + pageU.search + pageU.hash;
 }
 
 function uniqueTypes(errors: readonly PageError[]): string[] {
