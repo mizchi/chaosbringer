@@ -20,6 +20,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Baseline diff** — surface new clusters / newly failing pages vs a previous run.
 - **Flake detection** — rerun the same crawl N times and flag clusters / pages whose outcome varies.
 - **Action heatmap** — pure aggregation of `report.actions[]` exposing the most-hit and most-failed targets.
+- **JUnit XML output** — Surefire-style `junit.xml` so any CI dashboard (Jenkins, CircleCI, GitLab, GitHub Actions test summary, Allure) can ingest the run.
 - **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
 - **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
 - **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
@@ -480,6 +481,30 @@ console.log(formatHeatmap(entries, 20));
 
 It's pure aggregation over the existing `actions` array — works on any report (current run, baseline, or one loaded from disk). Action types remain distinct, so `click Search` and `input Search` count separately.
 
+## JUnit XML output
+
+Render the report as Surefire-style `junit.xml` so existing CI dashboards (Jenkins, CircleCI, GitLab CI, GitHub Actions test summaries, Allure) ingest chaosbringer runs without bespoke parsing.
+
+```bash
+chaosbringer --url http://localhost:3000 --junit junit.xml
+```
+
+```ts
+import { buildJunitXml, chaos } from "chaosbringer";
+import { writeFileSync } from "node:fs";
+
+const { report } = await chaos({ baseUrl: "http://localhost:3000" });
+writeFileSync("junit.xml", buildJunitXml(report, { suiteName: "smoke" }));
+```
+
+Mapping is one `<testcase>` per visited page:
+
+- `status="error"` / `"timeout"` → `<error>` (HTTP code or `timeout` in `type`)
+- `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
+- otherwise → passing testcase, no children
+
+Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped.
+
 ## Visual regression
 
 Compare each page's screenshot against a baseline PNG on disk. Differences beyond the configured budget are recorded as invariant violations (`visual-regression`), which fail the run.
@@ -802,6 +827,7 @@ const merged = mergeReports([r0, r1, r2, r3]);
 | `--heatmap` | Print an action-frequency heatmap after the report | false |
 | `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |
 | `--heatmap-out <path>` | Write the heatmap as JSON | — |
+| `--junit <path>` | Write a Surefire-style JUnit XML for CI dashboards | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |

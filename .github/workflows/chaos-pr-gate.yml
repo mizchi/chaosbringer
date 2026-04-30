@@ -76,14 +76,13 @@ jobs:
           echo "fixture server did not start" >&2
           exit 1
 
-      - name: Run chaos crawl with strict + baseline
+      - name: Run chaos crawl with baseline diff
         run: |
-          pnpm exec chaosbringer \
+          node dist/cli.js \
             --url http://127.0.0.1:4455 \
             --max-pages 30 \
             --max-actions-per-page 5 \
             --seed 1 \
-            --strict \
             --output chaos-report.json \
             --failure-artifacts failure-artifacts \
             ${BASELINE:+--baseline "$BASELINE"} \

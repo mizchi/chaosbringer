@@ -82,6 +82,7 @@ export {
 } from "./github.js";
 export { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
 export { buildActionHeatmap, formatHeatmap, type ActionHeatmapEntry } from "./heatmap.js";
+export { buildJunitXml, type JunitOptions } from "./junit.js";
 export { parseMetaRefreshUrl } from "./links.js";
 export {
   buildReproScript,

@@ -30,6 +30,7 @@ import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
+import { buildJunitXml } from "./junit.js";
 import { writeFileSync } from "node:fs";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
@@ -75,6 +76,9 @@ const { values, positionals } = parseArgs({
     url: { type: "string" },
     "max-pages": { type: "string" },
     "max-actions": { type: "string" },
+    // Alias to match the underlying CrawlerOptions field name (used by the
+    // chaos-pr-gate workflow and surfaced as a synonym in docs).
+    "max-actions-per-page": { type: "string" },
     timeout: { type: "string" },
     headless: { type: "boolean", default: true },
     screenshots: { type: "boolean", default: false },
@@ -114,6 +118,7 @@ const { values, positionals } = parseArgs({
     heatmap: { type: "boolean", default: false },
     "heatmap-top": { type: "string" },
     "heatmap-out": { type: "string" },
+    junit: { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -133,6 +138,7 @@ OPTIONS:
   --url <url>           Base URL to crawl (required)
   --max-pages <n>       Max pages to visit (default: 50)
   --max-actions <n>     Max random actions per page (default: 5)
+                        (alias: --max-actions-per-page)
   --timeout <ms>        Page load timeout (default: 30000)
   --no-headless         Show the browser window (headless is the default)
   --screenshots         Take screenshots
@@ -171,6 +177,7 @@ OPTIONS:
   --heatmap             Print an action-frequency heatmap after the report
   --heatmap-top <n>     Limit the heatmap to the top N targets (default 20)
   --heatmap-out <path>  Also write the heatmap as JSON
+  --junit <path>        Write a Surefire-style JUnit XML for CI dashboards
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -338,7 +345,10 @@ function buildInvariants(): Invariant[] | undefined {
 const options: CrawlerOptions = {
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
-  maxActionsPerPage: values["max-actions"] ? parseInt(values["max-actions"], 10) : undefined,
+  maxActionsPerPage: (() => {
+    const raw = values["max-actions"] ?? values["max-actions-per-page"];
+    return raw ? parseInt(raw, 10) : undefined;
+  })(),
   timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
   headless: values.headless,
   screenshots: values.screenshots,
@@ -459,6 +469,11 @@ async function main() {
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);
+    }
+
+    if (values.junit) {
+      writeFileSync(values.junit, buildJunitXml(report));
+      if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
     }
 
     const exitCode = getExitCode(report, exitOptions);

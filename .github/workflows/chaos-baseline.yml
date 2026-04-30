@@ -57,7 +57,7 @@ jobs:
 
       - name: Crawl + heatmap
         run: |
-          pnpm exec chaosbringer \
+          node dist/cli.js \
             --url http://127.0.0.1:4455 \
             --max-pages 30 \
             --max-actions-per-page 5 \
