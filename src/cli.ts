@@ -30,6 +30,7 @@ import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
+import { buildJunitXml } from "./junit.js";
 import { writeFileSync } from "node:fs";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
@@ -114,6 +115,7 @@ const { values, positionals } = parseArgs({
     heatmap: { type: "boolean", default: false },
     "heatmap-top": { type: "string" },
     "heatmap-out": { type: "string" },
+    junit: { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -171,6 +173,7 @@ OPTIONS:
   --heatmap             Print an action-frequency heatmap after the report
   --heatmap-top <n>     Limit the heatmap to the top N targets (default 20)
   --heatmap-out <path>  Also write the heatmap as JSON
+  --junit <path>        Write a Surefire-style JUnit XML for CI dashboards
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -459,6 +462,11 @@ async function main() {
     saveReport(report, outputPath);
     if (!isQuiet) {
       console.log(`\nReport saved to: ${outputPath}`);
+    }
+
+    if (values.junit) {
+      writeFileSync(values.junit, buildJunitXml(report));
+      if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
     }
 
     const exitCode = getExitCode(report, exitOptions);
