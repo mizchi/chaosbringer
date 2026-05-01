@@ -47,6 +47,15 @@ importers:
         specifier: ^3.0.7
         version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
 
+  packages/server-faults:
+    devDependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
+
 packages:
 
   '@esbuild/aix-ppc64@0.27.7':

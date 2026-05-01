@@ -1,0 +1,52 @@
+{
+  "name": "@mizchi/server-faults",
+  "version": "0.1.0",
+  "description": "Framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request/Response.",
+  "license": "MIT",
+  "author": "mizchi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mizchi/chaosbringer.git",
+    "directory": "packages/server-faults"
+  },
+  "homepage": "https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults#readme",
+  "bugs": {
+    "url": "https://github.com/mizchi/chaosbringer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "keywords": [
+    "fault-injection",
+    "chaos-engineering",
+    "testing",
+    "web-standard",
+    "request",
+    "response"
+  ],
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.0.7"
+  }
+}
