@@ -182,6 +182,28 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.advisor && report.advisor.callsAttempted > 0) {
+    const a = report.advisor;
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("VLM ADVISOR");
+    lines.push("-".repeat(40));
+    lines.push(`  provider: ${a.provider}`);
+    lines.push(
+      `  calls: ${a.callsSucceeded}/${a.callsAttempted} succeeded (${a.picks.length} picks recorded)`
+    );
+    if (a.picks.length > 0) {
+      const reasonCounts = new Map<string, number>();
+      for (const p of a.picks) {
+        reasonCounts.set(p.reason, (reasonCounts.get(p.reason) ?? 0) + 1);
+      }
+      const reasonStr = [...reasonCounts.entries()]
+        .map(([r, n]) => `${r}=${n}`)
+        .join(" ");
+      lines.push(`  picks by reason: ${reasonStr}`);
+    }
+  }
+
   if (report.diff) {
     const d = report.diff;
     lines.push("");
@@ -237,9 +259,13 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
   const diffSuffix = report.diff
     ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
     : "";
+  const advisorSuffix =
+    report.advisor && report.advisor.callsAttempted > 0
+      ? ` advisor=${report.advisor.callsSucceeded}/${report.advisor.callsAttempted}`
+      : "";
 
   return [
-    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}`,
+    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}${advisorSuffix}`,
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
-import { formatCompactReport, getExitCode, saveReport } from "./reporter.js";
+import { formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
 
 function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -135,6 +135,58 @@ describe("formatCompactReport", () => {
     const report = makeReport({ summary: makeSummary({ invariantViolations: 1 }) });
     expect(formatCompactReport(report)).toContain("[FAIL]");
     expect(formatCompactReport(report, true)).toContain("[FAIL]");
+  });
+
+  it("appends advisor=succeeded/attempted suffix when advisor was used", () => {
+    const report = makeReport({
+      advisor: {
+        provider: "openrouter/google/gemini-2.5-flash",
+        callsAttempted: 5,
+        callsSucceeded: 4,
+        picks: [],
+      },
+    });
+    expect(formatCompactReport(report)).toContain("advisor=4/5");
+  });
+
+  it("omits advisor suffix when advisor was configured but never consulted", () => {
+    const report = makeReport({
+      advisor: {
+        provider: "openrouter/google/gemini-2.5-flash",
+        callsAttempted: 0,
+        callsSucceeded: 0,
+        picks: [],
+      },
+    });
+    expect(formatCompactReport(report)).not.toContain("advisor=");
+  });
+});
+
+describe("formatReport", () => {
+  it("includes a VLM ADVISOR section when advisor was used", () => {
+    const report = makeReport({
+      advisor: {
+        provider: "openrouter/google/gemini-2.5-flash",
+        callsAttempted: 3,
+        callsSucceeded: 3,
+        picks: [
+          { url: "/a", reason: "novelty_stall", chosenSelector: "#a", reasoning: "x" },
+          { url: "/b", reason: "novelty_stall", chosenSelector: "#b", reasoning: "y" },
+          { url: "/c", reason: "invariant_violation", chosenSelector: "#c", reasoning: "z" },
+        ],
+      },
+    });
+    const out = formatReport(report);
+    expect(out).toContain("VLM ADVISOR");
+    expect(out).toContain("openrouter/google/gemini-2.5-flash");
+    expect(out).toContain("3/3 succeeded");
+    expect(out).toContain("novelty_stall=2");
+    expect(out).toContain("invariant_violation=1");
+  });
+
+  it("omits the advisor section when advisor was never consulted", () => {
+    const out = formatReport(makeReport());
+    expect(out).not.toContain("VLM ADVISOR");
   });
 });
 
