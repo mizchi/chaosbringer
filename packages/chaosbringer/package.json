@@ -65,6 +65,9 @@
     "accessibility",
     "crawler"
   ],
+  "dependencies": {
+    "@mizchi/playwright-v8-coverage": "workspace:^"
+  },
   "peerDependencies": {
     "@playwright/test": "^1.40.0",
     "axe-core": "^4.0.0",
