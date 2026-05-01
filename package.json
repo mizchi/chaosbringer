@@ -36,8 +36,8 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "prepare": "tsc",
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "prepare": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsc --watch",
     "test": "vitest run",
     "lint": "biome check src/",

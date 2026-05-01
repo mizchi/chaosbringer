@@ -66,6 +66,7 @@ export type {
   AdvisorContext,
   AdvisorSuggestion,
 } from "./advisor/types.js";
+export { openRouterAdvisor, type OpenRouterAdvisorOptions } from "./advisor/openrouter.js";
 export {
   compareScreenshotBuffers,
   formatVisualDiff,
