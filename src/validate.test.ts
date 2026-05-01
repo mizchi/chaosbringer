@@ -237,6 +237,59 @@ describe("validateOptions", () => {
     ).toThrow(/failureArtifacts.dir/);
   });
 
+  it("accepts a valid runtimeFaults config", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [
+            { action: { kind: "flaky-fetch" } },
+            { action: { kind: "clock-skew", skewMs: 1000 }, urlPattern: /\/api\// },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects a runtime fault probability out of [0, 1]", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [{ action: { kind: "flaky-fetch" }, probability: 1.5 }],
+        }),
+      ),
+    ).toThrow(/probability/);
+  });
+
+  it("rejects a non-integer clock-skew", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [{ action: { kind: "clock-skew", skewMs: 1.5 } }],
+        }),
+      ),
+    ).toThrow(/skewMs/);
+  });
+
+  it("rejects an unknown runtime fault action kind", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [{ action: { kind: "made-up" as never } }],
+        }),
+      ),
+    ).toThrow(/action.kind/);
+  });
+
+  it("rejects a malformed runtime fault urlPattern", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [{ action: { kind: "flaky-fetch" }, urlPattern: "(" }],
+        }),
+      ),
+    ).toThrow(/urlPattern/);
+  });
+
   it("rejects a negative maxArtifacts", () => {
     expect(() =>
       validateOptions(base({ failureArtifacts: { dir: "./x", maxArtifacts: -1 } }))
