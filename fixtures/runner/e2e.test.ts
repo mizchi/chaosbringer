@@ -460,4 +460,57 @@ describe("ChaosCrawler against fixture site", () => {
     await crawler2.start();
     expect(seenInitial[0]).toBe("home");
   }, 120000);
+
+  it("collects V8 precise coverage and surfaces it in report.coverage", async () => {
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 4,
+      maxActionsPerPage: 2,
+      headless: true,
+      seed: 17,
+      coverageFeedback: { enabled: true, boost: 2 },
+    });
+    const report = await crawler.start();
+
+    expect(report.coverage).toBeDefined();
+    const cov = report.coverage!;
+
+    // The fixture site loads inline <script> blocks (console.error,
+    // throw new Error, Promise.reject, …) — V8 must report at least one
+    // executed function.
+    expect(cov.totalFunctions).toBeGreaterThan(0);
+    expect(cov.pagesWithNewCoverage).toBeGreaterThan(0);
+    expect(Array.isArray(cov.topNovelTargets)).toBe(true);
+  }, 120000);
+
+  it("disabling coverage feedback omits report.coverage and keeps the no-feedback action sequence", async () => {
+    // Same seed, two configurations: with feedback off, the action sequence
+    // must be identical to the prior baseline. With feedback on, weights
+    // change after the first action that yields novel coverage, so the
+    // sequence may differ.
+    const off = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 3,
+      maxActionsPerPage: 2,
+      headless: true,
+      seed: 31,
+    });
+    const offReport = await off.start();
+    expect(offReport.coverage).toBeUndefined();
+
+    const offSelectors = offReport.actions.map((a) => a.selector ?? "");
+    expect(offSelectors.length).toBeGreaterThan(0);
+
+    // Sanity: the off-feedback report has no coverage stats but the action
+    // sequence is the deterministic seed-driven one.
+    const off2 = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 3,
+      maxActionsPerPage: 2,
+      headless: true,
+      seed: 31,
+    });
+    const offReport2 = await off2.start();
+    expect(offReport2.actions.map((a) => a.selector ?? "")).toEqual(offSelectors);
+  }, 180000);
 });

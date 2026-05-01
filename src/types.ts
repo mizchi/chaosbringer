@@ -54,6 +54,16 @@ export interface CrawlerOptions {
    * acts on individual network requests.
    */
   lifecycleFaults?: LifecycleFault[];
+  /**
+   * Opt-in coverage-guided action selection. When enabled, the crawler
+   * attaches a V8 precise-coverage collector (CDP `Profiler.takePreciseCoverage`)
+   * to every page, attributes per-action coverage deltas to the target that
+   * fired them, and biases subsequent action weighting toward targets that
+   * historically delivered new coverage. Reproducibility now spans
+   * `(seed, coverageFeedback)` — same seed + same feedback config → same
+   * action sequence.
+   */
+  coverageFeedback?: CoverageFeedbackOptions;
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
   /**
@@ -252,6 +262,60 @@ export interface LifecycleFault {
   probability?: number;
   /** What to do when the fault fires. */
   action: LifecycleAction;
+}
+
+/**
+ * Configuration for coverage-guided action selection.
+ *
+ * Off by default. When `enabled`, the crawler:
+ *   1. Attaches a V8 precise-coverage collector to every page via CDP.
+ *   2. After each chaos action, computes the set of functions newly executed
+ *      since the previous action.
+ *   3. Filters that set against a global "already-seen" set; the residual is
+ *      the truly novel contribution of that action.
+ *   4. Stores `targetNovelty[(url, selector)] += novelCount`.
+ *   5. On the next visit (same or different page), multiplies each action
+ *      target's weight by `1 + boost · log(1 + targetNovelty[key])`.
+ *
+ * No extra RNG draws — the seed sequence is unchanged. The action sequence
+ * still differs from a no-feedback run because the weight inputs to
+ * `weightedPick` differ, so reproducibility is a tuple of `(seed, this
+ * config)`.
+ */
+export interface CoverageFeedbackOptions {
+  /** Master switch. Default: false (no coverage hooks attached). */
+  enabled: boolean;
+  /**
+   * Multiplier applied via `1 + boost · log1p(score)`. `0` disables the
+   * weight bias (coverage still tracked / reported). `1` gives a gentle
+   * bias; `2` (default) noticeably reorders actions; `4` aggressively
+   * concentrates picks on the top-scoring targets.
+   */
+  boost?: number;
+  /** Cap top-N novel targets emitted in `report.coverage`. Default: 20. */
+  topN?: number;
+}
+
+/**
+ * Coverage summary attached to `CrawlReport.coverage` when
+ * `coverageFeedback.enabled` was true.
+ */
+export interface CoverageReport {
+  /** Total distinct V8 function fingerprints executed during this run. */
+  totalFunctions: number;
+  /** Number of pages whose visit yielded at least one new function. */
+  pagesWithNewCoverage: number;
+  /**
+   * Top action targets by historical novelty score, sorted desc. Capped by
+   * `topN`. The `selector` is the same one chaosbringer uses to pick the
+   * target — useful when interpreting which interactions are pulling weight
+   * up across pages.
+   */
+  topNovelTargets: Array<{
+    url: string;
+    selector: string;
+    score: number;
+  }>;
 }
 
 /** Per-fault stats emitted on the final report. */
@@ -519,6 +583,12 @@ export interface CrawlReport {
    * matched.
    */
   lifecycleFaults?: LifecycleFaultStats[];
+  /**
+   * Coverage-feedback summary (present only when `coverageFeedback.enabled`
+   * was true). Reports total V8 functions executed, how many pages produced
+   * new coverage, and the top-N action targets by historical novelty.
+   */
+  coverage?: CoverageReport;
   /**
    * Errors grouped into clusters by fingerprint (type + normalised message).
    * Use `ErrorCluster.count` to triage noisy runs where the same issue fires
