@@ -610,6 +610,38 @@ describe("ChaosCrawler against fixture site", () => {
     }
   }, 120000);
 
+  it("forwards screenshotMode: fullPage to the advisor screenshot supplier", async () => {
+    const seenSizes: number[] = [];
+    const stubAdvisor = {
+      name: "stub/test",
+      async suggest(ctx: { screenshot: Buffer }) {
+        seenSizes.push(ctx.screenshot.byteLength);
+        return { chosenIndex: 0, reasoning: "ok" };
+      },
+    };
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 2,
+      maxActionsPerPage: 2,
+      headless: true,
+      seed: 21,
+      advisor: {
+        provider: stubAdvisor,
+        noveltyStallThreshold: 0,
+        minCandidatesToConsult: 1,
+        timeoutMs: 5_000,
+        screenshotMode: "fullPage",
+      },
+    });
+    await crawler.start();
+
+    expect(seenSizes.length).toBeGreaterThan(0);
+    for (const size of seenSizes) {
+      expect(size).toBeGreaterThan(0);
+    }
+  }, 120000);
+
   it("captures SPA history.pushState navigations as discovered links", async () => {
     // /spa-router has NO `<a href>` to /spa-router/*, only buttons that
     // call history.pushState. Static link extraction misses every one;
