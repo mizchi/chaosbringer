@@ -69,6 +69,35 @@ jobs:
         if: always()
         run: kill "$(cat .fixture.pid)" 2>/dev/null || true
 
+      # Persist chaos signals into the same flaker storage that
+      # `flaker-nightly.yml` writes — same cache key shape so reads / writes
+      # interleave naturally. Each baseline run becomes one set of
+      # TestCaseResults in flaker (one per visited page + one per invariant
+      # violation), keyed by the merge commit. Over enough runs flaker can
+      # tell which chaos errors are real, flaky, or intermittent.
+      - name: Cache flaker data
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: .flaker/data
+          key: flaker-data-${{ github.run_id }}
+          restore-keys: |
+            flaker-data-
+
+      - name: Import chaos report into flaker
+        if: always()
+        run: |
+          # Adapter landed in @mizchi/flaker 0.11.0; this repo pins ^0.11.0.
+          # The repo's `pnpm flaker:*` aliases set NODE_OPTIONS=--preserve-symlinks-main
+          # — that env var is a leftover workaround for a pnpm symlink resolution
+          # bug fixed in flaker 0.10.7, and it now silently breaks the CLI under
+          # 0.11.0. Invoke without the env var here.
+          pnpm exec flaker import chaos-report.json \
+            --adapter chaosbringer \
+            --commit "${{ github.sha }}" \
+            --branch "${{ github.ref_name }}" \
+            --source ci
+
       - name: Upload baseline
         uses: actions/upload-artifact@v4
         with:
