@@ -37,6 +37,15 @@ export {
   type TransitionVerdict,
 } from "./state-machine-invariants.js";
 export {
+  CoverageCollector,
+  coverageDelta,
+  coverageSignature,
+  noveltyMultiplier,
+  summarizeCoverage,
+  targetKey,
+  type CoverageScriptResult,
+} from "./coverage.js";
+export {
   compareScreenshotBuffers,
   formatVisualDiff,
   screenshotFilename,
@@ -119,6 +128,8 @@ export type {
   LifecycleFaultStats,
   LifecycleStage,
   StorageScope,
+  CoverageFeedbackOptions,
+  CoverageReport,
   UrlMatcher,
   HarConfig,
   HarMode,

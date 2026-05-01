@@ -9,6 +9,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
+- **Coverage-guided action selection** — opt-in V8 precise coverage feedback (CDP `Profiler.takePreciseCoverage`) attributes per-action coverage deltas to the target that fired them and biases subsequent action weights toward targets that historically delivered new code paths.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
 - **Performance budgets** per TTFB / FCP / LCP / TBT — budget breaches fail the run.
@@ -336,6 +337,47 @@ When `derive()` returns a label that the previous label's transition list doesn'
 `derive()` receives `{ page, url, prev, errors }` so the caller can branch on the previous label or the current URL when classifying the page.
 
 The state-machine helper is one preset on top of `ctx.state`; for non-discrete properties (counters, set membership, ordered event log), drop down to a plain `Invariant` and use `state.set` / `state.get` directly.
+
+## Coverage-guided action selection
+
+`coverageFeedback` opts the crawler into AFL-style feedback: V8 precise coverage (CDP `Profiler.startPreciseCoverage` / `takePreciseCoverage`) is collected per page, the coverage delta of every chaos action is attributed to the action target that fired it, and on subsequent visits each target's weight is multiplied by `1 + boost · log1p(score)`. Targets that have historically delivered new V8 functions get picked more often; dead-end targets fade.
+
+```ts
+import { chaos } from "chaosbringer";
+
+const { report } = await chaos({
+  baseUrl: "http://localhost:3000",
+  seed: 42,
+  maxPages: 50,
+  maxActionsPerPage: 5,
+  coverageFeedback: { enabled: true, boost: 2 },
+});
+
+console.log(report.coverage);
+// {
+//   totalFunctions: 312,
+//   pagesWithNewCoverage: 18,
+//   topNovelTargets: [
+//     { url: "http://localhost:3000/cart", selector: "button:has-text(\"Checkout\")", score: 47 },
+//     { url: "http://localhost:3000/", selector: "[role=link]:has-text(\"Sign in\")", score: 23 },
+//     ...
+//   ],
+// }
+```
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `enabled` | Master switch — attaches the coverage collector and biases weights. | required (`false` if omitted entirely) |
+| `boost` | Multiplier applied via `1 + boost · log1p(score)`. `0` keeps coverage tracked but disables the weight bias. `2` is moderate. `4`+ aggressively concentrates picks. | 2 |
+| `topN` | Cap top-N novel targets emitted in `report.coverage`. | 20 |
+
+### Reproducibility
+
+The collector never consumes the seeded RNG, so the seed sequence is unchanged. Action selection still differs vs a no-feedback run because the **weight inputs** to `weightedPick` are different — reproducibility is now `(seed, coverageFeedback)` rather than `seed` alone. The `Repro:` line emitted by the report only encodes flags expressible on the CLI, so a coverage-feedback run is reproducible programmatically (same `chaos({...})` config) but not from the CLI alone.
+
+### Cost
+
+Each chaos action incurs one `Profiler.takePreciseCoverage` CDP roundtrip. Chromium-only (the API is Chrome-DevTools-Protocol-specific). For typical chaos runs (≤100 pages, ≤5 actions per page) the overhead is below 5%; expect a noticeable slowdown on heavy SPAs with hundreds of scripts.
 
 ## Device emulation & network throttling
 

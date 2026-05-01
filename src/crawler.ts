@@ -30,6 +30,8 @@ import type {
   LifecycleFault,
   LifecycleFaultStats,
   LifecycleStage,
+  CoverageFeedbackOptions,
+  CoverageReport,
   UrlMatcher,
   NetworkProfile,
 } from "./types.js";
@@ -44,6 +46,13 @@ import {
   shouldFireProbability,
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
+import {
+  CoverageCollector,
+  coverageDelta,
+  noveltyMultiplier,
+  summarizeCoverage,
+  targetKey,
+} from "./coverage.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -88,6 +97,7 @@ const DEFAULT_OPTIONS: Required<
     | "shardIndex"
     | "shardCount"
     | "failureArtifacts"
+    | "coverageFeedback"
   >
 > = {
   maxPages: 50,
@@ -204,6 +214,22 @@ export class ChaosCrawler {
    * multiple runs doesn't leak stale state.
    */
   private invariantState: Map<string, unknown> = new Map();
+  /** Resolved coverage-feedback config (null when disabled). */
+  private coverageFeedback: { enabled: true; boost: number; topN: number } | null = null;
+  /** Per-page coverage collector — recreated each new page when enabled. */
+  private coverageCollector: CoverageCollector | null = null;
+  /** All V8 function fingerprints seen across the run so far. */
+  private globalCoverage: Set<string> = new Set();
+  /** Per-page coverage delta count, in BFS visit order. */
+  private pageCoverageDeltas: Array<{ url: string; addedCount: number }> = [];
+  /** Historical novelty score per `targetKey(url, selector)`. */
+  private targetNovelty: Map<string, number> = new Map();
+  /**
+   * Most recent V8 coverage snapshot taken for the current page. Per-action
+   * deltas are computed as `take() − lastCoverageSnapshot`. Reset to an
+   * empty set whenever a fresh page is opened.
+   */
+  private lastCoverageSnapshot: Set<string> = new Set();
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -220,6 +246,13 @@ export class ChaosCrawler {
     this.options.seed = this.rng.seed;
     this.compiledFaultRules = compileFaultRules(options.faultInjection);
     this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
+    if (options.coverageFeedback?.enabled) {
+      this.coverageFeedback = {
+        enabled: true,
+        boost: options.coverageFeedback.boost ?? 2,
+        topN: options.coverageFeedback.topN ?? 20,
+      };
+    }
 
     // Initialize logger
     if (options.logFile) {
@@ -378,6 +411,9 @@ export class ChaosCrawler {
     this.blockedExternalCount = 0;
     this.failureArtifactCount = 0;
     this.invariantState = new Map();
+    this.globalCoverage = new Set();
+    this.pageCoverageDeltas = [];
+    this.targetNovelty = new Map();
 
     if (this.isRecordingTrace()) {
       this.trace.push({
@@ -716,6 +752,79 @@ export class ChaosCrawler {
   }
 
   /**
+   * Take a coverage snapshot right after `page.goto` finishes. Functions
+   * executed during page load are credited to the URL itself (no specific
+   * action) and folded into `globalCoverage`. The snapshot is also saved as
+   * the per-action delta baseline.
+   */
+  private async recordPageLoadCoverage(url: string): Promise<void> {
+    if (!this.coverageCollector) {
+      this.lastCoverageSnapshot = new Set();
+      return;
+    }
+    let snapshot: Set<string>;
+    try {
+      snapshot = await this.coverageCollector.take();
+    } catch (err) {
+      this.logger.warn("coverage_take_failed", {
+        url,
+        phase: "page-load",
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      this.lastCoverageSnapshot = new Set();
+      return;
+    }
+    const novel = coverageDelta(this.globalCoverage, snapshot);
+    for (const fp of novel) this.globalCoverage.add(fp);
+    this.pageCoverageDeltas.push({ url, addedCount: novel.size });
+    this.lastCoverageSnapshot = snapshot;
+  }
+
+  /**
+   * Take a coverage snapshot after a chaos action and credit any
+   * never-before-seen functions to `(url, selector)` in `targetNovelty`.
+   * Updates `globalCoverage` and `lastCoverageSnapshot` so subsequent
+   * actions see the right baseline.
+   */
+  private async attributeActionCoverage(url: string, selector: string): Promise<void> {
+    if (!this.coverageCollector) return;
+    let snapshot: Set<string>;
+    try {
+      snapshot = await this.coverageCollector.take();
+    } catch (err) {
+      this.logger.warn("coverage_take_failed", {
+        url,
+        selector,
+        phase: "action",
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    const actionDelta = coverageDelta(this.lastCoverageSnapshot, snapshot);
+    if (actionDelta.size === 0) {
+      this.lastCoverageSnapshot = snapshot;
+      return;
+    }
+    const novel = coverageDelta(this.globalCoverage, actionDelta);
+    if (novel.size > 0) {
+      const key = targetKey(url, selector);
+      this.targetNovelty.set(key, (this.targetNovelty.get(key) ?? 0) + novel.size);
+      for (const fp of novel) this.globalCoverage.add(fp);
+    }
+    this.lastCoverageSnapshot = snapshot;
+  }
+
+  /**
+   * Compute the coverage-feedback weight multiplier for a target on a given
+   * URL. Returns 1 when feedback is off or when the target has no history.
+   */
+  private coverageWeightFor(url: string, selector: string): number {
+    if (!this.coverageFeedback) return 1;
+    const score = this.targetNovelty.get(targetKey(url, selector)) ?? 0;
+    return noveltyMultiplier(score, this.coverageFeedback.boost);
+  }
+
+  /**
    * Run every lifecycle fault that targets `stage` and matches `url`. Errors
    * are caught and recorded in the fault's stats counter — a misbehaving
    * fault should not abort the rest of the crawl.
@@ -825,9 +934,26 @@ export class ChaosCrawler {
     // Drop the previous page's lifecycle executor — next stage call
     // re-creates one against the current page.
     this.lifecycleExecutor = null;
+    this.coverageCollector = null;
 
     if (this.options.network) {
       await this.applyNetworkProfile(page, this.options.network);
+    }
+
+    if (this.coverageFeedback) {
+      // Attach a CDP session and start V8 precise coverage BEFORE goto so
+      // load-time function execution is captured.
+      try {
+        const cdp = await this.context!.newCDPSession(page);
+        this.coverageCollector = new CoverageCollector(cdp);
+        await this.coverageCollector.start();
+      } catch (err) {
+        this.logger.warn("coverage_attach_failed", {
+          url,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        this.coverageCollector = null;
+      }
     }
 
     if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
@@ -896,6 +1022,14 @@ export class ChaosCrawler {
       this.logger.logPageComplete(result);
       return result;
     } finally {
+      if (this.coverageCollector) {
+        try {
+          await this.coverageCollector.stop();
+        } catch {
+          /* page may already be closing — drop. */
+        }
+        this.coverageCollector = null;
+      }
       await page.close();
     }
   }
@@ -1017,6 +1151,12 @@ export class ChaosCrawler {
       // afterLoad lifecycle faults — page exists, DOM is reachable, but no
       // chaos actions have run yet. Storage wipes and tampering happen here.
       await this.applyLifecycleStage("afterLoad", page, url);
+
+      // Take an initial coverage snapshot so subsequent action deltas have
+      // a baseline. The page-load attribution (functions executed during
+      // navigation) folds straight into globalCoverage — no specific action
+      // owns it.
+      await this.recordPageLoadCoverage(url);
 
       await this.runInvariants("afterLoad", page, url, errors);
 
@@ -1446,7 +1586,14 @@ export class ChaosCrawler {
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
 
-      const selectedTarget = weightedPick(targets, (t) => t.weight, this.rng);
+      const selectedTarget = weightedPick(
+        targets,
+        // Coverage-guided action selection: bias picks toward targets that
+        // historically delivered new V8 coverage. `coverageWeightFor` returns
+        // 1 when feedback is off, so the no-feedback path is unchanged.
+        (t) => t.weight * this.coverageWeightFor(url, t.selector),
+        this.rng,
+      );
 
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
@@ -1464,6 +1611,10 @@ export class ChaosCrawler {
       }
       this.events.onAction?.(result);
       this.logger.logAction(result);
+
+      // Attribute V8 coverage executed during this action to the selected
+      // target — feeds the novelty score that biases the next picks.
+      await this.attributeActionCoverage(url, selectedTarget.selector);
 
       // betweenActions lifecycle faults — re-applied after each chaos action
       // so sustained-pressure faults (CPU throttle, repeated tamper) keep
@@ -1707,6 +1858,14 @@ export class ChaosCrawler {
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
           : undefined,
+      coverage: this.coverageFeedback
+        ? summarizeCoverage({
+            globalCovered: this.globalCoverage,
+            pageDeltas: this.pageCoverageDeltas,
+            targetNovelty: this.targetNovelty,
+            topN: this.coverageFeedback.topN,
+          })
+        : undefined,
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
     };
@@ -1983,6 +2142,32 @@ export function validateOptions(options: CrawlerOptions): void {
       throw new Error(
         `chaosbringer: "network" must be one of ${NETWORK_PROFILES.join(", ")} (got ${JSON.stringify(options.network)})`
       );
+    }
+  }
+
+  if (options.coverageFeedback !== undefined) {
+    const cf = options.coverageFeedback;
+    if (cf === null || typeof cf !== "object" || Array.isArray(cf)) {
+      throw new Error(
+        `chaosbringer: "coverageFeedback" must be an object with at least an "enabled" boolean`
+      );
+    }
+    if (typeof cf.enabled !== "boolean") {
+      throw new Error(`chaosbringer: "coverageFeedback.enabled" must be a boolean`);
+    }
+    if (cf.boost !== undefined) {
+      if (typeof cf.boost !== "number" || !Number.isFinite(cf.boost) || cf.boost < 0) {
+        throw new Error(
+          `chaosbringer: "coverageFeedback.boost" must be a non-negative finite number (got ${JSON.stringify(cf.boost)})`
+        );
+      }
+    }
+    if (cf.topN !== undefined) {
+      if (!Number.isInteger(cf.topN) || cf.topN < 0) {
+        throw new Error(
+          `chaosbringer: "coverageFeedback.topN" must be a non-negative integer (got ${JSON.stringify(cf.topN)})`
+        );
+      }
     }
   }
 
