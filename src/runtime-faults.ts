@@ -108,7 +108,11 @@ export function buildRuntimeFaultsScript(
   faults: ReadonlyArray<RuntimeFault>,
   seed: number,
 ): string {
-  const serialized = faults.map((f) => ({
+  // Stats keys are indices, not names — two faults can legitimately share
+  // a name (`flaky-fetch` x2 with different urlPatterns) and we mustn't
+  // collapse their counters.
+  const serialized = faults.map((f, i) => ({
+    id: i,
     name: runtimeFaultName(f),
     pattern: serializeMatcher(f.urlPattern),
     probability: typeof f.probability === "number" ? f.probability : 1,
@@ -133,7 +137,7 @@ export function buildRuntimeFaultsScript(
 
   const faults = ${JSON.stringify(serialized)};
   const stats = window.__chaosbringerRuntimeStats;
-  for (const f of faults) stats[f.name] = { matched: 0, fired: 0 };
+  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
 
   const matchUrl = (pattern, url) => {
     if (!pattern) return true;
@@ -145,14 +149,15 @@ export function buildRuntimeFaultsScript(
   };
 
   const roll = (f) => {
-    stats[f.name].matched++;
+    const slot = stats[String(f.id)];
+    slot.matched++;
     if (f.probability >= 1) {
-      stats[f.name].fired++;
+      slot.fired++;
       return true;
     }
     if (f.probability <= 0) return false;
     const fired = __nextRoll() < f.probability;
-    if (fired) stats[f.name].fired++;
+    if (fired) slot.fired++;
     return fired;
   };
 
@@ -179,10 +184,12 @@ export function buildRuntimeFaultsScript(
   // --- clock-skew ---
   const skewFaults = faults.filter((f) => f.action.kind === "clock-skew");
   if (skewFaults.length > 0) {
+    // Use a plain accumulator. Multi-day skews (e.g. 30 days ~ 2.6e9 ms)
+    // exceed int32 max, so any '| 0' truncation here would flip them negative.
     let totalSkew = 0;
     for (const f of skewFaults) {
       if (matchUrl(f.pattern, location.href) && roll(f)) {
-        totalSkew += f.action.skewMs | 0;
+        totalSkew += Number(f.action.skewMs);
       }
     }
     if (totalSkew !== 0) {
@@ -213,16 +220,33 @@ export function buildRuntimeFaultsScript(
  * (`matched` and `fired`). Returns the merged stats; the compiled-fault
  * objects are mutated in place so the next page picks up where this one
  * left off.
+ *
+ * Stats keys are array indices so two faults with the same name don't
+ * collide their counters. Both legacy name-keyed snapshots and the
+ * current index-keyed shape are accepted: name-keyed entries are applied
+ * to the first compiled fault with that name (the safe, non-collapsing
+ * fallback used when reading older traces).
  */
 export function mergeRuntimeStats(
   compiled: CompiledRuntimeFault[],
   pageStats: Record<string, { matched: number; fired: number }>,
 ): RuntimeFaultStats[] {
-  for (const c of compiled) {
-    const ps = pageStats[c.name];
-    if (!ps) continue;
-    c.matched += ps.matched;
-    c.fired += ps.fired;
+  for (let i = 0; i < compiled.length; i++) {
+    const c = compiled[i]!;
+    // Index-keyed (current shape).
+    const ps = pageStats[String(i)];
+    if (ps) {
+      c.matched += ps.matched;
+      c.fired += ps.fired;
+      continue;
+    }
+    // Backwards-compat: name-keyed (one slot per distinct name only;
+    // applied to the first compiled fault that wears that name).
+    const byName = pageStats[c.name];
+    if (byName && !compiled.slice(0, i).some((c2) => c2.name === c.name)) {
+      c.matched += byName.matched;
+      c.fired += byName.fired;
+    }
   }
   return compiled.map((c) => ({
     rule: c.name,

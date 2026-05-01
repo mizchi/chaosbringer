@@ -156,13 +156,35 @@ describe("buildRuntimeFaultsScript", () => {
     expect(skewed).toContain("Date.now");
   });
 
-  it("uses the fault's auto-derived name as the stats key", () => {
+  it("uses the fault's auto-derived name as a display label", () => {
     const s = buildRuntimeFaultsScript(
       [{ action: { kind: "flaky-fetch" } }, { action: { kind: "clock-skew", skewMs: 1000 } }],
       1,
     );
     expect(s).toContain('"name":"flaky-fetch"');
     expect(s).toContain('"name":"clock-skew:1000ms"');
+  });
+
+  it("assigns sequential id keys so duplicate names don't collide in stats", () => {
+    const s = buildRuntimeFaultsScript(
+      [{ action: { kind: "flaky-fetch" } }, { action: { kind: "flaky-fetch" } }],
+      1,
+    );
+    expect(s).toContain('"id":0');
+    expect(s).toContain('"id":1');
+    // The stats accessor uses String(f.id), not f.name.
+    expect(s).toContain("stats[String(f.id)]");
+  });
+
+  it("does not 32-bit-truncate large skewMs values", () => {
+    // 30 days = 2,592,000,000 ms — exceeds int32 max. The script must
+    // accumulate via Number(...), not `| 0`.
+    const s = buildRuntimeFaultsScript(
+      [{ action: { kind: "clock-skew", skewMs: 2_592_000_000 } }],
+      1,
+    );
+    expect(s).not.toContain("skewMs | 0");
+    expect(s).toContain("Number(f.action.skewMs)");
   });
 
   it("respects an explicit fault name", () => {
@@ -187,31 +209,62 @@ describe("buildRuntimeFaultsScript", () => {
 });
 
 describe("mergeRuntimeStats", () => {
-  it("accumulates per-page counters into the compiled fault counters", () => {
+  it("accumulates per-page counters by index into the compiled fault counters", () => {
     const compiled = compileRuntimeFaults([
       { name: "f1", action: { kind: "flaky-fetch" } },
       { name: "c1", action: { kind: "clock-skew", skewMs: 100 } },
     ]);
-    mergeRuntimeStats(compiled, { f1: { matched: 3, fired: 2 } });
+    mergeRuntimeStats(compiled, { "0": { matched: 3, fired: 2 } });
     expect(compiled[0]!.matched).toBe(3);
     expect(compiled[0]!.fired).toBe(2);
     expect(compiled[1]!.matched).toBe(0);
     expect(compiled[1]!.fired).toBe(0);
-    mergeRuntimeStats(compiled, { f1: { matched: 1, fired: 1 } });
+    mergeRuntimeStats(compiled, { "0": { matched: 1, fired: 1 } });
     expect(compiled[0]!.matched).toBe(4);
     expect(compiled[0]!.fired).toBe(3);
   });
 
+  it("does not collapse counters when two faults share a name", () => {
+    // Both default to name="flaky-fetch"; index keys keep them apart.
+    const compiled = compileRuntimeFaults([
+      { action: { kind: "flaky-fetch" }, urlPattern: /\/api\/a/ },
+      { action: { kind: "flaky-fetch" }, urlPattern: /\/api\/b/ },
+    ]);
+    mergeRuntimeStats(compiled, {
+      "0": { matched: 5, fired: 5 },
+      "1": { matched: 1, fired: 0 },
+    });
+    expect(compiled[0]!.matched).toBe(5);
+    expect(compiled[0]!.fired).toBe(5);
+    expect(compiled[1]!.matched).toBe(1);
+    expect(compiled[1]!.fired).toBe(0);
+  });
+
   it("ignores stats keys that don't correspond to a compiled fault", () => {
     const compiled = compileRuntimeFaults([{ name: "known", action: { kind: "flaky-fetch" } }]);
-    mergeRuntimeStats(compiled, { ghost: { matched: 99, fired: 99 } });
+    mergeRuntimeStats(compiled, { "99": { matched: 99, fired: 99 } });
     expect(compiled[0]!.matched).toBe(0);
   });
 
   it("returns a stats array shaped like RuntimeFaultStats", () => {
     const compiled = compileRuntimeFaults([{ name: "f", action: { kind: "flaky-fetch" } }]);
-    const out = mergeRuntimeStats(compiled, { f: { matched: 5, fired: 3 } });
+    const out = mergeRuntimeStats(compiled, { "0": { matched: 5, fired: 3 } });
     expect(out).toEqual([{ rule: "f", matched: 5, fired: 3 }]);
+  });
+
+  it("falls back to a name-keyed snapshot for the first matching fault", () => {
+    // Backwards-compat path: when reading legacy snapshots that keyed
+    // by name, the merge applies the count to the first compiled fault
+    // with that name and skips the rest.
+    const compiled = compileRuntimeFaults([
+      { name: "shared", action: { kind: "flaky-fetch" } },
+      { name: "shared", action: { kind: "flaky-fetch" } },
+    ]);
+    mergeRuntimeStats(compiled, { shared: { matched: 4, fired: 2 } });
+    expect(compiled[0]!.matched).toBe(4);
+    expect(compiled[0]!.fired).toBe(2);
+    expect(compiled[1]!.matched).toBe(0);
+    expect(compiled[1]!.fired).toBe(0);
   });
 });
 
