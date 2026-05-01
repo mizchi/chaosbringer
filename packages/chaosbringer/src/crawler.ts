@@ -266,6 +266,7 @@ export class ChaosCrawler {
     stall: StallTracker;
     timeoutMs: number;
     redactReasoning: boolean;
+    screenshotFullPage: boolean;
     callsAttempted: number;
     callsSucceeded: number;
     picks: AdvisorPick[];
@@ -320,6 +321,7 @@ export class ChaosCrawler {
         stall: new StallTracker(),
         timeoutMs: options.advisor.timeoutMs ?? 8_000,
         redactReasoning: options.advisor.redactReasoning ?? false,
+        screenshotFullPage: options.advisor.screenshotMode === "fullPage",
         callsAttempted: 0,
         callsSucceeded: 0,
         picks: [],
@@ -992,7 +994,7 @@ export class ChaosCrawler {
       provider: runtime.provider,
       url,
       candidates,
-      screenshotSupplier: () => page.screenshot({ fullPage: false }),
+      screenshotSupplier: () => page.screenshot({ fullPage: runtime.screenshotFullPage }),
       timeoutMs: runtime.timeoutMs,
     });
 

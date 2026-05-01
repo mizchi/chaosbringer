@@ -74,6 +74,14 @@ export interface AdvisorConfig {
    * Default: false.
    */
   redactReasoning?: boolean;
+  /**
+   * Screenshot mode for advisor consults. `viewport` (default) sends only
+   * what the user currently sees — smaller payload, lower cost, but the
+   * model can miss off-screen UI. `fullPage` captures the entire scrollable
+   * page — better signal for long pages but 2-5× the bytes / tokens.
+   * Default: "viewport".
+   */
+  screenshotMode?: "viewport" | "fullPage";
 }
 
 export const REDACTED_REASONING = "[redacted]";
