@@ -53,6 +53,10 @@ import {
   summarizeCoverage,
   targetKey,
 } from "./coverage.js";
+import {
+  resolveSpaNavigationUrls,
+  type RawSpaNavigation,
+} from "./spa-navigation.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -349,6 +353,26 @@ export class ChaosCrawler {
         this.events.onError?.(error);
         this.logger.logPageError(error);
       }
+    }
+  }
+
+  /**
+   * Pop and return SPA navigations recorded by the in-page hook since the
+   * previous drain. Used to surface History-API routing as discovered links
+   * the BFS queue can pick up.
+   */
+  private async drainSpaNavigations(page: Page): Promise<RawSpaNavigation[]> {
+    try {
+      return await page.evaluate(() => {
+        // @ts-ignore - bag installed via addInitScript
+        const bag = (window.__chaosNavigations || []) as RawSpaNavigation[];
+        // @ts-ignore
+        window.__chaosNavigations = [];
+        return bag;
+      });
+    } catch {
+      // Page may have navigated away or closed — drop and move on.
+      return [];
     }
   }
 
@@ -1100,6 +1124,55 @@ export class ChaosCrawler {
       });
     });
 
+    // Capture SPA route changes that go through the History API
+    // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,
+    // Next.js client-side links, hand-rolled `useNavigate()` buttons —
+    // all of them mutate history without firing a real navigation, which
+    // means `extractLinks` (DOM-only) misses every URL they would route
+    // to. We monkey-patch the two methods on every page so each call
+    // appends the URL into a side channel that `drainSpaNavigations`
+    // reads later.
+    await page.addInitScript(() => {
+      // @ts-ignore - custom bag attached to window
+      window.__chaosNavigations = [];
+      const origPush = history.pushState;
+      const origReplace = history.replaceState;
+      history.pushState = function (...args: unknown[]) {
+        try {
+          const url = args[2];
+          if (typeof url === "string" && url.length > 0) {
+            // @ts-ignore
+            window.__chaosNavigations.push({
+              method: "pushState",
+              url,
+              timestamp: Date.now(),
+            });
+          }
+        } catch {
+          /* never let our hook break the host page */
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return origPush.apply(this, args as any);
+      };
+      history.replaceState = function (...args: unknown[]) {
+        try {
+          const url = args[2];
+          if (typeof url === "string" && url.length > 0) {
+            // @ts-ignore
+            window.__chaosNavigations.push({
+              method: "replaceState",
+              url,
+              timestamp: Date.now(),
+            });
+          }
+        } catch {
+          /* never let our hook break the host page */
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return origReplace.apply(this, args as any);
+      };
+    });
+
     page.on("requestfailed", (request) => {
       if (!collecting) return;
       const requestUrl = request.url();
@@ -1164,6 +1237,14 @@ export class ChaosCrawler {
       const metrics = await this.collectMetrics(page);
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
+      // History-API navigations that fired during page load (auto-routing
+      // SPAs that redirect / on mount). Same de-dup happens at the queue
+      // feeder, so duplicates between extractLinks and SPA drain are fine.
+      const loadSpaUrls = resolveSpaNavigationUrls(
+        await this.drainSpaNavigations(page),
+        page.url(),
+      );
+      for (const u of loadSpaUrls) links.push(u);
 
       // beforeActions lifecycle faults — invariants have passed, the chaos
       // driver is about to start. Service Worker cache eviction lives here.
@@ -1179,6 +1260,14 @@ export class ChaosCrawler {
 
       // Drain any rejections that fired during actions.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
+
+      // History-API navigations that fired DURING actions (every chaos
+      // click on a React Router `<button onClick={navigate(...)}>`).
+      const actionSpaUrls = resolveSpaNavigationUrls(
+        await this.drainSpaNavigations(page),
+        page.url(),
+      );
+      for (const u of actionSpaUrls) links.push(u);
 
       await this.runInvariants("afterActions", page, url, errors);
 

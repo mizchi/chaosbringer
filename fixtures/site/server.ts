@@ -160,6 +160,42 @@ const pages: Record<string, Route> = {
       `,
     }),
   },
+
+  // SPA navigation via the History API — the page itself never reloads,
+  // and there are NO `<a href>` to /spa-router/*. Static link extraction
+  // would miss every one of these. The crawler's pushState / replaceState
+  // hook should pick them up via window.__chaosNavigations.
+  "/spa-router": {
+    body: html({
+      title: "SPA Router",
+      // No nav — otherwise the chaos driver picks the nav anchors first
+      // (link weight 3 > button weight 2) and never clicks the SPA buttons.
+      body: `
+        <h1>SPA Router</h1>
+        <p>Buttons below call <code>history.pushState</code> with a fresh route. No anchor tags.</p>
+        <button type="button" id="go-dashboard">Dashboard</button>
+        <button type="button" id="go-settings">Settings</button>
+        <button type="button" id="go-profile">Profile</button>
+        <div id="route" style="margin-top:1em">/</div>
+        <script>
+          // One-shot autoroute on mount so 'load-time' pushStates are also
+          // exercised separately from button-driven ones.
+          history.replaceState({}, '', '/spa-router/auto');
+
+          for (const [id, target] of [
+            ['go-dashboard', '/spa-router/dashboard'],
+            ['go-settings',  '/spa-router/settings'],
+            ['go-profile',   '/spa-router/profile'],
+          ]) {
+            document.getElementById(id).addEventListener('click', () => {
+              history.pushState({}, '', target);
+              document.getElementById('route').textContent = target;
+            });
+          }
+        </script>
+      `,
+    }),
+  },
 };
 
 function html({ title, body, nav }: { title: string; body: string; nav?: boolean }): string {
