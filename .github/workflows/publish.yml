@@ -4,6 +4,10 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      package_dir:
+        description: "Package dir under packages/ (e.g. chaosbringer, playwright-faults). Required for workflow_dispatch."
+        required: false
 
 permissions:
   contents: read
@@ -23,12 +27,36 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
+      - name: Determine target package directory
+        id: pkg
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT_DIR: ${{ inputs.package_dir }}
+        run: |
+          # Tag formats handled:
+          #   <short-name>-v<ver>  (release-please monorepo style)
+          #   v<ver>               (legacy chaosbringer-only, through 0.6.0)
+          # workflow_dispatch overrides via the package_dir input.
+          if [[ -n "$INPUT_DIR" ]]; then
+            dir="packages/${INPUT_DIR}"
+          elif [[ "$TAG" =~ ^([a-z0-9-]+)-v[0-9] ]]; then
+            dir="packages/${BASH_REMATCH[1]}"
+          else
+            dir="packages/chaosbringer"
+          fi
+          if [[ ! -f "${dir}/package.json" ]]; then
+            echo "::error::No package.json at ${dir} (resolved from tag '${TAG}' / input '${INPUT_DIR}')"
+            exit 1
+          fi
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
+          echo "Publishing from ${dir}"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm -F chaosbringer run build
+      - name: Build (recursive — workspace deps must be built before any single package publishes)
+        run: pnpm -r build
 
       - name: Publish to npm (OIDC Trusted Publishing)
-        working-directory: packages/chaosbringer
+        working-directory: ${{ steps.pkg.outputs.dir }}
         run: npm publish --access public --provenance
