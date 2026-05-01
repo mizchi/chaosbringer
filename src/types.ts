@@ -665,6 +665,13 @@ export interface CrawlReport {
    */
   coverage?: CoverageReport;
   /**
+   * Action-advisor activity (present only when `advisor` was configured).
+   * Reports the provider, attempt + success counts, and one row per pick
+   * the advisor actually made — useful for auditing which crawl decisions
+   * were model-driven vs heuristic-driven.
+   */
+  advisor?: AdvisorReport;
+  /**
    * Errors grouped into clusters by fingerprint (type + normalised message).
    * Use `ErrorCluster.count` to triage noisy runs where the same issue fires
    * repeatedly. Always populated, even when empty.
@@ -674,6 +681,20 @@ export interface CrawlReport {
   har?: HarConfig;
   /** Diff against a baseline report, present only when a baseline was supplied. */
   diff?: ReportDiff;
+}
+
+export interface AdvisorPick {
+  url: string;
+  reason: "novelty_stall" | "invariant_violation" | "explicit_request";
+  chosenSelector: string;
+  reasoning: string;
+}
+
+export interface AdvisorReport {
+  provider: string;
+  callsAttempted: number;
+  callsSucceeded: number;
+  picks: AdvisorPick[];
 }
 
 export interface CrawlSummary {

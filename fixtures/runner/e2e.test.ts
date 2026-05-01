@@ -514,6 +514,57 @@ describe("ChaosCrawler against fixture site", () => {
     expect(offReport2.actions.map((a) => a.selector ?? "")).toEqual(offSelectors);
   }, 180000);
 
+  it("populates report.advisor and stamps trace entries when the advisor picks a target", async () => {
+    // Stub advisor: forces consultation by reporting always-stalled state via
+    // a permissive policy (noveltyStallThreshold=0). Picks index 0 every time.
+    const visited: Array<{ url: string; reason: string }> = [];
+    const stubAdvisor = {
+      name: "stub/test",
+      async suggest(ctx: { url: string; reason: string; candidates: { index: number }[] }) {
+        visited.push({ url: ctx.url, reason: ctx.reason });
+        return { chosenIndex: 0, reasoning: "stub picks index 0" };
+      },
+    };
+
+    const tmpTrace = join(mkdtempSync(join(tmpdir(), "chaos-advisor-")), "trace.jsonl");
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 3,
+      maxActionsPerPage: 3,
+      headless: true,
+      seed: 11,
+      traceOut: tmpTrace,
+      advisor: {
+        provider: stubAdvisor,
+        noveltyStallThreshold: 0,
+        minCandidatesToConsult: 1,
+        timeoutMs: 5_000,
+      },
+    });
+    const report = await crawler.start();
+
+    expect(report.advisor).toBeDefined();
+    expect(report.advisor!.provider).toBe("stub/test");
+    expect(report.advisor!.callsAttempted).toBeGreaterThan(0);
+    expect(report.advisor!.callsSucceeded).toBeGreaterThan(0);
+    expect(report.advisor!.picks.length).toBeGreaterThan(0);
+    for (const pick of report.advisor!.picks) {
+      expect(pick.reasoning).toBe("stub picks index 0");
+      expect(pick.chosenSelector).toBeTruthy();
+    }
+
+    // Trace file should have at least one action entry tagged with advisor.
+    const { readFileSync } = await import("node:fs");
+    const lines = readFileSync(tmpTrace, "utf8").trim().split("\n");
+    const advisorActions = lines
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.kind === "action" && e.advisor !== undefined);
+    expect(advisorActions.length).toBeGreaterThan(0);
+    expect(advisorActions[0].advisor.provider).toBe("stub/test");
+    expect(advisorActions[0].advisor.reasoning).toBe("stub picks index 0");
+  }, 120000);
+
   it("captures SPA history.pushState navigations as discovered links", async () => {
     // /spa-router has NO `<a href>` to /spa-router/*, only buttons that
     // call history.pushState. Static link extraction misses every one;
