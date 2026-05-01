@@ -65,4 +65,15 @@ export interface AdvisorConfig {
   timeoutMs?: number;
   /** Skip advisor when fewer than N candidates. Default: 3. */
   minCandidatesToConsult?: number;
+  /**
+   * When true, the model's `reasoning` string is replaced with "[redacted]"
+   * before being written to `CrawlReport.advisor.picks[].reasoning` and to
+   * the trace's advisor stamp. The provider still sees the raw reasoning
+   * at call time — redaction happens at the storage boundary. Use on
+   * internal apps where UI text in the reasoning could be sensitive.
+   * Default: false.
+   */
+  redactReasoning?: boolean;
 }
+
+export const REDACTED_REASONING = "[redacted]";

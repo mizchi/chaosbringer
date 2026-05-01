@@ -91,7 +91,7 @@ import {
 import { AdvisorBudget, StallTracker } from "./advisor/budget.js";
 import { consultAdvisor } from "./advisor/consult.js";
 import { defaultTriggerPolicy, type TriggerPolicy } from "./advisor/trigger.js";
-import type { ActionAdvisor, AdvisorCandidate } from "./advisor/types.js";
+import { REDACTED_REASONING, type ActionAdvisor, type AdvisorCandidate } from "./advisor/types.js";
 import type { AdvisorPick } from "./types.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
@@ -265,6 +265,7 @@ export class ChaosCrawler {
     budget: AdvisorBudget;
     stall: StallTracker;
     timeoutMs: number;
+    redactReasoning: boolean;
     callsAttempted: number;
     callsSucceeded: number;
     picks: AdvisorPick[];
@@ -318,6 +319,7 @@ export class ChaosCrawler {
         budget: new AdvisorBudget(),
         stall: new StallTracker(),
         timeoutMs: options.advisor.timeoutMs ?? 8_000,
+        redactReasoning: options.advisor.redactReasoning ?? false,
         callsAttempted: 0,
         callsSucceeded: 0,
         picks: [],
@@ -1015,15 +1017,17 @@ export class ChaosCrawler {
     const target = targets[result.suggestion.chosenIndex];
     if (!target) return null;
 
+    const storedReasoning = runtime.redactReasoning ? REDACTED_REASONING : result.suggestion.reasoning;
+
     runtime.picks.push({
       url,
       reason: result.decision.reason,
       chosenSelector: target.selector,
-      reasoning: result.suggestion.reasoning,
+      reasoning: storedReasoning,
     });
     runtime.pendingPick = {
       selector: target.selector,
-      reasoning: result.suggestion.reasoning,
+      reasoning: storedReasoning,
       reason: result.decision.reason,
     };
     return target;
