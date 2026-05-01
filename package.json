@@ -41,6 +41,7 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "lint": "biome check src/",
+    "lint:nul": "node scripts/check-no-nul.mjs src fixtures scripts",
     "crawl": "tsx src/cli.ts",
     "fixture:serve": "tsx fixtures/site/server.ts",
     "fixture:run": "tsx fixtures/runner/run.ts",
