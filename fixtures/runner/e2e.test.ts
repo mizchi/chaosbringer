@@ -513,4 +513,33 @@ describe("ChaosCrawler against fixture site", () => {
     const offReport2 = await off2.start();
     expect(offReport2.actions.map((a) => a.selector ?? "")).toEqual(offSelectors);
   }, 180000);
+
+  it("captures SPA history.pushState navigations as discovered links", async () => {
+    // /spa-router has NO `<a href>` to /spa-router/*, only buttons that
+    // call history.pushState. Static link extraction misses every one;
+    // the new pushState hook is the only path that surfaces them.
+    const crawler = new ChaosCrawler({
+      baseUrl: `${server.url}/spa-router`,
+      // Cap visits at 1 so we stay on the SPA shell instead of recursing.
+      maxPages: 1,
+      // Need actions so the chaos driver clicks the pushState buttons.
+      maxActionsPerPage: 6,
+      headless: true,
+      seed: 7,
+    });
+    const report = await crawler.start();
+
+    const spaPage = report.pages.find((p) => p.url.includes("/spa-router"));
+    expect(spaPage).toBeDefined();
+
+    const links = spaPage!.links;
+    // Auto-route on mount (replaceState).
+    expect(links.some((l) => l.endsWith("/spa-router/auto"))).toBe(true);
+    // At least one button-driven pushState should have fired given seed=7
+    // and 6 chaos actions on a page with 3 routable buttons.
+    const buttonRoutes = ["dashboard", "settings", "profile"];
+    expect(
+      buttonRoutes.some((r) => links.some((l) => l.endsWith(`/spa-router/${r}`))),
+    ).toBe(true);
+  }, 120000);
 });

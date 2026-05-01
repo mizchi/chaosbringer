@@ -5,7 +5,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 ## Features
 
 - **Weighted random actions** targeted by ARIA role and visible text (nav links > buttons > inputs > scroll).
-- **Thorough link extraction** — `<a>`, `<area>`, `<iframe>`, `<link rel="canonical"/"alternate">`, and `<meta http-equiv="refresh">` feed the queue, so dead-link coverage isn't limited to clickable anchors.
+- **Thorough link extraction** — `<a>`, `<area>`, `<iframe>`, `<link rel="canonical"/"alternate">`, `<meta http-equiv="refresh">`, and **SPA `history.pushState` / `replaceState` navigations** all feed the queue, so React Router / Vue Router / SvelteKit / Next.js client-side routes get discovered without static `<a href>`.
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
