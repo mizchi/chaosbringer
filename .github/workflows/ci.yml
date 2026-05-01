@@ -22,8 +22,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Lint — no NUL bytes in source
-        run: pnpm -F chaosbringer lint:nul
+      - name: Lint — no NUL bytes in source (all workspace packages)
+        run: pnpm -r lint:nul
 
       - name: Build
         run: pnpm -F chaosbringer build
