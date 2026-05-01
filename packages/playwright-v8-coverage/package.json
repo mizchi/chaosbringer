@@ -30,6 +30,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "vitest run",
     "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
   },
