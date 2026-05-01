@@ -22,8 +22,9 @@ pnpm -F chaosbringer test
 chaosbringer/
 ├── packages/
 │   └── chaosbringer/      # the npm `chaosbringer` package
+│       ├── flaker.toml    # package-local @mizchi/flaker config
+│       └── .flaker/       # storage (gitignored, persisted across CI runs via actions/cache)
 ├── docs/                  # repo-wide design notes (see docs/superpowers/specs/)
-├── flaker.toml            # @mizchi/flaker config (root-level so .flaker/data lives at repo root)
 ├── package.json           # workspace catalog (private, not published)
 └── pnpm-workspace.yaml
 ```
