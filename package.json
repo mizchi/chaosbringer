@@ -94,7 +94,7 @@
     ]
   },
   "devDependencies": {
-    "@mizchi/flaker": "^0.10.6",
+    "@mizchi/flaker": "^0.11.0",
     "@playwright/test": "^1.52.0",
     "@types/node": "^22.0.0",
     "@types/pixelmatch": "^5.2.6",
