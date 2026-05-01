@@ -92,6 +92,7 @@ import { AdvisorBudget, StallTracker } from "./advisor/budget.js";
 import { consultAdvisor } from "./advisor/consult.js";
 import { defaultTriggerPolicy, type TriggerPolicy } from "./advisor/trigger.js";
 import type { ActionAdvisor, AdvisorCandidate } from "./advisor/types.js";
+import type { AdvisorPick } from "./types.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
 // perf budget, trace, device/network) are carved out of the Required<>
@@ -264,6 +265,16 @@ export class ChaosCrawler {
     budget: AdvisorBudget;
     stall: StallTracker;
     timeoutMs: number;
+    callsAttempted: number;
+    callsSucceeded: number;
+    picks: AdvisorPick[];
+    /**
+     * Selector → suggestion map, populated immediately before
+     * `performActionOnTarget` so the just-recorded ActionResult can be
+     * stamped onto the matching trace entry. Cleared after every action
+     * so a non-advisor action doesn't accidentally pick up stale state.
+     */
+    pendingPick: { selector: string; reasoning: string; reason: AdvisorPick["reason"] } | null;
   } | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
@@ -307,6 +318,10 @@ export class ChaosCrawler {
         budget: new AdvisorBudget(),
         stall: new StallTracker(),
         timeoutMs: options.advisor.timeoutMs ?? 8_000,
+        callsAttempted: 0,
+        callsSucceeded: 0,
+        picks: [],
+        pendingPick: null,
       };
     }
 
@@ -404,6 +419,7 @@ export class ChaosCrawler {
         errors.push(error);
         this.events.onError?.(error);
         this.logger.logPageError(error);
+        this.advisorRuntime?.stall.recordInvariantViolation();
       }
     }
   }
@@ -493,6 +509,10 @@ export class ChaosCrawler {
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
+      this.advisorRuntime.callsAttempted = 0;
+      this.advisorRuntime.callsSucceeded = 0;
+      this.advisorRuntime.picks = [];
+      this.advisorRuntime.pendingPick = null;
     }
 
     if (this.isRecordingTrace()) {
@@ -976,6 +996,8 @@ export class ChaosCrawler {
 
     if (result.outcome === "skipped") return null;
 
+    runtime.callsAttempted += 1;
+
     this.logger.debug("advisor_consult", {
       url,
       reason: result.decision.reason,
@@ -985,9 +1007,45 @@ export class ChaosCrawler {
       provider: runtime.provider.name,
     });
 
-    if (!result.suggestion) return null;
+    if (!result.suggestion || !result.decision.reason) return null;
+
+    runtime.callsSucceeded += 1;
     runtime.stall.recordAdvisorPick();
-    return targets[result.suggestion.chosenIndex] ?? null;
+
+    const target = targets[result.suggestion.chosenIndex];
+    if (!target) return null;
+
+    runtime.picks.push({
+      url,
+      reason: result.decision.reason,
+      chosenSelector: target.selector,
+      reasoning: result.suggestion.reasoning,
+    });
+    runtime.pendingPick = {
+      selector: target.selector,
+      reasoning: result.suggestion.reasoning,
+      reason: result.decision.reason,
+    };
+    return target;
+  }
+
+  /**
+   * Pop the just-pending advisor pick if (and only if) it matches the
+   * selector that was actually performed. Mismatch can happen when the
+   * advisor's chosen target was rejected as not-visible and the loop
+   * fell back to a heuristic pick — those should NOT be tagged advisor.
+   */
+  private consumeAdvisorStamp(selector: string) {
+    const runtime = this.advisorRuntime;
+    if (!runtime?.pendingPick) return undefined;
+    const pending = runtime.pendingPick;
+    runtime.pendingPick = null;
+    if (pending.selector !== selector) return undefined;
+    return {
+      provider: runtime.provider.name,
+      reason: pending.reason,
+      reasoning: pending.reasoning,
+    };
   }
 
   /**
@@ -1844,8 +1902,9 @@ export class ChaosCrawler {
       actionsPerformed++;
       this.actions.push(result);
       this.addToHistory(result);  // Add to recovery history
+      const advisorStamp = this.consumeAdvisorStamp(selectedTarget.selector);
       if (this.isRecordingTrace()) {
-        this.trace.push(actionToTraceEntry(result, url));
+        this.trace.push(actionToTraceEntry(result, url, advisorStamp));
       }
       this.events.onAction?.(result);
       this.logger.logAction(result);
@@ -2111,6 +2170,14 @@ export class ChaosCrawler {
             targetNovelty: this.targetNovelty,
             topN: this.coverageFeedback.topN,
           })
+        : undefined,
+      advisor: this.advisorRuntime
+        ? {
+            provider: this.advisorRuntime.provider.name,
+            callsAttempted: this.advisorRuntime.callsAttempted,
+            callsSucceeded: this.advisorRuntime.callsSucceeded,
+            picks: [...this.advisorRuntime.picks],
+          }
         : undefined,
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,

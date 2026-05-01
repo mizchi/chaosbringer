@@ -42,6 +42,18 @@ export interface TraceAction {
   success: boolean;
   error?: string;
   blockedExternal?: boolean;
+  /**
+   * When the target was picked by the VLM advisor (not the heuristic),
+   * a stamp identifying the provider, the consult reason, and the
+   * model's one-line reasoning. Replay uses the recorded `selector` /
+   * `target` verbatim — this field is informational only, useful for
+   * auditing which actions were model-driven.
+   */
+  advisor?: {
+    provider: string;
+    reason: "novelty_stall" | "invariant_violation" | "explicit_request";
+    reasoning: string;
+  };
 }
 
 export type TraceEntry = TraceMeta | TraceVisit | TraceAction;
@@ -50,7 +62,11 @@ export type TraceEntry = TraceMeta | TraceVisit | TraceAction;
  * Convert a recorded ActionResult + its URL into a TraceAction. Kept pure so
  * the crawler can serialize without importing node:fs in the hot path.
  */
-export function actionToTraceEntry(action: ActionResult, url: string): TraceAction {
+export function actionToTraceEntry(
+  action: ActionResult,
+  url: string,
+  advisor?: TraceAction["advisor"],
+): TraceAction {
   const out: TraceAction = {
     kind: "action",
     url,
@@ -61,6 +77,7 @@ export function actionToTraceEntry(action: ActionResult, url: string): TraceActi
   if (action.selector !== undefined) out.selector = action.selector;
   if (action.error !== undefined) out.error = action.error;
   if (action.blockedExternal !== undefined) out.blockedExternal = action.blockedExternal;
+  if (advisor) out.advisor = advisor;
   return out;
 }
 
