@@ -681,6 +681,26 @@ export interface CrawlReport {
   har?: HarConfig;
   /** Diff against a baseline report, present only when a baseline was supplied. */
   diff?: ReportDiff;
+  /**
+   * Drift signal for `--trace-replay` runs. Present only when traceReplay
+   * was set. Reports how many of the recorded trace actions resolved
+   * cleanly against the current UI vs. drifted (selector missing, threw,
+   * etc.) — surfaces UI drift before stale traces silently start producing
+   * meaningless replays.
+   */
+  replayFidelity?: ReplayFidelity;
+}
+
+export interface ReplayFidelity {
+  /** Total trace actions attempted (excludes meta + visit entries). */
+  totalActions: number;
+  succeeded: number;
+  /** Recorded selector did not resolve / element not visible. */
+  selectorMissing: number;
+  /** Recorded action had no selector (e.g. scroll fallback). */
+  noSelectorRecorded: number;
+  /** Replay threw (e.g. navigation timeout, click timeout). */
+  threw: number;
 }
 
 export interface AdvisorPick {

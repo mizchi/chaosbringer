@@ -182,6 +182,22 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  if (report.replayFidelity && report.replayFidelity.totalActions > 0) {
+    const r = report.replayFidelity;
+    const drift = r.totalActions - r.succeeded;
+    const pct = ((r.succeeded / r.totalActions) * 100).toFixed(1);
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("REPLAY FIDELITY");
+    lines.push("-".repeat(40));
+    lines.push(`  ${r.succeeded}/${r.totalActions} actions replayed cleanly (${pct}%)`);
+    if (drift > 0) {
+      lines.push(
+        `  drift breakdown: selectorMissing=${r.selectorMissing} noSelectorRecorded=${r.noSelectorRecorded} threw=${r.threw}`
+      );
+    }
+  }
+
   if (report.advisor && report.advisor.callsAttempted > 0) {
     const a = report.advisor;
     lines.push("");
