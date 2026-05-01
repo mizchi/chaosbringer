@@ -5,6 +5,7 @@ This repository hosts `chaosbringer` plus future Layer-1 packages extracted from
 ## Packages
 
 - [`chaosbringer`](packages/chaosbringer) — Playwright-based chaos testing CLI + library
+- [`@mizchi/server-faults`](packages/server-faults) — framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request / Response
 
 ## Development
 
