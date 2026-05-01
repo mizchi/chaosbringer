@@ -27,7 +27,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: pnpm run build
+        run: pnpm -F chaosbringer run build
 
       - name: Publish to npm (OIDC Trusted Publishing)
+        working-directory: packages/chaosbringer
         run: npm publish --access public --provenance

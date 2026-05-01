@@ -15,10 +15,15 @@ on:
 jobs:
   confirm:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/chaosbringer
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-      - run: pnpm install
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install
 
       - name: Run confirmation tests
         run: |
@@ -33,4 +38,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: flaker-confirm-results
-          path: result-*.json
+          path: packages/chaosbringer/result-*.json

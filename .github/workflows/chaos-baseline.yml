@@ -16,6 +16,9 @@ jobs:
   baseline:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: packages/chaosbringer
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +28,10 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+      - run: pnpm run build
 
       - name: Cache Playwright browsers
         id: pw-cache
@@ -62,8 +67,8 @@ jobs:
             --max-pages 30 \
             --max-actions-per-page 5 \
             --seed 1 \
-            --output chaos-report.json \
-            --heatmap-out heatmap.json
+            --output ${{ github.workspace }}/chaos-report.json \
+            --heatmap-out ${{ github.workspace }}/heatmap.json
 
       - name: Stop fixture server
         if: always()
@@ -86,12 +91,11 @@ jobs:
 
       - name: Import chaos report into flaker
         if: always()
+        working-directory: .
         run: |
           # Adapter landed in @mizchi/flaker 0.11.0; this repo pins ^0.11.0.
-          # The repo's `pnpm flaker:*` aliases set NODE_OPTIONS=--preserve-symlinks-main
-          # — that env var is a leftover workaround for a pnpm symlink resolution
-          # bug fixed in flaker 0.10.7, and it now silently breaks the CLI under
-          # 0.11.0. Invoke without the env var here.
+          # `pnpm exec` here resolves to the chaosbringer package's flaker
+          # binary (hoisted to the workspace root node_modules).
           pnpm exec flaker import chaos-report.json \
             --adapter chaosbringer \
             --commit "${{ github.sha }}" \

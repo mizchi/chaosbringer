@@ -64,4 +64,4 @@ jobs:
           # is valid: hybrid will fall back to the configured fallback strategy.
           changed=$(git diff --name-only "origin/${BASE_REF}...HEAD" | tr '\n' ',' | sed 's/,$//')
           echo "Changed files passed to flaker: ${changed:-(none)}"
-          pnpm flaker:run:merge --changed "$changed"
+          pnpm -F chaosbringer flaker:run:merge --changed "$changed"
