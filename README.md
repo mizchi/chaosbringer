@@ -5,6 +5,7 @@ This repository hosts `chaosbringer` plus future Layer-1 packages extracted from
 ## Packages
 
 - [`chaosbringer`](packages/chaosbringer) — Playwright-based chaos testing CLI + library
+- [`@mizchi/playwright-faults`](packages/playwright-faults) — Playwright fault-injection primitives (network route, page lifecycle, JS runtime monkey-patch)
 - [`@mizchi/playwright-v8-coverage`](packages/playwright-v8-coverage) — V8 precise-coverage collector for Playwright (CDP `Profiler.takePreciseCoverage`) with novelty-scoring helpers
 - [`@mizchi/server-faults`](packages/server-faults) — framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request / Response
 

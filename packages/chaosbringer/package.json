@@ -66,6 +66,7 @@
     "crawler"
   ],
   "dependencies": {
+    "@mizchi/playwright-faults": "workspace:^",
     "@mizchi/playwright-v8-coverage": "workspace:^"
   },
   "peerDependencies": {
