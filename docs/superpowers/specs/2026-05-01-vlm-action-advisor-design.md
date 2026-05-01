@@ -95,7 +95,7 @@ export interface AdvisorConfig {
   maxCallsPerPage?: number;
 
   /** Consult after this many consecutive zero-novelty actions. Default: 5. */
-  novelyStallThreshold?: number;
+  noveltyStallThreshold?: number;
 
   /** Also consult on invariant violation. Default: true. */
   consultOnInvariantViolation?: boolean;
