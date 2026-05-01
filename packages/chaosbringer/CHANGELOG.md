@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/mizchi/chaosbringer/compare/v0.5.0...v0.6.0) (2026-05-01)
+
+
+### Features
+
+* **advisor:** opt-in VLM (vision-language model) action advisor that picks the next action from a candidate list when the coverage-guided heuristic stalls. Default reference provider is OpenRouter `google/gemini-2.5-flash`. Off by default; configure via `CrawlerOptions.advisor`. Soft-failure on every recoverable problem; falls back to heuristic. ([#38](https://github.com/mizchi/chaosbringer/pull/38), [#39](https://github.com/mizchi/chaosbringer/pull/39), [#40](https://github.com/mizchi/chaosbringer/pull/40), [#41](https://github.com/mizchi/chaosbringer/pull/41))
+* **report.advisor:** new `CrawlReport.advisor` block (provider, callsAttempted, callsSucceeded, picks). Each pick records the URL, reason (`novelty_stall` / `invariant_violation` / `explicit_request`), chosen selector, and model reasoning.
+* **trace:** advisor-driven actions are stamped into the JSONL trace with `{provider, reason, reasoning}`. Replays use the recorded selector verbatim — model is not re-consulted.
+
+
+### Build / repo
+
+* repo converted to a pnpm workspace ([#42](https://github.com/mizchi/chaosbringer/pull/42)). Source moved to `packages/chaosbringer/`. No effect on the published npm package contents.
+
 ## [0.5.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.4.0...chaosbringer-v0.5.0) (2026-05-01)
 
 
