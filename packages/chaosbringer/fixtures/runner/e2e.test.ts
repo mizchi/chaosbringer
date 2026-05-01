@@ -565,6 +565,51 @@ describe("ChaosCrawler against fixture site", () => {
     expect(advisorActions[0].advisor.reasoning).toBe("stub picks index 0");
   }, 120000);
 
+  it("redacts advisor reasoning in report and trace when redactReasoning is true", async () => {
+    const stubAdvisor = {
+      name: "stub/test",
+      async suggest() {
+        return { chosenIndex: 0, reasoning: "secret reasoning that should not leak" };
+      },
+    };
+
+    const tmpTrace = join(mkdtempSync(join(tmpdir(), "chaos-redact-")), "trace.jsonl");
+
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxPages: 2,
+      maxActionsPerPage: 2,
+      headless: true,
+      seed: 13,
+      traceOut: tmpTrace,
+      advisor: {
+        provider: stubAdvisor,
+        noveltyStallThreshold: 0,
+        minCandidatesToConsult: 1,
+        timeoutMs: 5_000,
+        redactReasoning: true,
+      },
+    });
+    const report = await crawler.start();
+
+    expect(report.advisor!.picks.length).toBeGreaterThan(0);
+    for (const pick of report.advisor!.picks) {
+      expect(pick.reasoning).toBe("[redacted]");
+      expect(pick.reasoning).not.toContain("secret");
+    }
+
+    const { readFileSync } = await import("node:fs");
+    const lines = readFileSync(tmpTrace, "utf8").trim().split("\n");
+    const advisorActions = lines
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.kind === "action" && e.advisor !== undefined);
+    expect(advisorActions.length).toBeGreaterThan(0);
+    for (const a of advisorActions) {
+      expect(a.advisor.reasoning).toBe("[redacted]");
+      expect(a.advisor.reasoning).not.toContain("secret");
+    }
+  }, 120000);
+
   it("captures SPA history.pushState navigations as discovered links", async () => {
     // /spa-router has NO `<a href>` to /spa-router/*, only buttons that
     // call history.pushState. Static link extraction misses every one;
