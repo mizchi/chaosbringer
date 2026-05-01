@@ -58,6 +58,14 @@ export {
   targetKey,
   type CoverageScriptResult,
 } from "./coverage.js";
+export type {
+  ActionAdvisor,
+  AdvisorCandidate,
+  AdvisorConfig,
+  AdvisorConsultReason,
+  AdvisorContext,
+  AdvisorSuggestion,
+} from "./advisor/types.js";
 export {
   compareScreenshotBuffers,
   formatVisualDiff,
