@@ -10,7 +10,20 @@ export { ChaosCrawler, COMMON_IGNORE_PATTERNS, validateOptions } from "./crawler
 export { formatReport, formatCompactReport, saveReport, printReport, getExitCode, type ExitCodeOptions } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
-export { faults, type FaultHelperOptions, type LifecycleHelperOptions } from "./faults.js";
+export {
+  faults,
+  type FaultHelperOptions,
+  type LifecycleHelperOptions,
+  type RuntimeHelperOptions,
+} from "./faults.js";
+export {
+  buildRuntimeFaultsScript,
+  compileRuntimeFaults,
+  mergeRuntimeStats,
+  runtimeFaultName,
+  runtimeMatchesUrl,
+  type CompiledRuntimeFault,
+} from "./runtime-faults.js";
 export {
   compileLifecycleFaults,
   executeLifecycleAction,
@@ -128,6 +141,9 @@ export type {
   LifecycleFaultStats,
   LifecycleStage,
   StorageScope,
+  RuntimeAction,
+  RuntimeFault,
+  RuntimeFaultStats,
   CoverageFeedbackOptions,
   CoverageReport,
   UrlMatcher,

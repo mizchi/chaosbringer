@@ -14,6 +14,7 @@ import type {
   FaultRule,
   LifecycleFault,
   LifecycleStage,
+  RuntimeFault,
   StorageScope,
   UrlMatcher,
 } from "./types.js";
@@ -170,4 +171,55 @@ export const faults = {
     };
     return applyLifecycleCommon(fault, opts, "afterLoad");
   },
+
+  /**
+   * Reject `window.fetch` calls before any network round-trip. Different
+   * from `faults.abort()` (request-scoped, applied via Playwright `route`):
+   * `flakyFetch` rejects the Promise client-side with a TypeError, so any
+   * `try/catch` and Service-Worker fallbacks downstream of `fetch` engage
+   * just like a real "Failed to fetch" event.
+   */
+  flakyFetch(opts?: RuntimeHelperOptions & { rejectionMessage?: string }): RuntimeFault {
+    const fault: RuntimeFault = {
+      action: {
+        kind: "flaky-fetch",
+        ...(opts?.rejectionMessage !== undefined
+          ? { rejectionMessage: opts.rejectionMessage }
+          : {}),
+      },
+    };
+    return applyRuntimeCommon(fault, opts);
+  },
+
+  /**
+   * Skew `Date.now()`, `performance.now()`, and the no-arg `Date`
+   * constructor forward by `skewMs`. Use to surface token-expiry,
+   * cache-bust, and "clock drift" code paths without waiting real time.
+   */
+  clockSkew(skewMs: number, opts?: RuntimeHelperOptions): RuntimeFault {
+    if (!Number.isFinite(skewMs) || !Number.isInteger(skewMs)) {
+      throw new Error(`faults.clockSkew: skewMs must be a finite integer (got ${skewMs})`);
+    }
+    const fault: RuntimeFault = { action: { kind: "clock-skew", skewMs } };
+    return applyRuntimeCommon(fault, opts);
+  },
 };
+
+export interface RuntimeHelperOptions {
+  /** Restrict the fault to pages whose URL matches this matcher. */
+  urlPattern?: UrlMatcher;
+  /** 0..1, default 1.0. Rolled per call against the in-page seeded RNG. */
+  probability?: number;
+  /** Override the auto-derived stats name. */
+  name?: string;
+}
+
+function applyRuntimeCommon(
+  fault: RuntimeFault,
+  opts: RuntimeHelperOptions | undefined,
+): RuntimeFault {
+  if (opts?.urlPattern !== undefined) fault.urlPattern = opts.urlPattern;
+  if (opts?.probability !== undefined) fault.probability = opts.probability;
+  if (opts?.name !== undefined) fault.name = opts.name;
+  return fault;
+}

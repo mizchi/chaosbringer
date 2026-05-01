@@ -55,6 +55,15 @@ export interface CrawlerOptions {
    */
   lifecycleFaults?: LifecycleFault[];
   /**
+   * JS-runtime fault injection. Each fault is a persistent monkey-patch
+   * installed via `addInitScript` on every page navigation, subverting
+   * in-page JS APIs (fetch / Date / performance / etc.) so the app sees
+   * client-side failures that no network mock would expose. Distinct from
+   * `faultInjection` (request-scoped) and `lifecycleFaults` (one-shot at
+   * named stages).
+   */
+  runtimeFaults?: RuntimeFault[];
+  /**
    * Opt-in coverage-guided action selection. When enabled, the crawler
    * attaches a V8 precise-coverage collector (CDP `Profiler.takePreciseCoverage`)
    * to every page, attributes per-action coverage deltas to the target that
@@ -330,6 +339,55 @@ export interface LifecycleFaultStats {
   errored: number;
 }
 
+/**
+ * What a runtime fault does when it fires. Each kind is a persistent
+ * monkey-patch installed in every page via `addInitScript`.
+ */
+export type RuntimeAction =
+  /**
+   * Reject `window.fetch` calls before any network round-trip. Different
+   * from a network `Fault` of kind `"abort"`: `flaky-fetch` rejects the
+   * Promise client-side with a TypeError, simulating "Failed to fetch" /
+   * Service Worker reject / DNS failure.
+   */
+  | { kind: "flaky-fetch"; rejectionMessage?: string }
+  /**
+   * Skew `Date.now()` / `performance.now()` (and the no-arg `Date`
+   * constructor) forward by `skewMs`. Useful for forcing token-expiry,
+   * cache-bust, and "clock drift" code paths.
+   */
+  | { kind: "clock-skew"; skewMs: number };
+
+/**
+ * Page-level JS-runtime fault. Installed via `addInitScript` on every page
+ * navigation. Distinct from `FaultRule` (request-scoped) and
+ * `LifecycleFault` (one-shot at named stages of a page visit).
+ */
+export interface RuntimeFault {
+  /** Optional human-readable name used in stats. Auto-derived when omitted. */
+  name?: string;
+  /**
+   * Restrict to pages whose URL matches this matcher. Omitted = applies on
+   * every page. The check happens inside the page (against `location.href`),
+   * so the matcher must be JSON-serializable (string regex or RegExp literal).
+   */
+  urlPattern?: UrlMatcher;
+  /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
+  probability?: number;
+  /** What to do when the fault fires. */
+  action: RuntimeAction;
+}
+
+/** Per-fault stats for runtime fault injection, emitted on the final report. */
+export interface RuntimeFaultStats {
+  /** `name` from the `RuntimeFault`, or an auto-derived label. */
+  rule: string;
+  /** Times the fault was tested (URL matched, probability about to roll). */
+  matched: number;
+  /** Times the fault actually fired. */
+  fired: number;
+}
+
 export interface ActionWeights {
   /** Weight for navigation links (default: 3) */
   navigationLinks?: number;
@@ -583,6 +641,12 @@ export interface CrawlReport {
    * matched.
    */
   lifecycleFaults?: LifecycleFaultStats[];
+  /**
+   * Per-fault runtime fault stats (present only when `runtimeFaults` was
+   * configured). Counts are accumulated across every page visit's
+   * `window.__chaosbringerRuntimeStats` snapshot.
+   */
+  runtimeFaults?: RuntimeFaultStats[];
   /**
    * Coverage-feedback summary (present only when `coverageFeedback.enabled`
    * was true). Reports total V8 functions executed, how many pages produced

@@ -47,6 +47,12 @@ import {
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
 import {
+  buildRuntimeFaultsScript,
+  compileRuntimeFaults,
+  mergeRuntimeStats,
+  type CompiledRuntimeFault,
+} from "./runtime-faults.js";
+import {
   CoverageCollector,
   coverageDelta,
   noveltyMultiplier,
@@ -126,6 +132,7 @@ const DEFAULT_OPTIONS: Required<
   invariants: [],
   faultInjection: [],
   lifecycleFaults: [],
+  runtimeFaults: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -207,6 +214,8 @@ export class ChaosCrawler {
   }> = [];
   /** Page-lifecycle faults compiled once at construction time. */
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
+  /** Compiled runtime faults — installed once at context level via init script. */
+  private compiledRuntimeFaults: CompiledRuntimeFault[] = [];
   /**
    * Per-page lifecycle executor — created on `applyLifecycleStage` first
    * call for each page and dropped when the page is closed.
@@ -250,6 +259,7 @@ export class ChaosCrawler {
     this.options.seed = this.rng.seed;
     this.compiledFaultRules = compileFaultRules(options.faultInjection);
     this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
+    this.compiledRuntimeFaults = compileRuntimeFaults(options.runtimeFaults);
     if (options.coverageFeedback?.enabled) {
       this.coverageFeedback = {
         enabled: true,
@@ -501,6 +511,17 @@ export class ChaosCrawler {
       storageState: this.options.storageState || undefined,
     });
 
+    // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
+    // …) on every navigation. Installed at the context level so every page
+    // (including ones opened via window.open later) inherits the patches.
+    if (this.compiledRuntimeFaults.length > 0) {
+      const script = buildRuntimeFaultsScript(
+        this.compiledRuntimeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await this.context.addInitScript({ content: script });
+    }
+
     // Replay mode: serve every matching request from the HAR before it hits
     // the network. Fault injection (installed per-page) still wins because
     // page.route runs before context.route in Playwright.
@@ -652,6 +673,27 @@ export class ChaosCrawler {
    * Errors here are intentionally swallowed: the bundle is diagnostic, not
    * load-bearing — losing one bundle shouldn't take the crawler down.
    */
+  /**
+   * Read `window.__chaosbringerRuntimeStats` and accumulate into the
+   * compiled runtime-fault counters. Errors are swallowed: the in-page
+   * counter is best-effort diagnostics, not load-bearing.
+   */
+  private async collectRuntimeFaultStats(page: Page): Promise<void> {
+    if (this.compiledRuntimeFaults.length === 0) return;
+    try {
+      const pageStats = (await page.evaluate(
+        () =>
+          (globalThis as { __chaosbringerRuntimeStats?: Record<string, { matched: number; fired: number }> })
+            .__chaosbringerRuntimeStats ?? {},
+      )) as Record<string, { matched: number; fired: number }>;
+      mergeRuntimeStats(this.compiledRuntimeFaults, pageStats);
+    } catch (err) {
+      this.logger.warn("runtime_fault_stats_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async maybeWriteFailureBundle(page: Page, result: PageResult): Promise<void> {
     const opts = this.options.failureArtifacts;
     if (!opts) return;
@@ -996,6 +1038,10 @@ export class ChaosCrawler {
       // page away — otherwise the screenshot would show the recovered URL
       // rather than the failing one.
       await this.maybeWriteFailureBundle(page, result);
+
+      // Merge runtime-fault stats from the in-page counter. Recovery
+      // navigates away, so we collect before that path runs.
+      await this.collectRuntimeFaultStats(page);
 
       // Handle recovery from 404 or error status
       if (
@@ -1947,6 +1993,14 @@ export class ChaosCrawler {
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
           : undefined,
+      runtimeFaults:
+        this.compiledRuntimeFaults.length > 0
+          ? this.compiledRuntimeFaults.map((c) => ({
+              rule: c.name,
+              matched: c.matched,
+              fired: c.fired,
+            }))
+          : undefined,
       coverage: this.coverageFeedback
         ? summarizeCoverage({
             globalCovered: this.globalCoverage,
@@ -2175,6 +2229,37 @@ export function validateOptions(options: CrawlerOptions): void {
       if (a.cacheNames !== undefined && !Array.isArray(a.cacheNames)) {
         throw new Error(`chaosbringer: ${label} evict-cache cacheNames must be an array of strings`);
       }
+    }
+  }
+
+  for (const fault of options.runtimeFaults ?? []) {
+    const label = fault.name
+      ? `runtimeFaults entry "${fault.name}"`
+      : `runtimeFaults entry`;
+    assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    if (fault.probability !== undefined) {
+      const p = fault.probability;
+      if (!Number.isFinite(p) || p < 0 || p > 1) {
+        throw new Error(
+          `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+    const a = fault.action;
+    if (a.kind === "flaky-fetch") {
+      if (a.rejectionMessage !== undefined && typeof a.rejectionMessage !== "string") {
+        throw new Error(`chaosbringer: ${label} flaky-fetch rejectionMessage must be a string`);
+      }
+    } else if (a.kind === "clock-skew") {
+      if (!Number.isFinite(a.skewMs) || !Number.isInteger(a.skewMs)) {
+        throw new Error(
+          `chaosbringer: ${label} clock-skew skewMs must be a finite integer (got ${JSON.stringify(a.skewMs)})`
+        );
+      }
+    } else {
+      throw new Error(
+        `chaosbringer: ${label} action.kind is not recognized (got ${JSON.stringify((a as { kind: unknown }).kind)})`
+      );
     }
   }
 

@@ -9,6 +9,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
+- **Runtime fault injection** — persistent in-page monkey-patches (`flaky-fetch`, `clock-skew`) installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach (e.g. `fetch` rejection before any request goes out).
 - **Coverage-guided action selection** — opt-in V8 precise coverage feedback (CDP `Profiler.takePreciseCoverage`) attributes per-action coverage deltas to the target that fired them and biases subsequent action weights toward targets that historically delivered new code paths.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
@@ -247,6 +248,46 @@ Every fault gets one row in `report.lifecycleFaults` with `matched` (URL-pattern
 ```
 
 Like network-side fault injection, lifecycle faults are programmatic-only — they're not expressible as flat shell flags and so are absent from the CLI.
+
+## Runtime faults (in-page monkey-patches)
+
+`runtimeFaults` is a third fault layer, distinct from request-scoped `faultInjection` and stage-scoped `lifecycleFaults`. Each entry is a persistent monkey-patch installed via `addInitScript` on every page navigation, subverting in-page JS APIs so the app sees client-side failures that no network mock would expose.
+
+```ts
+import { chaos, faults } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  seed: 42,
+  runtimeFaults: [
+    // 30% of fetch() calls reject with "Failed to fetch" before any
+    // network round-trip — exposes Service Worker fallbacks, retry
+    // logic, and "offline indicator" code paths.
+    faults.flakyFetch({
+      urlPattern: /\/api\//,
+      probability: 0.3,
+      rejectionMessage: "simulated network failure",
+    }),
+    // Skew the clock 25 minutes forward on /dashboard pages — surfaces
+    // token-expiry and cache-bust bugs without waiting real time.
+    faults.clockSkew(25 * 60_000, { urlPattern: /\/dashboard/ }),
+  ],
+});
+```
+
+The probability roll is deterministic given the same `(seed, runtimeFaults)` pair — the in-page LCG is seeded from `seed` so two runs roll identically.
+
+Layer comparison:
+
+| Layer | Where it runs | Targets | Example |
+| --- | --- | --- | --- |
+| `faultInjection` | Playwright `route()` (Node side) | individual network requests | serve 500 on `/api/*` |
+| `lifecycleFaults` | per-page hook (CDP / page eval) | one-shot at named stages | wipe localStorage `afterLoad` |
+| `runtimeFaults` | `addInitScript` (in-page) | persistent JS API patches | reject `fetch()`, skew `Date.now` |
+
+Stats land in `report.runtimeFaults` — one row per fault with `matched` (URL filtered ok, probability about to roll) and `fired` (actually triggered) counts.
+
+Like the other fault layers, `runtimeFaults` is programmatic-only.
 
 ## Invariants
 
