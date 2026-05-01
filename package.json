@@ -45,13 +45,13 @@
     "crawl": "tsx src/cli.ts",
     "fixture:serve": "tsx fixtures/site/server.ts",
     "fixture:run": "tsx fixtures/runner/run.ts",
-    "flaker": "NODE_OPTIONS=--preserve-symlinks-main flaker",
-    "flaker:plan": "NODE_OPTIONS=--preserve-symlinks-main flaker plan",
-    "flaker:apply": "NODE_OPTIONS=--preserve-symlinks-main flaker apply",
-    "flaker:status": "NODE_OPTIONS=--preserve-symlinks-main flaker status",
-    "flaker:doctor": "NODE_OPTIONS=--preserve-symlinks-main flaker doctor",
-    "flaker:run:iteration": "NODE_OPTIONS=--preserve-symlinks-main flaker run --gate iteration",
-    "flaker:run:merge": "NODE_OPTIONS=--preserve-symlinks-main flaker run --gate merge"
+    "flaker": "flaker",
+    "flaker:plan": "flaker plan",
+    "flaker:apply": "flaker apply",
+    "flaker:status": "flaker status",
+    "flaker:doctor": "flaker doctor",
+    "flaker:run:iteration": "flaker run --gate iteration",
+    "flaker:run:merge": "flaker run --gate merge"
   },
   "files": [
     "dist",
