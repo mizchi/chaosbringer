@@ -13,6 +13,9 @@ jobs:
   chaos-crawl:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/chaosbringer
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +25,10 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+      - run: pnpm run build
 
       - name: Cache Playwright browsers
         id: pw-cache
@@ -57,7 +62,7 @@ jobs:
             gh run download "$run_id" --name chaos-baseline -D ./baseline -R ${{ github.repository }} || true
           fi
           if [ -f baseline/chaos-report.json ]; then
-            echo "BASELINE=baseline/chaos-report.json" >> "$GITHUB_ENV"
+            echo "BASELINE=$(pwd)/baseline/chaos-report.json" >> "$GITHUB_ENV"
           else
             echo "no baseline available; running without --baseline"
           fi
@@ -97,7 +102,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chaos-report-pr-${{ github.event.pull_request.number }}
-          path: chaos-report.json
+          path: packages/chaosbringer/chaos-report.json
           if-no-files-found: warn
 
       - name: Upload failure bundles
@@ -105,5 +110,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chaos-failures-pr-${{ github.event.pull_request.number }}
-          path: failure-artifacts/
+          path: packages/chaosbringer/failure-artifacts/
           if-no-files-found: ignore

@@ -3,7 +3,7 @@
   "release-type": "node",
   "include-v-in-tag": true,
   "packages": {
-    ".": {
+    "packages/chaosbringer": {
       "package-name": "chaosbringer",
       "changelog-path": "CHANGELOG.md"
     }

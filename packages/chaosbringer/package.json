@@ -1,0 +1,103 @@
+{
+  "name": "chaosbringer",
+  "version": "0.5.0",
+  "description": "Playwright-based chaos testing tool for web applications",
+  "license": "MIT",
+  "author": "mizchi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mizchi/chaosbringer.git"
+  },
+  "homepage": "https://github.com/mizchi/chaosbringer#readme",
+  "bugs": {
+    "url": "https://github.com/mizchi/chaosbringer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "chaosbringer": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./fixture": {
+      "types": "./dist/fixture.d.ts",
+      "import": "./dist/fixture.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "prepare": "tsc && node scripts/copy-assets.mjs",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "lint": "biome check src/",
+    "lint:nul": "node scripts/check-no-nul.mjs src fixtures scripts",
+    "crawl": "tsx src/cli.ts",
+    "fixture:serve": "tsx fixtures/site/server.ts",
+    "fixture:run": "tsx fixtures/runner/run.ts",
+    "flaker": "flaker",
+    "flaker:plan": "flaker plan",
+    "flaker:apply": "flaker apply",
+    "flaker:status": "flaker status",
+    "flaker:doctor": "flaker doctor",
+    "flaker:run:iteration": "flaker run --gate iteration",
+    "flaker:run:merge": "flaker run --gate merge"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "keywords": [
+    "playwright",
+    "playwright-test",
+    "testing",
+    "chaos-engineering",
+    "monkey-testing",
+    "accessibility",
+    "crawler"
+  ],
+  "peerDependencies": {
+    "@playwright/test": "^1.40.0",
+    "axe-core": "^4.0.0",
+    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0",
+    "playwright": "^1.40.0",
+    "pngjs": "^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    },
+    "axe-core": {
+      "optional": true
+    },
+    "pixelmatch": {
+      "optional": true
+    },
+    "pngjs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@mizchi/flaker": "^0.11.0",
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.0.0",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
+    "axe-core": "^4.11.3",
+    "pixelmatch": "^7.1.0",
+    "playwright": "^1.52.0",
+    "pngjs": "^7.0.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.0.7"
+  }
+}

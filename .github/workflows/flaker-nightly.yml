@@ -29,18 +29,18 @@ jobs:
       - name: Cache flaker data
         uses: actions/cache@v4
         with:
-          path: .flaker/data
+          path: packages/chaosbringer/.flaker/data
           key: flaker-data-${{ github.run_id }}
           restore-keys: |
             flaker-data-
 
       - name: flaker apply
-        run: pnpm flaker:apply
+        run: pnpm -F chaosbringer flaker:apply
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: flaker status (markdown)
-        run: pnpm flaker:status --markdown > flaker-status.md || true
+        run: pnpm -F chaosbringer flaker:status --markdown > flaker-status.md || true
 
       - name: Upload status
         uses: actions/upload-artifact@v4
