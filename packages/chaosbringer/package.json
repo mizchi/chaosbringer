@@ -1,6 +1,6 @@
 {
   "name": "chaosbringer",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Playwright-based chaos testing tool for web applications",
   "license": "MIT",
   "author": "mizchi",

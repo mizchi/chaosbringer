@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.6.0...chaosbringer-v0.7.0) (2026-05-01)
+
+
+### Features
+
+* **advisor:** CLI cost / call summary in formatReport + formatCompactReport ([#47](https://github.com/mizchi/chaosbringer/issues/47)) ([6bcb035](https://github.com/mizchi/chaosbringer/commit/6bcb035776d66384854da958d6ca710407f39523))
+* **advisor:** redactReasoning flag for confidential UIs ([#45](https://github.com/mizchi/chaosbringer/issues/45)) ([001e4a1](https://github.com/mizchi/chaosbringer/commit/001e4a1b80aa4e14875923ab9bb9560416474dd0))
+* **advisor:** screenshotMode config (viewport | fullPage) ([#46](https://github.com/mizchi/chaosbringer/issues/46)) ([5932a53](https://github.com/mizchi/chaosbringer/commit/5932a538259add28618c07a54432a0f7ac8c6568))
+* replay fidelity tracking — surface trace UI drift ([#48](https://github.com/mizchi/chaosbringer/issues/48)) ([5017733](https://github.com/mizchi/chaosbringer/commit/50177332c0d0f022a7a98f38da6b697195674d9f))
+
 ## [0.6.0](https://github.com/mizchi/chaosbringer/compare/v0.5.0...v0.6.0) (2026-05-01)
 
 
