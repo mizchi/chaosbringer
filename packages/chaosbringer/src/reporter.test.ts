@@ -188,6 +188,45 @@ describe("formatReport", () => {
     const out = formatReport(makeReport());
     expect(out).not.toContain("VLM ADVISOR");
   });
+
+  it("includes a REPLAY FIDELITY section when traceReplay was used", () => {
+    const report = makeReport({
+      replayFidelity: {
+        totalActions: 10,
+        succeeded: 7,
+        selectorMissing: 2,
+        noSelectorRecorded: 1,
+        threw: 0,
+      },
+    });
+    const out = formatReport(report);
+    expect(out).toContain("REPLAY FIDELITY");
+    expect(out).toContain("7/10 actions replayed cleanly (70.0%)");
+    expect(out).toContain("selectorMissing=2");
+    expect(out).toContain("noSelectorRecorded=1");
+    expect(out).toContain("threw=0");
+  });
+
+  it("omits the drift breakdown when replay was 100% clean", () => {
+    const report = makeReport({
+      replayFidelity: {
+        totalActions: 5,
+        succeeded: 5,
+        selectorMissing: 0,
+        noSelectorRecorded: 0,
+        threw: 0,
+      },
+    });
+    const out = formatReport(report);
+    expect(out).toContain("REPLAY FIDELITY");
+    expect(out).toContain("5/5 actions replayed cleanly (100.0%)");
+    expect(out).not.toContain("drift breakdown");
+  });
+
+  it("omits the replay-fidelity section when traceReplay was not used", () => {
+    const out = formatReport(makeReport());
+    expect(out).not.toContain("REPLAY FIDELITY");
+  });
 });
 
 describe("saveReport", () => {

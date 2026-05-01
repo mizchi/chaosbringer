@@ -92,7 +92,7 @@ import { AdvisorBudget, StallTracker } from "./advisor/budget.js";
 import { consultAdvisor } from "./advisor/consult.js";
 import { defaultTriggerPolicy, type TriggerPolicy } from "./advisor/trigger.js";
 import { REDACTED_REASONING, type ActionAdvisor, type AdvisorCandidate } from "./advisor/types.js";
-import type { AdvisorPick } from "./types.js";
+import type { AdvisorPick, ReplayFidelity } from "./types.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
 // perf budget, trace, device/network) are carved out of the Required<>
@@ -278,6 +278,8 @@ export class ChaosCrawler {
      */
     pendingPick: { selector: string; reasoning: string; reason: AdvisorPick["reason"] } | null;
   } | null = null;
+  /** Per-run replay drift counters. Populated only when `traceReplay` is set. */
+  private replayFidelity: ReplayFidelity | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -518,6 +520,9 @@ export class ChaosCrawler {
       this.advisorRuntime.picks = [];
       this.advisorRuntime.pendingPick = null;
     }
+    this.replayFidelity = this.options.traceReplay
+      ? { totalActions: 0, succeeded: 0, selectorMissing: 0, noSelectorRecorded: 0, threw: 0 }
+      : null;
 
     if (this.isRecordingTrace()) {
       this.trace.push({
@@ -2018,7 +2023,25 @@ export class ChaosCrawler {
       }
       this.events.onAction?.(result);
       this.logger.logAction(result);
+      this.recordReplayOutcome(action, result);
       await page.waitForTimeout(100);
+    }
+  }
+
+  private recordReplayOutcome(action: TraceAction, result: ActionResult): void {
+    const f = this.replayFidelity;
+    if (!f) return;
+    f.totalActions += 1;
+    if (result.success) {
+      f.succeeded += 1;
+      return;
+    }
+    if (result.error?.startsWith("replay: entry has no selector")) {
+      f.noSelectorRecorded += 1;
+    } else if (result.error?.startsWith("replay: element not visible")) {
+      f.selectorMissing += 1;
+    } else {
+      f.threw += 1;
     }
   }
 
@@ -2185,6 +2208,7 @@ export class ChaosCrawler {
             picks: [...this.advisorRuntime.picks],
           }
         : undefined,
+      replayFidelity: this.replayFidelity ? { ...this.replayFidelity } : undefined,
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
     };
