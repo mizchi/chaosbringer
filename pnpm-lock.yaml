@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@mizchi/flaker':
-        specifier: ^0.10.6
-        version: 0.10.6(encoding@0.1.13)
+        specifier: ^0.11.0
+        version: 0.11.0(encoding@0.1.13)
       '@playwright/test':
         specifier: ^1.52.0
         version: 1.59.1
@@ -218,8 +218,8 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  '@mizchi/flaker@0.10.6':
-    resolution: {integrity: sha512-T+9hWPQVLl+Y6XCt2GXwy7P8NbsUTJ7SwTV48UNLXiKSq8pBnRTNrmH+mr9J+jQ7CIozdmPPSvN1yD+80/x3HQ==}
+  '@mizchi/flaker@0.11.0':
+    resolution: {integrity: sha512-LuR4LMF2ETsircym+ctQEDhpxx1zzv19j6EKfTJJMnrBb3PFjsmndFRTKG8dPvr3iH2IjujNFhJuVvj6n9ZaEA==}
     engines: {node: '>=24'}
     hasBin: true
 
@@ -1267,7 +1267,7 @@ snapshots:
       - encoding
       - supports-color
 
-  '@mizchi/flaker@0.10.6(encoding@0.1.13)':
+  '@mizchi/flaker@0.11.0(encoding@0.1.13)':
     dependencies:
       '@octokit/rest': 22.0.1
       adm-zip: 0.5.17
