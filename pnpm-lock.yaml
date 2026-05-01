@@ -10,6 +10,9 @@ importers:
 
   packages/chaosbringer:
     dependencies:
+      '@mizchi/playwright-faults':
+        specifier: workspace:^
+        version: link:../playwright-faults
       '@mizchi/playwright-v8-coverage':
         specifier: workspace:^
         version: link:../playwright-v8-coverage
@@ -44,6 +47,18 @@ importers:
       tsx:
         specifier: ^4.19.4
         version: 4.21.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
+
+  packages/playwright-faults:
+    devDependencies:
+      playwright:
+        specifier: ^1.52.0
+        version: 1.59.1
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
