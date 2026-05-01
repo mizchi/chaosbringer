@@ -18,6 +18,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need history to compute the --changed file list against the PR base.
+          # Without this, `git diff --name-only origin/<base>...HEAD` would
+          # return nothing and `flaker run --gate merge` (hybrid strategy)
+          # would error out with `hybrid mode requires resolver and changedFiles`.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -47,6 +53,15 @@ jobs:
             flaker-data-
 
       - name: flaker run --gate merge
-        run: pnpm flaker:run:merge
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # Hybrid strategy needs the changed-file set; flaker doesn't compute
+          # it itself when invoked from CI. We diff against the PR base ref —
+          # `actions/checkout@v4` fetched it under refs/remotes/origin/<base>
+          # because of fetch-depth: 0 above. Empty diff (config-only PR, etc.)
+          # is valid: hybrid will fall back to the configured fallback strategy.
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD" | tr '\n' ',' | sed 's/,$//')
+          echo "Changed files passed to flaker: ${changed:-(none)}"
+          pnpm flaker:run:merge --changed "$changed"
