@@ -2,6 +2,10 @@
  * Core types for Chaos Crawler
  */
 
+import type { AdvisorConfig } from "./advisor/types.js";
+
+export type { AdvisorConfig } from "./advisor/types.js";
+
 export interface CrawlerOptions {
   /** Base URL to start crawling */
   baseUrl: string;
@@ -138,6 +142,13 @@ export interface CrawlerOptions {
    * and the reader can reproduce locally.
    */
   failureArtifacts?: FailureArtifactsOptions;
+  /**
+   * Opt-in vision-language model advisor that picks the next action
+   * when the coverage-guided heuristic stalls. See
+   * `docs/superpowers/specs/2026-05-01-vlm-action-advisor-design.md`.
+   * Default: undefined (advisor disabled, zero overhead).
+   */
+  advisor?: AdvisorConfig;
 }
 
 export interface FailureArtifactsOptions {

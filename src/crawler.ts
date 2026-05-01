@@ -88,6 +88,10 @@ import {
   type TraceAction,
   type TraceEntry,
 } from "./trace.js";
+import { AdvisorBudget, StallTracker } from "./advisor/budget.js";
+import { consultAdvisor } from "./advisor/consult.js";
+import { defaultTriggerPolicy, type TriggerPolicy } from "./advisor/trigger.js";
+import type { ActionAdvisor, AdvisorCandidate } from "./advisor/types.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
 // perf budget, trace, device/network) are carved out of the Required<>
@@ -108,6 +112,7 @@ const DEFAULT_OPTIONS: Required<
     | "shardCount"
     | "failureArtifacts"
     | "coverageFeedback"
+    | "advisor"
   >
 > = {
   maxPages: 50,
@@ -159,6 +164,15 @@ export const COMMON_IGNORE_PATTERNS = [
   // Generic error message from blocked resources
   "Failed to load resource: net::ERR_FAILED$",
 ];
+
+function describeTarget(t: ActionTarget): string {
+  const parts: string[] = [];
+  if (t.role) parts.push(t.role);
+  if (t.name) parts.push(`"${t.name}"`);
+  parts.push(`(${t.type})`);
+  if (t.href) parts.push(`href=${t.href}`);
+  return parts.join(" ");
+}
 
 export class ChaosCrawler {
   private options: Required<CrawlerOptions>;
@@ -243,6 +257,14 @@ export class ChaosCrawler {
    * empty set whenever a fresh page is opened.
    */
   private lastCoverageSnapshot: Set<string> = new Set();
+  /** Resolved advisor wiring (null when the option is unset). */
+  private advisorRuntime: {
+    provider: ActionAdvisor;
+    policy: TriggerPolicy;
+    budget: AdvisorBudget;
+    stall: StallTracker;
+    timeoutMs: number;
+  } | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -265,6 +287,26 @@ export class ChaosCrawler {
         enabled: true,
         boost: options.coverageFeedback.boost ?? 2,
         topN: options.coverageFeedback.topN ?? 20,
+      };
+    }
+
+    if (options.advisor) {
+      const defaults = defaultTriggerPolicy();
+      this.advisorRuntime = {
+        provider: options.advisor.provider,
+        policy: {
+          maxCallsPerCrawl: options.advisor.maxCallsPerCrawl ?? defaults.maxCallsPerCrawl,
+          maxCallsPerPage: options.advisor.maxCallsPerPage ?? defaults.maxCallsPerPage,
+          noveltyStallThreshold:
+            options.advisor.noveltyStallThreshold ?? defaults.noveltyStallThreshold,
+          consultOnInvariantViolation:
+            options.advisor.consultOnInvariantViolation ?? defaults.consultOnInvariantViolation,
+          minCandidatesToConsult:
+            options.advisor.minCandidatesToConsult ?? defaults.minCandidatesToConsult,
+        },
+        budget: new AdvisorBudget(),
+        stall: new StallTracker(),
+        timeoutMs: options.advisor.timeoutMs ?? 8_000,
       };
     }
 
@@ -448,6 +490,10 @@ export class ChaosCrawler {
     this.globalCoverage = new Set();
     this.pageCoverageDeltas = [];
     this.targetNovelty = new Map();
+    if (this.advisorRuntime) {
+      this.advisorRuntime.budget = new AdvisorBudget();
+      this.advisorRuntime.stall = new StallTracker();
+    }
 
     if (this.isRecordingTrace()) {
       this.trace.push({
@@ -824,6 +870,10 @@ export class ChaosCrawler {
    * the per-action delta baseline.
    */
   private async recordPageLoadCoverage(url: string): Promise<void> {
+    if (this.advisorRuntime) {
+      this.advisorRuntime.stall.resetForNewPage();
+      this.advisorRuntime.budget.resetPage(url);
+    }
     if (!this.coverageCollector) {
       this.lastCoverageSnapshot = new Set();
       return;
@@ -869,6 +919,7 @@ export class ChaosCrawler {
     const actionDelta = coverageDelta(this.lastCoverageSnapshot, snapshot);
     if (actionDelta.size === 0) {
       this.lastCoverageSnapshot = snapshot;
+      this.advisorRuntime?.stall.recordZeroNovelty();
       return;
     }
     const novel = coverageDelta(this.globalCoverage, actionDelta);
@@ -876,6 +927,9 @@ export class ChaosCrawler {
       const key = targetKey(url, selector);
       this.targetNovelty.set(key, (this.targetNovelty.get(key) ?? 0) + novel.size);
       for (const fp of novel) this.globalCoverage.add(fp);
+      this.advisorRuntime?.stall.recordNovelty();
+    } else {
+      this.advisorRuntime?.stall.recordZeroNovelty();
     }
     this.lastCoverageSnapshot = snapshot;
   }
@@ -888,6 +942,52 @@ export class ChaosCrawler {
     if (!this.coverageFeedback) return 1;
     const score = this.targetNovelty.get(targetKey(url, selector)) ?? 0;
     return noveltyMultiplier(score, this.coverageFeedback.boost);
+  }
+
+  private async consultAdvisorIfStalled(
+    page: Page,
+    url: string,
+    targets: ReadonlyArray<ActionTarget>,
+  ): Promise<ActionTarget | null> {
+    const runtime = this.advisorRuntime;
+    if (!runtime) return null;
+
+    const candidates: AdvisorCandidate[] = targets.map((t, index) => ({
+      index,
+      selector: t.selector,
+      description: describeTarget(t),
+    }));
+
+    const result = await consultAdvisor({
+      state: {
+        callsThisCrawl: runtime.budget.callsThisCrawl(),
+        callsThisPage: runtime.budget.callsThisPage(url),
+        consecutiveZeroNovelty: runtime.stall.consecutiveZeroNovelty(),
+        pendingInvariantViolation: runtime.stall.invariantViolationPending(),
+      },
+      policy: runtime.policy,
+      budget: runtime.budget,
+      provider: runtime.provider,
+      url,
+      candidates,
+      screenshotSupplier: () => page.screenshot({ fullPage: false }),
+      timeoutMs: runtime.timeoutMs,
+    });
+
+    if (result.outcome === "skipped") return null;
+
+    this.logger.debug("advisor_consult", {
+      url,
+      reason: result.decision.reason,
+      candidateCount: candidates.length,
+      outcome: result.outcome,
+      durationMs: result.durationMs,
+      provider: runtime.provider.name,
+    });
+
+    if (!result.suggestion) return null;
+    runtime.stall.recordAdvisorPick();
+    return targets[result.suggestion.chosenIndex] ?? null;
   }
 
   /**
@@ -1721,14 +1821,17 @@ export class ChaosCrawler {
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
 
-      const selectedTarget = weightedPick(
-        targets,
-        // Coverage-guided action selection: bias picks toward targets that
-        // historically delivered new V8 coverage. `coverageWeightFor` returns
-        // 1 when feedback is off, so the no-feedback path is unchanged.
-        (t) => t.weight * this.coverageWeightFor(url, t.selector),
-        this.rng,
-      );
+      const advisorPick = await this.consultAdvisorIfStalled(page, url, targets);
+      const selectedTarget =
+        advisorPick ??
+        weightedPick(
+          targets,
+          // Coverage-guided action selection: bias picks toward targets that
+          // historically delivered new V8 coverage. `coverageWeightFor` returns
+          // 1 when feedback is off, so the no-feedback path is unchanged.
+          (t) => t.weight * this.coverageWeightFor(url, t.selector),
+          this.rng,
+        );
 
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
