@@ -67,8 +67,8 @@ jobs:
             --max-pages 30 \
             --max-actions-per-page 5 \
             --seed 1 \
-            --output ${{ github.workspace }}/chaos-report.json \
-            --heatmap-out ${{ github.workspace }}/heatmap.json
+            --output chaos-report.json \
+            --heatmap-out heatmap.json
 
       - name: Stop fixture server
         if: always()
@@ -84,18 +84,14 @@ jobs:
         if: always()
         uses: actions/cache@v4
         with:
-          path: .flaker/data
+          path: packages/chaosbringer/.flaker/data
           key: flaker-data-${{ github.run_id }}
           restore-keys: |
             flaker-data-
 
       - name: Import chaos report into flaker
         if: always()
-        working-directory: .
         run: |
-          # Adapter landed in @mizchi/flaker 0.11.0; this repo pins ^0.11.0.
-          # `pnpm exec` here resolves to the chaosbringer package's flaker
-          # binary (hoisted to the workspace root node_modules).
           pnpm exec flaker import chaos-report.json \
             --adapter chaosbringer \
             --commit "${{ github.sha }}" \
@@ -107,6 +103,6 @@ jobs:
         with:
           name: chaos-baseline
           path: |
-            chaos-report.json
-            heatmap.json
+            packages/chaosbringer/chaos-report.json
+            packages/chaosbringer/heatmap.json
           retention-days: 30
