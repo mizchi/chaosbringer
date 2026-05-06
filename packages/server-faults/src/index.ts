@@ -1,5 +1,6 @@
 export {
   serverFaults,
+  toOtelAttrs,
   type FaultAttrs,
   type FaultKind,
   type ServerFaultConfig,
