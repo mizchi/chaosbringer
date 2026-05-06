@@ -3,6 +3,7 @@
  */
 
 import type { AdvisorConfig } from "./advisor/types.js";
+import type { ServerFaultEventAttrs } from "./server-fault-events.js";
 
 export type { AdvisorConfig } from "./advisor/types.js";
 
@@ -744,17 +745,11 @@ export interface ServerFaultEvent {
   traceId?: string;
   /**
    * Flat camelCase attrs mirroring `@mizchi/server-faults`'s `FaultAttrs`.
-   * Use `toOtelAttrs(attrs)` (re-exported from chaosbringer) when shipping
-   * these to an OTel exporter.
+   * Aliased to `ServerFaultEventAttrs` (the parser's own type) so adding a
+   * new fault kind is a single edit instead of two — see
+   * `server-fault-events.ts` for the canonical shape.
    */
-  attrs: {
-    kind: "5xx" | "latency";
-    path: string;
-    method: string;
-    targetStatus?: number;
-    latencyMs?: number;
-    traceId?: string;
-  };
+  attrs: ServerFaultEventAttrs;
   /** Wall-clock ms when chaos observed the response. */
   observedAt: number;
   /** URL of the page that triggered the request. */
