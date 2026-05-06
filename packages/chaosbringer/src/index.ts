@@ -167,6 +167,8 @@ export type {
   PageDiffEntry,
   FailureArtifactsOptions,
   TraceparentInjectionOptions,
+  ChaosRemoteServer,
+  ServerFaultEvent,
 } from "./types.js";
 export { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 export { networkConditionsFor, type NetworkConditions } from "./network.js";

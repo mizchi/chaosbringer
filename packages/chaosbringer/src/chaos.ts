@@ -8,7 +8,12 @@ import { chromium, type Page } from "playwright";
 import { ChaosCrawler } from "./crawler.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
 import { getExitCode } from "./reporter.js";
-import type { CrawlerEvents, CrawlerOptions, CrawlReport } from "./types.js";
+import type {
+  CrawlerEvents,
+  CrawlerOptions,
+  CrawlReport,
+  ChaosRemoteServer,
+} from "./types.js";
 
 export interface ChaosResult {
   report: CrawlReport;
@@ -52,6 +57,12 @@ export interface ChaosRunOptions extends CrawlerOptions {
    * `storageState` to a path that the main crawler reads.
    */
   setup?: ChaosSetupHook;
+  /**
+   * Surface server-side fault events into `report.serverFaults`. Phase 1:
+   * `{ mode: "remote" }` reads `x-chaos-fault-*` response headers emitted
+   * by `@mizchi/server-faults` running in the server process.
+   */
+  server?: ChaosRemoteServer;
 }
 
 async function runSetup(hook: ChaosSetupHook, baseUrl: string): Promise<void> {
@@ -73,7 +84,7 @@ export async function chaos(
   options: ChaosRunOptions,
   events: CrawlerEvents = {}
 ): Promise<ChaosResult> {
-  const { strict, baseline, baselineStrict, setup, ...crawlerOptions } = options;
+  const { strict, baseline, baselineStrict, setup, server, ...crawlerOptions } = options;
 
   // Construct the crawler before invoking the setup hook so that
   // CrawlerOptions validation (bad maxPages, malformed fault regex,
@@ -82,7 +93,7 @@ export async function chaos(
   // would then fail validation, mutating state that should never have
   // been touched. ChaosCrawler's constructor is side-effect-free; the
   // browser doesn't start until .start(), so the re-ordering is safe.
-  const crawler = new ChaosCrawler(crawlerOptions, events);
+  const crawler = new ChaosCrawler({ ...crawlerOptions, server } as CrawlerOptions, events);
 
   if (setup) {
     await runSetup(setup, options.baseUrl);

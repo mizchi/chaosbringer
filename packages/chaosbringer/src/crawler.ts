@@ -116,6 +116,7 @@ const DEFAULT_OPTIONS: Required<
     | "coverageFeedback"
     | "advisor"
     | "traceparent"
+    | "server"
   >
 > = {
   maxPages: 50,
