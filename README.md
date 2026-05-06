@@ -68,6 +68,13 @@ Common patterns extracted from real consumer code (rather than rediscovered ever
 
 More recipes (auth via storageState, SPA-routing tips, Playwright Test integration, CI on GitHub Actions) live inline in `packages/chaosbringer/README.md` until split out.
 
+## Examples
+
+Two runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs both end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
+
+- **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above.
+- **[`examples/playwright-test/`](examples/playwright-test/)** — chaosbringer inside an `@playwright/test` suite via the `chaos` fixture. Both `chaosTest` and `withChaos()` extension patterns in one file.
+
 ## Internal design docs
 
 - `docs/superpowers/specs/` — design specs for non-trivial features (kept under version control so the *why* survives the *what*).
@@ -95,6 +102,7 @@ chaosbringer/
 │   ├── playwright-faults/        # `@mizchi/playwright-faults`
 │   ├── playwright-v8-coverage/   # `@mizchi/playwright-v8-coverage`
 │   └── cf-faults/                # `@mizchi/cf-faults`
+├── examples/                     # runnable demos (workspace-linked to packages/*)
 ├── docs/
 │   ├── recipes/                  # task-oriented user docs
 │   └── superpowers/              # design specs + plans (internal)
