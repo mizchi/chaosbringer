@@ -70,6 +70,10 @@ async function main() {
   console.log(report.reproCommand);
   console.log(`pages=${report.pagesVisited} errors=${report.totalErrors}`);
 
+  // NOTE: the four `console.log` strings below ("server-side fault events: N",
+  // the per-kind breakdown, "pages with server faults: N", "actions with server
+  // faults: N") are asserted by examples/cloudflare-worker/test.mjs via regex.
+  // If you change the wording here, update the regexes there.
   const sf = report.serverFaults ?? [];
   if (sf.length > 0) {
     console.log(`server-side fault events: ${sf.length}`);
