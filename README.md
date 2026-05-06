@@ -1,13 +1,79 @@
-# chaosbringer monorepo
+# chaosbringer
 
-This repository hosts `chaosbringer` plus future Layer-1 packages extracted from it.
+Chaos testing toolkit for web apps. A Playwright-based crawler injects faults at every layer a browser test can reach — network, page lifecycle, JS runtime — and a sibling `@mizchi/server-faults` covers the layer the browser cannot reach: inside the server process. Same `traceparent`, one report.
+
+## Where each package fits
+
+`chaosbringer` only injects faults that a **browser-driven** test can reach. Server-internal failure modes need a sibling library. Pick the layer before reaching for a fault provider:
+
+| Layer | Library | What it touches | When to use |
+|---|---|---|---|
+| **Application state** | `chaos({ setup })` hook | Backend rows, storage state, fixtures (via Playwright `page.request`) | "Crawler needs N todos to navigate" |
+| **Network** | [`chaosbringer`](packages/chaosbringer) `faults.*` | HTTP between browser and server (Playwright `route()`) | "What does the UI do when `/api/x` is 500 / slow / aborted" |
+| **Page lifecycle / runtime** | [`chaosbringer`](packages/chaosbringer) `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
+| **Server-side** | [`@mizchi/server-faults`](packages/server-faults) | Inside the server process, before the handler runs | "Do the server's OTel traces / metrics show the fault, and does the handler degrade gracefully" |
+| **Cloudflare bindings** | [`@mizchi/cf-faults`](packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
+
+**Common confusion:** `faults.status(500, …)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` *and* run both layers together. See [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md).
 
 ## Packages
 
-- [`chaosbringer`](packages/chaosbringer) — Playwright-based chaos testing CLI + library
-- [`@mizchi/playwright-faults`](packages/playwright-faults) — Playwright fault-injection primitives (network route, page lifecycle, JS runtime monkey-patch)
-- [`@mizchi/playwright-v8-coverage`](packages/playwright-v8-coverage) — V8 precise-coverage collector for Playwright (CDP `Profiler.takePreciseCoverage`) with novelty-scoring helpers
-- [`@mizchi/server-faults`](packages/server-faults) — framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request / Response
+| Package | What it is |
+|---|---|
+| [`chaosbringer`](packages/chaosbringer) | Playwright-based chaos crawler — CLI + library |
+| [`@mizchi/server-faults`](packages/server-faults) | Framework-agnostic server-side fault injection (5xx + latency) for Web Standard `Request`/`Response`. Adapters for hono / express / fastify / koa. |
+| [`@mizchi/playwright-faults`](packages/playwright-faults) | Playwright fault-injection primitives (network route, page lifecycle, JS runtime monkey-patch) — extracted from chaosbringer for direct Playwright Test use |
+| [`@mizchi/playwright-v8-coverage`](packages/playwright-v8-coverage) | V8 precise-coverage collector for Playwright (CDP `Profiler.takePreciseCoverage`) with novelty-scoring helpers |
+| [`@mizchi/cf-faults`](packages/cf-faults) | Cloudflare Worker binding wrappers (KV / Service Binding) for chaos injection |
+
+## 30-second tour
+
+```bash
+pnpm add chaosbringer playwright @playwright/test
+npx playwright install chromium
+
+# crawl localhost, exit 0/1 on errors, print a Repro: line you can paste into CI
+chaosbringer --url http://localhost:3000 --max-pages 20 --strict
+```
+
+```ts
+// or programmatically — fault injection + invariants in 15 lines
+import { chaos, faults } from "chaosbringer";
+
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000",
+  seed: 42,
+  faultInjection: [
+    faults.status(500, { urlPattern: /\/api\//, probability: 0.3 }),
+    faults.delay(2000, { urlPattern: /\/api\//, probability: 0.1 }),
+  ],
+  invariants: [
+    { name: "has-h1", when: "afterLoad", check: async ({ page }) =>
+        (await page.locator("h1").count()) > 0 || "missing <h1>" },
+  ],
+});
+
+console.log(report.reproCommand); // chaosbringer --url … --seed 42 …
+process.exit(passed ? 0 : 1);
+```
+
+The full feature list, CLI reference, and report-shape walkthrough live in [`packages/chaosbringer/README.md`](packages/chaosbringer/README.md).
+
+## Recipes
+
+Common patterns extracted from real consumer code (rather than rediscovered every time):
+
+- [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
+- [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
+
+More recipes (auth via storageState, SPA-routing tips, Playwright Test integration, CI on GitHub Actions) live inline in `packages/chaosbringer/README.md` until split out.
+
+## Internal design docs
+
+- `docs/superpowers/specs/` — design specs for non-trivial features (kept under version control so the *why* survives the *what*).
+- `docs/superpowers/plans/` — implementation plans corresponding to specs.
+
+These are internal; users do not need to read them. They exist to keep design rationale next to the code.
 
 ## Development
 
@@ -24,10 +90,18 @@ pnpm -F chaosbringer test
 ```
 chaosbringer/
 ├── packages/
-│   └── chaosbringer/      # the npm `chaosbringer` package
-│       ├── flaker.toml    # package-local @mizchi/flaker config
-│       └── .flaker/       # storage (gitignored, persisted across CI runs via actions/cache)
-├── docs/                  # repo-wide design notes (see docs/superpowers/specs/)
-├── package.json           # workspace catalog (private, not published)
+│   ├── chaosbringer/             # the npm `chaosbringer` package
+│   ├── server-faults/            # `@mizchi/server-faults`
+│   ├── playwright-faults/        # `@mizchi/playwright-faults`
+│   ├── playwright-v8-coverage/   # `@mizchi/playwright-v8-coverage`
+│   └── cf-faults/                # `@mizchi/cf-faults`
+├── docs/
+│   ├── recipes/                  # task-oriented user docs
+│   └── superpowers/              # design specs + plans (internal)
+├── package.json                  # workspace root (private, not published)
 └── pnpm-workspace.yaml
 ```
+
+## License
+
+MIT
