@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.7.0...chaosbringer-v0.8.0) (2026-05-06)
+
+
+### Features
+
+* **chaosbringer:** add chaos({ setup }) pre-run hook for state seeding ([2432558](https://github.com/mizchi/chaosbringer/commit/24325580e2dcf25f17101767fcf4ad17d80ea30b))
+* **chaosbringer:** add ChaosRemoteServer option type (no behaviour yet) ([62b19bc](https://github.com/mizchi/chaosbringer/commit/62b19bcf9559f286871e4273274f29db64f29b5a))
+* **chaosbringer:** collect server-fault events from response headers per page ([31b3bc0](https://github.com/mizchi/chaosbringer/commit/31b3bc0fdd30c1c5460c8e6fcde8460349131973))
+* **chaosbringer:** inject W3C traceparent for OTel correlation ([a76a485](https://github.com/mizchi/chaosbringer/commit/a76a48523afdab28f77250fad0ce1b68e85deddc))
+* **chaosbringer:** named fault profiles for shared operator knowledge ([bb1f7dc](https://github.com/mizchi/chaosbringer/commit/bb1f7dc3b563a313098eb5825ceb1bbdb15af153))
+* **chaosbringer:** parse x-chaos-fault-* response headers into events ([214b9a3](https://github.com/mizchi/chaosbringer/commit/214b9a379b7ac0cb3fcbaad0ceaf3c23beacc22b))
+* **chaosbringer:** per-page + per-action server-fault correlation ([#56](https://github.com/mizchi/chaosbringer/issues/56) Phase 2) ([#79](https://github.com/mizchi/chaosbringer/issues/79)) ([7c3d7f9](https://github.com/mizchi/chaosbringer/commit/7c3d7f96aace1f6b23f7c6af914d726a28f69951))
+* **chaosbringer:** surface server fault events on CrawlReport.serverFaults ([0f39f97](https://github.com/mizchi/chaosbringer/commit/0f39f97a73134ea9c305684874b991864a80d807))
+* extract @mizchi/playwright-faults (network / lifecycle / runtime) ([#51](https://github.com/mizchi/chaosbringer/issues/51)) ([b642aa5](https://github.com/mizchi/chaosbringer/commit/b642aa5cb0f677519f712f0a7a41e438857ebaca))
+* extract V8 coverage primitives to @mizchi/playwright-v8-coverage ([#50](https://github.com/mizchi/chaosbringer/issues/50)) ([80a7d20](https://github.com/mizchi/chaosbringer/commit/80a7d2026a9887fb6815c045de9026fcf154f8d2))
+
+
+### Bug Fixes
+
+* **chaosbringer:** alias ServerFaultEvent.attrs to ServerFaultEventAttrs + drop redundant cast ([54231c0](https://github.com/mizchi/chaosbringer/commit/54231c0ebf6f55aef00483405fe0108efc2158ec))
+* **chaosbringer:** align serverFaults field style + drop redundant shape test ([d2cb30a](https://github.com/mizchi/chaosbringer/commit/d2cb30af6776f593eec85a5f7b0c875fead0ff01))
+* **chaosbringer:** derive ServerFaultKind from as-const tuple + prefix-isolation test ([1bf0b43](https://github.com/mizchi/chaosbringer/commit/1bf0b43a693beef4b33f6686727f8aa6e153a3a7))
+* **chaosbringer:** validate options before invoking the setup hook ([e51606b](https://github.com/mizchi/chaosbringer/commit/e51606bdc9a7fb69f2c7a64eccad79e732d66ead))
+
 ## [0.7.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.6.0...chaosbringer-v0.7.0) (2026-05-01)
 
 
