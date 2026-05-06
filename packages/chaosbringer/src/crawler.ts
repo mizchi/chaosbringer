@@ -307,6 +307,13 @@ export class ChaosCrawler {
    * `page.on("response")` listener can be skipped in the common case.
    */
   private readonly serverFaultCollector: ServerFaultCollector | null;
+  /**
+   * Set by the action loop immediately before each `performActionOnTarget`
+   * call; cleared at the start of the next iteration. The traceparent
+   * injection site uses `recordTraceId` to append captured trace-ids onto
+   * this action's `traceIds[]`.
+   */
+  private currentAction: ActionResult | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -1007,6 +1014,17 @@ export class ChaosCrawler {
     return noveltyMultiplier(score, this.coverageFeedback.boost);
   }
 
+  /**
+   * Append a trace-id to the currently-executing action, if any. Called
+   * from the per-request traceparent injection in `setupNavigationBlocking`.
+   * No-op when no action is in flight (e.g. during initial page load).
+   */
+  private recordTraceId(traceId: string): void {
+    if (!this.currentAction) return;
+    if (!this.currentAction.traceIds) this.currentAction.traceIds = [];
+    this.currentAction.traceIds.push(traceId);
+  }
+
   private async consultAdvisorIfStalled(
     page: Page,
     url: string,
@@ -1169,10 +1187,11 @@ export class ChaosCrawler {
         const reqHeaders = await request.allHeaders();
         const existingTp = reqHeaders["traceparent"];
         if (existingTp) {
-          // Honour explicit propagation upstream — but still surface it to
-          // the consumer hook so the report can record the correlation id.
+          // Honour upstream propagation; record the correlation id on the
+          // current action regardless of whether the user supplied a hook.
+          const parts = parseTraceparent(existingTp);
+          if (parts?.traceId) this.recordTraceId(parts.traceId);
           if (traceparentHook) {
-            const parts = parseTraceparent(existingTp);
             traceparentHook({
               url,
               method,
@@ -1187,6 +1206,7 @@ export class ChaosCrawler {
           const spanId = randomBytes(8).toString("hex"); // 16 hex chars
           const traceparent = `00-${traceId}-${spanId}-01`;
           outgoingHeaders = { ...reqHeaders, traceparent };
+          this.recordTraceId(traceId);
           traceparentHook?.({
             url,
             method,
@@ -1977,6 +1997,13 @@ export class ChaosCrawler {
    * Perform actions based on weighted random selection
    */
   private async performWeightedActions(page: Page, url: string): Promise<void> {
+    // Per-page reset: if the previous page's last action left `currentAction`
+    // pointing at it, requests fired during this page's load / navigation /
+    // invariants would otherwise attribute to the previous page's last
+    // action. Clearing here covers both the no-targets early-return below
+    // and the regular-loop entry path.
+    this.currentAction = null;
+
     const targets = await this.getWeightedActionTargets(page);
     this.logger.debug("action_targets", { count: targets.length, url });
     if (targets.length === 0) return;
@@ -1988,6 +2015,11 @@ export class ChaosCrawler {
 
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
+
+      // Clear at the start of each iteration. Late-firing requests from the
+      // previous action attach to the previous action; once we begin the next,
+      // attribution is the current iteration's responsibility.
+      this.currentAction = null;
 
       const advisorPick = await this.consultAdvisorIfStalled(page, url, targets);
       const selectedTarget =
@@ -2001,6 +2033,18 @@ export class ChaosCrawler {
           this.rng,
         );
 
+      // Build a placeholder ActionResult ahead of the call so traceIds captured
+      // during execution land on the right object. We carry the captured ids
+      // onto the real result returned by performActionOnTarget below.
+      const placeholder: ActionResult = {
+        type: "click", // overwritten by performActionOnTarget on success
+        target: selectedTarget.name ?? selectedTarget.selector,
+        selector: selectedTarget.selector,
+        success: false,
+        timestamp: Date.now(),
+      };
+      this.currentAction = placeholder;
+
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
       // Skip null results (element not visible)
@@ -2008,6 +2052,11 @@ export class ChaosCrawler {
         this.logger.debug("action_skipped", { target: selectedTarget.name || selectedTarget.selector, reason: "not visible" });
         continue;
       }
+
+      // Carry over any traceIds captured against the placeholder onto the
+      // real result. (performActionOnTarget returns a fresh ActionResult.)
+      if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
+      this.currentAction = result;
 
       actionsPerformed++;
       this.actions.push(result);
@@ -2263,6 +2312,27 @@ export class ChaosCrawler {
   private generateReport(endTime: number): CrawlReport {
     const summary = this.calculateSummary();
 
+    const drainedServerFaults =
+      this.serverFaultCollector && this.serverFaultCollector.size() > 0
+        ? this.serverFaultCollector.drain()
+        : null;
+
+    if (drainedServerFaults) {
+      // Per-page join — same references as the flat list.
+      for (const p of this.results) {
+        const events = drainedServerFaults.filter((e) => e.pageUrl === p.url);
+        if (events.length > 0) p.serverFaultEvents = events;
+      }
+      // Per-action join — only meaningful when traceparent injection is on
+      // (otherwise traceIds is always empty/absent).
+      for (const a of this.actions) {
+        if (!a.traceIds || a.traceIds.length === 0) continue;
+        const set = new Set(a.traceIds);
+        const events = drainedServerFaults.filter((e) => e.traceId !== undefined && set.has(e.traceId));
+        if (events.length > 0) a.serverFaultEvents = events;
+      }
+    }
+
     return {
       baseUrl: this.options.baseUrl,
       seed: this.rng.seed,
@@ -2311,10 +2381,7 @@ export class ChaosCrawler {
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
       // Field is omitted when no faults observed (matches advisor / coverage convention).
-      serverFaults:
-        this.serverFaultCollector && this.serverFaultCollector.size() > 0
-          ? this.serverFaultCollector.drain()
-          : undefined,
+      serverFaults: drainedServerFaults ?? undefined,
     };
   }
 

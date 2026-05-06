@@ -41,6 +41,7 @@ async function main() {
     seed: Number(process.env.SEED ?? "42"),
     maxPages: Number(process.env.MAX_PAGES ?? "20"),
     strict: false,
+    traceparent: true,
     faultInjection: [
       // Network-layer faults — intercepted by Playwright BEFORE the worker is called.
       // These produce no `x-chaos-fault-*` headers because the worker is never reached.
@@ -69,6 +70,10 @@ async function main() {
   console.log(report.reproCommand);
   console.log(`pages=${report.pagesVisited} errors=${report.totalErrors}`);
 
+  // NOTE: the four `console.log` strings below ("server-side fault events: N",
+  // the per-kind breakdown, "pages with server faults: N", "actions with server
+  // faults: N") are asserted by examples/cloudflare-worker/test.mjs via regex.
+  // If you change the wording here, update the regexes there.
   const sf = report.serverFaults ?? [];
   if (sf.length > 0) {
     console.log(`server-side fault events: ${sf.length}`);
@@ -80,6 +85,11 @@ async function main() {
   } else {
     console.log("server-side fault events: 0 (set CHAOS_5XX_RATE / CHAOS_LATENCY_RATE on the worker to see some)");
   }
+
+  const pagesWithServerFaults = report.pages.filter((p) => p.serverFaultEvents && p.serverFaultEvents.length > 0);
+  const actionsWithServerFaults = report.actions.filter((a) => a.serverFaultEvents && a.serverFaultEvents.length > 0);
+  console.log(`pages with server faults: ${pagesWithServerFaults.length}`);
+  console.log(`actions with server faults: ${actionsWithServerFaults.length}`);
 
   process.exit(passed ? 0 : 1);
 }

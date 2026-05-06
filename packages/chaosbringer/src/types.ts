@@ -456,6 +456,17 @@ export interface PageResult {
   sourceUrl?: string;
   /** Element that linked to this page */
   sourceElement?: string;
+  /**
+   * Server-side fault events that fired while this page was active.
+   * Pre-computed view of `report.serverFaults` filtered by `pageUrl`.
+   * Populated only when `chaos({ server: { mode: "remote" } })` was set
+   * AND faults were observed on this page; absent otherwise.
+   *
+   * References are shared with `report.serverFaults[]` and with
+   * `ActionResult.serverFaultEvents[]` — no duplication. Treat events as
+   * read-only: mutating one observed here mutates the other views too.
+   */
+  serverFaultEvents?: ServerFaultEvent[];
 }
 
 export interface RecoveryInfo {
@@ -491,6 +502,31 @@ export interface ActionResult {
   /** True when the action was skipped because the target URL is owned by another shard. */
   shardSkipped?: boolean;
   timestamp: number;
+  /**
+   * W3C trace-ids of requests triggered while this action was executing.
+   * Format: 32 lowercase hex chars per id (the traceparent's trace-id segment).
+   * Populated only when `chaos({ traceparent: true })` is set. Absent for
+   * actions that triggered no requests (scroll, hover) or when traceparent
+   * injection is off.
+   */
+  traceIds?: string[];
+  /**
+   * Server-side fault events whose `traceId` is in `traceIds[]`. Pre-
+   * computed view of `report.serverFaults` per action.
+   *
+   * Populated only when ALL of:
+   *   - `chaos({ traceparent: true })` was set, AND
+   *   - `chaos({ server: { mode: "remote" } })` was set, AND
+   *   - at least one fault's traceId matched a traceId captured by THIS
+   *     specific action.
+   * Otherwise absent — including the case where `report.serverFaults` is
+   * non-empty but no event joined to this action's `traceIds[]`.
+   *
+   * References are shared with `report.serverFaults[]` and with
+   * `PageResult.serverFaultEvents[]` — no duplication. Treat events as
+   * read-only: mutating one observed here mutates the other views too.
+   */
+  serverFaultEvents?: ServerFaultEvent[];
 }
 
 /**

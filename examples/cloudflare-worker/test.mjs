@@ -118,7 +118,15 @@ try {
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`expected server-side fault events > 0 with CHAOS_5XX_RATE=0.5, got ${n}`);
   }
-  console.log(`[test] PASS — ${n} server-side fault events observed via header round-trip`);
+  const ma = chaosStdout.match(/actions with server faults:\s*(\d+)/);
+  if (!ma) {
+    throw new Error("could not find 'actions with server faults: N' in chaos output — did Phase 2 wiring break?");
+  }
+  const na = Number(ma[1]);
+  if (!Number.isFinite(na) || na <= 0) {
+    throw new Error(`expected at least one action joined to a server fault via traceId, got ${na}`);
+  }
+  console.log(`[test] PASS — ${n} fault events / ${na} actions joined via header round-trip`);
   await teardown(0);
 } catch (err) {
   console.error("[test] FAIL:", err.message ?? err);
