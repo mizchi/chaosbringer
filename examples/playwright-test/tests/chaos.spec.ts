@@ -12,6 +12,7 @@
 
 import { test as base, expect } from "@playwright/test";
 import { chaosTest, withChaos, type ChaosFixtures } from "chaosbringer/fixture";
+import type { ChaosTestOptions } from "chaosbringer";
 
 // chaos.testPage / chaos.crawl require absolute URLs (the crawler computes
 // `new URL(url).origin` to gate external-navigation blocking). Pin the
@@ -19,7 +20,21 @@ import { chaosTest, withChaos, type ChaosFixtures } from "chaosbringer/fixture";
 // playwright.config.ts and site/server.mjs read the same env.
 const BASE = `http://localhost:${process.env.PORT ?? 3300}`;
 
-// ---------- pattern 1: chaosTest ----------
+// Action selection during the crawl can click `<a href="/broken-link">`
+// and Chromium logs the resulting 404 as a console error. That's correct
+// HTML behaviour but not what we want the example to assert against —
+// the third test exercises broken-link discovery via `expectNoDeadLinks`,
+// which is a separate code path. Filter the resource-404 console message
+// at the chaos level so the no-console-error test stays meaningful.
+const COMMON_CHAOS_OPTIONS: ChaosTestOptions = {
+  maxPages: 5,
+  // chaosbringer treats these as regex source strings.
+  ignoreErrorPatterns: ["Failed to load resource.*404"],
+};
+
+// ---------- pattern 1: chaosTest with per-file chaosOptions override ----------
+
+chaosTest.use({ chaosOptions: COMMON_CHAOS_OPTIONS });
 
 chaosTest("home page has no console errors", async ({ page, chaos }) => {
   const result = await chaos.testPage(page, `${BASE}/`);
@@ -30,13 +45,15 @@ chaosTest("crawl finds a broken link", async ({ chaos }) => {
   const report = await chaos.crawl(`${BASE}/`);
   // Crawl visits at least the three reachable URLs (/, /about, /broken-link).
   expect(report.pagesVisited).toBeGreaterThanOrEqual(2);
-  // /broken-link returns 404; the dead-link assertion should catch it.
+  // /broken-link returns 404; the dead-link assertion should still catch it
+  // — `expectNoDeadLinks` reads `summary.discovery.deadLinks`, not console
+  // errors, so the `ignoreErrorPatterns` above does NOT mask it.
   expect(() => chaos.expectNoDeadLinks(report)).toThrow(/broken-link/);
 });
 
 // ---------- pattern 2: withChaos extension ----------
 
-const test = base.extend<ChaosFixtures>(withChaos({ maxPages: 5 }));
+const test = base.extend<ChaosFixtures>(withChaos(COMMON_CHAOS_OPTIONS));
 
 test("about page shows the heading", async ({ page, chaos }) => {
   await page.goto("/about");
