@@ -34,6 +34,21 @@ export interface FaultAttrs {
   traceId?: string;
 }
 
+/**
+ * Outcome of a fault raffle.
+ *
+ * - `synthetic`: a fault response was minted; the adapter must short-circuit
+ *   the real handler and return `response`.
+ * - `annotate`: no synthetic response, but the request was perturbed (e.g.
+ *   latency was injected). The adapter should run the real handler and
+ *   surface `attrs` (as response headers, span attributes, etc.).
+ * - `null`: bypass / exempt / no raffle won — pass through unchanged.
+ */
+export type FaultVerdict =
+  | { kind: "synthetic"; response: Response; attrs: FaultAttrs }
+  | { kind: "annotate"; attrs: FaultAttrs }
+  | null;
+
 export interface ServerFaultObserver {
   onFault?: (kind: FaultKind, attrs: FaultAttrs) => void;
 }
@@ -68,7 +83,7 @@ export interface ServerFaultConfig {
 }
 
 export interface ServerFaultHandle {
-  maybeInject: (req: Request) => Promise<Response | null>;
+  maybeInject: (req: Request) => Promise<FaultVerdict>;
 }
 
 interface SeededRng {
@@ -132,7 +147,7 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
   const rng: SeededRng = cfg.seed !== undefined ? mulberry32(cfg.seed) : { next: () => Math.random() };
 
   return {
-    async maybeInject(req: Request): Promise<Response | null> {
+    async maybeInject(req: Request): Promise<FaultVerdict> {
       if (bypassHeader && req.headers.has(bypassHeader)) return null;
 
       const url = new URL(req.url);
@@ -152,10 +167,11 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         };
         if (traceId !== undefined) attrs5xx.traceId = traceId;
         cfg.observer?.onFault?.("5xx", attrs5xx);
-        return Response.json(
+        const response = Response.json(
           { error: "chaos: synthetic 5xx", path: url.pathname, status },
           { status },
         );
+        return { kind: "synthetic", response, attrs: attrs5xx };
       }
 
       const rL = cfg.latencyRate ?? 0;
@@ -170,6 +186,7 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         if (traceId !== undefined) attrsLat.traceId = traceId;
         cfg.observer?.onFault?.("latency", attrsLat);
         await sleep(ms);
+        return { kind: "annotate", attrs: attrsLat };
       }
       return null;
     },
