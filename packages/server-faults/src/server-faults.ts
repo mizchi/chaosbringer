@@ -12,11 +12,33 @@
  * (1 roll for 5xx, conditionally 1 roll for latency).
  */
 
+export type FaultKind = "5xx" | "latency";
+
+/**
+ * Stable attribute schema fed to `observer.onFault`.
+ *
+ * Modeled on OTel semantic conventions: keys are namespaced under `fault.*`,
+ * values are primitive scalars so they map cleanly to OTel attributes,
+ * Prometheus labels, Datadog tags, etc. Required keys are always present;
+ * optional keys appear only when meaningful for the fault kind. Treat this
+ * shape as part of the public contract — additions are backward-compatible,
+ * renames are not.
+ */
+export interface FaultAttrs {
+  /** Mirror of the kind argument; included so an attrs object is self-describing if it ever travels without context. */
+  "fault.kind": FaultKind;
+  /** URL pathname (no host, no query). */
+  "fault.path": string;
+  /** Uppercase HTTP method. */
+  "fault.method": string;
+  /** Set when `fault.kind === "5xx"`. The synthetic HTTP status that was returned. */
+  "fault.target_status"?: number;
+  /** Set when `fault.kind === "latency"`. Milliseconds actually slept. */
+  "fault.latency_ms"?: number;
+}
+
 export interface ServerFaultObserver {
-  onFault?: (
-    kind: "5xx" | "latency",
-    attrs: Record<string, string | number>,
-  ) => void;
+  onFault?: (kind: FaultKind, attrs: FaultAttrs) => void;
 }
 
 export interface ServerFaultConfig {
@@ -111,10 +133,16 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
       if (exemptPattern && exemptPattern.test(url.pathname)) return null;
       if (pattern && !pattern.test(url.pathname)) return null;
 
+      const method = req.method.toUpperCase();
       const r5 = cfg.status5xxRate ?? 0;
       if (r5 > 0 && rng.next() < r5) {
         const status = cfg.status5xxCode ?? 503;
-        cfg.observer?.onFault?.("5xx", { status, path: url.pathname });
+        cfg.observer?.onFault?.("5xx", {
+          "fault.kind": "5xx",
+          "fault.path": url.pathname,
+          "fault.method": method,
+          "fault.target_status": status,
+        });
         return Response.json(
           { error: "chaos: synthetic 5xx", path: url.pathname, status },
           { status },
@@ -124,7 +152,12 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
       const rL = cfg.latencyRate ?? 0;
       if (rL > 0 && rng.next() < rL) {
         const ms = pickLatencyMs(cfg.latencyMs);
-        cfg.observer?.onFault?.("latency", { ms, path: url.pathname });
+        cfg.observer?.onFault?.("latency", {
+          "fault.kind": "latency",
+          "fault.path": url.pathname,
+          "fault.method": method,
+          "fault.latency_ms": ms,
+        });
         await sleep(ms);
       }
       return null;

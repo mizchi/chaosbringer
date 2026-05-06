@@ -115,11 +115,29 @@ const fault = serverFaults({
   observer: {
     onFault: (kind, attrs) => {
       // wire to OTel / Datadog / console — no framework dep imposed by this lib
-      faultsCounter.add(1, { kind, path: String(attrs.path) });
+      faultsCounter.add(1, {
+        kind,
+        path: attrs["fault.path"],
+        method: attrs["fault.method"],
+      });
     },
   },
 });
 ```
+
+### Semantic conventions for `attrs`
+
+`observer.onFault(kind, attrs)` passes a strongly-typed `FaultAttrs` object whose keys follow OTel-style `fault.*` naming so dashboards / pipelines can be reused across consumers.
+
+| Attribute | Type | Required | Notes |
+|---|---|---|---|
+| `fault.kind` | `"5xx" \| "latency"` | always | mirrors the `kind` arg, so the attrs object is self-describing |
+| `fault.path` | `string` | always | URL pathname (no host, no query) |
+| `fault.method` | `string` | always | HTTP method, uppercased |
+| `fault.target_status` | `number` | when `kind === "5xx"` | the synthetic HTTP status returned |
+| `fault.latency_ms` | `number` | when `kind === "latency"` | milliseconds actually slept |
+
+The shape is part of the public contract: additions are backward-compatible, renames are not. This is why we shipped a stable schema before any consumer pinned to ad-hoc keys.
 
 ## License
 
