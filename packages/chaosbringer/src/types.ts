@@ -462,7 +462,9 @@ export interface PageResult {
    * Populated only when `chaos({ server: { mode: "remote" } })` was set
    * AND faults were observed on this page; absent otherwise.
    *
-   * References are shared with `report.serverFaults[]` — no duplication.
+   * References are shared with `report.serverFaults[]` and with
+   * `ActionResult.serverFaultEvents[]` — no duplication. Treat events as
+   * read-only: mutating one observed here mutates the other views too.
    */
   serverFaultEvents?: ServerFaultEvent[];
 }
@@ -502,6 +504,7 @@ export interface ActionResult {
   timestamp: number;
   /**
    * W3C trace-ids of requests triggered while this action was executing.
+   * Format: 32 lowercase hex chars per id (the traceparent's trace-id segment).
    * Populated only when `chaos({ traceparent: true })` is set. Absent for
    * actions that triggered no requests (scroll, hover) or when traceparent
    * injection is off.
@@ -509,9 +512,19 @@ export interface ActionResult {
   traceIds?: string[];
   /**
    * Server-side fault events whose `traceId` is in `traceIds[]`. Pre-
-   * computed view of `report.serverFaults` per action. Populated only when
-   * `chaos({ traceparent: true, server: { mode: "remote" } })` is BOTH set
-   * AND at least one fault joined to this action.
+   * computed view of `report.serverFaults` per action.
+   *
+   * Populated only when ALL of:
+   *   - `chaos({ traceparent: true })` was set, AND
+   *   - `chaos({ server: { mode: "remote" } })` was set, AND
+   *   - at least one fault's traceId matched a traceId captured by THIS
+   *     specific action.
+   * Otherwise absent — including the case where `report.serverFaults` is
+   * non-empty but no event joined to this action's `traceIds[]`.
+   *
+   * References are shared with `report.serverFaults[]` and with
+   * `PageResult.serverFaultEvents[]` — no duplication. Treat events as
+   * read-only: mutating one observed here mutates the other views too.
    */
   serverFaultEvents?: ServerFaultEvent[];
 }
