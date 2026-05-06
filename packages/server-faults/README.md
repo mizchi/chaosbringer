@@ -62,8 +62,16 @@ app.use(async (req, res, next) => {
 | `latencyRate` | `number` (0..1) | `0` | Probability of injected latency |
 | `latencyMs` | `number \| {minMs, maxMs}` | — | Sleep duration. Number = constant; range = uniform pick |
 | `pathPattern` | `RegExp \| string` | none | Only matching paths are considered for fault injection |
+| `exemptPathPattern` | `RegExp \| string` | none | Paths that match are passed through unconditionally — useful for health checks or seed endpoints. Wins over `pathPattern`. |
+| `bypassHeader` | `string` | none | Header name (case-insensitive). Any request that carries it is passed through unconditionally — useful for warm-up / fixture traffic in tests. |
 | `seed` | `number` | none (`Math.random`) | When given, fault selection is reproducible across runs |
 | `observer.onFault` | `(kind, attrs) => void` | none | Telemetry callback |
+
+### Bypass and exempt — when to use which
+
+- **`bypassHeader`** is opt-in **per request**. The caller (test runner, fixture script, internal monitor) attaches the header to mark "this one is mine, don't break it." Headers don't show up in the URL, so it is safe for shared paths.
+- **`exemptPathPattern`** is opt-out **by URL**. It carves out a region of the surface that the caller cannot touch (e.g. `^/api/health`). Use this for paths that should *never* see chaos regardless of who calls them.
+- Both fire **before** any raffle, so they are zero-cost on exempt traffic and they do not invoke `observer.onFault`.
 
 ## Semantics
 
