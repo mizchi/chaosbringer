@@ -2,6 +2,20 @@
 
 Playwright-based chaos testing for web apps. Crawls the pages you point it at, performs weighted random actions, injects network faults, evaluates invariants, and reports what broke — with a seed you can replay.
 
+## Where chaosbringer fits in the chaos layering
+
+`chaosbringer` only injects faults that a **browser-driven** test can reach. Server-internal failure modes need a sibling library. Use this table to pick the layer before reaching for a fault provider:
+
+| Layer | Library | What it touches | When to use |
+|---|---|---|---|
+| **Application state** | (your test setup; see [`#60`](https://github.com/mizchi/chaosbringer/issues/60) for a built-in hook) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
+| **Network** | `chaosbringer` `faults.*` | HTTP between browser and server (Playwright `route()`) | "What does the UI do when `/api/x` is 500 / slow / aborted" |
+| **Page lifecycle / runtime** | `chaosbringer` `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
+| **Server-side** | [`@mizchi/server-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults) | Inside the server process, before the handler runs | "Do the server's own OTel traces / metrics show the fault, and does the handler degrade gracefully" |
+| **Cloudflare bindings** | (proposed [`#61`](https://github.com/mizchi/chaosbringer/issues/61) `@mizchi/cf-faults`) | KV / Service Binding / D1 / Cache wrappers | "How does the Worker behave when its KV throws" |
+
+**Common confusion:** `faults.status(500, ...)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` (or run both layers together).
+
 ## Features
 
 - **Weighted random actions** targeted by ARIA role and visible text (nav links > buttons > inputs > scroll).
