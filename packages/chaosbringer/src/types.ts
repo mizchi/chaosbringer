@@ -163,6 +163,8 @@ export interface CrawlerOptions {
    * Default: undefined (advisor disabled, zero overhead).
    */
   advisor?: AdvisorConfig;
+  /** @internal Set by `chaos({ server })`. */
+  server?: ChaosRemoteServer;
 }
 
 /**
@@ -604,6 +606,14 @@ export interface CrawlReport {
    * meaningless replays.
    */
   replayFidelity?: ReplayFidelity;
+  /**
+   * Server-side fault events ingested via response headers (present only
+   * when `chaos({ server: { mode: "remote" } })` was set and the server
+   * was emitting `x-chaos-fault-*` headers via `@mizchi/server-faults`).
+   * Flat list across the whole run; consumers join by `traceId` for
+   * per-action correlation.
+   */
+  serverFaults?: ServerFaultEvent[];
 }
 
 export interface ReplayFidelity {
@@ -715,6 +725,40 @@ export interface CrawlerEvents {
   onAction?: (action: ActionResult) => void;
   onProgress?: (visited: number, total: number) => void;
   onBlockedNavigation?: (url: string) => void;
+}
+
+/**
+ * Server-side fault ingestion mode. Phase 1 supports `"remote"`: the server
+ * runs in a different process and emits `x-chaos-fault-*` response headers
+ * via `@mizchi/server-faults`'s `metadataHeader` option. chaos() listens for
+ * those headers and surfaces the events on `CrawlReport.serverFaults`.
+ */
+export interface ChaosRemoteServer {
+  mode: "remote";
+  /** Header prefix to look for. Default `"x-chaos-fault"`. */
+  responseHeaderPrefix?: string;
+}
+
+export interface ServerFaultEvent {
+  /** Trace-id from the response headers (W3C traceparent's trace-id segment). */
+  traceId?: string;
+  /**
+   * Flat camelCase attrs mirroring `@mizchi/server-faults`'s `FaultAttrs`.
+   * Use `toOtelAttrs(attrs)` (re-exported from chaosbringer) when shipping
+   * these to an OTel exporter.
+   */
+  attrs: {
+    kind: "5xx" | "latency";
+    path: string;
+    method: string;
+    targetStatus?: number;
+    latencyMs?: number;
+    traceId?: string;
+  };
+  /** Wall-clock ms when chaos observed the response. */
+  observedAt: number;
+  /** URL of the page that triggered the request. */
+  pageUrl: string;
 }
 
 /** Configuration for Playwright Test integration */
