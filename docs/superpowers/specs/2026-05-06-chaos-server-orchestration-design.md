@@ -38,8 +38,8 @@ Bun, …) run as **different processes**, communicating only over HTTP.
 - Response-header-based event channel (server-faults annotates synthetic
   / latency-affected responses; chaos parses headers in
   `page.on('response', …)`).
-- `fault.trace_id` joining the W3C `traceparent` already injected by
-  chaosbringer's network layer (PR #72).
+- `traceId` (OTel-mapped to `fault.trace_id`) joining the W3C
+  `traceparent` already injected by chaosbringer's network layer (PR #72).
 - A breaking `maybeInject` API change on server-faults to surface
   fault attrs to adapters even on the latency path.
 
@@ -63,9 +63,9 @@ chaosbringer's Playwright route layer already injects on every request
 trace-id back from response headers, so the same id flows through both
 layers without a parallel id system.
 
-This also means OTel exporters wired to either side automatically get a
-`fault.trace_id` attribute that joins to spans the rest of the system
-already emits.
+This also means OTel exporters wired to either side — via the
+`toOtelAttrs(attrs)` translator — automatically get a `fault.trace_id`
+attribute that joins to spans the rest of the system already emits.
 
 ### Event channel: response headers
 
@@ -102,23 +102,45 @@ hook handles both fault kinds.
 
 ### `@mizchi/server-faults`
 
-#### `FaultAttrs` gains `fault.trace_id`
+#### `FaultAttrs` becomes flat camelCase + gains `traceId`
+
+The PR #69 schema used dotted keys (`"fault.kind"`, `"fault.target_status"`,
+…) modelled directly on OTel attribute names. Those keys require quoting
+in TypeScript and force every consumer to write `attrs["fault.kind"]`
+instead of `attrs.kind`. We treat the OTel-style dotted form as a *wire
+format* and keep the in-memory TS shape flat:
 
 ```ts
 export interface FaultAttrs {
-  "fault.kind": FaultKind;
-  "fault.path": string;
-  "fault.method": string;
-  "fault.target_status"?: number;
-  "fault.latency_ms"?: number;
-  "fault.trace_id"?: string;  // NEW
+  kind: FaultKind;
+  path: string;
+  method: string;
+  targetStatus?: number;
+  latencyMs?: number;
+  traceId?: string;
 }
 ```
 
-Extracted from the incoming request's `traceparent` header per W3C
-Trace Context (segment 2 of `00-{trace-id}-{span-id}-{flags}`,
+`traceId` is extracted from the incoming request's `traceparent` header
+per W3C Trace Context (segment 2 of `00-{trace-id}-{span-id}-{flags}`,
 32 lowercase hex). Absent if the request has no traceparent or the
 header is malformed.
+
+A small adapter exposes the OTel attribute form for consumers that pipe
+fault events directly into an OTel exporter:
+
+```ts
+export function toOtelAttrs(attrs: FaultAttrs): Record<string, string | number> {
+  // Returns { "fault.kind": "5xx", "fault.target_status": 503, … }
+  // following the OTel semantic convention naming.
+}
+```
+
+This is a breaking change to PR #69's landed `observer.onFault` callback
+signature. The package is at `0.x`; bumping to `0.2.0` is acceptable, and
+the only known consumer (the four in-tree adapters + `otel-chaos-lab`'s
+`hono` wiring) is migrated in the same release. A migration note in the
+PR body documents the rename map.
 
 #### `metadataHeader` option
 
@@ -135,9 +157,14 @@ export interface ServerFaultConfig {
 }
 ```
 
-Header naming rule: `{prefix}-{key}` where `key` is the attrs key after
-stripping `fault.` and replacing `_` with `-`. So
-`fault.target_status` → `x-chaos-fault-target-status`.
+Header naming rule: `{prefix}-{kebab(key)}` where `key` is a TS attrs
+property name and `kebab` lower-cases the camelCase boundary. So
+`targetStatus` → `x-chaos-fault-target-status`,
+`latencyMs` → `x-chaos-fault-latency-ms`,
+`traceId` → `x-chaos-fault-trace-id`. The on-the-wire header names match
+what the previous PR #69 schema would have produced, so a downstream
+consumer (e.g. an OTel exporter that ingests these headers) is
+unaffected by the in-memory rename.
 
 #### Breaking: `maybeInject` returns a verdict
 
@@ -265,8 +292,10 @@ After this lands, `otel-chaos-lab` adopts the new wiring in a follow-up:
 - `metadataHeader` unit tests: 5xx case includes all expected headers;
   latency case carries headers via the `annotate` verdict; `prefix`
   override works; absent option means no headers.
-- `fault.trace_id` extraction: valid traceparent yields the 32-hex
-  segment; malformed / absent traceparent yields no `trace_id` key.
+- `traceId` extraction: valid traceparent yields the 32-hex segment;
+  malformed / absent traceparent yields no `traceId` key.
+- `toOtelAttrs(attrs)` translator: every camelCase property maps to its
+  dotted OTel form; absent optional keys do not appear in the output.
 - Verdict migration: existing tests that asserted `Response | null`
   switch to verdict-shaped expectations. Each fault kind is exercised
   through every adapter (`hono` / `express` / `fastify` / `koa`).
@@ -308,8 +337,9 @@ round-trip and lands the adoption.
 
 ## Sequencing
 
-1. **server-faults**: `fault.trace_id`, verdict refactor, adapters
-   updated, `metadataHeader` plumbed (one PR; breaking, bumps minor).
+1. **server-faults**: flat camelCase `FaultAttrs` (with `traceId`),
+   `toOtelAttrs(attrs)` translator, verdict refactor, adapters updated,
+   `metadataHeader` plumbed (one PR; breaking, bumps minor).
 2. **chaosbringer**: `server` option, `page.on('response')` listener,
    `CrawlReport.serverFaults`, fixture test (one PR).
 3. **otel-chaos-lab**: adoption + verification PR.
