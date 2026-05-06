@@ -79,6 +79,7 @@ import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
+import { ServerFaultCollector } from "./server-fault-collector.js";
 import { shouldSaveArtifacts, writeFailureBundle } from "./failure-artifacts.js";
 import {
   TRACE_FORMAT_VERSION,
@@ -300,6 +301,12 @@ export class ChaosCrawler {
   } | null = null;
   /** Per-run replay drift counters. Populated only when `traceReplay` is set. */
   private replayFidelity: ReplayFidelity | null = null;
+  /**
+   * Buffers server-side fault events parsed from response headers when
+   * `options.server.mode === "remote"`. Null otherwise so the per-page
+   * `page.on("response")` listener can be skipped in the common case.
+   */
+  private readonly serverFaultCollector: ServerFaultCollector | null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -309,6 +316,9 @@ export class ChaosCrawler {
       Object.entries(options).filter(([_, v]) => v !== undefined)
     );
     this.options = { ...DEFAULT_OPTIONS, ...filteredOptions } as Required<CrawlerOptions>;
+    this.serverFaultCollector = this.options.server?.mode === "remote"
+      ? new ServerFaultCollector(this.options.server.responseHeaderPrefix ?? "x-chaos-fault")
+      : null;
     this.actionWeights = { ...DEFAULT_ACTION_WEIGHTS, ...options.actionWeights };
     this.events = events;
     this.baseOrigin = new URL(options.baseUrl).origin;
@@ -1397,6 +1407,22 @@ export class ChaosCrawler {
       this.events.onError?.(error);
       this.logger.logPageError(error);
     });
+
+    // Server-fault collector: when chaos() runs in remote-server mode, every
+    // response carries `x-chaos-fault-*` headers describing any fault the
+    // server-side middleware injected. Forward each response's headers to
+    // the collector so `generateReport` (Task 13) can drain them.
+    if (this.serverFaultCollector) {
+      const collector = this.serverFaultCollector;
+      page.on("response", (response) => {
+        if (!collecting) return;
+        // Playwright's APIResponse / Response gives a plain object via headers().
+        // Wrap in Headers so the collector's parser sees a Web-Standard surface.
+        const h = new Headers();
+        for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
+        collector.observe({ headers: h, pageUrl: page.url() });
+      });
+    }
 
     // Capture unhandled promise rejections. Claim them via preventDefault so
     // they don't also fire as `pageerror` (which we'd misclassify as exception).
