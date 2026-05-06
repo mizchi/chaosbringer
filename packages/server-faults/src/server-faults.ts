@@ -181,15 +181,26 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
  * (`fault.kind`, `fault.target_status`, …) for consumers that pipe
  * fault events directly into an OTel exporter. Undefined optional
  * keys are dropped so the output is tight.
+ *
+ * The `Record<keyof FaultAttrs, string>` constraint forces every new
+ * `FaultAttrs` key to be added to the map at type-check time — adding
+ * a field to the interface without updating the map produces a
+ * compile error, so the translator never silently omits new attrs.
  */
+const FAULT_KEY_MAP: Record<keyof FaultAttrs, string> = {
+  kind: "fault.kind",
+  path: "fault.path",
+  method: "fault.method",
+  targetStatus: "fault.target_status",
+  latencyMs: "fault.latency_ms",
+  traceId: "fault.trace_id",
+};
+
 export function toOtelAttrs(a: FaultAttrs): Record<string, string | number> {
-  const out: Record<string, string | number> = {
-    "fault.kind": a.kind,
-    "fault.path": a.path,
-    "fault.method": a.method,
-  };
-  if (a.targetStatus !== undefined) out["fault.target_status"] = a.targetStatus;
-  if (a.latencyMs !== undefined) out["fault.latency_ms"] = a.latencyMs;
-  if (a.traceId !== undefined) out["fault.trace_id"] = a.traceId;
+  const out: Record<string, string | number> = {};
+  for (const k of Object.keys(FAULT_KEY_MAP) as Array<keyof FaultAttrs>) {
+    const v = a[k];
+    if (v !== undefined) out[FAULT_KEY_MAP[k]] = v;
+  }
   return out;
 }
