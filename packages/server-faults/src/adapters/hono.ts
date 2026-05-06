@@ -1,17 +1,22 @@
 /**
  * Hono adapter for @mizchi/server-faults.
  *
- * Hono already exposes `c.req.raw` (a Web Standard Request), so the adapter
- * is a one-liner around `serverFaults({...}).maybeInject(c.req.raw)` plus
- * the customary `next()` plumbing.
+ * `c.req.raw` is a Web Standard Request, so the adapter is mostly a thin
+ * wrapper around `serverFaults({...}).maybeInject(req)`. The latency
+ * (annotate) path requires running the real handler first and then
+ * stamping the metadata headers onto `c.res.headers` afterwards.
  */
 
-import { serverFaults, type ServerFaultConfig } from "../server-faults.js";
+import {
+  serverFaults,
+  attrsToHeaderEntries,
+  resolveMetadataPrefix,
+  type ServerFaultConfig,
+} from "../server-faults.js";
 
-// Loosely-typed Hono surface — we intentionally avoid importing from "hono"
-// so server-faults stays zero-dep. Consumers compile against their own Hono.
 interface HonoLikeContext {
   req: { raw: Request };
+  res?: { headers: Headers };
 }
 interface HonoLikeNext {
   (): Promise<unknown>;
@@ -20,9 +25,17 @@ type HonoLikeMiddleware = (c: HonoLikeContext, next: HonoLikeNext) => Promise<Re
 
 export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
   const fault = serverFaults(cfg);
+  const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async (c, next) => {
-    const response = await fault.maybeInject(c.req.raw);
-    if (response) return response;
+    const verdict = await fault.maybeInject(c.req.raw);
+    if (!verdict) return next().then(() => undefined);
+    if (verdict.kind === "synthetic") return verdict.response;
+    // annotate: real handler runs, then stamp headers if requested.
     await next();
+    if (metadataPrefix && c.res?.headers) {
+      for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+        c.res.headers.set(name, value);
+      }
+    }
   };
 }

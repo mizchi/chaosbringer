@@ -30,6 +30,41 @@ describe("honoMiddleware", () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(out).toBeUndefined();
   });
+
+  it("returns synthetic 5xx response unchanged (headers already attached)", async () => {
+    const mw = honoMiddleware({ status5xxRate: 1, metadataHeader: true });
+    const next = vi.fn();
+    const c = { req: { raw: new Request("https://test.local/api/x") } };
+    const out = await mw(c, next);
+    expect((out as Response).status).toBe(503);
+    expect((out as Response).headers.get("x-chaos-fault-kind")).toBe("5xx");
+  });
+
+  it("calls next() and stamps headers on c.res for latency annotate verdict", async () => {
+    const mw = honoMiddleware({ latencyRate: 1, latencyMs: 0, metadataHeader: true });
+    const headers = new Headers();
+    const c = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: { headers },
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c as never, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(headers.get("x-chaos-fault-kind")).toBe("latency");
+    expect(headers.get("x-chaos-fault-latency-ms")).toBe("0");
+  });
+
+  it("does not stamp latency headers when metadataHeader is off", async () => {
+    const mw = honoMiddleware({ latencyRate: 1, latencyMs: 0 });
+    const headers = new Headers();
+    const c = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: { headers },
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c as never, next);
+    expect(headers.get("x-chaos-fault-kind")).toBeNull();
+  });
 });
 
 describe("expressMiddleware", () => {
