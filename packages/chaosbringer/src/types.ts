@@ -33,6 +33,20 @@ export interface CrawlerOptions {
   userAgent?: string;
   /** Block navigation to external domains */
   blockExternalNavigation?: boolean;
+  /**
+   * Inject a fresh W3C `traceparent` header onto every request the browser
+   * sends. Pair with an OTel-instrumented server to correlate browser-driven
+   * actions with server-side traces.
+   *
+   * - `true` / `{}`        — generate a new trace per request.
+   * - `false` / undefined  — do nothing (default).
+   * - `{ onInject }`       — also receive the generated traceparent so the
+   *                          consumer can stash it in their own report.
+   *
+   * Existing `traceparent` headers (e.g. set by another middleware) are left
+   * alone so explicit propagation always wins.
+   */
+  traceparent?: boolean | TraceparentInjectionOptions;
   /** Action weighting configuration */
   actionWeights?: ActionWeights;
   /** Log file path (enables file logging) */
@@ -149,6 +163,32 @@ export interface CrawlerOptions {
    * Default: undefined (advisor disabled, zero overhead).
    */
   advisor?: AdvisorConfig;
+}
+
+/**
+ * Options for `CrawlerOptions.traceparent`. The hook lets the consumer
+ * stash the generated trace ID alongside their own per-request data
+ * (e.g. for cross-referencing the browser-side action log with a
+ * server-side OTel trace).
+ */
+export interface TraceparentInjectionOptions {
+  /**
+   * Called once per request *after* the traceparent header is decided.
+   * `traceparent` is the full W3C value, `traceId` and `spanId` are the
+   * pre-split components (32-hex / 16-hex).
+   *
+   * If the request already carried a `traceparent` header (e.g. set by
+   * an outer middleware), the existing value is forwarded as-is and
+   * `existing` is `true`. Consumers can use this to avoid double-counting.
+   */
+  onInject?: (info: {
+    url: string;
+    method: string;
+    traceparent: string;
+    traceId: string;
+    spanId: string;
+    existing: boolean;
+  }) => void;
 }
 
 export interface FailureArtifactsOptions {
