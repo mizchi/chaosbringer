@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire `@mizchi/server-faults` events into a chaosbringer `chaos()` run via response headers and trace_id, so a single chaos run produces one report covering both layers.
+**Goal:** Wire `@mizchi/server-faults` events into a chaosbringer `chaos()` run via response headers and trace-id, so a single chaos run produces one report covering both layers.
 
-**Architecture:** server-faults extracts `fault.trace_id` from incoming `traceparent` and mirrors `FaultAttrs` onto kebab-case response headers (`x-chaos-fault-*`). chaosbringer attaches a `page.on('response', ...)` listener, parses those headers, and surfaces events via `CrawlReport.serverFaults`. `maybeInject` is refactored to a verdict shape so the latency path can also annotate the real response.
+**Architecture:** server-faults extracts `traceId` from incoming `traceparent` and mirrors a flat camelCase `FaultAttrs` onto kebab-case response headers (`x-chaos-fault-*`). A `toOtelAttrs(attrs)` translator emits the OTel-style dotted form (`fault.kind`, `fault.target_status`, …) at the wire boundary for OTel exporter consumers. chaosbringer attaches a `page.on('response', ...)` listener, parses headers back into `FaultAttrs`, and surfaces events via `CrawlReport.serverFaults`. `maybeInject` is refactored to a verdict shape so the latency path can also annotate the real response.
 
 **Tech Stack:** TypeScript, vitest, Playwright, Web Standard `Request`/`Response`, W3C Trace Context.
 
@@ -20,98 +20,188 @@
 
 ## PR 1 — server-faults: trace_id, verdict refactor, metadataHeader
 
-### Task 1: Add `extractTraceId` helper + `fault.trace_id` to `FaultAttrs`
+### Task 1: Flatten `FaultAttrs` to camelCase + add `traceId` + `toOtelAttrs`
 
 **Files:**
 - Modify: `packages/server-faults/src/server-faults.ts`
 - Modify: `packages/server-faults/src/server-faults.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+This combines two breakages into one commit so the test file is only edited once: rename every `"fault.x"` key to its camelCase equivalent **and** add the new `traceId` field. A `toOtelAttrs(attrs)` translator preserves the OTel-mapped dotted form for downstream exporters.
 
-Append to `packages/server-faults/src/server-faults.test.ts`:
+Rename map:
+
+| Old (PR #69 dotted) | New (flat camelCase) |
+| --- | --- |
+| `"fault.kind"` | `kind` |
+| `"fault.path"` | `path` |
+| `"fault.method"` | `method` |
+| `"fault.target_status"` | `targetStatus` |
+| `"fault.latency_ms"` | `latencyMs` |
+| (new) | `traceId` |
+
+- [ ] **Step 1: Update existing tests to flat camelCase + add new tests**
+
+In `packages/server-faults/src/server-faults.test.ts`, replace every dotted attrs assertion. The two existing observer tests:
 
 ```ts
-describe("fault.trace_id", () => {
-  it("populates fault.trace_id from a valid traceparent header", async () => {
+it("invokes observer.onFault for 5xx faults with semantic-convention attrs", async () => {
+  const onFault = vi.fn();
+  const fault = serverFaults({
+    status5xxRate: 1,
+    observer: { onFault },
+  });
+  await fault.maybeInject(req("/api/x"));
+  expect(onFault).toHaveBeenCalledWith("5xx", {
+    kind: "5xx",
+    path: "/api/x",
+    method: "GET",
+    targetStatus: 503,
+  });
+});
+
+it("invokes observer.onFault for latency faults with semantic-convention attrs", async () => {
+  const onFault = vi.fn();
+  const fault = serverFaults({
+    latencyRate: 1,
+    latencyMs: 1,
+    observer: { onFault },
+  });
+  await fault.maybeInject(req("/api/x"));
+  expect(onFault).toHaveBeenCalledWith("latency", {
+    kind: "latency",
+    path: "/api/x",
+    method: "GET",
+    latencyMs: 1,
+  });
+});
+
+it("uppercases HTTP method in attrs (mirrors OTel http semantic convention)", async () => {
+  const onFault = vi.fn();
+  const fault = serverFaults({
+    status5xxRate: 1,
+    observer: { onFault },
+  });
+  const r = new Request("https://test.local/api/x", { method: "post" as string });
+  await fault.maybeInject(r);
+  expect(onFault).toHaveBeenCalledWith("5xx", expect.objectContaining({ method: "POST" }));
+});
+```
+
+Append the new traceId + translator tests:
+
+```ts
+describe("traceId", () => {
+  const TP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+  it("populates traceId from a valid traceparent header (5xx)", async () => {
     const onFault = vi.fn();
-    const fault = serverFaults({
-      status5xxRate: 1,
-      observer: { onFault },
-    });
-    const r = new Request("https://test.local/api/x", {
-      headers: { traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" },
-    });
-    await fault.maybeInject(r);
+    const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
+    await fault.maybeInject(
+      new Request("https://test.local/api/x", { headers: { traceparent: TP } }),
+    );
     expect(onFault).toHaveBeenCalledWith(
       "5xx",
-      expect.objectContaining({ "fault.trace_id": "0af7651916cd43dd8448eb211c80319c" }),
+      expect.objectContaining({ traceId: "0af7651916cd43dd8448eb211c80319c" }),
     );
   });
 
-  it("omits fault.trace_id when traceparent is absent", async () => {
+  it("populates traceId on latency events too", async () => {
+    const onFault = vi.fn();
+    const fault = serverFaults({ latencyRate: 1, latencyMs: 1, observer: { onFault } });
+    await fault.maybeInject(
+      new Request("https://test.local/api/x", { headers: { traceparent: TP } }),
+    );
+    expect(onFault).toHaveBeenCalledWith(
+      "latency",
+      expect.objectContaining({ traceId: "0af7651916cd43dd8448eb211c80319c" }),
+    );
+  });
+
+  it("omits traceId when traceparent is absent", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
     await fault.maybeInject(new Request("https://test.local/api/x"));
     const attrs = onFault.mock.calls[0][1] as Record<string, unknown>;
-    expect("fault.trace_id" in attrs).toBe(false);
+    expect("traceId" in attrs).toBe(false);
   });
 
-  it("omits fault.trace_id when traceparent is malformed", async () => {
+  it("omits traceId when traceparent is malformed", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
-    const r = new Request("https://test.local/api/x", {
-      headers: { traceparent: "garbage" },
-    });
-    await fault.maybeInject(r);
+    await fault.maybeInject(
+      new Request("https://test.local/api/x", { headers: { traceparent: "garbage" } }),
+    );
     const attrs = onFault.mock.calls[0][1] as Record<string, unknown>;
-    expect("fault.trace_id" in attrs).toBe(false);
+    expect("traceId" in attrs).toBe(false);
+  });
+});
+
+describe("toOtelAttrs", () => {
+  it("maps every populated camelCase key to its OTel dotted equivalent", () => {
+    const out = toOtelAttrs({
+      kind: "5xx",
+      path: "/api/x",
+      method: "GET",
+      targetStatus: 503,
+      traceId: "0af7651916cd43dd8448eb211c80319c",
+    });
+    expect(out).toEqual({
+      "fault.kind": "5xx",
+      "fault.path": "/api/x",
+      "fault.method": "GET",
+      "fault.target_status": 503,
+      "fault.trace_id": "0af7651916cd43dd8448eb211c80319c",
+    });
   });
 
-  it("populates fault.trace_id on latency events too", async () => {
-    const onFault = vi.fn();
-    const fault = serverFaults({
-      latencyRate: 1,
-      latencyMs: 1,
-      observer: { onFault },
+  it("omits keys that are undefined", () => {
+    const out = toOtelAttrs({ kind: "latency", path: "/x", method: "GET", latencyMs: 50 });
+    expect(out).toEqual({
+      "fault.kind": "latency",
+      "fault.path": "/x",
+      "fault.method": "GET",
+      "fault.latency_ms": 50,
     });
-    const r = new Request("https://test.local/api/x", {
-      headers: { traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" },
-    });
-    await fault.maybeInject(r);
-    expect(onFault).toHaveBeenCalledWith(
-      "latency",
-      expect.objectContaining({ "fault.trace_id": "0af7651916cd43dd8448eb211c80319c" }),
-    );
+    expect("fault.target_status" in out).toBe(false);
+    expect("fault.trace_id" in out).toBe(false);
   });
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+Add `toOtelAttrs` to the existing import statement:
+
+```ts
+import { serverFaults, toOtelAttrs } from "./server-faults.js";
+```
+
+- [ ] **Step 2: Run, observe failures**
 
 ```bash
 cd ~/ghq/github.com/mizchi/chaosbringer
-pnpm --filter @mizchi/server-faults test -- server-faults.test.ts -t "fault.trace_id"
+pnpm --filter @mizchi/server-faults test -- server-faults.test.ts
 ```
 
-Expected: 4 failing tests (assertions on `fault.trace_id`).
+Expected: every observer-shape and traceId test fails (current production code emits dotted keys; `toOtelAttrs` is unresolved).
 
-- [ ] **Step 3: Implement extractor + wire into both observer call sites**
+- [ ] **Step 3: Update `FaultAttrs`, attrs construction, and add helpers**
 
-In `packages/server-faults/src/server-faults.ts`, after the `FaultAttrs` interface, add the optional field:
+In `packages/server-faults/src/server-faults.ts`:
+
+a) Replace the `FaultAttrs` interface:
 
 ```ts
 export interface FaultAttrs {
-  "fault.kind": FaultKind;
-  "fault.path": string;
-  "fault.method": string;
-  "fault.target_status"?: number;
-  "fault.latency_ms"?: number;
+  kind: FaultKind;
+  path: string;
+  method: string;
+  targetStatus?: number;
+  latencyMs?: number;
   /** Trace-id from incoming traceparent (W3C Trace Context). 32 lowercase hex. */
-  "fault.trace_id"?: string;
+  traceId?: string;
 }
 ```
 
-Add the helper near `compileStatelessPattern`:
+b) Add the traceparent extractor near `compileStatelessPattern`:
 
 ```ts
 const TRACEPARENT_RE = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
@@ -124,45 +214,67 @@ function extractTraceId(req: Request): string | undefined {
 }
 ```
 
-In `serverFaults()`, replace each `observer.onFault?.(...)` call with one that conditionally sets `"fault.trace_id"`:
+c) Add the OTel translator at the bottom of the file, exported:
+
+```ts
+/**
+ * Map a flat `FaultAttrs` to the OTel-style dotted attribute schema
+ * (`fault.kind`, `fault.target_status`, …) for consumers that pipe
+ * fault events directly into an OTel exporter. Undefined optional
+ * keys are dropped so the output is tight.
+ */
+export function toOtelAttrs(a: FaultAttrs): Record<string, string | number> {
+  const out: Record<string, string | number> = {
+    "fault.kind": a.kind,
+    "fault.path": a.path,
+    "fault.method": a.method,
+  };
+  if (a.targetStatus !== undefined) out["fault.target_status"] = a.targetStatus;
+  if (a.latencyMs !== undefined) out["fault.latency_ms"] = a.latencyMs;
+  if (a.traceId !== undefined) out["fault.trace_id"] = a.traceId;
+  return out;
+}
+```
+
+d) Inside `serverFaults()`, rebuild the attrs and observer calls:
 
 ```ts
 const traceId = extractTraceId(req);
 
 // 5xx branch:
 const attrs5xx: FaultAttrs = {
-  "fault.kind": "5xx",
-  "fault.path": url.pathname,
-  "fault.method": method,
-  "fault.target_status": status,
+  kind: "5xx",
+  path: url.pathname,
+  method,
+  targetStatus: status,
 };
-if (traceId !== undefined) attrs5xx["fault.trace_id"] = traceId;
+if (traceId !== undefined) attrs5xx.traceId = traceId;
 cfg.observer?.onFault?.("5xx", attrs5xx);
 
 // latency branch:
 const attrsLat: FaultAttrs = {
-  "fault.kind": "latency",
-  "fault.path": url.pathname,
-  "fault.method": method,
-  "fault.latency_ms": ms,
+  kind: "latency",
+  path: url.pathname,
+  method,
+  latencyMs: ms,
 };
-if (traceId !== undefined) attrsLat["fault.trace_id"] = traceId;
+if (traceId !== undefined) attrsLat.traceId = traceId;
 cfg.observer?.onFault?.("latency", attrsLat);
 ```
 
 - [ ] **Step 4: Run tests to verify**
 
 ```bash
-pnpm --filter @mizchi/server-faults test
+pnpm --filter @mizchi/server-faults test -- server-faults.test.ts
 ```
 
-Expected: full suite green, including the 4 new trace_id tests.
+Expected: full file green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/server-faults/src/server-faults.ts packages/server-faults/src/server-faults.test.ts
-git commit -m "feat(server-faults): add fault.trace_id extracted from W3C traceparent"
+git commit -m "feat(server-faults)!: flat camelCase FaultAttrs + traceId + toOtelAttrs translator"
 ```
 
 ---
@@ -284,9 +396,9 @@ describe("metadataHeader", () => {
     const v = await fault.maybeInject(r);
     expect(v?.kind).toBe("annotate");
     const attrs = (v as { kind: "annotate"; attrs: FaultAttrs }).attrs;
-    expect(attrs["fault.kind"]).toBe("latency");
-    expect(attrs["fault.latency_ms"]).toBe(1);
-    expect(attrs["fault.trace_id"]).toBe("0af7651916cd43dd8448eb211c80319c");
+    expect(attrs.kind).toBe("latency");
+    expect(attrs.latencyMs).toBe(1);
+    expect(attrs.traceId).toBe("0af7651916cd43dd8448eb211c80319c");
   });
 });
 ```
@@ -315,32 +427,32 @@ export interface ServerFaultConfig {
    * out-of-process consumers (e.g. chaosbringer's `chaos()` crawler) can
    * observe server-side faults without sharing memory with the server.
    *
-   * Header naming: `{prefix}-{key}`, where `key` is the attrs key with
-   * `fault.` stripped and `_` replaced by `-` (e.g. `fault.target_status`
-   * → `{prefix}-target-status`). `true` uses the default prefix
-   * `"x-chaos-fault"`.
+   * Header naming: `{prefix}-{kebab(key)}` where `key` is a TS attrs
+   * property name and `kebab` lower-cases the camelCase boundary
+   * (e.g. `targetStatus` → `{prefix}-target-status`). `true` uses
+   * the default prefix `"x-chaos-fault"`.
    */
   metadataHeader?: boolean | { prefix?: string };
 }
 ```
 
-2. Add a helper to materialise the header set:
+2. Add a helper to materialise the header set (camelCase → kebab-case):
 
 ```ts
 const DEFAULT_METADATA_PREFIX = "x-chaos-fault";
 
-function attrsToHeaderEntries(attrs: FaultAttrs, prefix: string): Array<[string, string]> {
+export function attrsToHeaderEntries(attrs: FaultAttrs, prefix: string): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const [k, v] of Object.entries(attrs)) {
     if (v === undefined) continue;
-    // Strip "fault." prefix; underscore → kebab.
-    const tail = k.replace(/^fault\./, "").replace(/_/g, "-");
+    // camelCase → kebab-case (e.g. `targetStatus` → `target-status`).
+    const tail = k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
     out.push([`${prefix}-${tail}`, String(v)]);
   }
   return out;
 }
 
-function resolveMetadataPrefix(opt: ServerFaultConfig["metadataHeader"]): string | null {
+export function resolveMetadataPrefix(opt: ServerFaultConfig["metadataHeader"]): string | null {
   if (!opt) return null;
   if (opt === true) return DEFAULT_METADATA_PREFIX;
   return opt.prefix ?? DEFAULT_METADATA_PREFIX;
@@ -363,7 +475,7 @@ const response = Response.json(
 return { kind: "synthetic", response, attrs: attrs5xx };
 ```
 
-The latency branch returns `{ kind: "annotate", attrs: attrsLat }`. The `metadataPrefix` value is not consumed there — adapters look up `cfg` themselves, see Tasks 4–7. (Adapters import `attrsToHeaderEntries` and `resolveMetadataPrefix` indirectly: we re-export them privately from server-faults.ts so adapters can reuse the same encoding without redefining the rule. Add `export` to both helpers.)
+The latency branch returns `{ kind: "annotate", attrs: attrsLat }`. The `metadataPrefix` value is not consumed there — adapters look up `cfg` themselves, see Tasks 4–7. The `export` keywords on `attrsToHeaderEntries` and `resolveMetadataPrefix` are deliberate so adapters can reuse the same encoding without redefining the rule.
 
 - [ ] **Step 4: Run tests**
 
@@ -875,9 +987,9 @@ git commit -m "chore(server-faults): refresh build artefacts"
 
 ```bash
 git push -u origin feat/server-faults-metadata-header
-gh pr create --title "feat(server-faults)!: trace_id, FaultVerdict, metadataHeader" --body "$(cat <<'EOF'
+gh pr create --title "feat(server-faults)!: flat FaultAttrs + traceId + FaultVerdict + metadataHeader" --body "$(cat <<'EOF'
 ## Summary
-- `FaultAttrs` gains `fault.trace_id` extracted from incoming W3C `traceparent`
+- `FaultAttrs` is now flat camelCase (`kind`, `path`, `method`, `targetStatus`, `latencyMs`, `traceId`); a new `toOtelAttrs(attrs)` translator emits the OTel-style dotted form for downstream exporters. `traceId` is extracted from the incoming W3C `traceparent`. **Breaking** rename of PR #69's landed schema
 - `maybeInject` now returns `FaultVerdict` (`synthetic` | `annotate` | `null`); the latency path returns `annotate` so adapters can stamp metadata headers on the real response
 - `metadataHeader` option mirrors fault attrs onto kebab-case response headers (`x-chaos-fault-*` by default)
 - All four adapters (hono / express / fastify / koa) updated for the new verdict + header stamping
@@ -940,11 +1052,11 @@ describe("parseServerFaultHeaders", () => {
     });
     expect(parseServerFaultHeaders(h, "x-chaos-fault")).toEqual({
       attrs: {
-        "fault.kind": "5xx",
-        "fault.path": "/api/todos",
-        "fault.method": "GET",
-        "fault.target_status": 503,
-        "fault.trace_id": "0af7651916cd43dd8448eb211c80319c",
+        kind: "5xx",
+        path: "/api/todos",
+        method: "GET",
+        targetStatus: 503,
+        traceId: "0af7651916cd43dd8448eb211c80319c",
       },
       traceId: "0af7651916cd43dd8448eb211c80319c",
     });
@@ -959,10 +1071,10 @@ describe("parseServerFaultHeaders", () => {
     });
     const r = parseServerFaultHeaders(h, "x-chaos-fault");
     expect(r?.attrs).toEqual({
-      "fault.kind": "latency",
-      "fault.path": "/api/x",
-      "fault.method": "POST",
-      "fault.latency_ms": 350,
+      kind: "latency",
+      path: "/api/x",
+      method: "POST",
+      latencyMs: 350,
     });
     expect(r?.traceId).toBeUndefined();
   });
@@ -983,7 +1095,7 @@ describe("parseServerFaultHeaders", () => {
       "x-my-fault-method": "GET",
       "x-my-fault-target-status": "500",
     });
-    expect(parseServerFaultHeaders(h, "x-my-fault")?.attrs["fault.kind"]).toBe("5xx");
+    expect(parseServerFaultHeaders(h, "x-my-fault")?.attrs.kind).toBe("5xx");
     expect(parseServerFaultHeaders(h, "x-chaos-fault")).toBeNull();
   });
 
@@ -995,9 +1107,9 @@ describe("parseServerFaultHeaders", () => {
       "x-chaos-fault-latency-ms": "not-a-number",
     });
     const r = parseServerFaultHeaders(h, "x-chaos-fault");
-    // Latency event still parses; the bad number is dropped (no fault.latency_ms).
-    expect(r?.attrs["fault.kind"]).toBe("latency");
-    expect(r?.attrs["fault.latency_ms"]).toBeUndefined();
+    // Latency event still parses; the bad number is dropped (no latencyMs).
+    expect(r?.attrs.kind).toBe("latency");
+    expect(r?.attrs.latencyMs).toBeUndefined();
   });
 });
 ```
@@ -1025,12 +1137,12 @@ Create `packages/chaosbringer/src/server-fault-events.ts`:
 const KNOWN_KINDS = new Set(["5xx", "latency"]);
 
 export interface ServerFaultEventAttrs {
-  "fault.kind": "5xx" | "latency";
-  "fault.path": string;
-  "fault.method": string;
-  "fault.target_status"?: number;
-  "fault.latency_ms"?: number;
-  "fault.trace_id"?: string;
+  kind: "5xx" | "latency";
+  path: string;
+  method: string;
+  targetStatus?: number;
+  latencyMs?: number;
+  traceId?: string;
 }
 
 export interface ParsedServerFault {
@@ -1050,25 +1162,25 @@ export function parseServerFaultHeaders(
   if (!path || !method) return null;
 
   const attrs: ServerFaultEventAttrs = {
-    "fault.kind": kind as "5xx" | "latency",
-    "fault.path": path,
-    "fault.method": method,
+    kind: kind as "5xx" | "latency",
+    path,
+    method,
   };
 
-  const targetStatus = headers.get(`${prefix}-target-status`);
-  if (targetStatus !== null) {
-    const n = Number.parseInt(targetStatus, 10);
-    if (Number.isFinite(n)) attrs["fault.target_status"] = n;
+  const targetStatusHeader = headers.get(`${prefix}-target-status`);
+  if (targetStatusHeader !== null) {
+    const n = Number.parseInt(targetStatusHeader, 10);
+    if (Number.isFinite(n)) attrs.targetStatus = n;
   }
 
-  const latencyMs = headers.get(`${prefix}-latency-ms`);
-  if (latencyMs !== null) {
-    const n = Number.parseFloat(latencyMs);
-    if (Number.isFinite(n)) attrs["fault.latency_ms"] = n;
+  const latencyMsHeader = headers.get(`${prefix}-latency-ms`);
+  if (latencyMsHeader !== null) {
+    const n = Number.parseFloat(latencyMsHeader);
+    if (Number.isFinite(n)) attrs.latencyMs = n;
   }
 
   const traceId = headers.get(`${prefix}-trace-id`) ?? undefined;
-  if (traceId) attrs["fault.trace_id"] = traceId;
+  if (traceId) attrs.traceId = traceId;
 
   return { attrs, traceId };
 }
@@ -1120,13 +1232,18 @@ export interface ChaosRemoteServer {
 export interface ServerFaultEvent {
   /** Trace-id from the response headers (W3C traceparent's trace-id segment). */
   traceId?: string;
+  /**
+   * Flat camelCase attrs mirroring `@mizchi/server-faults`'s `FaultAttrs`.
+   * Use `toOtelAttrs(attrs)` (re-exported from chaosbringer) when shipping
+   * these to an OTel exporter.
+   */
   attrs: {
-    "fault.kind": "5xx" | "latency";
-    "fault.path": string;
-    "fault.method": string;
-    "fault.target_status"?: number;
-    "fault.latency_ms"?: number;
-    "fault.trace_id"?: string;
+    kind: "5xx" | "latency";
+    path: string;
+    method: string;
+    targetStatus?: number;
+    latencyMs?: number;
+    traceId?: string;
   };
   /** Wall-clock ms when chaos observed the response. */
   observedAt: number;
@@ -1253,7 +1370,7 @@ describe("ServerFaultCollector", () => {
     expect(events).toHaveLength(1);
     expect(events[0].pageUrl).toBe("https://app/todos");
     expect(events[0].traceId).toBe("0af7651916cd43dd8448eb211c80319c");
-    expect(events[0].attrs["fault.kind"]).toBe("5xx");
+    expect(events[0].attrs.kind).toBe("5xx");
     expect(typeof events[0].observedAt).toBe("number");
   });
 
@@ -1274,7 +1391,7 @@ describe("ServerFaultCollector", () => {
     c.observe({ headers: headers("5xx", "/a"), pageUrl: "https://app/a" });
     c.observe({ headers: headers("latency", "/b"), pageUrl: "https://app/b" });
     const events = c.drain();
-    expect(events.map((e) => e.attrs["fault.path"])).toEqual(["/a", "/b"]);
+    expect(events.map((e) => e.attrs.path)).toEqual(["/a", "/b"]);
   });
 
   it("drain() empties the buffer", () => {
@@ -1449,11 +1566,11 @@ describe("server-fault report integration", () => {
       traceId: "abcdef0123456789abcdef0123456789",
       pageUrl: "https://app/x",
       attrs: {
-        "fault.kind": "5xx",
-        "fault.path": "/api/x",
-        "fault.method": "GET",
-        "fault.target_status": 503,
-        "fault.trace_id": "abcdef0123456789abcdef0123456789",
+        kind: "5xx",
+        path: "/api/x",
+        method: "GET",
+        targetStatus: 503,
+        traceId: "abcdef0123456789abcdef0123456789",
       },
     });
     expect(typeof drained[0].observedAt).toBe("number");
