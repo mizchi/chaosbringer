@@ -1,0 +1,16 @@
+{
+  "name": "@mizchi/chaosbringer-example-playwright-test",
+  "private": true,
+  "type": "module",
+  "description": "Run chaosbringer inside a Playwright Test suite via the chaos fixture",
+  "scripts": {
+    "site": "node site/server.mjs",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "chaosbringer": "workspace:*",
+    "typescript": "^5.8.3"
+  }
+}

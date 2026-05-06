@@ -1,0 +1,13 @@
+name = "chaosbringer-example-cf"
+main = "src/worker.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+DEPLOY_ENV = "dev"
+# Toggle these from the CLI to vary how aggressive the chaos middleware is.
+# (See README.md for the matrix.)
+# CHAOS_5XX_RATE = "0.3"
+# CHAOS_LATENCY_RATE = "0.1"
+# CHAOS_LATENCY_MS = "1500"
+# CHAOS_SEED = "42"

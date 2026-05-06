@@ -1,0 +1,23 @@
+{
+  "name": "@mizchi/chaosbringer-example-cloudflare-worker",
+  "private": true,
+  "type": "module",
+  "description": "Hono on Cloudflare Worker + @mizchi/server-faults + chaosbringer (remote mode)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "chaos": "tsx chaos/run.ts"
+  },
+  "dependencies": {
+    "@mizchi/server-faults": "workspace:*",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.52.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "wrangler": "^3.90.0"
+  }
+}
