@@ -152,21 +152,44 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const DEFAULT_METADATA_PREFIX = "x-chaos-fault";
 
 /**
+ * Header-name suffixes for each `FaultAttrs` key.
+ *
+ * `Record<keyof FaultAttrs, string>` forces every new key on `FaultAttrs`
+ * to be added here at type-check time. A naive camelCase→kebab regex
+ * silently mangles consecutive caps (`traceID` → `trace-i-d`) and leading
+ * caps; a hand-written map dodges both and keeps the wire format stable
+ * even if a contributor adds a key without thinking about encoding.
+ */
+const FAULT_HEADER_KEY_SUFFIX: Record<keyof FaultAttrs, string> = {
+  kind: "kind",
+  path: "path",
+  method: "method",
+  targetStatus: "target-status",
+  latencyMs: "latency-ms",
+  traceId: "trace-id",
+};
+
+// NOTE: attrsToHeaderEntries and resolveMetadataPrefix are exported for the
+// in-package framework adapters (hono / express / fastify / koa) to reuse the
+// canonical header encoding on the annotate path. They are intentionally NOT
+// re-exported from `index.ts` and carry no stability guarantee for external
+// consumers — deep-importing them is unsupported.
+
+/**
  * Materialise a `FaultAttrs` value as a list of HTTP-header pairs.
  *
- * camelCase keys are lowered into kebab-case (`targetStatus` →
- * `target-status`) and then prefixed. Undefined optional values are
- * dropped. Exposed so framework adapters can apply the same headers
- * to the `annotate` verdict path (where the real handler's response
- * is what actually reaches the wire).
+ * Keys are translated through `FAULT_HEADER_KEY_SUFFIX` (camelCase →
+ * kebab-case), then prefixed. Undefined optional values are dropped.
+ * Used by both the synthetic-response path here and by adapters on the
+ * annotate verdict path so the wire format stays identical across
+ * fault kinds.
  */
 export function attrsToHeaderEntries(attrs: FaultAttrs, prefix: string): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  for (const [k, v] of Object.entries(attrs)) {
+  for (const k of Object.keys(FAULT_HEADER_KEY_SUFFIX) as Array<keyof FaultAttrs>) {
+    const v = attrs[k];
     if (v === undefined) continue;
-    // camelCase → kebab-case (e.g. `targetStatus` → `target-status`).
-    const tail = k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
-    out.push([`${prefix}-${tail}`, String(v)]);
+    out.push([`${prefix}-${FAULT_HEADER_KEY_SUFFIX[k]}`, String(v)]);
   }
   return out;
 }
