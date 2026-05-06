@@ -307,6 +307,13 @@ export class ChaosCrawler {
    * `page.on("response")` listener can be skipped in the common case.
    */
   private readonly serverFaultCollector: ServerFaultCollector | null;
+  /**
+   * Set by the action loop immediately before each `performActionOnTarget`
+   * call; cleared at the start of the next iteration. The traceparent
+   * injection site uses `recordTraceId` to append captured trace-ids onto
+   * this action's `traceIds[]`.
+   */
+  private currentAction: ActionResult | null = null;
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -1005,6 +1012,17 @@ export class ChaosCrawler {
     if (!this.coverageFeedback) return 1;
     const score = this.targetNovelty.get(targetKey(url, selector)) ?? 0;
     return noveltyMultiplier(score, this.coverageFeedback.boost);
+  }
+
+  /**
+   * Append a trace-id to the currently-executing action, if any. Called
+   * from the per-request traceparent injection in `setupNavigationBlocking`.
+   * No-op when no action is in flight (e.g. during initial page load).
+   */
+  private recordTraceId(traceId: string): void {
+    if (!this.currentAction) return;
+    if (!this.currentAction.traceIds) this.currentAction.traceIds = [];
+    this.currentAction.traceIds.push(traceId);
   }
 
   private async consultAdvisorIfStalled(
@@ -1989,6 +2007,11 @@ export class ChaosCrawler {
     while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
       attempts++;
 
+      // Clear at the start of each iteration. Late-firing requests from the
+      // previous action attach to the previous action; once we begin the next,
+      // attribution is the current iteration's responsibility.
+      this.currentAction = null;
+
       const advisorPick = await this.consultAdvisorIfStalled(page, url, targets);
       const selectedTarget =
         advisorPick ??
@@ -2001,6 +2024,18 @@ export class ChaosCrawler {
           this.rng,
         );
 
+      // Build a placeholder ActionResult ahead of the call so traceIds captured
+      // during execution land on the right object. We carry the captured ids
+      // onto the real result returned by performActionOnTarget below.
+      const placeholder: ActionResult = {
+        type: "click", // overwritten by performActionOnTarget on success
+        target: selectedTarget.name ?? selectedTarget.selector,
+        selector: selectedTarget.selector,
+        success: false,
+        timestamp: Date.now(),
+      };
+      this.currentAction = placeholder;
+
       const result = await this.performActionOnTarget(page, selectedTarget, url);
 
       // Skip null results (element not visible)
@@ -2008,6 +2043,11 @@ export class ChaosCrawler {
         this.logger.debug("action_skipped", { target: selectedTarget.name || selectedTarget.selector, reason: "not visible" });
         continue;
       }
+
+      // Carry over any traceIds captured against the placeholder onto the
+      // real result. (performActionOnTarget returns a fresh ActionResult.)
+      if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
+      this.currentAction = result;
 
       actionsPerformed++;
       this.actions.push(result);
