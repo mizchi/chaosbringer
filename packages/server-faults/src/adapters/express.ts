@@ -8,7 +8,12 @@
  * which we always have, so we never need to read the request body.
  */
 
-import { serverFaults, type ServerFaultConfig } from "../server-faults.js";
+import {
+  attrsToHeaderEntries,
+  resolveMetadataPrefix,
+  serverFaults,
+  type ServerFaultConfig,
+} from "../server-faults.js";
 
 // Loosely-typed Express surface to keep server-faults zero-dep.
 interface ExpressLikeRequest {
@@ -46,16 +51,40 @@ export function expressMiddleware(
   cfg: ServerFaultConfig,
 ): (req: ExpressLikeRequest, res: ExpressLikeResponse, next: ExpressLikeNext) => Promise<void> {
   const fault = serverFaults(cfg);
+  const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async (req, res, next) => {
     try {
-      const response = await fault.maybeInject(toWebRequest(req));
-      if (!response) return next();
-      res.status(response.status);
-      response.headers.forEach((value, key) => {
-        if (key.toLowerCase() === "content-type") return; // res.json sets this
-        res.setHeader(key, value);
-      });
-      res.json(await response.json());
+      const verdict = await fault.maybeInject(toWebRequest(req));
+      if (!verdict) {
+        next();
+        return;
+      }
+      if (verdict.kind === "synthetic") {
+        res.status(verdict.response.status);
+        verdict.response.headers.forEach((value, key) => {
+          if (key.toLowerCase() === "content-type") return; // res.json sets this
+          res.setHeader(key, value);
+        });
+        res.json(await verdict.response.json());
+        return;
+      }
+      if (verdict.kind === "annotate") {
+        // Stamp headers BEFORE calling next() — Express buffers headers on the
+        // response object until the handler responds. Stamping after `next()`
+        // would race the handler's own `res.send` / `res.json`. If a downstream
+        // layer hands back a `Response` with frozen headers (some custom
+        // bridges do this), `res.setHeader(...)` will throw — that is the
+        // documented contract.
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            res.setHeader(name, value);
+          }
+        }
+        next();
+        return;
+      }
+      const _exhaustive: never = verdict;
+      void _exhaustive;
     } catch (err) {
       next(err);
     }

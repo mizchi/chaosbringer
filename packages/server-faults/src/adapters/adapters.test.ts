@@ -129,6 +129,37 @@ describe("expressMiddleware", () => {
     await mw(req, res, next);
     expect(res.statusCode).toBe(503);
   });
+
+  it("stamps metadata headers on res for the latency annotate verdict", async () => {
+    const mw = expressMiddleware({ latencyRate: 1, latencyMs: 0, metadataHeader: true });
+    const next = vi.fn();
+    const req = { method: "GET", originalUrl: "/api/x", headers: { host: "test.local" } };
+    const res = makeRes();
+    await mw(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.headers["x-chaos-fault-kind"]).toBe("latency");
+    expect(res.headers["x-chaos-fault-path"]).toBe("/api/x");
+  });
+
+  it("does not stamp any chaos headers when metadataHeader is off", async () => {
+    const mw = expressMiddleware({ latencyRate: 1, latencyMs: 0 });
+    const next = vi.fn();
+    const req = { method: "GET", originalUrl: "/api/x", headers: {} };
+    const res = makeRes();
+    await mw(req, res, next);
+    // No chaos headers leaked.
+    expect(Object.keys(res.headers).length).toBe(0);
+  });
+
+  it("attaches metadata headers to synthetic 5xx response", async () => {
+    const mw = expressMiddleware({ status5xxRate: 1, metadataHeader: true });
+    const next = vi.fn();
+    const req = { method: "GET", originalUrl: "/api/x", headers: { host: "test.local" } };
+    const res = makeRes();
+    await mw(req, res, next);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
 });
 
 describe("fastifyPlugin", () => {
