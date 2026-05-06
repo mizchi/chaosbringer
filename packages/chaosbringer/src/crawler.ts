@@ -2312,6 +2312,27 @@ export class ChaosCrawler {
   private generateReport(endTime: number): CrawlReport {
     const summary = this.calculateSummary();
 
+    const drainedServerFaults =
+      this.serverFaultCollector && this.serverFaultCollector.size() > 0
+        ? this.serverFaultCollector.drain()
+        : null;
+
+    if (drainedServerFaults) {
+      // Per-page join — same references as the flat list.
+      for (const p of this.results) {
+        const events = drainedServerFaults.filter((e) => e.pageUrl === p.url);
+        if (events.length > 0) p.serverFaultEvents = events;
+      }
+      // Per-action join — only meaningful when traceparent injection is on
+      // (otherwise traceIds is always empty/absent).
+      for (const a of this.actions) {
+        if (!a.traceIds || a.traceIds.length === 0) continue;
+        const set = new Set(a.traceIds);
+        const events = drainedServerFaults.filter((e) => e.traceId !== undefined && set.has(e.traceId));
+        if (events.length > 0) a.serverFaultEvents = events;
+      }
+    }
+
     return {
       baseUrl: this.options.baseUrl,
       seed: this.rng.seed,
@@ -2360,10 +2381,7 @@ export class ChaosCrawler {
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
       // Field is omitted when no faults observed (matches advisor / coverage convention).
-      serverFaults:
-        this.serverFaultCollector && this.serverFaultCollector.size() > 0
-          ? this.serverFaultCollector.drain()
-          : undefined,
+      serverFaults: drainedServerFaults ?? undefined,
     };
   }
 

@@ -132,3 +132,116 @@ describe("traceparent.onInject feeds recordTraceId", () => {
     expect(action.traceIds).toEqual(["aa".repeat(16), "bb".repeat(16)]);
   });
 });
+
+describe("generateReport joins serverFaults onto pages and actions", () => {
+  function callGenerateReport(crawler: ChaosCrawler) {
+    // generateReport is private; reach in directly with a cast.
+    return (crawler as unknown as {
+      generateReport: (endTime: number) => import("./types.js").CrawlReport;
+    }).generateReport(Date.now());
+  }
+
+  it("populates PageResult.serverFaultEvents by pageUrl", () => {
+    const crawler = freshCrawler();
+    pushPage(crawler, "https://app.test/a");
+    pushPage(crawler, "https://app.test/b");
+    pushFault(crawler, {
+      pageUrl: "https://app.test/a",
+      observedAt: 100,
+      attrs: { kind: "5xx", path: "/api/x", method: "GET", targetStatus: 503 },
+    });
+    pushFault(crawler, {
+      pageUrl: "https://app.test/b",
+      observedAt: 110,
+      attrs: { kind: "latency", path: "/api/y", method: "POST", latencyMs: 200 },
+    });
+
+    const report = callGenerateReport(crawler);
+    expect(report.serverFaults).toHaveLength(2);
+
+    const a = report.pages.find((p) => p.url === "https://app.test/a")!;
+    const b = report.pages.find((p) => p.url === "https://app.test/b")!;
+    expect(a.serverFaultEvents?.map((e) => e.attrs.path)).toEqual(["/api/x"]);
+    expect(b.serverFaultEvents?.map((e) => e.attrs.path)).toEqual(["/api/y"]);
+  });
+
+  it("omits serverFaultEvents on pages with no matching events", () => {
+    const crawler = freshCrawler();
+    pushPage(crawler, "https://app.test/a");
+    pushPage(crawler, "https://app.test/b");
+    pushFault(crawler, {
+      pageUrl: "https://app.test/a",
+      observedAt: 100,
+      attrs: { kind: "5xx", path: "/api/x", method: "GET", targetStatus: 503 },
+    });
+    const report = callGenerateReport(crawler);
+    const b = report.pages.find((p) => p.url === "https://app.test/b")!;
+    expect(b.serverFaultEvents).toBeUndefined();
+  });
+
+  it("populates ActionResult.serverFaultEvents by traceId", () => {
+    const crawler = freshCrawler();
+    pushPage(crawler, "https://app.test/a");
+    const action = pushAction(crawler, {
+      type: "click",
+      target: "Buy",
+      success: true,
+      timestamp: 1,
+      traceIds: ["aa".repeat(16), "bb".repeat(16)],
+    });
+    pushFault(crawler, {
+      traceId: "aa".repeat(16),
+      pageUrl: "https://app.test/a",
+      observedAt: 100,
+      attrs: {
+        kind: "5xx",
+        path: "/api/x",
+        method: "POST",
+        targetStatus: 503,
+        traceId: "aa".repeat(16),
+      },
+    });
+    pushFault(crawler, {
+      traceId: "cc".repeat(16),
+      pageUrl: "https://app.test/a",
+      observedAt: 110,
+      attrs: { kind: "5xx", path: "/api/y", method: "GET", targetStatus: 500, traceId: "cc".repeat(16) },
+    });
+
+    const report = callGenerateReport(crawler);
+    expect(action.serverFaultEvents?.map((e) => e.attrs.path)).toEqual(["/api/x"]);
+  });
+
+  it("omits ActionResult.serverFaultEvents when traceIds is empty/absent", () => {
+    const crawler = freshCrawler();
+    pushPage(crawler, "https://app.test/a");
+    const noTraceAction = pushAction(crawler, {
+      type: "scroll",
+      target: "scrollY:200",
+      success: true,
+      timestamp: 1,
+    });
+    pushFault(crawler, {
+      traceId: "ee".repeat(16),
+      pageUrl: "https://app.test/a",
+      observedAt: 100,
+      attrs: { kind: "5xx", path: "/api/x", method: "GET", targetStatus: 503, traceId: "ee".repeat(16) },
+    });
+    const report = callGenerateReport(crawler);
+    expect(noTraceAction.serverFaultEvents).toBeUndefined();
+  });
+
+  it("references are shared between report.serverFaults and the joined views", () => {
+    const crawler = freshCrawler();
+    pushPage(crawler, "https://app.test/a");
+    pushFault(crawler, {
+      pageUrl: "https://app.test/a",
+      observedAt: 100,
+      attrs: { kind: "5xx", path: "/api/x", method: "GET", targetStatus: 503 },
+    });
+    const report = callGenerateReport(crawler);
+    const flat = report.serverFaults![0];
+    const onPage = report.pages[0].serverFaultEvents![0];
+    expect(onPage).toBe(flat);
+  });
+});
