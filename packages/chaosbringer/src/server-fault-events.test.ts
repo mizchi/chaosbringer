@@ -70,6 +70,29 @@ describe("parseServerFaultHeaders", () => {
     expect(parseServerFaultHeaders(h, "x-chaos-fault")).toBeNull();
   });
 
+  it("does not leak between prefixes when both are present", () => {
+    // Server misconfiguration scenario: two prefixes coexist on the same
+    // response. Each prefix must parse only its own keyspace.
+    const h = make({
+      "x-my-fault-kind": "5xx",
+      "x-my-fault-path": "/api",
+      "x-my-fault-method": "GET",
+      "x-chaos-fault-kind": "latency",
+      "x-chaos-fault-path": "/other",
+      "x-chaos-fault-method": "POST",
+    });
+    expect(parseServerFaultHeaders(h, "x-my-fault")?.attrs).toMatchObject({
+      kind: "5xx",
+      path: "/api",
+      method: "GET",
+    });
+    expect(parseServerFaultHeaders(h, "x-chaos-fault")?.attrs).toMatchObject({
+      kind: "latency",
+      path: "/other",
+      method: "POST",
+    });
+  });
+
   it("ignores numeric headers that fail to parse", () => {
     const h = make({
       "x-chaos-fault-kind": "latency",
