@@ -114,17 +114,22 @@ describe("serverFaults", () => {
     sleepSpy.mockRestore();
   });
 
-  it("invokes observer.onFault for 5xx faults", async () => {
+  it("invokes observer.onFault for 5xx faults with semantic-convention attrs", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
       status5xxRate: 1,
       observer: { onFault },
     });
     await fault.maybeInject(req("/api/x"));
-    expect(onFault).toHaveBeenCalledWith("5xx", expect.objectContaining({ status: 503, path: "/api/x" }));
+    expect(onFault).toHaveBeenCalledWith("5xx", {
+      "fault.kind": "5xx",
+      "fault.path": "/api/x",
+      "fault.method": "GET",
+      "fault.target_status": 503,
+    });
   });
 
-  it("invokes observer.onFault for latency faults", async () => {
+  it("invokes observer.onFault for latency faults with semantic-convention attrs", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
       latencyRate: 1,
@@ -132,7 +137,23 @@ describe("serverFaults", () => {
       observer: { onFault },
     });
     await fault.maybeInject(req("/api/x"));
-    expect(onFault).toHaveBeenCalledWith("latency", expect.objectContaining({ ms: 1, path: "/api/x" }));
+    expect(onFault).toHaveBeenCalledWith("latency", {
+      "fault.kind": "latency",
+      "fault.path": "/api/x",
+      "fault.method": "GET",
+      "fault.latency_ms": 1,
+    });
+  });
+
+  it("uppercases HTTP method in attrs (mirrors OTel http semantic convention)", async () => {
+    const onFault = vi.fn();
+    const fault = serverFaults({
+      status5xxRate: 1,
+      observer: { onFault },
+    });
+    const r = new Request("https://test.local/api/x", { method: "post" as string });
+    await fault.maybeInject(r);
+    expect(onFault).toHaveBeenCalledWith("5xx", expect.objectContaining({ "fault.method": "POST" }));
   });
 
   it("does not roll latency raffle when 5xx already won", async () => {

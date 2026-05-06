@@ -1,5 +1,7 @@
 export {
   serverFaults,
+  type FaultAttrs,
+  type FaultKind,
   type ServerFaultConfig,
   type ServerFaultHandle,
   type ServerFaultObserver,
