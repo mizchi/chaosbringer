@@ -2310,9 +2310,11 @@ export class ChaosCrawler {
       replayFidelity: this.replayFidelity ? { ...this.replayFidelity } : undefined,
       errorClusters: clusterErrors(this.results.flatMap((r) => r.errors)),
       har: this.options.har,
-      ...(this.serverFaultCollector && this.serverFaultCollector.size() > 0
-        ? { serverFaults: this.serverFaultCollector.drain() }
-        : {}),
+      // Field is omitted when no faults observed (matches advisor / coverage convention).
+      serverFaults:
+        this.serverFaultCollector && this.serverFaultCollector.size() > 0
+          ? this.serverFaultCollector.drain()
+          : undefined,
     };
   }
 
