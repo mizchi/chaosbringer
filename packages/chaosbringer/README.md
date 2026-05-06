@@ -184,6 +184,37 @@ await chaos({
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`.
 
+### Fault profiles
+
+Hand-authored probabilities are easy to start with but hard to share. **Profiles** wrap operator knowledge — "S3 503 burst", "flaky third-party CDN", "regional degradation" — into a single function that returns a ready-made array of fault rules:
+
+```ts
+import { chaos, profiles } from "chaosbringer";
+
+await chaos({
+  baseUrl,
+  faultInjection: [
+    ...profiles.flakyThirdPartyCdn(/cdn\.example\.com/),
+    ...profiles.s3FivexxBurst(/s3\.amazonaws\.com/),
+    ...profiles.regionalDegradation({ urlPattern: /\/api\//, severity: 0.3 }),
+    ...profiles.slowAuthService(/\/auth\//),
+    ...profiles.partialDataLoss(/\/api\/feed/),
+  ],
+});
+```
+
+Available profiles (all return `FaultRule[]`):
+
+| Profile | What it models |
+|---|---|
+| `flakyThirdPartyCdn(urlPattern)` | Slow + occasional drops on a third-party CDN |
+| `s3FivexxBurst(urlPattern)` | Mostly 503 with a 500 sprinkle — retry-storm provocation |
+| `regionalDegradation({ urlPattern, severity })` | Severity-scaled mix of slow / 5xx / drop. `severity` is clamped to `[0, 1]` |
+| `slowAuthService(urlPattern, { ms?, rate? })` | One slow dependency. Defaults: 3000 ms, rate 0.5 |
+| `partialDataLoss(urlPattern, { rate? })` | Empty 200 body + occasional 5xx — catches `JSON.parse(\"\")` bugs |
+
+Each rule is named (`profile:behavior`), so per-profile counters land in `report.faultInjections` without extra wiring. Override knobs by passing options or compose `faults.*` directly when a profile doesn't fit.
+
 ## Pre-run setup hook
 
 State-driven apps (CRUD, anything with a list) often start empty — the BFS frontier dries up at `pages=2` and `maxPages` becomes meaningless. `chaos({ setup })` runs **before** the crawler starts, in a disposable browser context, and gives you a `page` to seed backend state.
