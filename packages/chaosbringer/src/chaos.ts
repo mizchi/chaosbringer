@@ -4,6 +4,7 @@
  * these from CrawlReport; this just makes the common case one call.
  */
 
+import { chromium, type Page } from "playwright";
 import { ChaosCrawler } from "./crawler.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
 import { getExitCode } from "./reporter.js";
@@ -14,6 +15,21 @@ export interface ChaosResult {
   passed: boolean;
   exitCode: number;
 }
+
+/**
+ * Context handed to the `setup` hook. `page` is a one-shot Playwright page
+ * that lives only for the duration of the hook; it is closed before the
+ * crawler starts. Use `page.request` for REST seeding, or drive UI flows
+ * (e.g. login, then save the resulting `storageState` to disk and feed the
+ * path to `options.storageState`) when you need browser context to carry
+ * into the crawl.
+ */
+export interface ChaosSetupContext {
+  page: Page;
+  baseUrl: string;
+}
+
+export type ChaosSetupHook = (ctx: ChaosSetupContext) => Promise<void>;
 
 export interface ChaosRunOptions extends CrawlerOptions {
   /** Treat console errors / JS exceptions as failures when computing exitCode. */
@@ -27,13 +43,42 @@ export interface ChaosRunOptions extends CrawlerOptions {
   baseline?: string;
   /** When true, new regressions vs the baseline force exitCode=1. */
   baselineStrict?: boolean;
+  /**
+   * Pre-run hook that fires before any chaos action or fault rolls. Receives
+   * a Playwright page in a disposable browser context. Typical use is REST
+   * seeding via `page.request.post(...)` so the crawler has navigable state
+   * to discover. The disposable context does NOT carry into the crawl —
+   * propagate shared state through the server (REST) or by saving
+   * `storageState` to a path that the main crawler reads.
+   */
+  setup?: ChaosSetupHook;
+}
+
+async function runSetup(hook: ChaosSetupHook, baseUrl: string): Promise<void> {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      await hook({ page, baseUrl });
+    } finally {
+      await context.close();
+    }
+  } finally {
+    await browser.close();
+  }
 }
 
 export async function chaos(
   options: ChaosRunOptions,
   events: CrawlerEvents = {}
 ): Promise<ChaosResult> {
-  const { strict, baseline, baselineStrict, ...crawlerOptions } = options;
+  const { strict, baseline, baselineStrict, setup, ...crawlerOptions } = options;
+
+  if (setup) {
+    await runSetup(setup, options.baseUrl);
+  }
+
   const crawler = new ChaosCrawler(crawlerOptions, events);
   const report = await crawler.start();
 

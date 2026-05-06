@@ -170,6 +170,28 @@ await chaos({
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`.
 
+## Pre-run setup hook
+
+State-driven apps (CRUD, anything with a list) often start empty — the BFS frontier dries up at `pages=2` and `maxPages` becomes meaningless. `chaos({ setup })` runs **before** the crawler starts, in a disposable browser context, and gives you a `page` to seed backend state.
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  setup: async ({ page, baseUrl }) => {
+    for (let i = 0; i < 5; i++) {
+      await page.request.post(`${baseUrl}/api/todos`, {
+        data: { title: `seed-${i}` },
+        // pair with @mizchi/server-faults' bypassHeader to keep seeds out of the chaos surface
+        headers: { "x-chaos-bypass": "1" },
+      });
+    }
+  },
+  // ... maxPages, faultInjection, etc.
+});
+```
+
+The setup browser is closed before the crawler starts; carry shared state through the server (REST seed) or by saving `storageState` to a file and pointing `options.storageState` at it.
+
 ## Lifecycle faults (client-side)
 
 `faultInjection` is request-scoped; **lifecycle faults** are page-scoped client-side perturbations that fire at well-defined stages of every page visit. Use them to simulate slow CPUs, stale auth tokens, evicted Service Worker caches, and other browser-side conditions that aren't expressible at the network layer.
