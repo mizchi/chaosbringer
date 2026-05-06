@@ -324,4 +324,54 @@ describe("koaMiddleware", () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(ctx.status).toBe(0);
   });
+
+  it("stamps metadata headers via ctx.set() for latency annotate verdict", async () => {
+    const mw = koaMiddleware({ latencyRate: 1, latencyMs: 0, metadataHeader: true });
+    const next = vi.fn(async () => undefined);
+    const ctx = {
+      req: { method: "GET", url: "/api/x", headers: { host: "test.local" } },
+      status: 0,
+      body: undefined as unknown,
+      _headers: {} as Record<string, string>,
+      set(k: string, v: string) {
+        this._headers[k] = v;
+      },
+    };
+    await mw(ctx, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(ctx._headers["x-chaos-fault-kind"]).toBe("latency");
+  });
+
+  it("does not stamp any chaos headers when metadataHeader is off", async () => {
+    const mw = koaMiddleware({ latencyRate: 1, latencyMs: 0 });
+    const next = vi.fn(async () => undefined);
+    const ctx = {
+      req: { method: "GET", url: "/api/x", headers: {} },
+      status: 0,
+      body: undefined as unknown,
+      _headers: {} as Record<string, string>,
+      set(k: string, v: string) {
+        this._headers[k] = v;
+      },
+    };
+    await mw(ctx, next);
+    expect(Object.keys(ctx._headers).length).toBe(0);
+  });
+
+  it("attaches metadata headers to synthetic 5xx ctx", async () => {
+    const mw = koaMiddleware({ status5xxRate: 1, metadataHeader: true });
+    const next = vi.fn();
+    const ctx = {
+      req: { method: "GET", url: "/api/x", headers: { host: "test.local" } },
+      status: 0,
+      body: undefined as unknown,
+      _headers: {} as Record<string, string>,
+      set(k: string, v: string) {
+        this._headers[k] = v;
+      },
+    };
+    await mw(ctx, next);
+    expect(ctx.status).toBe(503);
+    expect(ctx._headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
 });

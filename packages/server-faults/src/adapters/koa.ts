@@ -6,7 +6,12 @@
  * response back through `ctx.status` / `ctx.body`.
  */
 
-import { serverFaults, type ServerFaultConfig } from "../server-faults.js";
+import {
+  attrsToHeaderEntries,
+  resolveMetadataPrefix,
+  serverFaults,
+  type ServerFaultConfig,
+} from "../server-faults.js";
 
 interface KoaLikeRequest {
   method?: string;
@@ -42,13 +47,35 @@ export function koaMiddleware(
   cfg: ServerFaultConfig,
 ): (ctx: KoaLikeContext, next: KoaLikeNext) => Promise<void> {
   const fault = serverFaults(cfg);
+  const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async (ctx, next) => {
-    const response = await fault.maybeInject(toWebRequest(ctx.req));
-    if (!response) return next().then(() => undefined);
-    ctx.status = response.status;
-    response.headers.forEach((value, key) => {
-      ctx.set(key, value);
-    });
-    ctx.body = await response.json();
+    const verdict = await fault.maybeInject(toWebRequest(ctx.req));
+    if (!verdict) {
+      await next();
+      return;
+    }
+    if (verdict.kind === "synthetic") {
+      ctx.status = verdict.response.status;
+      verdict.response.headers.forEach((value, key) => {
+        ctx.set(key, value);
+      });
+      ctx.body = await verdict.response.json();
+      return;
+    }
+    if (verdict.kind === "annotate") {
+      // Stamp BEFORE next() — Koa's ctx.set just wraps res.setHeader, which
+      // buffers headers until the response is flushed. A downstream handler
+      // that bypasses ctx (writing to ctx.res directly) would skip these
+      // headers; that is the documented escape hatch.
+      if (metadataPrefix) {
+        for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+          ctx.set(name, value);
+        }
+      }
+      await next();
+      return;
+    }
+    const _exhaustive: never = verdict;
+    void _exhaustive;
   };
 }
