@@ -8,7 +8,7 @@
 - You want to know "did the 503 in this report come from the chaos network layer (chaosbringer's `faults.status(500, …)`) or from inside the server (`@mizchi/server-faults`'s `status5xxRate`)?"
 - You want to grep the resulting report by `traceId` and find every fault — network and server-side — that affected a single Playwright action.
 
-## Architecture (Phase 1, separate-process mode)
+## Architecture (separate-process mode)
 
 ```
 Browser (Playwright)              Server process
@@ -210,16 +210,15 @@ const fault = serverFaults({
 
 Now any downstream OTel consumer (Jaeger, Tempo, Honeycomb, Datadog) can filter spans by `fault.kind="5xx"` or join chaos events to user spans by `fault.trace_id`.
 
-## Limitations of Phase 1
+## Limitations
 
-- **Seed propagation is manual.** Future work may add automatic seed broadcast.
-- **Same-process integration (`server: ServerFaultHandle`) is not implemented.** Phase 2 will let the test runner pass the handle directly, share an in-memory observer, and skip the response-header round-trip. Useful for unit tests where the test driver imports the app.
-- **Per-action correlation is post-hoc.** `report.serverFaults` is a flat list; consumers join by `traceId` themselves. A trace-id-indexed dict on `ActionResult` is design-deferred.
+- **Seed propagation is manual.** Both processes must be started with the same seed env var. Future work may add automatic seed broadcast.
+- **Same-process integration (`server: ServerFaultHandle`) is not implemented.** Useful for unit tests where the test driver imports the app and calls `app.fetch()` directly; would skip the response-header round-trip and share an in-memory observer. No demand surfaced yet, deferred.
 
 ## Related
 
-- Spec: [`docs/superpowers/specs/2026-05-06-chaos-server-orchestration-design.md`](../superpowers/specs/2026-05-06-chaos-server-orchestration-design.md) (internal design rationale)
+- Phase 1 spec: [`docs/superpowers/specs/2026-05-06-chaos-server-orchestration-design.md`](../superpowers/specs/2026-05-06-chaos-server-orchestration-design.md) (header round-trip + flat `report.serverFaults`)
+- Phase 2 spec: [`docs/superpowers/specs/2026-05-06-chaos-server-orchestration-phase-2-design.md`](../superpowers/specs/2026-05-06-chaos-server-orchestration-phase-2-design.md) (per-page + per-action joins)
 - Issue: [`#56`](https://github.com/mizchi/chaosbringer/issues/56)
-- PR 1 (server-faults): [`#74`](https://github.com/mizchi/chaosbringer/pull/74)
-- PR 2 (chaosbringer): [`#75`](https://github.com/mizchi/chaosbringer/pull/75)
 - Seeding pattern: [`docs/recipes/seeding-data.md`](seeding-data.md)
+- Runnable demo: [`examples/cloudflare-worker/`](../../examples/cloudflare-worker/)
