@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { serverFaults } from "./server-faults.js";
+import { serverFaults, toOtelAttrs } from "./server-faults.js";
 
 const req = (path: string) => new Request(`https://test.local${path}`);
 
@@ -122,10 +122,10 @@ describe("serverFaults", () => {
     });
     await fault.maybeInject(req("/api/x"));
     expect(onFault).toHaveBeenCalledWith("5xx", {
-      "fault.kind": "5xx",
-      "fault.path": "/api/x",
-      "fault.method": "GET",
-      "fault.target_status": 503,
+      kind: "5xx",
+      path: "/api/x",
+      method: "GET",
+      targetStatus: 503,
     });
   });
 
@@ -138,10 +138,10 @@ describe("serverFaults", () => {
     });
     await fault.maybeInject(req("/api/x"));
     expect(onFault).toHaveBeenCalledWith("latency", {
-      "fault.kind": "latency",
-      "fault.path": "/api/x",
-      "fault.method": "GET",
-      "fault.latency_ms": 1,
+      kind: "latency",
+      path: "/api/x",
+      method: "GET",
+      latencyMs: 1,
     });
   });
 
@@ -153,7 +153,7 @@ describe("serverFaults", () => {
     });
     const r = new Request("https://test.local/api/x", { method: "post" as string });
     await fault.maybeInject(r);
-    expect(onFault).toHaveBeenCalledWith("5xx", expect.objectContaining({ "fault.method": "POST" }));
+    expect(onFault).toHaveBeenCalledWith("5xx", expect.objectContaining({ method: "POST" }));
   });
 
   describe("bypassHeader", () => {
@@ -282,5 +282,82 @@ describe("serverFaults", () => {
     await fault.maybeInject(req("/api/x"));
     expect(onFault).toHaveBeenCalledTimes(1);
     expect(onFault).toHaveBeenCalledWith("5xx", expect.anything());
+  });
+
+  describe("traceId", () => {
+    const TP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+    it("populates traceId from a valid traceparent header (5xx)", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
+      await fault.maybeInject(
+        new Request("https://test.local/api/x", { headers: { traceparent: TP } }),
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        "5xx",
+        expect.objectContaining({ traceId: "0af7651916cd43dd8448eb211c80319c" }),
+      );
+    });
+
+    it("populates traceId on latency events too", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({ latencyRate: 1, latencyMs: 1, observer: { onFault } });
+      await fault.maybeInject(
+        new Request("https://test.local/api/x", { headers: { traceparent: TP } }),
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        "latency",
+        expect.objectContaining({ traceId: "0af7651916cd43dd8448eb211c80319c" }),
+      );
+    });
+
+    it("omits traceId when traceparent is absent", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
+      await fault.maybeInject(new Request("https://test.local/api/x"));
+      const attrs = onFault.mock.calls[0][1] as Record<string, unknown>;
+      expect("traceId" in attrs).toBe(false);
+    });
+
+    it("omits traceId when traceparent is malformed", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({ status5xxRate: 1, observer: { onFault } });
+      await fault.maybeInject(
+        new Request("https://test.local/api/x", { headers: { traceparent: "garbage" } }),
+      );
+      const attrs = onFault.mock.calls[0][1] as Record<string, unknown>;
+      expect("traceId" in attrs).toBe(false);
+    });
+  });
+
+  describe("toOtelAttrs", () => {
+    it("maps every populated camelCase key to its OTel dotted equivalent", () => {
+      const out = toOtelAttrs({
+        kind: "5xx",
+        path: "/api/x",
+        method: "GET",
+        targetStatus: 503,
+        traceId: "0af7651916cd43dd8448eb211c80319c",
+      });
+      expect(out).toEqual({
+        "fault.kind": "5xx",
+        "fault.path": "/api/x",
+        "fault.method": "GET",
+        "fault.target_status": 503,
+        "fault.trace_id": "0af7651916cd43dd8448eb211c80319c",
+      });
+    });
+
+    it("omits keys that are undefined", () => {
+      const out = toOtelAttrs({ kind: "latency", path: "/x", method: "GET", latencyMs: 50 });
+      expect(out).toEqual({
+        "fault.kind": "latency",
+        "fault.path": "/x",
+        "fault.method": "GET",
+        "fault.latency_ms": 50,
+      });
+      expect("fault.target_status" in out).toBe(false);
+      expect("fault.trace_id" in out).toBe(false);
+    });
   });
 });
