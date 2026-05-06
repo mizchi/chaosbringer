@@ -12,45 +12,65 @@ Requires Node 20+ (uses `Response.json` and the global `Request` constructor).
 
 ## Usage
 
-### Hono on Cloudflare Workers / Node
+The core `serverFaults({...})` is framework-agnostic. For one-line wiring, prefer the subpath adapters below — they are zero-cost wrappers that handle request/response translation. Reach for the core API only when you need finer control or your framework isn't on the list.
+
+### Hono (Cloudflare Workers / Node)
 
 ```ts
 import { Hono } from "hono";
-import { serverFaults } from "@mizchi/server-faults";
+import { honoMiddleware } from "@mizchi/server-faults/hono";
 
-const fault = serverFaults({
+const app = new Hono();
+app.use("*", honoMiddleware({
   status5xxRate: Number(process.env.CHAOS_5XX_RATE ?? 0),
   latencyRate: Number(process.env.CHAOS_LATENCY_RATE ?? 0),
   latencyMs: { minMs: 50, maxMs: 500 },
   pathPattern: "^/api/",
-});
-
-const app = new Hono();
-app.use("*", async (c, next) => {
-  const response = await fault.maybeInject(c.req.raw);
-  if (response) return response;
-  return next();
-});
+}));
 ```
 
 ### Express
 
 ```ts
 import express from "express";
+import { expressMiddleware } from "@mizchi/server-faults/express";
+
+const app = express();
+app.use(expressMiddleware({ status5xxRate: 0.05, pathPattern: /^\/api\// }));
+```
+
+### Fastify
+
+```ts
+import Fastify from "fastify";
+import { fastifyPlugin } from "@mizchi/server-faults/fastify";
+
+const app = Fastify();
+await app.register(fastifyPlugin({ status5xxRate: 0.05, pathPattern: /^\/api\// }));
+```
+
+### Koa
+
+```ts
+import Koa from "koa";
+import { koaMiddleware } from "@mizchi/server-faults/koa";
+
+const app = new Koa();
+app.use(koaMiddleware({ status5xxRate: 0.05, pathPattern: /^\/api\// }));
+```
+
+### Core API (any framework)
+
+```ts
 import { serverFaults } from "@mizchi/server-faults";
 
 const fault = serverFaults({ status5xxRate: 0.05, pathPattern: /^\/api\// });
-
-const app = express();
-app.use(async (req, res, next) => {
-  const webReq = new Request(`http://${req.headers.host}${req.originalUrl}`, {
-    method: req.method,
-  });
-  const response = await fault.maybeInject(webReq);
-  if (!response) return next();
-  res.status(response.status);
-  res.json(await response.json());
-});
+const response = await fault.maybeInject(webStandardRequest);
+if (response) {
+  // synthetic Response — short-circuit the handler
+} else {
+  // null — let the request through
+}
 ```
 
 ## Config
