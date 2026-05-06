@@ -94,11 +94,11 @@ describe("traceIds capture during action execution", () => {
   it("ignores recordTraceId calls when no action is current", () => {
     const crawler = freshCrawler();
     (crawler as unknown as { currentAction: ActionResult | null }).currentAction = null;
-    (crawler as unknown as { recordTraceId: (id: string) => void }).recordTraceId(
-      "00000000000000000000000000000003",
-    );
-    // No state to assert against; just verify it does not throw.
-    expect(true).toBe(true);
+    expect(() =>
+      (crawler as unknown as { recordTraceId: (id: string) => void }).recordTraceId(
+        "00000000000000000000000000000003",
+      ),
+    ).not.toThrow();
   });
 
   it("attributes trace-ids to the most recent action when called between actions", () => {

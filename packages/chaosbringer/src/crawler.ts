@@ -1995,6 +1995,13 @@ export class ChaosCrawler {
    * Perform actions based on weighted random selection
    */
   private async performWeightedActions(page: Page, url: string): Promise<void> {
+    // Per-page reset: if the previous page's last action left `currentAction`
+    // pointing at it, requests fired during this page's load / navigation /
+    // invariants would otherwise attribute to the previous page's last
+    // action. Clearing here covers both the no-targets early-return below
+    // and the regular-loop entry path.
+    this.currentAction = null;
+
     const targets = await this.getWeightedActionTargets(page);
     this.logger.debug("action_targets", { count: targets.length, url });
     if (targets.length === 0) return;
