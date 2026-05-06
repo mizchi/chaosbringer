@@ -212,6 +212,44 @@ describe("serverFaults", () => {
     });
   });
 
+  describe("stateless regex matching", () => {
+    // `RegExp.test()` is stateful with the `g` or `y` flag — `lastIndex`
+    // advances between calls, so a second call against the same input
+    // would spuriously miss. Both pathPattern and exemptPathPattern must
+    // be normalised before use.
+    it("handles g-flagged exemptPathPattern across repeated calls", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        exemptPathPattern: /^\/api\/health/g,
+      });
+      // 50 consecutive calls; every one must be exempt.
+      for (let i = 0; i < 50; i++) {
+        expect(await fault.maybeInject(req("/api/health"))).toBeNull();
+      }
+    });
+
+    it("handles g-flagged pathPattern across repeated calls", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        pathPattern: /^\/api\//g,
+      });
+      // Every matching call should land in the raffle and (with rate=1) inject.
+      for (let i = 0; i < 50; i++) {
+        expect(await fault.maybeInject(req("/api/x"))).not.toBeNull();
+      }
+    });
+
+    it("preserves case-insensitive flag while stripping g/y", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        exemptPathPattern: /^\/API\/HEALTH/giy,
+      });
+      // i flag preserved -> /api/health and /API/HEALTH both exempt.
+      expect(await fault.maybeInject(req("/api/health"))).toBeNull();
+      expect(await fault.maybeInject(req("/API/HEALTH"))).toBeNull();
+    });
+  });
+
   it("does not roll latency raffle when 5xx already won", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
