@@ -93,7 +93,7 @@ export async function chaos(
   // would then fail validation, mutating state that should never have
   // been touched. ChaosCrawler's constructor is side-effect-free; the
   // browser doesn't start until .start(), so the re-ordering is safe.
-  const crawler = new ChaosCrawler({ ...crawlerOptions, server } as CrawlerOptions, events);
+  const crawler = new ChaosCrawler({ ...crawlerOptions, server }, events);
 
   if (setup) {
     await runSetup(setup, options.baseUrl);
