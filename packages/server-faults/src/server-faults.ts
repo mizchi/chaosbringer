@@ -166,6 +166,10 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
           targetStatus: status,
         };
         if (traceId !== undefined) attrs5xx.traceId = traceId;
+        // Frozen because the same reference is handed to observer.onFault and
+        // returned in the verdict; either consumer mutating it would corrupt
+        // the other's view.
+        Object.freeze(attrs5xx);
         cfg.observer?.onFault?.("5xx", attrs5xx);
         const response = Response.json(
           { error: "chaos: synthetic 5xx", path: url.pathname, status },
@@ -184,6 +188,7 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
           latencyMs: ms,
         };
         if (traceId !== undefined) attrsLat.traceId = traceId;
+        Object.freeze(attrsLat);
         cfg.observer?.onFault?.("latency", attrsLat);
         await sleep(ms);
         return { kind: "annotate", attrs: attrsLat };
