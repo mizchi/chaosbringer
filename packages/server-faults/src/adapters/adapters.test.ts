@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { honoMiddleware } from "./hono.js";
+import { honoMiddleware, type HonoLikeContext } from "./hono.js";
 import { expressMiddleware } from "./express.js";
 import { fastifyPlugin } from "./fastify.js";
 import { koaMiddleware } from "./koa.js";
@@ -43,27 +43,29 @@ describe("honoMiddleware", () => {
   it("calls next() and stamps headers on c.res for latency annotate verdict", async () => {
     const mw = honoMiddleware({ latencyRate: 1, latencyMs: 0, metadataHeader: true });
     const headers = new Headers();
-    const c = {
+    const c: HonoLikeContext = {
       req: { raw: new Request("https://test.local/api/x") },
       res: { headers },
     };
     const next = vi.fn(async () => undefined);
-    await mw(c as never, next);
+    await mw(c, next);
     expect(next).toHaveBeenCalledTimes(1);
     expect(headers.get("x-chaos-fault-kind")).toBe("latency");
     expect(headers.get("x-chaos-fault-latency-ms")).toBe("0");
   });
 
-  it("does not stamp latency headers when metadataHeader is off", async () => {
+  it("does not stamp any chaos headers when metadataHeader is off", async () => {
     const mw = honoMiddleware({ latencyRate: 1, latencyMs: 0 });
     const headers = new Headers();
-    const c = {
+    const c: HonoLikeContext = {
       req: { raw: new Request("https://test.local/api/x") },
       res: { headers },
     };
     const next = vi.fn(async () => undefined);
-    await mw(c as never, next);
-    expect(headers.get("x-chaos-fault-kind")).toBeNull();
+    await mw(c, next);
+    // Stronger than checking just one header: the entire Headers object stays
+    // empty so no other fault.* key sneaks through.
+    expect([...headers.entries()]).toHaveLength(0);
   });
 });
 
