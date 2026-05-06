@@ -25,16 +25,13 @@ export type FaultKind = "5xx" | "latency";
  * renames are not.
  */
 export interface FaultAttrs {
-  /** Mirror of the kind argument; included so an attrs object is self-describing if it ever travels without context. */
-  "fault.kind": FaultKind;
-  /** URL pathname (no host, no query). */
-  "fault.path": string;
-  /** Uppercase HTTP method. */
-  "fault.method": string;
-  /** Set when `fault.kind === "5xx"`. The synthetic HTTP status that was returned. */
-  "fault.target_status"?: number;
-  /** Set when `fault.kind === "latency"`. Milliseconds actually slept. */
-  "fault.latency_ms"?: number;
+  kind: FaultKind;
+  path: string;
+  method: string;
+  targetStatus?: number;
+  latencyMs?: number;
+  /** Trace-id from incoming traceparent (W3C Trace Context). 32 lowercase hex. */
+  traceId?: string;
 }
 
 export interface ServerFaultObserver {
@@ -115,6 +112,15 @@ function compileStatelessPattern(p: RegExp | string | undefined): RegExp | null 
   return new RegExp(p.source, p.flags.replace(/[gy]/g, ""));
 }
 
+const TRACEPARENT_RE = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
+
+function extractTraceId(req: Request): string | undefined {
+  const tp = req.headers.get("traceparent");
+  if (!tp) return undefined;
+  const m = TRACEPARENT_RE.exec(tp);
+  return m ? m[1] : undefined;
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
@@ -134,15 +140,18 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
       if (pattern && !pattern.test(url.pathname)) return null;
 
       const method = req.method.toUpperCase();
+      const traceId = extractTraceId(req);
       const r5 = cfg.status5xxRate ?? 0;
       if (r5 > 0 && rng.next() < r5) {
         const status = cfg.status5xxCode ?? 503;
-        cfg.observer?.onFault?.("5xx", {
-          "fault.kind": "5xx",
-          "fault.path": url.pathname,
-          "fault.method": method,
-          "fault.target_status": status,
-        });
+        const attrs5xx: FaultAttrs = {
+          kind: "5xx",
+          path: url.pathname,
+          method,
+          targetStatus: status,
+        };
+        if (traceId !== undefined) attrs5xx.traceId = traceId;
+        cfg.observer?.onFault?.("5xx", attrs5xx);
         return Response.json(
           { error: "chaos: synthetic 5xx", path: url.pathname, status },
           { status },
@@ -152,15 +161,35 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
       const rL = cfg.latencyRate ?? 0;
       if (rL > 0 && rng.next() < rL) {
         const ms = pickLatencyMs(cfg.latencyMs);
-        cfg.observer?.onFault?.("latency", {
-          "fault.kind": "latency",
-          "fault.path": url.pathname,
-          "fault.method": method,
-          "fault.latency_ms": ms,
-        });
+        const attrsLat: FaultAttrs = {
+          kind: "latency",
+          path: url.pathname,
+          method,
+          latencyMs: ms,
+        };
+        if (traceId !== undefined) attrsLat.traceId = traceId;
+        cfg.observer?.onFault?.("latency", attrsLat);
         await sleep(ms);
       }
       return null;
     },
   };
+}
+
+/**
+ * Map a flat `FaultAttrs` to the OTel-style dotted attribute schema
+ * (`fault.kind`, `fault.target_status`, …) for consumers that pipe
+ * fault events directly into an OTel exporter. Undefined optional
+ * keys are dropped so the output is tight.
+ */
+export function toOtelAttrs(a: FaultAttrs): Record<string, string | number> {
+  const out: Record<string, string | number> = {
+    "fault.kind": a.kind,
+    "fault.path": a.path,
+    "fault.method": a.method,
+  };
+  if (a.targetStatus !== undefined) out["fault.target_status"] = a.targetStatus;
+  if (a.latencyMs !== undefined) out["fault.latency_ms"] = a.latencyMs;
+  if (a.traceId !== undefined) out["fault.trace_id"] = a.traceId;
+  return out;
 }
