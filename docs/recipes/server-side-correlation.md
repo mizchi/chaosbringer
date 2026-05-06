@@ -140,26 +140,52 @@ SEED=$CHAOS_SEED pnpm chaos
 
 The chaosbringer report's `Repro:` line includes only chaosbringer's own seed (the network-layer roll). The server-side seed is the operator's responsibility — write it next to the Repro line or in your run log.
 
+## Activation matrix
+
+Two chaos options interact to populate the four fault-related fields on the report:
+
+| `chaos({ traceparent })` | `chaos({ server: { mode: "remote" } })` | What's populated |
+|---|---|---|
+| absent | absent | nothing |
+| absent | set | `report.serverFaults`, `pages[].serverFaultEvents`. No per-action attribution (no trace-ids to join on). |
+| set | absent | `actions[].traceIds` (record-only). No fault events anywhere. |
+| set | set | All four. The intended Phase 2 surface — see the example at `examples/cloudflare-worker/chaos/run.ts`. |
+
+If the per-action `serverFaultEvents` field is empty when you expected it to be populated, the
+diagnosis is almost always one of:
+- `traceparent: true` was not set on `chaos()`.
+- The action triggered no requests (scroll, hover) — it carried no trace-ids to join on.
+- The fault fired during a navigation that ended on a different page than the one the action
+  was issued on. The flat `report.serverFaults[]` is still the source of truth in those cases.
+
 ## Verification
 
 After a run with `CHAOS_5XX_RATE=0.3`:
 
 ```ts
-const fivexx = report.serverFaults?.filter(e => e.attrs.kind === "5xx") ?? [];
+const fivexx = report.serverFaults?.filter((e) => e.attrs.kind === "5xx") ?? [];
 console.log(`server-side 5xx: ${fivexx.length}`);
 
-// join with chaosbringer actions by traceparent (when implemented in your stack):
-for (const action of report.actions) {
-  const trace = action.traceparent?.match(/^00-([0-9a-f]{32})/)?.[1];
-  if (!trace) continue;
-  const matchingFaults = report.serverFaults?.filter(e => e.traceId === trace) ?? [];
-  if (matchingFaults.length > 0) {
-    console.log(`action ${action.target} → ${matchingFaults.length} server fault(s)`);
+// "What server faults fired on the page that broke?"
+const failed = report.pages.filter((p) => p.errors.length > 0);
+for (const p of failed) {
+  const events = p.serverFaultEvents ?? [];
+  if (events.length > 0) {
+    console.log(p.url, events.map((e) => `${e.attrs.kind} ${e.attrs.path}`));
   }
+}
+
+// "Which click triggered the 503?"
+for (const f of fivexx) {
+  const action = report.actions.find((a) => a.serverFaultEvents?.includes(f));
+  console.log(`5xx on ${f.attrs.path} → triggered by`, action?.target ?? "(no action attribution)");
 }
 ```
 
-The `traceId` join is the load-bearing primitive: same `traceparent` on the wire → same value in `report.serverFaults[].traceId` → same value emitted on OTel attributes via `toOtelAttrs(attrs)` in any downstream observability layer.
+The trace-id join is the load-bearing primitive: same `traceparent` on the wire → same value in
+`report.actions[i].traceIds` → same value in `report.serverFaults[].traceId` → the report
+pre-computes the per-action match for you. Same value emitted on OTel attributes via
+`toOtelAttrs(attrs)` in any downstream observability layer.
 
 ## OTel exporter integration
 
