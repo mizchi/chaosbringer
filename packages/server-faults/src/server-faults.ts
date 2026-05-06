@@ -75,22 +75,29 @@ function pickLatencyMs(spec: ServerFaultConfig["latencyMs"]): number {
   return 0;
 }
 
+/**
+ * Coerce a user-supplied RegExp/string pattern into a stateless RegExp.
+ *
+ * `RegExp.test()` is **stateful** when the pattern carries the `g` or `y`
+ * flag — `lastIndex` advances between calls, so a second call against the
+ * same input can spuriously miss. That would make exempt paths
+ * intermittently receive injected faults, violating the documented
+ * "passed through unconditionally" contract. Strip those two flags so
+ * every call is positional from index 0; preserve `i` / `m` / `s` / `u`
+ * since they change *what* matches, not *how* the index moves.
+ */
+function compileStatelessPattern(p: RegExp | string | undefined): RegExp | null {
+  if (!p) return null;
+  if (typeof p === "string") return new RegExp(p);
+  if (!/[gy]/.test(p.flags)) return p;
+  return new RegExp(p.source, p.flags.replace(/[gy]/g, ""));
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
-  const pattern =
-    cfg.pathPattern instanceof RegExp
-      ? cfg.pathPattern
-      : cfg.pathPattern
-        ? new RegExp(cfg.pathPattern)
-        : null;
-
-  const exemptPattern =
-    cfg.exemptPathPattern instanceof RegExp
-      ? cfg.exemptPathPattern
-      : cfg.exemptPathPattern
-        ? new RegExp(cfg.exemptPathPattern)
-        : null;
+  const pattern = compileStatelessPattern(cfg.pathPattern);
+  const exemptPattern = compileStatelessPattern(cfg.exemptPathPattern);
 
   const bypassHeader = cfg.bypassHeader?.toLowerCase();
 
