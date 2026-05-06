@@ -135,6 +135,83 @@ describe("serverFaults", () => {
     expect(onFault).toHaveBeenCalledWith("latency", expect.objectContaining({ ms: 1, path: "/api/x" }));
   });
 
+  describe("bypassHeader", () => {
+    it("skips fault raffle when the named header is present (case-insensitive)", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        status5xxRate: 1,
+        bypassHeader: "x-chaos-bypass",
+        observer: { onFault },
+      });
+      const r = new Request("https://test.local/api/x", {
+        headers: { "X-Chaos-Bypass": "1" },
+      });
+      expect(await fault.maybeInject(r)).toBeNull();
+      expect(onFault).not.toHaveBeenCalled();
+    });
+
+    it("still rolls fault when the header is absent", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        bypassHeader: "x-chaos-bypass",
+      });
+      expect(await fault.maybeInject(req("/api/x"))).not.toBeNull();
+    });
+
+    it("ignores any other header value", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        bypassHeader: "x-chaos-bypass",
+      });
+      const r = new Request("https://test.local/api/x", {
+        headers: { "x-some-other": "1" },
+      });
+      expect(await fault.maybeInject(r)).not.toBeNull();
+    });
+  });
+
+  describe("exemptPathPattern", () => {
+    it("skips fault raffle when pathname matches (RegExp)", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        status5xxRate: 1,
+        exemptPathPattern: /^\/api\/health/,
+        observer: { onFault },
+      });
+      expect(await fault.maybeInject(req("/api/health"))).toBeNull();
+      expect(await fault.maybeInject(req("/api/health/deep"))).toBeNull();
+      expect(onFault).not.toHaveBeenCalled();
+    });
+
+    it("skips fault raffle when pathname matches (string)", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        exemptPathPattern: "^/api/health",
+      });
+      expect(await fault.maybeInject(req("/api/health"))).toBeNull();
+    });
+
+    it("still rolls fault for non-exempt paths", async () => {
+      const fault = serverFaults({
+        status5xxRate: 1,
+        exemptPathPattern: /^\/api\/health/,
+      });
+      expect(await fault.maybeInject(req("/api/users"))).not.toBeNull();
+    });
+
+    it("exemption short-circuits before pathPattern", async () => {
+      // exempt covers a sub-prefix of pathPattern. The exempt pathname matches
+      // both, but exempt should win and the request should pass through.
+      const fault = serverFaults({
+        status5xxRate: 1,
+        pathPattern: /^\/api\//,
+        exemptPathPattern: /^\/api\/health/,
+      });
+      expect(await fault.maybeInject(req("/api/health"))).toBeNull();
+      expect(await fault.maybeInject(req("/api/users"))).not.toBeNull();
+    });
+  });
+
   it("does not roll latency raffle when 5xx already won", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({

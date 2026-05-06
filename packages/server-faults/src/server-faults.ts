@@ -30,6 +30,19 @@ export interface ServerFaultConfig {
   latencyMs?: number | { minMs: number; maxMs: number };
   /** RegExp or pattern string. Only matching paths are considered for fault injection. */
   pathPattern?: RegExp | string;
+  /**
+   * Header name (case-insensitive) that, when present on a request, makes that
+   * request bypass all fault raffles. Use this to keep test fixture / warm-up
+   * traffic out of the chaos surface.
+   */
+  bypassHeader?: string;
+  /**
+   * RegExp or pattern string. Requests whose pathname matches are skipped
+   * unconditionally (e.g. health checks, seed endpoints). Evaluated before
+   * `pathPattern`; an exempt request never has a raffle rolled, even if it
+   * also matches `pathPattern`.
+   */
+  exemptPathPattern?: RegExp | string;
   /** Optional. When set, fault selection (which raffles win) is reproducible across runs. */
   seed?: number;
   observer?: ServerFaultObserver;
@@ -72,11 +85,23 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         ? new RegExp(cfg.pathPattern)
         : null;
 
+  const exemptPattern =
+    cfg.exemptPathPattern instanceof RegExp
+      ? cfg.exemptPathPattern
+      : cfg.exemptPathPattern
+        ? new RegExp(cfg.exemptPathPattern)
+        : null;
+
+  const bypassHeader = cfg.bypassHeader?.toLowerCase();
+
   const rng: SeededRng = cfg.seed !== undefined ? mulberry32(cfg.seed) : { next: () => Math.random() };
 
   return {
     async maybeInject(req: Request): Promise<Response | null> {
+      if (bypassHeader && req.headers.has(bypassHeader)) return null;
+
       const url = new URL(req.url);
+      if (exemptPattern && exemptPattern.test(url.pathname)) return null;
       if (pattern && !pattern.test(url.pathname)) return null;
 
       const r5 = cfg.status5xxRate ?? 0;
