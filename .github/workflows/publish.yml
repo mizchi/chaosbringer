@@ -59,4 +59,11 @@ jobs:
 
       - name: Publish to npm (OIDC Trusted Publishing)
         working-directory: ${{ steps.pkg.outputs.dir }}
-        run: npm publish --access public --provenance
+        # pnpm publish (NOT npm publish): rewrites `workspace:^` / `workspace:*`
+        # refs in dependencies to actual workspace package versions before
+        # packing. `npm publish` leaves them as literal strings, which break
+        # installs at consume time. (chaosbringer@0.8.0 shipped to npm with
+        # `@mizchi/playwright-faults: workspace:^` because of this.)
+        # `--no-git-checks` is required because the workflow runs on a release
+        # tag (detached HEAD) which pnpm publish would otherwise refuse.
+        run: pnpm publish --access public --provenance --no-git-checks

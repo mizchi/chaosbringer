@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.8.0...chaosbringer-v0.8.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **publish:** rewrite `workspace:^` refs in the published `package.json` (use `pnpm publish`, not `npm publish`). 0.8.0 shipped with `@mizchi/playwright-faults: workspace:^` literally, which breaks installs at consume time. Use 0.8.1 instead.
+
 ## [0.8.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.7.0...chaosbringer-v0.8.0) (2026-05-06)
 
 
