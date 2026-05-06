@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serverFaults, toOtelAttrs } from "./server-faults.js";
+import type { FaultAttrs } from "./server-faults.js";
 
 const req = (path: string) => new Request(`https://test.local${path}`);
 
@@ -359,6 +360,50 @@ describe("serverFaults", () => {
       });
       expect("fault.target_status" in out).toBe(false);
       expect("fault.trace_id" in out).toBe(false);
+    });
+  });
+
+  describe("metadataHeader", () => {
+    const TP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+    it("attaches all 5xx attrs as kebab-case headers on synthetic responses", async () => {
+      const fault = serverFaults({ status5xxRate: 1, metadataHeader: true });
+      const r = new Request("https://test.local/api/x", { headers: { traceparent: TP } });
+      const v = await fault.maybeInject(r);
+      expect(v?.kind).toBe("synthetic");
+      const resp = (v as { response: Response }).response;
+      expect(resp.headers.get("x-chaos-fault-kind")).toBe("5xx");
+      expect(resp.headers.get("x-chaos-fault-path")).toBe("/api/x");
+      expect(resp.headers.get("x-chaos-fault-method")).toBe("GET");
+      expect(resp.headers.get("x-chaos-fault-target-status")).toBe("503");
+      expect(resp.headers.get("x-chaos-fault-trace-id")).toBe("0af7651916cd43dd8448eb211c80319c");
+      expect(resp.headers.get("x-chaos-fault-latency-ms")).toBeNull();
+    });
+
+    it("does not attach headers when metadataHeader is unset", async () => {
+      const fault = serverFaults({ status5xxRate: 1 });
+      const v = await fault.maybeInject(new Request("https://test.local/api/x"));
+      const resp = (v as { kind: "synthetic"; response: Response }).response;
+      expect(resp.headers.get("x-chaos-fault-kind")).toBeNull();
+    });
+
+    it("honours custom prefix", async () => {
+      const fault = serverFaults({ status5xxRate: 1, metadataHeader: { prefix: "x-my-fault" } });
+      const v = await fault.maybeInject(new Request("https://test.local/api/x"));
+      const resp = (v as { kind: "synthetic"; response: Response }).response;
+      expect(resp.headers.get("x-my-fault-kind")).toBe("5xx");
+      expect(resp.headers.get("x-chaos-fault-kind")).toBeNull();
+    });
+
+    it("returns annotate verdict carrying full attrs for latency (adapter must apply headers)", async () => {
+      const fault = serverFaults({ latencyRate: 1, latencyMs: 1, metadataHeader: true });
+      const r = new Request("https://test.local/api/x", { headers: { traceparent: TP } });
+      const v = await fault.maybeInject(r);
+      expect(v?.kind).toBe("annotate");
+      const attrs = (v as { kind: "annotate"; attrs: FaultAttrs }).attrs;
+      expect(attrs.kind).toBe("latency");
+      expect(attrs.latencyMs).toBe(1);
+      expect(attrs.traceId).toBe("0af7651916cd43dd8448eb211c80319c");
     });
   });
 });

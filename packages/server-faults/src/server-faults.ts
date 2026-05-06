@@ -80,6 +80,17 @@ export interface ServerFaultConfig {
   /** Optional. When set, fault selection (which raffles win) is reproducible across runs. */
   seed?: number;
   observer?: ServerFaultObserver;
+  /**
+   * When set, server-faults mirrors `FaultAttrs` onto response headers so
+   * out-of-process consumers (e.g. chaosbringer's `chaos()` crawler) can
+   * observe server-side faults without sharing memory with the server.
+   *
+   * Header naming: `{prefix}-{kebab(key)}` where `key` is a TS attrs
+   * property name and `kebab` lower-cases the camelCase boundary
+   * (e.g. `targetStatus` → `{prefix}-target-status`). `true` uses
+   * the default prefix `"x-chaos-fault"`.
+   */
+  metadataHeader?: boolean | { prefix?: string };
 }
 
 export interface ServerFaultHandle {
@@ -138,11 +149,45 @@ function extractTraceId(req: Request): string | undefined {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+const DEFAULT_METADATA_PREFIX = "x-chaos-fault";
+
+/**
+ * Materialise a `FaultAttrs` value as a list of HTTP-header pairs.
+ *
+ * camelCase keys are lowered into kebab-case (`targetStatus` →
+ * `target-status`) and then prefixed. Undefined optional values are
+ * dropped. Exposed so framework adapters can apply the same headers
+ * to the `annotate` verdict path (where the real handler's response
+ * is what actually reaches the wire).
+ */
+export function attrsToHeaderEntries(attrs: FaultAttrs, prefix: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined) continue;
+    // camelCase → kebab-case (e.g. `targetStatus` → `target-status`).
+    const tail = k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+    out.push([`${prefix}-${tail}`, String(v)]);
+  }
+  return out;
+}
+
+/**
+ * Resolve `metadataHeader` config to a concrete prefix string, or `null`
+ * if disabled. Exposed for adapters that handle the `annotate` branch.
+ */
+export function resolveMetadataPrefix(opt: ServerFaultConfig["metadataHeader"]): string | null {
+  if (!opt) return null;
+  if (opt === true) return DEFAULT_METADATA_PREFIX;
+  return opt.prefix ?? DEFAULT_METADATA_PREFIX;
+}
+
 export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
   const pattern = compileStatelessPattern(cfg.pathPattern);
   const exemptPattern = compileStatelessPattern(cfg.exemptPathPattern);
 
   const bypassHeader = cfg.bypassHeader?.toLowerCase();
+
+  const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
 
   const rng: SeededRng = cfg.seed !== undefined ? mulberry32(cfg.seed) : { next: () => Math.random() };
 
@@ -171,9 +216,15 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         // the other's view.
         Object.freeze(attrs5xx);
         cfg.observer?.onFault?.("5xx", attrs5xx);
+        const headers = new Headers();
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(attrs5xx, metadataPrefix)) {
+            headers.set(name, value);
+          }
+        }
         const response = Response.json(
           { error: "chaos: synthetic 5xx", path: url.pathname, status },
-          { status },
+          { status, headers },
         );
         return { kind: "synthetic", response, attrs: attrs5xx };
       }
