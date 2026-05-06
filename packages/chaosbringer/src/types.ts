@@ -456,6 +456,15 @@ export interface PageResult {
   sourceUrl?: string;
   /** Element that linked to this page */
   sourceElement?: string;
+  /**
+   * Server-side fault events that fired while this page was active.
+   * Pre-computed view of `report.serverFaults` filtered by `pageUrl`.
+   * Populated only when `chaos({ server: { mode: "remote" } })` was set
+   * AND faults were observed on this page; absent otherwise.
+   *
+   * References are shared with `report.serverFaults[]` — no duplication.
+   */
+  serverFaultEvents?: ServerFaultEvent[];
 }
 
 export interface RecoveryInfo {
@@ -491,6 +500,20 @@ export interface ActionResult {
   /** True when the action was skipped because the target URL is owned by another shard. */
   shardSkipped?: boolean;
   timestamp: number;
+  /**
+   * W3C trace-ids of requests triggered while this action was executing.
+   * Populated only when `chaos({ traceparent: true })` is set. Absent for
+   * actions that triggered no requests (scroll, hover) or when traceparent
+   * injection is off.
+   */
+  traceIds?: string[];
+  /**
+   * Server-side fault events whose `traceId` is in `traceIds[]`. Pre-
+   * computed view of `report.serverFaults` per action. Populated only when
+   * `chaos({ traceparent: true, server: { mode: "remote" } })` is BOTH set
+   * AND at least one fault joined to this action.
+   */
+  serverFaultEvents?: ServerFaultEvent[];
 }
 
 /**
