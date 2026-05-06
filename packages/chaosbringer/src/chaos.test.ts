@@ -37,4 +37,24 @@ describe("chaos() setup hook", () => {
 
     expect(result).toBeDefined();
   }, 30_000);
+
+  it("does NOT invoke setup when CrawlerOptions validation fails", async () => {
+    // Re-ordering safety: validation runs in ChaosCrawler's constructor,
+    // which we now construct *before* the setup hook fires. A bad
+    // maxPages should reject the run without ever calling the user's
+    // backend-seeding side effect.
+    const setup = vi.fn(async () => {
+      throw new Error("setup must not run for invalid configs");
+    });
+
+    await expect(
+      chaos({
+        baseUrl: "http://127.0.0.1:65535",
+        maxPages: -1, // rejected by validateOptions
+        setup,
+      }),
+    ).rejects.toThrow(/maxPages/);
+
+    expect(setup).not.toHaveBeenCalled();
+  });
 });

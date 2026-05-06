@@ -75,11 +75,19 @@ export async function chaos(
 ): Promise<ChaosResult> {
   const { strict, baseline, baselineStrict, setup, ...crawlerOptions } = options;
 
+  // Construct the crawler before invoking the setup hook so that
+  // CrawlerOptions validation (bad maxPages, malformed fault regex,
+  // invalid shard settings, …) runs first. Otherwise a user-visible
+  // side effect — typically a backend seed POST — fires for runs that
+  // would then fail validation, mutating state that should never have
+  // been touched. ChaosCrawler's constructor is side-effect-free; the
+  // browser doesn't start until .start(), so the re-ordering is safe.
+  const crawler = new ChaosCrawler(crawlerOptions, events);
+
   if (setup) {
     await runSetup(setup, options.baseUrl);
   }
 
-  const crawler = new ChaosCrawler(crawlerOptions, events);
   const report = await crawler.start();
 
   if (baseline) {
