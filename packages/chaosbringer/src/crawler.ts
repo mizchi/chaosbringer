@@ -1187,10 +1187,9 @@ export class ChaosCrawler {
         const reqHeaders = await request.allHeaders();
         const existingTp = reqHeaders["traceparent"];
         if (existingTp) {
-          // Honour explicit propagation upstream — but still surface it to
-          // the consumer hook so the report can record the correlation id.
+          const parts = parseTraceparent(existingTp);
+          if (parts?.traceId) this.recordTraceId(parts.traceId);
           if (traceparentHook) {
-            const parts = parseTraceparent(existingTp);
             traceparentHook({
               url,
               method,
@@ -1205,6 +1204,7 @@ export class ChaosCrawler {
           const spanId = randomBytes(8).toString("hex"); // 16 hex chars
           const traceparent = `00-${traceId}-${spanId}-01`;
           outgoingHeaders = { ...reqHeaders, traceparent };
+          this.recordTraceId(traceId);
           traceparentHook?.({
             url,
             method,

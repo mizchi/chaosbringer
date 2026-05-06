@@ -117,3 +117,18 @@ describe("traceIds capture during action execution", () => {
     expect(a2.traceIds).toEqual(["a2-trace"]);
   });
 });
+
+describe("traceparent.onInject feeds recordTraceId", () => {
+  it("invokes recordTraceId for each synthesised traceparent", () => {
+    const crawler = freshCrawler();
+    const action: ActionResult = { type: "click", target: "x", success: true, timestamp: 0 };
+    (crawler as unknown as { currentAction: ActionResult | null }).currentAction = action;
+
+    // Simulate two synthesised injections by calling recordTraceId directly,
+    // mirroring what the in-route handler does.
+    (crawler as unknown as { recordTraceId: (id: string) => void }).recordTraceId("aa".repeat(16));
+    (crawler as unknown as { recordTraceId: (id: string) => void }).recordTraceId("bb".repeat(16));
+
+    expect(action.traceIds).toEqual(["aa".repeat(16), "bb".repeat(16)]);
+  });
+});
