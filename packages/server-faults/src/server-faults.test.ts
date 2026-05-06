@@ -13,18 +13,19 @@ describe("serverFaults", () => {
 
   it("always returns a 503 when status5xxRate=1", async () => {
     const fault = serverFaults({ status5xxRate: 1 });
-    const response = await fault.maybeInject(req("/api/x"));
-    expect(response).not.toBeNull();
-    expect(response!.status).toBe(503);
-    const body = await response!.json();
+    const v = await fault.maybeInject(req("/api/x"));
+    expect(v?.kind).toBe("synthetic");
+    const response = (v as { kind: "synthetic"; response: Response }).response;
+    expect(response.status).toBe(503);
+    const body = await response.json();
     expect(body.error).toMatch(/chaos/);
     expect(body.path).toBe("/api/x");
   });
 
   it("honours status5xxCode override", async () => {
     const fault = serverFaults({ status5xxRate: 1, status5xxCode: 500 });
-    const response = await fault.maybeInject(req("/api/x"));
-    expect(response!.status).toBe(500);
+    const v = await fault.maybeInject(req("/api/x"));
+    expect((v as { kind: "synthetic"; response: Response }).response.status).toBe(500);
   });
 
   it("filters by pathPattern (RegExp form)", async () => {
@@ -83,14 +84,14 @@ describe("serverFaults", () => {
       expect(resolved).toBe(false);
       await vi.advanceTimersByTimeAsync(2);
       const result = await promise;
-      expect(result).toBeNull();
+      expect(result?.kind).toBe("annotate");
     });
 
     it("returns null after latency (handler runs after delay)", async () => {
       const fault = serverFaults({ latencyRate: 1, latencyMs: 50 });
       const promise = fault.maybeInject(req("/api/x"));
       await vi.advanceTimersByTimeAsync(50);
-      expect(await promise).toBeNull();
+      expect((await promise)?.kind).toBe("annotate");
     });
   });
 
