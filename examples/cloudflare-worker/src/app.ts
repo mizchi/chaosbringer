@@ -8,6 +8,14 @@
  *
  * Storage is an in-memory Map for this example. Real apps would use KV /
  * D1 / Durable Objects.
+ *
+ * The app + chaos middleware are constructed once per isolate and cached.
+ * If we re-built per request, every request would see the SAME first roll
+ * of a fresh seeded RNG (because `serverFaults({ seed })` is constructed
+ * each time), and faults would fire either always or never depending on
+ * that one roll. Module-level caching lets the RNG advance across requests
+ * within an isolate, which is the only context where reproducibility is
+ * meaningful anyway.
  */
 
 import { Hono } from "hono";
@@ -25,7 +33,28 @@ interface Todo {
 const TODOS = new Map<string, Todo>();
 let nextId = 1;
 
+let cachedApp: Hono<{ Bindings: Env }> | null = null;
+let cachedEnvKey: string | null = null;
+
+function envKey(env: Env): string {
+  return [
+    env.DEPLOY_ENV ?? "",
+    env.CHAOS_5XX_RATE ?? "",
+    env.CHAOS_LATENCY_RATE ?? "",
+    env.CHAOS_LATENCY_MS ?? "",
+    env.CHAOS_SEED ?? "",
+  ].join("|");
+}
+
 export function createApp(env: Env) {
+  const key = envKey(env);
+  if (cachedApp && cachedEnvKey === key) return cachedApp;
+  cachedEnvKey = key;
+  cachedApp = buildApp(env);
+  return cachedApp;
+}
+
+function buildApp(env: Env): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   // Mount server-faults BEFORE the routes so it can short-circuit before the

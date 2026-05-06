@@ -5,7 +5,9 @@
   "description": "Hono on Cloudflare Worker + @mizchi/server-faults + chaosbringer (remote mode)",
   "scripts": {
     "dev": "wrangler dev",
-    "chaos": "tsx chaos/run.ts"
+    "chaos": "tsx chaos/run.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node test.mjs"
   },
   "dependencies": {
     "@mizchi/server-faults": "workspace:*",

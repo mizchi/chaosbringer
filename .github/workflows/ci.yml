@@ -8,7 +8,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -45,3 +45,16 @@ jobs:
 
       - name: Test
         run: pnpm -F chaosbringer test
+
+      - name: Typecheck examples
+        run: |
+          pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" typecheck
+          pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
+
+      - name: Test examples — cloudflare-worker (boots wrangler + runs chaos)
+        run: pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" test
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
+      - name: Test examples — playwright-test
+        run: pnpm -F "@mizchi/chaosbringer-example-playwright-test" test

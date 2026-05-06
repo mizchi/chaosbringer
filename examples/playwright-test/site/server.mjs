@@ -24,6 +24,14 @@ const PAGES = {
 };
 
 const server = createServer((req, res) => {
+  // Browsers auto-request /favicon.ico; chaosbringer treats 404s on those
+  // as `requestfailed` errors. Returning 204 No Content keeps the home-
+  // page test free of incidental noise.
+  if (req.url === "/favicon.ico") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   const body = PAGES[req.url ?? "/"];
   if (!body) {
     res.writeHead(404, { "content-type": "text/plain" });
