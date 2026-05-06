@@ -1187,6 +1187,8 @@ export class ChaosCrawler {
         const reqHeaders = await request.allHeaders();
         const existingTp = reqHeaders["traceparent"];
         if (existingTp) {
+          // Honour upstream propagation; record the correlation id on the
+          // current action regardless of whether the user supplied a hook.
           const parts = parseTraceparent(existingTp);
           if (parts?.traceId) this.recordTraceId(parts.traceId);
           if (traceparentHook) {
