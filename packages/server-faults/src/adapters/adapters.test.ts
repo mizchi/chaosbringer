@@ -227,6 +227,69 @@ describe("fastifyPlugin", () => {
     await registered!(req, reply);
     expect(reply._code).toBe(0);
   });
+
+  it("stamps metadata headers via reply.header() for latency annotate verdict", async () => {
+    const plugin = fastifyPlugin({ latencyRate: 1, latencyMs: 0, metadataHeader: true });
+    let registered: ((req: unknown, reply: unknown) => Promise<void>) | null = null;
+    const fastify = {
+      addHook(_: "onRequest", h: (req: unknown, reply: unknown) => Promise<void>) {
+        registered = h;
+      },
+    };
+    await plugin(fastify);
+    const req = { method: "GET", url: "/api/x", headers: { host: "test.local" } };
+    const reply = {
+      _headers: {} as Record<string, string>,
+      code() { return this; },
+      header(k: string, v: string) { this._headers[k] = v; return this; },
+      send() { return undefined; },
+    };
+    await registered!(req, reply);
+    expect(reply._headers["x-chaos-fault-kind"]).toBe("latency");
+  });
+
+  it("does not stamp any chaos headers when metadataHeader is off", async () => {
+    const plugin = fastifyPlugin({ latencyRate: 1, latencyMs: 0 });
+    let registered: ((req: unknown, reply: unknown) => Promise<void>) | null = null;
+    const fastify = {
+      addHook(_: "onRequest", h: (req: unknown, reply: unknown) => Promise<void>) {
+        registered = h;
+      },
+    };
+    await plugin(fastify);
+    const req = { method: "GET", url: "/api/x", headers: {} };
+    const reply = {
+      _headers: {} as Record<string, string>,
+      code() { return this; },
+      header(k: string, v: string) { this._headers[k] = v; return this; },
+      send() { return undefined; },
+    };
+    await registered!(req, reply);
+    expect(Object.keys(reply._headers).length).toBe(0);
+  });
+
+  it("attaches metadata headers to synthetic 5xx reply", async () => {
+    const plugin = fastifyPlugin({ status5xxRate: 1, metadataHeader: true });
+    let registered: ((req: unknown, reply: unknown) => Promise<void>) | null = null;
+    const fastify = {
+      addHook(_: "onRequest", h: (req: unknown, reply: unknown) => Promise<void>) {
+        registered = h;
+      },
+    };
+    await plugin(fastify);
+    const req = { method: "GET", url: "/api/x", headers: { host: "test.local" } };
+    const reply = {
+      _code: 0,
+      _headers: {} as Record<string, string>,
+      _body: undefined as unknown,
+      code(c: number) { this._code = c; return this; },
+      header(k: string, v: string) { this._headers[k] = v; return this; },
+      send(body: unknown) { this._body = body; return body; },
+    };
+    await registered!(req, reply);
+    expect(reply._code).toBe(503);
+    expect(reply._headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
 });
 
 describe("koaMiddleware", () => {

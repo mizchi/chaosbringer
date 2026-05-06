@@ -6,7 +6,12 @@
  * synthetic 5xx (or sleep for latency) and let normal flow continue.
  */
 
-import { serverFaults, type ServerFaultConfig } from "../server-faults.js";
+import {
+  attrsToHeaderEntries,
+  resolveMetadataPrefix,
+  serverFaults,
+  type ServerFaultConfig,
+} from "../server-faults.js";
 
 interface FastifyLikeRequest {
   method: string;
@@ -45,15 +50,33 @@ function toWebRequest(req: FastifyLikeRequest): Request {
 
 export function fastifyPlugin(cfg: ServerFaultConfig) {
   const fault = serverFaults(cfg);
+  const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async function plugin(fastify: FastifyLikeInstance) {
     fastify.addHook("onRequest", async (req, reply) => {
-      const response = await fault.maybeInject(toWebRequest(req));
-      if (!response) return;
-      reply.code(response.status);
-      response.headers.forEach((value, key) => {
-        reply.header(key, value);
-      });
-      await reply.send(await response.json());
+      const verdict = await fault.maybeInject(toWebRequest(req));
+      if (!verdict) return;
+      if (verdict.kind === "synthetic") {
+        reply.code(verdict.response.status);
+        verdict.response.headers.forEach((value, key) => {
+          reply.header(key, value);
+        });
+        await reply.send(await verdict.response.json());
+        return;
+      }
+      if (verdict.kind === "annotate") {
+        // Stamp headers; the real route runs after this hook returns. If a
+        // downstream handler later returns a Response with frozen headers,
+        // any subsequent `reply.header(...)` would throw — that is the
+        // documented contract.
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            reply.header(name, value);
+          }
+        }
+        return;
+      }
+      const _exhaustive: never = verdict;
+      void _exhaustive;
     });
   };
 }
