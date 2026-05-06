@@ -215,6 +215,36 @@ Available profiles (all return `FaultRule[]`):
 
 Each rule is named (`profile:behavior`), so per-profile counters land in `report.faultInjections` without extra wiring. Override knobs by passing options or compose `faults.*` directly when a profile doesn't fit.
 
+## Trace correlation (W3C traceparent)
+
+When the server is OTel-instrumented, it's useful to find the server-side trace that corresponds to a specific browser-driven action. Enable `traceparent: true` and chaosbringer will inject a fresh W3C `traceparent` header onto every request the browser sends:
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  traceparent: true,
+});
+```
+
+To capture the generated trace IDs in your own report, pass an `onInject` hook:
+
+```ts
+const traceIds: Array<{ url: string; traceId: string }> = [];
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  traceparent: {
+    onInject: ({ url, traceId, existing }) => {
+      // `existing` is true when the request already carried a traceparent
+      // (e.g. set by an outer middleware) — chaosbringer never overwrites it.
+      traceIds.push({ url, traceId });
+    },
+  },
+});
+```
+
+The injected header is the standard `00-{trace-id}-{span-id}-01` format. Existing `traceparent` headers are honoured (passed through unchanged), so explicit upstream propagation always wins. The fault-injection layer also keeps the header attached, so a fault response and the matching server-side trace share the same correlation id.
+
 ## Pre-run setup hook
 
 State-driven apps (CRUD, anything with a list) often start empty — the BFS frontier dries up at `pages=2` and `maxPages` becomes meaningless. `chaos({ setup })` runs **before** the crawler starts, in a disposable browser context, and gives you a `page` to seed backend state.

@@ -4,6 +4,7 @@
 
 import type { Browser, BrowserContext, Page, Route } from "playwright";
 import { chromium, devices } from "playwright";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -114,6 +115,7 @@ const DEFAULT_OPTIONS: Required<
     | "failureArtifacts"
     | "coverageFeedback"
     | "advisor"
+    | "traceparent"
   >
 > = {
   maxPages: 50,
@@ -165,6 +167,23 @@ export const COMMON_IGNORE_PATTERNS = [
   // Generic error message from blocked resources
   "Failed to load resource: net::ERR_FAILED$",
 ];
+
+/**
+ * Parse a W3C traceparent header. Returns `null` if the value is malformed.
+ * Used by the route handler when honouring an incoming traceparent so we
+ * can still pass `traceId` / `spanId` to the consumer hook.
+ *
+ * Format: `00-{trace-id-32hex}-{span-id-16hex}-{flags-2hex}`.
+ *
+ * Exported for testing — consumers should not parse traceparents
+ * themselves.
+ */
+export function parseTraceparent(value: string): { traceId: string; spanId: string } | null {
+  // version-traceId-spanId-flags
+  const m = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(value.trim());
+  if (!m) return null;
+  return { traceId: m[2].toLowerCase(), spanId: m[3].toLowerCase() };
+}
 
 function describeTarget(t: ActionTarget): string {
   const parts: string[] = [];
@@ -706,7 +725,11 @@ export class ChaosCrawler {
     this.baseOrigin = new URL(url).origin;
 
     // Set up external navigation blocking and/or fault injection routing.
-    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
+    if (
+      this.options.blockExternalNavigation ||
+      this.compiledFaultRules.length > 0 ||
+      this.options.traceparent
+    ) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -1117,6 +1140,9 @@ export class ChaosCrawler {
   private async setupNavigationBlocking(page: Page): Promise<void> {
     const blockExternal = this.options.blockExternalNavigation;
     const rules = this.compiledFaultRules;
+    const traceparentEnabled = this.options.traceparent !== undefined && this.options.traceparent !== false;
+    const traceparentHook =
+      typeof this.options.traceparent === "object" ? this.options.traceparent.onInject : undefined;
 
     // Install a single route handler that first considers fault injection,
     // then falls back to external-navigation blocking, then continues.
@@ -1124,6 +1150,42 @@ export class ChaosCrawler {
       const request = route.request();
       const url = request.url();
       const method = request.method().toUpperCase();
+
+      // Decide on the traceparent header up front so it's attached to every
+      // path through this handler (fault response, blocked, fallback).
+      let outgoingHeaders: Record<string, string> | null = null;
+      if (traceparentEnabled) {
+        const reqHeaders = await request.allHeaders();
+        const existingTp = reqHeaders["traceparent"];
+        if (existingTp) {
+          // Honour explicit propagation upstream — but still surface it to
+          // the consumer hook so the report can record the correlation id.
+          if (traceparentHook) {
+            const parts = parseTraceparent(existingTp);
+            traceparentHook({
+              url,
+              method,
+              traceparent: existingTp,
+              traceId: parts?.traceId ?? "",
+              spanId: parts?.spanId ?? "",
+              existing: true,
+            });
+          }
+        } else {
+          const traceId = randomBytes(16).toString("hex"); // 32 hex chars
+          const spanId = randomBytes(8).toString("hex"); // 16 hex chars
+          const traceparent = `00-${traceId}-${spanId}-01`;
+          outgoingHeaders = { ...reqHeaders, traceparent };
+          traceparentHook?.({
+            url,
+            method,
+            traceparent,
+            traceId,
+            spanId,
+            existing: false,
+          });
+        }
+      }
 
       // 1. Fault injection has priority so tests can exercise backends that
       // would otherwise be allowed through.
@@ -1156,7 +1218,13 @@ export class ChaosCrawler {
 
       // route.fallback() (not continue) so context-level routes — notably
       // routeFromHAR for replay — still get a chance to serve this request.
-      await route.fallback();
+      // When traceparent injection is on, override headers; otherwise let the
+      // request through unchanged.
+      if (outgoingHeaders) {
+        await route.fallback({ headers: outgoingHeaders });
+      } else {
+        await route.fallback();
+      }
     });
   }
 
@@ -1191,7 +1259,11 @@ export class ChaosCrawler {
       }
     }
 
-    if (this.options.blockExternalNavigation || this.compiledFaultRules.length > 0) {
+    if (
+      this.options.blockExternalNavigation ||
+      this.compiledFaultRules.length > 0 ||
+      this.options.traceparent
+    ) {
       await this.setupNavigationBlocking(page);
     }
 
