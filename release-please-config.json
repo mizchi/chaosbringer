@@ -2,9 +2,30 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "release-type": "node",
   "include-v-in-tag": true,
+  "separate-pull-requests": true,
   "packages": {
     "packages/chaosbringer": {
       "package-name": "chaosbringer",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "packages/server-faults": {
+      "package-name": "@mizchi/server-faults",
+      "component": "server-faults",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "packages/playwright-faults": {
+      "package-name": "@mizchi/playwright-faults",
+      "component": "playwright-faults",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "packages/playwright-v8-coverage": {
+      "package-name": "@mizchi/playwright-v8-coverage",
+      "component": "playwright-v8-coverage",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "packages/cf-faults": {
+      "package-name": "@mizchi/cf-faults",
+      "component": "cf-faults",
       "changelog-path": "CHANGELOG.md"
     }
   }
