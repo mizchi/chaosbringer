@@ -16,6 +16,7 @@ export {
   type LifecycleHelperOptions,
   type RuntimeHelperOptions,
 } from "./faults.js";
+export { profiles } from "./profiles.js";
 export {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
