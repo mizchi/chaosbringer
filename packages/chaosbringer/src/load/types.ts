@@ -112,6 +112,11 @@ export interface ScenarioLoadOptions {
 
   /** Hard cap on iterations per worker (overrides duration). */
   maxIterationsPerWorker?: number;
+  /**
+   * Bucket width for the timeline in `LoadReport`. Default: 1000ms.
+   * Smaller buckets are finer-grained but blow up the report size linearly.
+   */
+  timelineBucketMs?: number;
 }
 
 // -------- Report shape --------
@@ -163,6 +168,20 @@ export interface WorkerSummary {
   lastIterationAt: number | null;
 }
 
+/**
+ * One bucket of the per-second timeline. Buckets are aligned to the
+ * run's start time, so `tMs` is the offset in ms from `LoadReport.startTime`
+ * to the bucket's beginning. Buckets with zero activity are included
+ * (so consumers see gaps as gaps, not as missing data).
+ */
+export interface TimelineBucket {
+  tMs: number;
+  iterations: number;
+  iterationFailures: number;
+  networkRequests: number;
+  networkErrors: number;
+}
+
 export interface LoadReport {
   baseUrl: string;
   startTime: number;
@@ -183,6 +202,13 @@ export interface LoadReport {
   scenarios: ScenarioReport[];
   workers: WorkerSummary[];
   endpoints: EndpointReport[];
+  /**
+   * Per-bucket timeline of iteration / error rates. Bucket width is
+   * `timelineBucketMs` from the runner options (default 1000ms). Useful
+   * for correlating chaos with throughput dips — `chaos starts at t=30s,
+   * throughput drops in bucket 30 → recovers at bucket 45`.
+   */
+  timeline: TimelineBucket[];
   /** Errors collected per worker, capped to avoid runaway reports. */
   errors: ReadonlyArray<{
     workerIndex: number;

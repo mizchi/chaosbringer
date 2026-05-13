@@ -64,7 +64,7 @@ The full feature list, CLI reference, and report-shape walkthrough live in [`pac
 Common patterns extracted from real consumer code (rather than rediscovered every time):
 
 - [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
-- [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint.
+- [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
 
@@ -72,10 +72,11 @@ More recipes (auth via storageState, SPA-routing tips, Playwright Test integrati
 
 ## Examples
 
-Two runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs both end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
+Runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs them end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
 
 - **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above.
 - **[`examples/playwright-test/`](examples/playwright-test/)** — chaosbringer inside an `@playwright/test` suite via the `chaos` fixture. Both `chaosTest` and `withChaos()` extension patterns in one file.
+- **[`examples/load-with-chaos/`](examples/load-with-chaos/)** — `scenarioLoad` running 5 virtual users through a shopping journey while 10% of `/api/*` is forced to 500. Boots its own in-process HTTP server. Shows per-step latency rollups, the per-second timeline sparkline, and fault-rule injection stats co-existing in one report.
 
 ## Internal design docs
 

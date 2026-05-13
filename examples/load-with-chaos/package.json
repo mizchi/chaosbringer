@@ -1,0 +1,17 @@
+{
+  "name": "@mizchi/chaosbringer-example-load-with-chaos",
+  "private": true,
+  "type": "module",
+  "description": "scenarioLoad: 5 virtual users loop a shopping journey while 10% of /api/* responses are forced to 500. Boots its own server, runs, prints report.",
+  "scripts": {
+    "start": "tsx run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.52.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

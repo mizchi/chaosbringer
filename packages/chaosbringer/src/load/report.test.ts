@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildLoadReport, formatLoadReport } from "./report.js";
+import { buildLoadReport, formatLoadReport, sparkline } from "./report.js";
 import type { Scenario, ScenarioSpec } from "./types.js";
 import type { WorkerSamples } from "./worker.js";
 
@@ -115,6 +115,75 @@ describe("buildLoadReport", () => {
     expect(report.workers[1]!.iterationFailures).toBe(1);
   });
 
+  it("produces a per-second timeline aligned to start time", () => {
+    const start = 10_000;
+    const sample: WorkerSamples = {
+      steps: [],
+      iterations: [
+        { scenarioName: "x", durationMs: 100, success: true, iteration: 0, timestamp: start + 500 },
+        { scenarioName: "x", durationMs: 100, success: true, iteration: 1, timestamp: start + 1500 },
+        { scenarioName: "x", durationMs: 100, success: false, iteration: 2, timestamp: start + 1700 },
+        { scenarioName: "x", durationMs: 100, success: true, iteration: 3, timestamp: start + 4500 },
+        // Out-of-window — should be dropped.
+        { scenarioName: "x", durationMs: 100, success: true, iteration: 4, timestamp: start + 9999 },
+      ],
+      network: [
+        { key: "/x", url: "https://x/x", status: 500, durationMs: 10, timestamp: start + 1200 },
+      ],
+      errors: [],
+    };
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: start,
+      endTime: start + 5000,
+      durationMs: 5000,
+      plannedDurationMs: 5000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec: { scenario, workers: 1 } }],
+      samples: [sample],
+    });
+    expect(report.timeline.length).toBe(5);
+    expect(report.timeline[0]!.iterations).toBe(1);
+    expect(report.timeline[1]!.iterations).toBe(2);
+    expect(report.timeline[1]!.iterationFailures).toBe(1);
+    expect(report.timeline[1]!.networkRequests).toBe(1);
+    expect(report.timeline[1]!.networkErrors).toBe(1);
+    expect(report.timeline[2]!.iterations).toBe(0);
+    expect(report.timeline[4]!.iterations).toBe(1);
+  });
+
+  it("respects a custom bucket width", () => {
+    const start = 10_000;
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: start,
+      endTime: start + 2000,
+      durationMs: 2000,
+      plannedDurationMs: 2000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec: { scenario, workers: 1 } }],
+      samples: [{ steps: [], iterations: [], network: [], errors: [] }],
+      timelineBucketMs: 500,
+    });
+    expect(report.timeline.length).toBe(4);
+    expect(report.timeline.map((b) => b.tMs)).toEqual([0, 500, 1000, 1500]);
+  });
+
+  it("disables the timeline when bucketMs <= 0", () => {
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: 0,
+      endTime: 1000,
+      durationMs: 1000,
+      plannedDurationMs: 1000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec: { scenario, workers: 1 } }],
+      samples: [{ steps: [], iterations: [], network: [], errors: [] }],
+      timelineBucketMs: 0,
+    });
+    expect(report.timeline).toEqual([]);
+  });
+
   it("renders a non-empty ASCII summary", () => {
     const report = buildLoadReport({
       baseUrl: "https://x",
@@ -130,5 +199,23 @@ describe("buildLoadReport", () => {
     expect(text).toContain("Load run: https://x");
     expect(text).toContain("Scenario: checkout");
     expect(text).toContain("Top endpoints:");
+    expect(text).toContain("Timeline (bucket=");
+  });
+});
+
+describe("sparkline", () => {
+  it("returns '' for empty input", () => {
+    expect(sparkline([])).toBe("");
+  });
+
+  it("returns the lowest character when all zero", () => {
+    expect(sparkline([0, 0, 0])).toBe("▁▁▁");
+  });
+
+  it("scales linearly so max → █ and 0 → ▁", () => {
+    const s = sparkline([0, 5, 10]);
+    expect(s.length).toBe(3);
+    expect(s[0]).toBe("▁");
+    expect(s[s.length - 1]).toBe("█");
   });
 });

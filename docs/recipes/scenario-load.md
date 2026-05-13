@@ -113,6 +113,7 @@ scenarios: [
 | `scenarios[].steps[].latency.{p50Ms,p95Ms,p99Ms}` | Per-step percentiles across every worker × iteration. |
 | `endpoints[].latency` | Same shape, keyed by URL pattern (numeric ids → `:id`, UUIDs → `:uuid`). |
 | `workers[]` | Per-worker iteration counts (debugging). |
+| `timeline[]` | Per-bucket counts (`iterations`, `iterationFailures`, `networkRequests`, `networkErrors`). Default bucket: 1000ms. Configure with `timelineBucketMs`. `formatLoadReport` renders this as a sparkline. |
 | `errors[]` | Capped flat error list (200 max) — first errors win. |
 
 ## Recipe: chaos + scenario load
@@ -158,9 +159,40 @@ await scenarioLoad({
 });
 ```
 
+## Recipe: correlating chaos with throughput dips
+
+`report.timeline` is bucketed per-second by default. Combine with chaos
+that fires at a known wall-clock to see the impact directly:
+
+```ts
+const { report } = await scenarioLoad({
+  baseUrl: "...",
+  duration: "60s",
+  timelineBucketMs: 1000,
+  scenarios: [{ scenario, workers: 5 }],
+  faultInjection: [
+    faults.status(500, { urlPattern: /\/api\/checkout/, probability: 0.5 }),
+  ],
+});
+
+// Find the worst bucket.
+const worst = report.timeline.reduce(
+  (a, b) => (b.iterationFailures > a.iterationFailures ? b : a),
+);
+console.log(`Worst bucket: t=${worst.tMs}ms, fail=${worst.iterationFailures}`);
+```
+
+The ASCII formatter renders this as a sparkline so you can eyeball the run:
+
+```
+Timeline (bucket=1.0s):
+  iterations  ▁▃▆▇█▇▆▃▁▁▁▃▆▇█
+  errors      ▁▁▁▁▁█▇▆▃▁▁▁▁▁▁
+  peak: 8/bucket
+```
+
 ## Limits / non-goals
 
 - **No SLO enforcement.** Inspect `report.scenarios[].steps[].latency` yourself if you want pass/fail on latency.
-- **No time-windowed RPS.** Only run-totals — for time-series, capture per-iteration timestamps and aggregate yourself.
 - **No `lifecycleFaults`.** They are tied to crawler page-lifecycle stages which don't map to load worker iteration boundaries. Use `faultInjection` (network) and `runtimeFaults` (in-page JS) instead.
 - **No graceful in-flight cancellation.** Workers check the deadline at step boundaries, so a long step at the end of the run can overrun by up to its own duration.

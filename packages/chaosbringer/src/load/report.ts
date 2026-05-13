@@ -17,10 +17,12 @@ import type {
   ScenarioReport,
   ScenarioSpec,
   StepReport,
+  TimelineBucket,
   WorkerSummary,
 } from "./types.js";
 
 const MAX_ERRORS_IN_REPORT = 200;
+const DEFAULT_TIMELINE_BUCKET_MS = 1000;
 
 export interface BuildLoadReportInput {
   baseUrl: string;
@@ -31,6 +33,8 @@ export interface BuildLoadReportInput {
   rampUpMs: number;
   planned: ReadonlyArray<{ workerIndex: number; spec: ScenarioSpec }>;
   samples: ReadonlyArray<WorkerSamples>;
+  /** Default 1000ms. Values <= 0 disable the timeline (returned empty). */
+  timelineBucketMs?: number;
 }
 
 export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
@@ -164,6 +168,13 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     for (const st of s.steps) if (st.latency.count === 0) st.latency = emptyLatencyStats();
   }
 
+  const timeline = buildTimeline({
+    startTime: input.startTime,
+    durationMs: input.durationMs,
+    bucketMs: input.timelineBucketMs ?? DEFAULT_TIMELINE_BUCKET_MS,
+    samples: input.samples,
+  });
+
   return {
     baseUrl: input.baseUrl,
     startTime: input.startTime,
@@ -178,8 +189,61 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     scenarios,
     workers,
     endpoints,
+    timeline,
     errors,
   };
+}
+
+interface BuildTimelineInput {
+  startTime: number;
+  durationMs: number;
+  bucketMs: number;
+  samples: ReadonlyArray<WorkerSamples>;
+}
+
+/**
+ * Bucket iterations + network events by `timestamp - startTime`.
+ * Returns one zero-filled bucket per `bucketMs` from t=0 up to (but
+ * not past) `durationMs`. Events landing outside the window are
+ * dropped silently — they're rare (timer skew) and the alternative
+ * (allowing trailing buckets) makes the consumer reason about a
+ * variable-length axis.
+ */
+function buildTimeline(input: BuildTimelineInput): TimelineBucket[] {
+  if (input.bucketMs <= 0 || input.durationMs <= 0) return [];
+  const bucketCount = Math.max(1, Math.ceil(input.durationMs / input.bucketMs));
+  const buckets: TimelineBucket[] = [];
+  for (let i = 0; i < bucketCount; i++) {
+    buckets.push({
+      tMs: i * input.bucketMs,
+      iterations: 0,
+      iterationFailures: 0,
+      networkRequests: 0,
+      networkErrors: 0,
+    });
+  }
+  const indexFor = (timestamp: number): number | null => {
+    const offset = timestamp - input.startTime;
+    if (offset < 0) return null;
+    const idx = Math.floor(offset / input.bucketMs);
+    if (idx >= bucketCount) return null;
+    return idx;
+  };
+  for (const s of input.samples) {
+    for (const it of s.iterations) {
+      const idx = indexFor(it.timestamp);
+      if (idx === null) continue;
+      buckets[idx]!.iterations += 1;
+      if (!it.success) buckets[idx]!.iterationFailures += 1;
+    }
+    for (const n of s.network) {
+      const idx = indexFor(n.timestamp);
+      if (idx === null) continue;
+      buckets[idx]!.networkRequests += 1;
+      if (isNetworkError(n)) buckets[idx]!.networkErrors += 1;
+    }
+  }
+  return buckets;
 }
 
 function isNetworkError(n: NetworkSample): boolean {
@@ -221,6 +285,14 @@ export function formatLoadReport(report: LoadReport): string {
       );
     }
   }
+  if (report.timeline.length > 0) {
+    lines.push("");
+    lines.push(`Timeline (bucket=${ms(timelineBucketMs(report))}):`);
+    lines.push(`  iterations  ${sparkline(report.timeline.map((b) => b.iterations))}`);
+    lines.push(`  errors      ${sparkline(report.timeline.map((b) => b.iterationFailures + b.networkErrors))}`);
+    const maxIter = Math.max(...report.timeline.map((b) => b.iterations));
+    lines.push(`  peak: ${maxIter}/bucket`);
+  }
   if (report.errors.length > 0) {
     lines.push("");
     lines.push("First errors:");
@@ -241,4 +313,34 @@ function ms(n: number): string {
 
 function pad(n: number, width: number): string {
   return String(n).padStart(width);
+}
+
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/**
+ * Map an array of counts to a unicode sparkline. Empty / all-zero
+ * input → an empty string. Scales linearly so 0 always maps to "▁"
+ * and the max maps to "█".
+ */
+export function sparkline(values: ReadonlyArray<number>): string {
+  if (values.length === 0) return "";
+  const max = Math.max(...values);
+  if (max === 0) return SPARK_CHARS[0]!.repeat(values.length);
+  const span = SPARK_CHARS.length - 1;
+  return values
+    .map((v) => {
+      const idx = Math.round((v / max) * span);
+      return SPARK_CHARS[idx]!;
+    })
+    .join("");
+}
+
+function timelineBucketMs(report: LoadReport): number {
+  // Reverse-engineer bucket width from the timeline. Two-bucket runs
+  // expose it directly; a single bucket means the whole run fit in
+  // one window, so report the full run duration as the bucket.
+  if (report.timeline.length >= 2) {
+    return report.timeline[1]!.tMs - report.timeline[0]!.tMs;
+  }
+  return report.durationMs;
 }

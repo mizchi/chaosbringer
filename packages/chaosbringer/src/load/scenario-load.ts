@@ -150,6 +150,7 @@ export async function scenarioLoad(
       rampUpMs,
       planned,
       samples,
+      timelineBucketMs: options.timelineBucketMs,
     });
     const faultStats = faultStatsFrom(compiledFaultRules);
     // Surface runtime fault stats in a side channel — runtime faults

@@ -140,6 +140,7 @@ export {
   pickThinkTimeMs,
   quantile,
   scenarioLoad,
+  sparkline,
   type DurationInput,
   type EndpointReport,
   type LatencyStats,
@@ -154,6 +155,7 @@ export {
   type ScenarioStep,
   type StepReport,
   type ThinkTime,
+  type TimelineBucket,
   type WorkerSummary,
 } from "./load/index.js";
 export {

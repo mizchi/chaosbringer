@@ -7,7 +7,7 @@
  */
 export { scenarioLoad, type ScenarioLoadResult } from "./scenario-load.js";
 export { defineScenario, pickThinkTimeMs } from "./scenario.js";
-export { buildLoadReport, formatLoadReport } from "./report.js";
+export { buildLoadReport, formatLoadReport, sparkline } from "./report.js";
 export { latencyStats, parseDurationMs, emptyLatencyStats, quantile } from "./histogram.js";
 export { endpointKey, NetworkSampler, type NetworkSample } from "./sampler.js";
 export type {
@@ -23,5 +23,6 @@ export type {
   ScenarioStep,
   StepReport,
   ThinkTime,
+  TimelineBucket,
   WorkerSummary,
 } from "./types.js";
