@@ -71,6 +71,19 @@ export type DriverPick =
       source?: string;
     }
   | {
+      /**
+       * The driver wants to perform a sequence of actions itself (e.g. fill a
+       * whole form). `perform` is called with the page; whatever
+       * `ActionResult` it returns is recorded as the step's result. Use this
+       * for multi-step operations that cannot be expressed as picking one
+       * candidate. The crawler still counts this as one chaos action.
+       */
+      kind: "custom";
+      perform: (page: import("playwright").Page) => Promise<ActionResult>;
+      reasoning?: string;
+      source?: string;
+    }
+  | {
       /** Skip this step — the crawler moves on. Used by samplers / budgets. */
       kind: "skip";
     };

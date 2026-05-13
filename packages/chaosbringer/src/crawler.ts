@@ -2201,28 +2201,51 @@ export class ChaosCrawler {
         continue;
       }
 
-      const selectedTarget = targets[pick.index];
-      if (!selectedTarget) {
-        this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
-        continue;
-      }
-
-      const placeholder: ActionResult = {
-        type: "click",
-        target: selectedTarget.name ?? selectedTarget.selector,
-        selector: selectedTarget.selector,
-        success: false,
-        timestamp: Date.now(),
-      };
-      this.currentAction = placeholder;
-
-      const result = await this.performActionOnTarget(page, selectedTarget, url);
-      if (result === null) {
-        this.logger.debug("driver_action_skipped", {
-          target: selectedTarget.name || selectedTarget.selector,
-          reason: "not visible",
-        });
-        continue;
+      let result: ActionResult | null;
+      let placeholder: ActionResult;
+      let selectorForCoverage: string | null = null;
+      if (pick.kind === "custom") {
+        placeholder = {
+          type: "click",
+          target: pick.source ?? driver.name,
+          success: false,
+          timestamp: Date.now(),
+        };
+        this.currentAction = placeholder;
+        try {
+          result = await pick.perform(page);
+        } catch (err) {
+          result = {
+            type: "click",
+            target: pick.source ?? driver.name,
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+            timestamp: Date.now(),
+          };
+        }
+      } else {
+        const selectedTarget = targets[pick.index];
+        if (!selectedTarget) {
+          this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
+          continue;
+        }
+        selectorForCoverage = selectedTarget.selector;
+        placeholder = {
+          type: "click",
+          target: selectedTarget.name ?? selectedTarget.selector,
+          selector: selectedTarget.selector,
+          success: false,
+          timestamp: Date.now(),
+        };
+        this.currentAction = placeholder;
+        result = await this.performActionOnTarget(page, selectedTarget, url);
+        if (result === null) {
+          this.logger.debug("driver_action_skipped", {
+            target: selectedTarget.name || selectedTarget.selector,
+            reason: "not visible",
+          });
+          continue;
+        }
       }
 
       if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
@@ -2266,7 +2289,9 @@ export class ChaosCrawler {
       // them.
       pendingViolations.length = 0;
 
-      await this.attributeActionCoverage(url, selectedTarget.selector);
+      if (selectorForCoverage !== null) {
+        await this.attributeActionCoverage(url, selectorForCoverage);
+      }
       await this.applyLifecycleStage("betweenActions", page, url);
       await page.waitForTimeout(100);
     }
