@@ -64,6 +64,7 @@ The full feature list, CLI reference, and report-shape walkthrough live in [`pac
 Common patterns extracted from real consumer code (rather than rediscovered every time):
 
 - [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
+- [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
 
