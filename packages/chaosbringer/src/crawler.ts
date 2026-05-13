@@ -95,6 +95,15 @@ import { consultAdvisor } from "./advisor/consult.js";
 import { defaultTriggerPolicy, type TriggerPolicy } from "./advisor/trigger.js";
 import { REDACTED_REASONING, type ActionAdvisor, type AdvisorCandidate } from "./advisor/types.js";
 import type { AdvisorPick, ReplayFidelity } from "./types.js";
+import type {
+  Driver,
+  DriverCandidate,
+  DriverHistoryEntry,
+  DriverInvariantViolation,
+  DriverPick,
+  DriverStep,
+  ScreenshotMode,
+} from "./drivers/types.js";
 
 // Options that are opt-in with no meaningful default (HAR, storage state,
 // perf budget, trace, device/network) are carved out of the Required<>
@@ -118,6 +127,8 @@ const DEFAULT_OPTIONS: Required<
     | "advisor"
     | "traceparent"
     | "server"
+    | "driver"
+    | "driverGoal"
   >
 > = {
   maxPages: 50,
@@ -185,6 +196,16 @@ export function parseTraceparent(value: string): { traceId: string; spanId: stri
   const m = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(value.trim());
   if (!m) return null;
   return { traceId: m[2].toLowerCase(), spanId: m[3].toLowerCase() };
+}
+
+/** Structural type-guard for the opaque `driver` option. */
+function isDriver(v: unknown): v is Driver {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as { name?: unknown }).name === "string" &&
+    typeof (v as { selectAction?: unknown }).selectAction === "function"
+  );
 }
 
 function describeTarget(t: ActionTarget): string {
@@ -314,6 +335,14 @@ export class ChaosCrawler {
    * this action's `traceIds[]`.
    */
   private currentAction: ActionResult | null = null;
+  /** Resolved driver (null when caller did not pass `options.driver`). */
+  private readonly driver: Driver | null;
+  /**
+   * Buffer of invariant violations observed since the driver's previous
+   * step. Drained at the top of every driver-loop iteration. Empty when
+   * no driver is configured.
+   */
+  private driverPendingViolations: DriverInvariantViolation[] = [];
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
@@ -341,6 +370,8 @@ export class ChaosCrawler {
         topN: options.coverageFeedback.topN ?? 20,
       };
     }
+
+    this.driver = isDriver(options.driver) ? options.driver : null;
 
     if (options.advisor) {
       const defaults = defaultTriggerPolicy();
@@ -463,6 +494,9 @@ export class ChaosCrawler {
         this.events.onError?.(error);
         this.logger.logPageError(error);
         this.advisorRuntime?.stall.recordInvariantViolation();
+        if (this.driver !== null) {
+          this.driverPendingViolations.push({ name: inv.name, message: failureReason });
+        }
       }
     }
   }
@@ -2008,6 +2042,10 @@ export class ChaosCrawler {
     this.logger.debug("action_targets", { count: targets.length, url });
     if (targets.length === 0) return;
 
+    if (this.driver !== null) {
+      return this.performDriverActions(page, url, targets);
+    }
+
     let actionsPerformed = 0;
     let attempts = 0;
     const maxAttempts = this.options.maxActionsPerPage * 3; // Allow retries for skipped elements
@@ -2080,6 +2118,160 @@ export class ChaosCrawler {
       // Small delay between actions
       await page.waitForTimeout(100);
     }
+  }
+
+  /**
+   * Driver-based action loop. Replaces the weighted-random path when the
+   * caller supplied `options.driver`. The crawler still owns target
+   * discovery, action execution, history, lifecycle hooks, and coverage
+   * attribution — the driver only decides *which* candidate to act on
+   * each step. A `kind: "skip"` pick or a `null` return short-circuits
+   * the step; the loop's attempt counter still ticks so a misbehaving
+   * driver cannot loop forever.
+   */
+  private async performDriverActions(
+    page: Page,
+    url: string,
+    targets: ReadonlyArray<ActionTarget>,
+  ): Promise<void> {
+    const driver = this.driver;
+    if (driver === null) return;
+
+    driver.onPageStart?.(url);
+
+    const candidates: DriverCandidate[] = targets.map((t, i) => ({
+      index: i,
+      selector: t.selector,
+      description: describeTarget(t),
+      type: t.type,
+      weight: t.weight,
+      href: t.href,
+    }));
+    const recentHistory: DriverHistoryEntry[] = [];
+    // Drain any pre-loop violations (e.g. from `afterLoad` invariant checks)
+    // so the driver's very first step already sees them.
+    const pendingViolations: DriverInvariantViolation[] = this.driverPendingViolations.splice(0);
+
+    const screenshotFn = async (mode: ScreenshotMode = "viewport") => {
+      return page.screenshot({ fullPage: mode === "fullPage" });
+    };
+
+    let actionsPerformed = 0;
+    let attempts = 0;
+    const maxAttempts = this.options.maxActionsPerPage * 3;
+    this.logger.debug("driver_loop_start", {
+      driver: driver.name,
+      maxActionsPerPage: this.options.maxActionsPerPage,
+      maxAttempts,
+    });
+
+    while (actionsPerformed < this.options.maxActionsPerPage && attempts < maxAttempts) {
+      attempts++;
+      this.currentAction = null;
+
+      // Drain violations that accumulated since the last step.
+      if (this.driverPendingViolations.length > 0) {
+        pendingViolations.push(...this.driverPendingViolations.splice(0));
+      }
+
+      const step: DriverStep = {
+        url,
+        page,
+        candidates,
+        history: recentHistory,
+        stepIndex: actionsPerformed,
+        rng: this.rng,
+        screenshot: screenshotFn,
+        invariantViolations: pendingViolations,
+      };
+
+      let pick: DriverPick | null;
+      try {
+        pick = await driver.selectAction(step);
+      } catch (err) {
+        this.logger.warn("driver_threw", {
+          driver: driver.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        pick = null;
+      }
+
+      if (pick === null || pick.kind === "skip") {
+        this.logger.debug("driver_skipped", { driver: driver.name, attempts });
+        continue;
+      }
+
+      const selectedTarget = targets[pick.index];
+      if (!selectedTarget) {
+        this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
+        continue;
+      }
+
+      const placeholder: ActionResult = {
+        type: "click",
+        target: selectedTarget.name ?? selectedTarget.selector,
+        selector: selectedTarget.selector,
+        success: false,
+        timestamp: Date.now(),
+      };
+      this.currentAction = placeholder;
+
+      const result = await this.performActionOnTarget(page, selectedTarget, url);
+      if (result === null) {
+        this.logger.debug("driver_action_skipped", {
+          target: selectedTarget.name || selectedTarget.selector,
+          reason: "not visible",
+        });
+        continue;
+      }
+
+      if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
+      this.currentAction = result;
+      actionsPerformed++;
+      this.actions.push(result);
+      this.addToHistory(result);
+
+      if (this.isRecordingTrace()) {
+        const stamp = pick.reasoning
+          ? {
+              provider: pick.source ?? driver.name,
+              reason: "explicit_request" as const,
+              reasoning: pick.reasoning,
+            }
+          : undefined;
+        this.trace.push(actionToTraceEntry(result, url, stamp));
+      }
+      this.events.onAction?.(result);
+      this.logger.logAction(result);
+
+      try {
+        driver.onActionComplete?.(result, step);
+      } catch (err) {
+        this.logger.warn("driver_onActionComplete_threw", {
+          driver: driver.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      recentHistory.push({
+        type: result.type,
+        target: result.target,
+        success: result.success,
+        error: result.error,
+      });
+      // Cap the history that drivers see; long-running pages should not
+      // balloon prompt size.
+      if (recentHistory.length > 10) recentHistory.shift();
+      // Violations are point-in-time signals — clear once a step has seen
+      // them.
+      pendingViolations.length = 0;
+
+      await this.attributeActionCoverage(url, selectedTarget.selector);
+      await this.applyLifecycleStage("betweenActions", page, url);
+      await page.waitForTimeout(100);
+    }
+
+    driver.onPageEnd?.(url);
   }
 
   /**
