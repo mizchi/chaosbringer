@@ -70,6 +70,16 @@ if (subcommand === "shard") {
     process.exit(1);
   }
 }
+if (subcommand === "recipes") {
+  const { runRecipesCli } = await import("./recipes/cli.js");
+  try {
+    await runRecipesCli(process.argv.slice(3));
+    process.exit(process.exitCode ?? 0);
+  } catch (err) {
+    console.error("recipes failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {
