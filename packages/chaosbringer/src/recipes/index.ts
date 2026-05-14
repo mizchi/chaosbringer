@@ -51,7 +51,13 @@ export {
   type CompletionGoalOptions,
   type CoverageGoalOptions,
 } from "./goals.js";
-export { recipeDriver, type RecipeDriverOptions } from "./recipe-driver.js";
+export {
+  aggregateFirings,
+  recipeDriver,
+  type RecipeDriverInstance,
+  type RecipeDriverOptions,
+  type RecipeRunStats,
+} from "./recipe-driver.js";
 export {
   tracingDriver,
   type TracingDriver,
@@ -107,9 +113,12 @@ export {
 } from "./templating.js";
 export {
   recipeStoreScenario,
+  recipeStoreScenarioWithStats,
   scenarioLoadFromStore,
   type RecipeSelection,
+  type RecipeStoreScenarioBundle,
   type RecipeStoreScenarioOptions,
   type ScenarioLoadFromStoreOptions,
+  type ScenarioLoadFromStoreResult,
   type SelectionContext,
 } from "./load-bridge.js";

@@ -25,6 +25,38 @@ import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
 import type { ActionRecipe } from "./types.js";
 
+/**
+ * Aggregated per-run telemetry for one recipe. "Per-run" means
+ * since this driver instance was created — closed over a closure
+ * that the recipeDriver maintains. Distinct from `ActionRecipe.stats`
+ * (lifetime across all runs).
+ */
+export interface RecipeRunStats {
+  name: string;
+  /** Number of times the driver fired this recipe in the current run. */
+  fired: number;
+  succeeded: number;
+  failed: number;
+  /** Mean of succeeded-run durations. */
+  avgDurationMs: number;
+  /** Earliest firing in this run (ms since epoch). */
+  firstFiredAt: number;
+  /** Latest firing in this run. */
+  lastFiredAt: number;
+}
+
+/**
+ * Public surface for a recipeDriver. Adds `getRunStats()` on top of
+ * the base Driver interface — issue #92's observability hook.
+ */
+export interface RecipeDriverInstance extends Driver {
+  /**
+   * Per-recipe firing counts since this driver instance was created.
+   * Snapshot — caller mutations don't leak.
+   */
+  getRunStats(): RecipeRunStats[];
+}
+
 export interface RecipeDriverOptions {
   store: RecipeStore;
   /**
@@ -59,13 +91,24 @@ export interface RecipeDriverOptions {
   chainRequires?: boolean;
 }
 
-export function recipeDriver(opts: RecipeDriverOptions): Driver {
+export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
   const log = opts.verbose ? (msg: string) => console.log(`[recipeDriver] ${msg}`) : () => {};
   const source = opts.source ?? "recipe";
   const chain = opts.chainRequires !== false;
   // Per-Page memory of which recipes already ran in this session.
   // WeakMap so closed pages don't leak.
   const sessionReplayed = new WeakMap<DriverStep["page"], Set<string>>();
+  // Per-run firing log — populated each time `perform()` runs a recipe
+  // (whether through the fast path or the chain). Aggregated on demand.
+  const firings: Array<{
+    name: string;
+    succeeded: boolean;
+    durationMs: number;
+    timestamp: number;
+  }> = [];
+  const recordFiring = (name: string, succeeded: boolean, durationMs: number): void => {
+    firings.push({ name, succeeded, durationMs, timestamp: Date.now() });
+  };
 
   return {
     name: "recipe",
@@ -97,10 +140,12 @@ export function recipeDriver(opts: RecipeDriverOptions): Driver {
               const result = await runRecipe(page, recipe);
               if (result.ok) {
                 opts.store.recordSuccess(recipe.name, result.durationMs);
+                recordFiring(recipe.name, true, result.durationMs);
                 log(`replayed ${recipe.name} ok (${result.durationMs.toFixed(0)}ms)`);
                 return { ...base, success: true } satisfies ActionResult;
               }
               opts.store.recordFailure(recipe.name);
+              recordFiring(recipe.name, false, result.durationMs);
               log(`replayed ${recipe.name} FAIL at step ${result.failedAt?.index} — ${result.failedAt?.reason}`);
               return {
                 ...base,
@@ -133,11 +178,12 @@ export function recipeDriver(opts: RecipeDriverOptions): Driver {
                     } else {
                       opts.store.recordFailure(ev.recipe);
                     }
+                    recordFiring(ev.recipe, ev.result.ok, ev.result.durationMs);
                     log(
                       `${ev.recipe}: ${ev.result.ok ? "ok" : "FAIL"} (${ev.result.durationMs.toFixed(0)}ms)`,
                     );
                   } else if (ev.kind === "skip") {
-                    log(`${ev.recipe}: skipped (already-ran)`);
+                    log(`${ev.recipe}: skipped (${ev.reason})`);
                   }
                 },
               });
@@ -161,7 +207,68 @@ export function recipeDriver(opts: RecipeDriverOptions): Driver {
       }
       return null;
     },
+    getRunStats(): RecipeRunStats[] {
+      return aggregateFirings(firings);
+    },
   };
+}
+
+/**
+ * Group a flat firing log by recipe name and compute the public
+ * RecipeRunStats shape. Stable order: most-fired first, then alpha.
+ */
+export function aggregateFirings(
+  firings: ReadonlyArray<{
+    name: string;
+    succeeded: boolean;
+    durationMs: number;
+    timestamp: number;
+  }>,
+): RecipeRunStats[] {
+  const grouped = new Map<string, RecipeRunStats & { _successDurations: number[] }>();
+  for (const f of firings) {
+    let entry = grouped.get(f.name);
+    if (!entry) {
+      entry = {
+        name: f.name,
+        fired: 0,
+        succeeded: 0,
+        failed: 0,
+        avgDurationMs: 0,
+        firstFiredAt: f.timestamp,
+        lastFiredAt: f.timestamp,
+        _successDurations: [],
+      };
+      grouped.set(f.name, entry);
+    }
+    entry.fired += 1;
+    entry.lastFiredAt = Math.max(entry.lastFiredAt, f.timestamp);
+    entry.firstFiredAt = Math.min(entry.firstFiredAt, f.timestamp);
+    if (f.succeeded) {
+      entry.succeeded += 1;
+      entry._successDurations.push(f.durationMs);
+    } else {
+      entry.failed += 1;
+    }
+  }
+  const out: RecipeRunStats[] = [];
+  for (const entry of grouped.values()) {
+    const total = entry._successDurations.reduce((a, b) => a + b, 0);
+    out.push({
+      name: entry.name,
+      fired: entry.fired,
+      succeeded: entry.succeeded,
+      failed: entry.failed,
+      avgDurationMs: entry._successDurations.length > 0 ? total / entry._successDurations.length : 0,
+      firstFiredAt: entry.firstFiredAt,
+      lastFiredAt: entry.lastFiredAt,
+    });
+  }
+  out.sort((a, b) => {
+    if (b.fired !== a.fired) return b.fired - a.fired;
+    return a.name.localeCompare(b.name);
+  });
+  return out;
 }
 
 function pickCandidates(

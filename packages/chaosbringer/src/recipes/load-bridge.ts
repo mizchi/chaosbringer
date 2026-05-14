@@ -31,6 +31,7 @@ import type {
   ThinkTime,
 } from "../load/index.js";
 import { runRecipeWithRequires } from "./composition.js";
+import { aggregateFirings, type RecipeRunStats } from "./recipe-driver.js";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
 import type { RecipeVars } from "./templating.js";
@@ -73,11 +74,37 @@ export interface RecipeStoreScenarioOptions {
 }
 
 /**
+ * Result shape returned by `recipeStoreScenarioWithStats`. The
+ * scenario is what scenarioLoad wants; `getRunStats()` is the
+ * issue #92 observability hook for callers that want to know "which
+ * recipes fired during this load run."
+ *
+ * `recipeStoreScenario` (no `WithStats`) is retained as the legacy
+ * scenario-only entry point.
+ */
+export interface RecipeStoreScenarioBundle {
+  scenario: Scenario;
+  getRunStats(): RecipeRunStats[];
+}
+
+/**
  * Builds a single `Scenario` whose only step picks a verified recipe
  * from the store and replays it. Designed to be passed to
  * `scenarioLoad({ scenarios: [{ scenario, workers }] })`.
  */
 export function recipeStoreScenario(opts: RecipeStoreScenarioOptions): Scenario {
+  return recipeStoreScenarioWithStats(opts).scenario;
+}
+
+/**
+ * Same as `recipeStoreScenario` but also exposes a `getRunStats()`
+ * accessor that returns per-recipe firing counts accumulated over
+ * the bundle's lifetime. Pair with `scenarioLoad` directly when you
+ * need stats; `scenarioLoadFromStore` does the wiring for you.
+ */
+export function recipeStoreScenarioWithStats(
+  opts: RecipeStoreScenarioOptions,
+): RecipeStoreScenarioBundle {
   const chain = opts.chainRequires !== false;
   const selection = opts.selection ?? "uniform";
   const filter = opts.filter ?? (() => true);
@@ -88,8 +115,15 @@ export function recipeStoreScenario(opts: RecipeStoreScenarioOptions): Scenario 
   // (scenarioLoad gives each worker its own BrowserContext, so the
   // page object is stable for the worker's lifetime.)
   const workerMemo = new WeakMap<ScenarioContext["page"], Set<string>>();
+  // Per-bundle firing log for issue #92 observability.
+  const firings: Array<{
+    name: string;
+    succeeded: boolean;
+    durationMs: number;
+    timestamp: number;
+  }> = [];
 
-  return defineScenario({
+  const scenario = defineScenario({
     name,
     thinkTime: opts.thinkTime,
     steps: [
@@ -128,6 +162,12 @@ export function recipeStoreScenario(opts: RecipeStoreScenarioOptions): Scenario 
                 if (ev.kind !== "complete") return;
                 if (ev.result.ok) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
                 else opts.store.recordFailure(ev.recipe);
+                firings.push({
+                  name: ev.recipe,
+                  succeeded: ev.result.ok,
+                  durationMs: ev.result.durationMs,
+                  timestamp: Date.now(),
+                });
               },
             });
             if (!result.ok) {
@@ -140,8 +180,20 @@ export function recipeStoreScenario(opts: RecipeStoreScenarioOptions): Scenario 
           const result = await runRecipe(ctx.page, recipe, { vars });
           if (result.ok) {
             opts.store.recordSuccess(recipe.name, result.durationMs);
+            firings.push({
+              name: recipe.name,
+              succeeded: true,
+              durationMs: result.durationMs,
+              timestamp: Date.now(),
+            });
           } else {
             opts.store.recordFailure(recipe.name);
+            firings.push({
+              name: recipe.name,
+              succeeded: false,
+              durationMs: result.durationMs,
+              timestamp: Date.now(),
+            });
             throw new Error(
               `${name}: recipe ${recipe.name} failed at step ${result.failedAt?.index} — ${result.failedAt?.reason ?? "unknown"}`,
             );
@@ -150,6 +202,11 @@ export function recipeStoreScenario(opts: RecipeStoreScenarioOptions): Scenario 
       },
     ],
   });
+
+  return {
+    scenario,
+    getRunStats: () => aggregateFirings(firings),
+  };
 }
 
 export interface ScenarioLoadFromStoreOptions extends RecipeStoreScenarioOptions {
@@ -167,23 +224,28 @@ export interface ScenarioLoadFromStoreOptions extends RecipeStoreScenarioOptions
   storageState?: string | ((workerIndex: number) => string | undefined);
 }
 
+export interface ScenarioLoadFromStoreResult extends ScenarioLoadResult {
+  /** Per-recipe firing counts for the run (issue #92). */
+  recipes: RecipeRunStats[];
+}
+
 /**
  * Top-level convenience: builds the scenario from the store and runs
  * `scenarioLoad` with the given concurrency / duration. Returns the
  * usual `ScenarioLoadResult` — chaos / SLO / timeline / fault stats
- * all work as normal.
+ * all work as normal — plus a per-recipe firing summary (issue #92).
  */
 export async function scenarioLoadFromStore(
   opts: ScenarioLoadFromStoreOptions,
-): Promise<ScenarioLoadResult> {
-  const scenario = recipeStoreScenario(opts);
-  return scenarioLoad({
+): Promise<ScenarioLoadFromStoreResult> {
+  const bundle = recipeStoreScenarioWithStats(opts);
+  const result = await scenarioLoad({
     baseUrl: opts.baseUrl,
     duration: opts.duration,
     rampUp: opts.rampUp,
     scenarios: [
       {
-        scenario,
+        scenario: bundle.scenario,
         workers: opts.workers,
         storageState: opts.storageState,
       },
@@ -196,6 +258,7 @@ export async function scenarioLoadFromStore(
     maxIterationsPerWorker: opts.maxIterationsPerWorker,
     viewport: opts.viewport,
   });
+  return { ...result, recipes: bundle.getRunStats() };
 }
 
 // -------- internals --------

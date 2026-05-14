@@ -72,7 +72,7 @@ describe("scenarioLoadFromStore against fixture", () => {
       ]),
     );
 
-    const { report } = await scenarioLoadFromStore({
+    const result = await scenarioLoadFromStore({
       baseUrl: server.url,
       store,
       workers: 2,
@@ -80,12 +80,21 @@ describe("scenarioLoadFromStore against fixture", () => {
       timelineBucketMs: 1000,
       vars: { base: server.url },
     });
+    const { report } = result;
 
     expect(report.config.workers).toBe(2);
     expect(report.scenarios.length).toBe(1);
     const mix = report.scenarios[0]!;
     expect(mix.name).toBe("recipe-mix");
     expect(mix.iterations).toBeGreaterThan(0);
+
+    // Issue #92: per-recipe firing summary is surfaced on the result.
+    expect(result.recipes).toBeDefined();
+    expect(Array.isArray(result.recipes)).toBe(true);
+    expect(result.recipes.length).toBeGreaterThan(0);
+    const totalFired = result.recipes.reduce((a, r) => a + r.fired, 0);
+    // Total firings should match the number of completed iterations.
+    expect(totalFired).toBe(mix.iterations);
     // Both recipes are uniformly selectable; over a 3s run with two
     // workers we should see *some* iterations succeed. (Exact
     // success count is timing-dependent.)
