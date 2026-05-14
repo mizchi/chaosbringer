@@ -1,2 +1,5 @@
 test-results/
 playwright-report/
+# Recipe artifacts produced by the recipes.spec.ts fixture default
+# storeDir. Test-only — never commit.
+chaosbringer-recipes/
