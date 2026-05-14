@@ -133,6 +133,38 @@ export class RecipeStore {
   }
 
   /**
+   * Recipes whose first URL precondition matches the given hostname.
+   * The match is a substring check on the regex source — e.g.
+   * `byDomain("github.com")` matches `urlPattern: "github\\.com\\/.*"`.
+   * Recipes with no URL precondition (cross-host) are returned for
+   * every domain.
+   *
+   * Convenience for multi-host crawls: drivers can scope replay to
+   * "only github.com recipes when on github.com" without re-scanning
+   * the full store on every step.
+   */
+  byDomain(host: string): ActionRecipe[] {
+    const needle = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.list().filter((r) => {
+      const first = r.preconditions[0]?.urlPattern;
+      if (!first) return true; // unscoped recipes
+      return first.includes(needle);
+    });
+  }
+
+  /** Distinct domains across the cached recipes. */
+  domains(): string[] {
+    const out = new Set<string>();
+    for (const r of this.list()) {
+      const pattern = r.preconditions[0]?.urlPattern;
+      if (!pattern) continue;
+      const match = /([A-Za-z0-9][A-Za-z0-9.-]*\\\.[A-Za-z]{2,})/.exec(pattern);
+      if (match) out.add(match[1]!.replace(/\\\./g, "."));
+    }
+    return [...out].sort();
+  }
+
+  /**
    * Insert or replace a recipe. New recipes start as `candidate` with
    * empty stats unless explicitly provided. The write target is the
    * local dir if available, otherwise global. Writing to neither is

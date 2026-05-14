@@ -84,6 +84,25 @@ async function executeStep(page: Page, step: RecipeStep): Promise<void> {
     case "click":
       await page.click(step.selector, { timeout });
       return;
+    case "click-at": {
+      if (step.viewportHint) {
+        const vp = page.viewportSize();
+        // If the viewport has changed meaningfully, the coordinates
+        // will not land on the original target. Fail fast — better
+        // than clicking the wrong thing silently.
+        if (
+          vp &&
+          (Math.abs(vp.width - step.viewportHint.width) > 50 ||
+            Math.abs(vp.height - step.viewportHint.height) > 50)
+        ) {
+          throw new Error(
+            `click-at: viewport ${vp.width}x${vp.height} differs from recipe hint ${step.viewportHint.width}x${step.viewportHint.height}`,
+          );
+        }
+      }
+      await page.mouse.click(step.x, step.y);
+      return;
+    }
     case "fill":
       await page.fill(step.selector, step.value, { timeout });
       return;

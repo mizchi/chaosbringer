@@ -285,6 +285,45 @@ const pages: Record<string, Route> = {
       body: `<h1 data-test="auth-thanks">Welcome</h1><p>Authenticated successfully.</p>`,
     }),
   },
+
+  // WebMCP-style page that self-declares testable scenarios on
+  // `window.__chaosbringer`. Used by the `loadPageScenarios` E2E.
+  "/page-scenarios": {
+    body: html({
+      title: "Self-declared scenarios",
+      body: `
+        <h1>Page-declared scenarios fixture</h1>
+        <p>Publishes two scenarios for the harness to harvest.</p>
+        <script>
+          window.__chaosbringer = {
+            version: 1,
+            scenarios: [
+              {
+                name: "demo/visit-about",
+                description: "Click About link",
+                goal: "completion",
+                preconditions: [{ urlPattern: "/page-scenarios" }],
+                steps: [
+                  { kind: "click", selector: 'a[href="/about"]' }
+                ],
+                postconditions: [{ urlPattern: "/about" }]
+              },
+              {
+                name: "demo/visit-form",
+                steps: [
+                  { kind: "navigate", url: "/form" }
+                ]
+              }
+            ]
+          };
+        </script>
+        <nav>
+          <a href="/about">About</a>
+          <a href="/form">Form</a>
+        </nav>
+      `,
+    }),
+  },
 };
 
 function html({ title, body, nav }: { title: string; body: string; nav?: boolean }): string {

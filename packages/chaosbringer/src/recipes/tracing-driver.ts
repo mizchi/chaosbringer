@@ -34,6 +34,26 @@ export interface TracingDriverOptions {
    * caller-provided overrider keyed by selector.
    */
   fillValueFor?: (selector: string, step: DriverStep) => string | undefined;
+  /**
+   * Per-step screenshot capture. browser-harness doctrine: "after
+   * every meaningful action, re-screenshot before assuming it worked."
+   * Enable for AI-driver runs where downstream `investigate()` will
+   * need visual context to diagnose recipe drift.
+   *
+   * Paths are absolute. The caller owns disk hygiene (rotating /
+   * deleting old runs) — we never clean up automatically.
+   */
+  screenshots?: {
+    /** Output directory. Created if missing. */
+    dir: string;
+    /** "viewport" (default) or "fullPage". */
+    mode?: "viewport" | "fullPage";
+    /**
+     * Filename strategy. Default: `step-${index}-${kind}.png`.
+     * Override when you need a stable, run-scoped naming convention.
+     */
+    filenameFor?: (stepIndex: number, kind: RecipeStep["kind"]) => string;
+  };
 }
 
 export interface TracingDriver extends Driver {
@@ -49,6 +69,29 @@ export function tracingDriver(opts: TracingDriverOptions): TracingDriver {
   let emitted = false;
   const errorBuffer: Array<{ message: string; timestamp: number }> = [];
   let errorHookInstalledFor: Page | null = null;
+  let screenshotsEnsured = false;
+  // Lazy-load fs only when screenshots are enabled, so non-screenshot
+  // users don't pay an import cost on a browser-context environment.
+  const captureScreenshot = async (page: Page, stepIndex: number, kind: RecipeStep["kind"]): Promise<string | null> => {
+    if (!opts.screenshots) return null;
+    const { dir, mode, filenameFor } = opts.screenshots;
+    const { mkdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    if (!screenshotsEnsured) {
+      mkdirSync(dir, { recursive: true });
+      screenshotsEnsured = true;
+    }
+    const filename = filenameFor
+      ? filenameFor(stepIndex, kind)
+      : `step-${String(stepIndex).padStart(3, "0")}-${kind}.png`;
+    const path = join(dir, filename);
+    try {
+      await page.screenshot({ path, fullPage: mode === "fullPage" });
+      return path;
+    } catch {
+      return null;
+    }
+  };
 
   function installErrorHook(page: Page): void {
     if (errorHookInstalledFor === page) return;
@@ -73,6 +116,7 @@ export function tracingDriver(opts: TracingDriverOptions): TracingDriver {
         endState: { url: startUrl ?? "" },
         durationMs: 0,
         successful: false,
+        screenshots: opts.screenshots ? [] : undefined,
       };
     }
     return trace;
@@ -104,7 +148,21 @@ export function tracingDriver(opts: TracingDriverOptions): TracingDriver {
       const current = trace ?? ensureTrace(step.page.url());
       if (!emitted && action.success) {
         const recipeStep = actionToRecipeStep(action, step, opts.fillValueFor);
-        if (recipeStep) current.steps.push(recipeStep);
+        if (recipeStep) {
+          current.steps.push(recipeStep);
+          if (opts.screenshots && current.screenshots) {
+            // Screenshot capture is async; we kick it off without
+            // blocking the driver loop. The recipe step is already
+            // pushed — the screenshot path is recorded once the
+            // capture resolves, indexed by step position.
+            const idx = current.steps.length - 1;
+            // Reserve the slot so screenshots[] stays parallel to steps[]
+            current.screenshots[idx] = "";
+            void captureScreenshot(step.page, idx, recipeStep.kind).then((path) => {
+              if (path && current.screenshots) current.screenshots[idx] = path;
+            });
+          }
+        }
         current.endState = { url: step.page.url() };
         current.durationMs = Date.now() - startTimeMs;
       }

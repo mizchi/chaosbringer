@@ -51,3 +51,21 @@ export {
   type FailureContext,
   type InvestigateGoalOptions,
 } from "./goals.js";
+export {
+  loadPageScenarios,
+  PAGE_SCENARIO_GLOBAL,
+  type LoadPageScenariosOptions,
+  type PageDeclaredBundle,
+  type PageDeclaredScenario,
+} from "./page-scenarios.js";
+export {
+  parseSkillMarkdown,
+  seedToCandidateRecipe,
+  seedToGoal,
+  type SkillSeed,
+} from "./skill-md.js";
+export {
+  repairRecipe,
+  type RepairOptions,
+  type RepairResult,
+} from "./repair.js";

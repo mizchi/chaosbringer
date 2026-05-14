@@ -20,7 +20,9 @@ export type RecipeOrigin =
   | "ai-extracted"   // captured from a successful AI-driver trajectory
   | "hand-written"   // authored by a human
   | "promoted-scenario" // converted from a `defineScenario` registration
-  | "regression";    // produced by `investigate()` from a captured failure
+  | "regression"     // produced by `investigate()` from a captured failure
+  | "page-declared"  // harvested from window.__chaosbringer (WebMCP-style)
+  | "markdown-seed";  // compiled from a skill markdown file
 
 /**
  * One executable step inside a recipe. Discriminated by `kind` so the
@@ -33,6 +35,20 @@ export type RecipeOrigin =
 export type RecipeStep =
   | { kind: "navigate"; url: string; expectAfter?: ExpectClause }
   | { kind: "click"; selector: string; expectAfter?: ExpectClause }
+  | {
+      /**
+       * Coordinate fallback for elements with unstable selectors (SPAs
+       * that mutate class names on every render, web components, etc.).
+       * Targets `(x, y)` in CSS pixels relative to the viewport's
+       * top-left. Less robust to viewport changes than `click` — set
+       * `viewportHint` so replay can detect mismatch.
+       */
+      kind: "click-at";
+      x: number;
+      y: number;
+      viewportHint?: { width: number; height: number };
+      expectAfter?: ExpectClause;
+    }
   | { kind: "fill"; selector: string; value: string; expectAfter?: ExpectClause }
   | { kind: "press"; key: string; selector?: string; expectAfter?: ExpectClause }
   | { kind: "select"; selector: string; value: string; expectAfter?: ExpectClause }
@@ -163,6 +179,11 @@ export interface ReplayResult {
 /**
  * Captured trajectory — produced by the trace collector after a goal
  * succeeds, fed to `extractCandidate()` to mint a Recipe.
+ *
+ * `screenshots` is parallel to `steps` when screenshot capture is
+ * enabled: each entry is the absolute path to the PNG saved AFTER
+ * that step ran. Length == steps.length when populated, otherwise the
+ * array is empty.
  */
 export interface ActionTrace {
   goal: string;
@@ -174,4 +195,11 @@ export interface ActionTrace {
   /** Total wall-clock ms. */
   durationMs: number;
   successful: boolean;
+  /**
+   * Per-step screenshot file paths, parallel to `steps`. Empty when
+   * screenshot capture is disabled (the default). When enabled, every
+   * recorded step has a corresponding entry — even failed runs, so a
+   * diagnosing AI can see the last frame before failure.
+   */
+  screenshots?: string[];
 }
