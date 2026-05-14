@@ -17,6 +17,7 @@ import {
   type AbortStyle,
   type ServerFaultConfig,
 } from "../server-faults.js";
+import { truncateStream } from "../stream-transforms.js";
 
 /**
  * Error thrown by `honoMiddleware` when an abort fault wins.
@@ -39,10 +40,12 @@ export class ServerFaultsAbortError extends Error {
 
 export interface HonoLikeContext {
   req: { raw: Request };
-  // c.res is always populated in real Hono (lazy getter that synthesizes a
-  // Response if none was set). The optional marker here is for structurally-
-  // typed test mocks that omit it on the no-fault path.
-  res?: { headers: Headers };
+  // In real Hono `c.res` is a getter/setter backed by a lazily-synthesized
+  // Response. The optional marker is for structurally-typed test mocks that
+  // omit it on the no-fault path; the union form accepts both a full
+  // `Response` (real Hono / the `partial` verdict needs to set a new one)
+  // and a minimal `{ headers }` stand-in (existing annotate tests).
+  res?: Response | { headers: Headers };
 }
 interface HonoLikeNext {
   (): Promise<unknown>;
@@ -80,7 +83,51 @@ export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
       }
       return;
     }
+    if (verdict.kind === "partial") {
+      // Real handler runs, then we wrap its response body in a truncating
+      // stream. The bytes-after-N truncation matches real upstream cuts
+      // (OOM, pod evict). `Content-Length` is stripped because the
+      // declared length no longer matches the bytes actually delivered —
+      // leaving it intact would make standards-compliant clients hang
+      // waiting for the missing bytes, masking the failure mode we want
+      // to expose.
+      await next();
+      const current = c.res;
+      if (!isFullResponse(current)) return;
+      if (current.body === null) {
+        // Null-body statuses (204 / 205 / 304) have nothing to truncate.
+        // The Response constructor also forbids passing a body for them,
+        // so attempting to wrap would throw. Stamp metadata headers on
+        // the existing Response (if enabled) and leave the body alone.
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            current.headers.set(name, value);
+          }
+        }
+        return;
+      }
+      const truncated = truncateStream(current.body, verdict.afterBytes);
+      const headers = new Headers(current.headers);
+      headers.delete("content-length");
+      if (metadataPrefix) {
+        for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+          headers.set(name, value);
+        }
+      }
+      c.res = new Response(truncated, {
+        status: current.status,
+        statusText: current.statusText,
+        headers,
+      });
+      return;
+    }
     const _exhaustive: never = verdict;
     void _exhaustive;
   };
+}
+
+function isFullResponse(r: Response | { headers: Headers } | undefined): r is Response {
+  // Discriminate via the `body` property: real Response always has it
+  // (possibly null), the `{ headers }` test-mock shape does not.
+  return !!r && "body" in r;
 }

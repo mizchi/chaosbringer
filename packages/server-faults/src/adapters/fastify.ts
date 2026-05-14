@@ -7,6 +7,7 @@
  */
 
 import {
+  assertAdapterSupportsConfig,
   attrsToHeaderEntries,
   resolveMetadataPrefix,
   serverFaults,
@@ -56,6 +57,7 @@ function toWebRequest(req: FastifyLikeRequest): Request {
 }
 
 export function fastifyPlugin(cfg: ServerFaultConfig) {
+  assertAdapterSupportsConfig(cfg, "fastify");
   const fault = serverFaults(cfg);
   const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async function plugin(fastify: FastifyLikeInstance) {
@@ -84,6 +86,12 @@ export function fastifyPlugin(cfg: ServerFaultConfig) {
           socket?.destroy();
         }
         return;
+      }
+      if (verdict.kind === "partial") {
+        // Unreachable: assertAdapterSupportsConfig() refuses construction
+        // when partialResponseRate > 0. Kept so exhaustive narrowing
+        // catches any future verdict additions at compile time.
+        throw new Error("server-faults: unexpected partial verdict on fastify adapter");
       }
       if (verdict.kind === "annotate") {
         // Stamp headers; the real route runs after this hook returns. If a

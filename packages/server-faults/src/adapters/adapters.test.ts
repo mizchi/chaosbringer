@@ -68,6 +68,49 @@ describe("honoMiddleware", () => {
     expect([...headers.entries()]).toHaveLength(0);
   });
 
+  it("truncates response body to afterBytes on partial verdict and strips Content-Length", async () => {
+    const mw = honoMiddleware({
+      partialResponseRate: 1,
+      partialResponseAfterBytes: 5,
+      metadataHeader: true,
+    });
+    const body = "hello world, this is a longer body";
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/plain", "content-length": String(body.length) },
+      }),
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const finalRes = c.res as Response;
+    expect(finalRes.status).toBe(200);
+    expect(finalRes.headers.get("content-type")).toBe("text/plain");
+    // Content-Length stripped — declared length no longer matches truncated body.
+    expect(finalRes.headers.get("content-length")).toBeNull();
+    // Metadata headers stamped through on the partial path.
+    expect(finalRes.headers.get("x-chaos-fault-kind")).toBe("partial");
+    expect(finalRes.headers.get("x-chaos-fault-after-bytes")).toBe("5");
+    const text = await finalRes.text();
+    expect(text).toBe("hello");
+  });
+
+  it("preserves status + null-body for partial verdict when handler returns null body", async () => {
+    const mw = honoMiddleware({ partialResponseRate: 1, partialResponseAfterBytes: 0 });
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(null, { status: 204 }),
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c, next);
+    const finalRes = c.res as Response;
+    expect(finalRes.status).toBe(204);
+    const text = await finalRes.text();
+    expect(text).toBe("");
+  });
+
   it("throws ServerFaultsAbortError carrying abortStyle when abort wins", async () => {
     const mw = honoMiddleware({ abortRate: 1, abortStyle: "reset" });
     const next = vi.fn();
@@ -227,6 +270,15 @@ describe("expressMiddleware", () => {
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(destroy.mock.calls[0][0]).toBeUndefined();
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("rejects partialResponseRate at construction time (unsupported on this adapter)", () => {
+    expect(() => expressMiddleware({ partialResponseRate: 0.1 })).toThrow(/express adapter/);
+    expect(() => expressMiddleware({ partialResponseRate: 0.1 })).toThrow(/partialResponseRate/);
+  });
+
+  it("allows partialResponseRate=0 (no opt-in, no rejection)", () => {
+    expect(() => expressMiddleware({ partialResponseRate: 0 })).not.toThrow();
   });
 });
 
@@ -409,6 +461,10 @@ describe("fastifyPlugin", () => {
     expect(end).toHaveBeenCalledTimes(1);
     expect(destroy).not.toHaveBeenCalled();
   });
+
+  it("rejects partialResponseRate at construction time", () => {
+    expect(() => fastifyPlugin({ partialResponseRate: 0.1 })).toThrow(/fastify adapter/);
+  });
 });
 
 describe("koaMiddleware", () => {
@@ -492,6 +548,10 @@ describe("koaMiddleware", () => {
     await mw(ctx, next);
     expect(ctx.status).toBe(503);
     expect(ctx._headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
+
+  it("rejects partialResponseRate at construction time", () => {
+    expect(() => koaMiddleware({ partialResponseRate: 0.1 })).toThrow(/koa adapter/);
   });
 
   it("tears down ctx.req.socket on abort and skips next()", async () => {

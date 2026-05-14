@@ -1,6 +1,6 @@
 # @mizchi/server-faults
 
-Framework-agnostic server-side fault injection (5xx + latency + abort) for Web Standard `Request` / `Response`. Sits between network-side fault interception (outside the server) and any client-side mocking. Independent of any HTTP framework — wire it as a 1-2 line middleware.
+Framework-agnostic server-side fault injection (5xx + latency + abort + partial response) for Web Standard `Request` / `Response`. Sits between network-side fault interception (outside the server) and any client-side mocking. Independent of any HTTP framework — wire it as a 1-2 line middleware.
 
 ## Install
 
@@ -83,6 +83,8 @@ if (response) {
 | `latencyMs` | `number \| {minMs, maxMs}` | — | Sleep duration. Number = constant; range = uniform pick |
 | `abortRate` | `number` (0..1) | `0` | Probability of tearing down the connection without sending a response. Rolled before 5xx / latency — wins short-circuit both |
 | `abortStyle` | `"hangup" \| "reset"` | `"hangup"` | `hangup` = clean half-close (EOF). `reset` = forced reset (ECONNRESET) |
+| `partialResponseRate` | `number` (0..1) | `0` | Probability of truncating the response body after `partialResponseAfterBytes`. **Hono adapter only** — Express / Koa / Fastify throw at construction if set |
+| `partialResponseAfterBytes` | `number` | `0` | Bytes of the real response body to emit before EOF |
 | `pathPattern` | `RegExp \| string` | none | Only matching paths are considered for fault injection |
 | `exemptPathPattern` | `RegExp \| string` | none | Paths that match are passed through unconditionally — useful for health checks or seed endpoints. Wins over `pathPattern`. |
 | `bypassHeader` | `string` | none | Header name (case-insensitive). Any request that carries it is passed through unconditionally — useful for warm-up / fixture traffic in tests. |
@@ -98,7 +100,7 @@ if (response) {
 ## Semantics
 
 - `null` = no fault, continue normally; `Response` = synthetic response, skip the handler.
-- 5xx, latency, and abort are **mutually exclusive in the same request**. Roll order is `abort → 5xx → latency`; the first one that wins short-circuits the rest. Single-fault-per-request keeps observability data clean.
+- All fault kinds are **mutually exclusive in the same request**. Roll order is `abort → 5xx → partial → latency`; the first one that wins short-circuits the rest. Single-fault-per-request keeps observability data clean.
 - `seed` drives **fault selection** (which raffles win), not exact ms values inside a `latencyMs` range — the inner range pick uses `Math.random()` so config tweaks don't shift the RNG sequence.
 - **abort caveat**: the connection is torn down before any bytes can be sent, so `metadataHeader` cannot round-trip on the abort path. `observer.onFault` is the only observability channel. Express / Fastify / Koa call `socket.end()` (hangup) or `socket.destroy(err)` (reset) on the underlying Node socket. Hono throws `ServerFaultsAbortError` — runtimes propagate it as a connection error; Node-hosts can install an `onError` handler that translates it to a TCP-level teardown.
 
@@ -134,12 +136,13 @@ const fault = serverFaults({
 
 | Attribute | Type | Required | Notes |
 |---|---|---|---|
-| `fault.kind` | `"5xx" \| "latency" \| "abort"` | always | mirrors the `kind` arg, so the attrs object is self-describing |
+| `fault.kind` | `"5xx" \| "latency" \| "abort" \| "partial"` | always | mirrors the `kind` arg, so the attrs object is self-describing |
 | `fault.path` | `string` | always | URL pathname (no host, no query) |
 | `fault.method` | `string` | always | HTTP method, uppercased |
 | `fault.target_status` | `number` | when `kind === "5xx"` | the synthetic HTTP status returned |
 | `fault.latency_ms` | `number` | when `kind === "latency"` | milliseconds actually slept |
 | `fault.abort_style` | `"hangup" \| "reset"` | when `kind === "abort"` | how the connection was torn down |
+| `fault.after_bytes` | `number` | when `kind === "partial"` | bytes of the real body emitted before truncation |
 
 The shape is part of the public contract: additions are backward-compatible, renames are not. This is why we shipped a stable schema before any consumer pinned to ad-hoc keys.
 

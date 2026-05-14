@@ -12,7 +12,7 @@
  * (1 roll for 5xx, conditionally 1 roll for latency).
  */
 
-export type FaultKind = "5xx" | "latency" | "abort";
+export type FaultKind = "5xx" | "latency" | "abort" | "partial";
 
 /**
  * How an abort fault tears down the connection.
@@ -44,6 +44,8 @@ export interface FaultAttrs {
   latencyMs?: number;
   /** Populated only on `kind: "abort"`. */
   abortStyle?: AbortStyle;
+  /** Populated only on `kind: "partial"`. Number of bytes emitted from the real body before close. */
+  afterBytes?: number;
   /** Trace-id from incoming traceparent (W3C Trace Context). 32 lowercase hex. */
   traceId?: string;
 }
@@ -59,12 +61,18 @@ export interface FaultAttrs {
  * - `abort`: the adapter must tear down the connection without sending a
  *   response. `metadataHeader` cannot round-trip on this path — no headers
  *   are ever delivered — so the only observability channel is `observer`.
+ * - `partial`: the real handler must run; the adapter then wraps the response
+ *   body so that only the first `afterBytes` bytes are emitted before the
+ *   stream is closed. Status + headers are delivered normally (so
+ *   `metadataHeader` works), but `Content-Length` MUST be stripped or
+ *   recomputed by the adapter — the real value no longer matches.
  * - `null`: bypass / exempt / no raffle won — pass through unchanged.
  */
 export type FaultVerdict =
   | { kind: "synthetic"; response: Response; attrs: FaultAttrs }
   | { kind: "annotate"; attrs: FaultAttrs }
   | { kind: "abort"; attrs: FaultAttrs; abortStyle: AbortStyle }
+  | { kind: "partial"; attrs: FaultAttrs; afterBytes: number }
   | null;
 
 export interface ServerFaultObserver {
@@ -88,6 +96,24 @@ export interface ServerFaultConfig {
   abortRate?: number;
   /** Connection-termination style when the abort raffle wins. Default `"hangup"`. */
   abortStyle?: AbortStyle;
+  /**
+   * 0..1, default 0. Probability of truncating the response body after a
+   * fixed number of bytes have been emitted. Rolled after `abort` and
+   * `status5xxRate` but before `latencyRate` — partial lets the handler
+   * run (like latency does) but transforms its output.
+   *
+   * Adapter support: Hono only at present. Express / Koa / Fastify throw
+   * at middleware construction when set, since they require Node-level
+   * `res.write` interception that is not yet implemented.
+   */
+  partialResponseRate?: number;
+  /**
+   * Bytes of the real response body to emit before closing. Default 0
+   * (close immediately after headers). The truncation point lands on a
+   * raw byte boundary, so multi-byte UTF-8 sequences may be split — that
+   * is the realistic failure mode, not a bug.
+   */
+  partialResponseAfterBytes?: number;
   /** RegExp or pattern string. Only matching paths are considered for fault injection. */
   pathPattern?: RegExp | string;
   /**
@@ -193,6 +219,7 @@ const FAULT_HEADER_KEY_SUFFIX: Record<keyof FaultAttrs, string> = {
   targetStatus: "target-status",
   latencyMs: "latency-ms",
   abortStyle: "abort-style",
+  afterBytes: "after-bytes",
   traceId: "trace-id",
 };
 
@@ -229,6 +256,28 @@ export function resolveMetadataPrefix(opt: ServerFaultConfig["metadataHeader"]):
   if (!opt) return null;
   if (opt === true) return DEFAULT_METADATA_PREFIX;
   return opt.prefix ?? DEFAULT_METADATA_PREFIX;
+}
+
+/**
+ * Throw a clear, sourceable error if a config asks for a fault kind the
+ * caller's adapter cannot honour. Each Node-based adapter (express,
+ * fastify, koa) calls this with its name; the Hono adapter does not,
+ * because it supports the full verdict set.
+ *
+ * Failing at middleware-construction time is a deliberate choice: a
+ * silent fall-through on a request would let `partialResponseRate=0.1`
+ * appear to "work" until a verdict actually fires, at which point the
+ * adapter would either no-op (masking chaos) or crash mid-request.
+ * Construction-time validation surfaces the misconfiguration before any
+ * traffic touches it.
+ */
+export function assertAdapterSupportsConfig(cfg: ServerFaultConfig, adapter: string): void {
+  if ((cfg.partialResponseRate ?? 0) > 0) {
+    throw new Error(
+      `server-faults: ${adapter} adapter does not yet support partialResponseRate. ` +
+        `Use honoMiddleware for stream-based faults, or wait for Node-res interception.`,
+    );
+  }
 }
 
 export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
@@ -297,6 +346,21 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         return { kind: "synthetic", response, attrs: attrs5xx };
       }
 
+      const rP = cfg.partialResponseRate ?? 0;
+      if (rP > 0 && rng.next() < rP) {
+        const afterBytes = cfg.partialResponseAfterBytes ?? 0;
+        const attrsPartial: FaultAttrs = {
+          kind: "partial",
+          path: url.pathname,
+          method,
+          afterBytes,
+        };
+        if (traceId !== undefined) attrsPartial.traceId = traceId;
+        Object.freeze(attrsPartial);
+        cfg.observer?.onFault?.("partial", attrsPartial);
+        return { kind: "partial", attrs: attrsPartial, afterBytes };
+      }
+
       const rL = cfg.latencyRate ?? 0;
       if (rL > 0 && rng.next() < rL) {
         const ms = pickLatencyMs(cfg.latencyMs);
@@ -335,6 +399,7 @@ const FAULT_KEY_MAP: Record<keyof FaultAttrs, string> = {
   targetStatus: "fault.target_status",
   latencyMs: "fault.latency_ms",
   abortStyle: "fault.abort_style",
+  afterBytes: "fault.after_bytes",
   traceId: "fault.trace_id",
 };
 

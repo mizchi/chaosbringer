@@ -7,6 +7,7 @@
  */
 
 import {
+  assertAdapterSupportsConfig,
   attrsToHeaderEntries,
   resolveMetadataPrefix,
   serverFaults,
@@ -51,6 +52,7 @@ function toWebRequest(req: KoaLikeRequest): Request {
 export function koaMiddleware(
   cfg: ServerFaultConfig,
 ): (ctx: KoaLikeContext, next: KoaLikeNext) => Promise<void> {
+  assertAdapterSupportsConfig(cfg, "koa");
   const fault = serverFaults(cfg);
   const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async (ctx, next) => {
@@ -80,6 +82,12 @@ export function koaMiddleware(
         socket?.destroy();
       }
       return;
+    }
+    if (verdict.kind === "partial") {
+      // Unreachable: assertAdapterSupportsConfig() refuses construction
+      // when partialResponseRate > 0. Kept so exhaustive narrowing
+      // catches any future verdict additions at compile time.
+      throw new Error("server-faults: unexpected partial verdict on koa adapter");
     }
     if (verdict.kind === "annotate") {
       // Stamp BEFORE next() — Koa's ctx.set just wraps res.setHeader, which

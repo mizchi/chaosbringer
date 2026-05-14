@@ -347,6 +347,69 @@ describe("serverFaults", () => {
     });
   });
 
+  describe("partialResponse", () => {
+    it("returns a partial verdict carrying afterBytes when raffle wins", async () => {
+      const fault = serverFaults({ partialResponseRate: 1, partialResponseAfterBytes: 64 });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("partial");
+      expect((v as { afterBytes: number }).afterBytes).toBe(64);
+      expect((v as { attrs: FaultAttrs }).attrs).toEqual({
+        kind: "partial",
+        path: "/api/x",
+        method: "GET",
+        afterBytes: 64,
+      });
+    });
+
+    it("defaults afterBytes to 0 when unset", async () => {
+      const fault = serverFaults({ partialResponseRate: 1 });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect((v as { afterBytes: number }).afterBytes).toBe(0);
+    });
+
+    it("invokes observer.onFault for partial faults", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        partialResponseRate: 1,
+        partialResponseAfterBytes: 128,
+        observer: { onFault },
+      });
+      await fault.maybeInject(req("/api/x"));
+      expect(onFault).toHaveBeenCalledWith("partial", {
+        kind: "partial",
+        path: "/api/x",
+        method: "GET",
+        afterBytes: 128,
+      });
+    });
+
+    it("rolls after abort/5xx — abort wins over partial", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        abortRate: 1,
+        partialResponseRate: 1,
+        observer: { onFault },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("abort");
+      expect(onFault).toHaveBeenCalledTimes(1);
+    });
+
+    it("rolls before latency — partial wins over latency", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        partialResponseRate: 1,
+        latencyRate: 1,
+        latencyMs: 1,
+        observer: { onFault },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("partial");
+      expect(onFault).toHaveBeenCalledTimes(1);
+      expect(onFault).toHaveBeenCalledWith("partial", expect.anything());
+    });
+  });
+
   it("does not roll latency raffle when 5xx already won", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
@@ -434,6 +497,21 @@ describe("serverFaults", () => {
       });
       expect("fault.target_status" in out).toBe(false);
       expect("fault.trace_id" in out).toBe(false);
+    });
+
+    it("maps afterBytes for partial verdicts", () => {
+      const out = toOtelAttrs({
+        kind: "partial",
+        path: "/api/x",
+        method: "GET",
+        afterBytes: 128,
+      });
+      expect(out).toEqual({
+        "fault.kind": "partial",
+        "fault.path": "/api/x",
+        "fault.method": "GET",
+        "fault.after_bytes": 128,
+      });
     });
 
     it("maps abortStyle for abort verdicts", () => {
