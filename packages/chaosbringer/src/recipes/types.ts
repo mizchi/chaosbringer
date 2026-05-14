@@ -19,7 +19,8 @@
 export type RecipeOrigin =
   | "ai-extracted"   // captured from a successful AI-driver trajectory
   | "hand-written"   // authored by a human
-  | "promoted-scenario"; // converted from a `defineScenario` registration
+  | "promoted-scenario" // converted from a `defineScenario` registration
+  | "regression";    // produced by `investigate()` from a captured failure
 
 /**
  * One executable step inside a recipe. Discriminated by `kind` so the

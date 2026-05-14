@@ -30,6 +30,7 @@ The three doc surfaces:
 ### AI-driven exploration
 
 - **[Grow an AI skill library (Goals + Recipes)](./ai-recipe-skills.md)** — `recipeDriver` replays verified trajectories without LLM calls; `Goal` defines the persona (normal user / bug hunter / coverage explorer) the AI operates as.
+- **[The AI ↔ Recipe flywheel](./ai-flywheel.md)** — full A→B→C→D loop: AI discovers (`tracingDriver`), verifier promotes (`verifyAndPromote`), production replays cheaply under chaos (`recipeDriver` + faults), and `investigate()` turns failures back into regression recipes.
 
 ### Invariants (what counts as "broken")
 

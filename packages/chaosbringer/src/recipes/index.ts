@@ -35,3 +35,19 @@ export {
   type CoverageGoalOptions,
 } from "./goals.js";
 export { recipeDriver, type RecipeDriverOptions } from "./recipe-driver.js";
+export {
+  tracingDriver,
+  type TracingDriver,
+  type TracingDriverOptions,
+} from "./tracing-driver.js";
+export {
+  discoverCandidates,
+  investigate,
+  type InvestigateOptions,
+  type InvestigateResult,
+} from "./investigate.js";
+export {
+  investigateGoal,
+  type FailureContext,
+  type InvestigateGoalOptions,
+} from "./goals.js";

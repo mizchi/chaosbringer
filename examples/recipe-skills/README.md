@@ -39,8 +39,25 @@ recipeDriver fired: success=true  url=http://127.0.0.1:.../thanks
 | `runRecipe` (replay engine) | Drives a hand-written recipe end-to-end on Chromium |
 | `verifyAndPromote` (auto-promotion) | 3 fresh contexts × identical recipe → promoted to `verified` |
 | `recipeDriver` (Driver wrapper) | Picks the verified recipe + replays it as a single `DriverPick` |
+| `investigate()` (Phase D) | Given a captured failure (`/broken` fires a console.error), the runner navigates there, sees the error on load, and stores a `regression/...` recipe in the same store |
 
 ## Where to go next
 
-- Real AI-driven capture: wire `aiDriver({ provider: anthropicDriverProvider(...) })` into a `compositeDriver` ahead of `recipeDriver`. The AI explores, you call `extractCandidate()` on the resulting trace, `upsert` the candidate, run `verifyAndPromote`, and the next run is recipe-driven for free.
-- Cookbook: [`docs/cookbook/ai-recipe-skills.md`](../../docs/cookbook/ai-recipe-skills.md) for the full lifecycle.
+The demo uses a deterministic "picking driver" in lieu of an actual LLM — it
+just clicks whichever candidate description matches a regex. To run with a
+real AI, swap that out for `aiDriver`:
+
+```ts
+import { aiDriver, anthropicDriverProvider, tracingDriver } from "chaosbringer";
+
+const ai = aiDriver({
+  provider: anthropicDriverProvider({ apiKey: process.env.ANTHROPIC_API_KEY! }),
+  goal: goal.objective,
+});
+
+// Phase A: wrap with tracingDriver to capture candidates as you go.
+// Phase D: pass `ai` directly to `investigate({ driver: ai, ... })`.
+```
+
+- The full flywheel walkthrough: [`docs/cookbook/ai-flywheel.md`](../../docs/cookbook/ai-flywheel.md)
+- Static skill library only: [`docs/cookbook/ai-recipe-skills.md`](../../docs/cookbook/ai-recipe-skills.md)

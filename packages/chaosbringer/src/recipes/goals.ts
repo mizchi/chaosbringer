@@ -125,12 +125,87 @@ export function completionBySelector(selector: string) {
 }
 
 /**
+ * Captured failure handed to `investigateGoal`. The richer the
+ * context, the better the AI can reason about reproduction —
+ * `errorMessages` and `notes` are surfaced directly inside the
+ * persona's prompt.
+ */
+export interface FailureContext {
+  /** Where the failure was observed (used as a navigation start point). */
+  url: string;
+  /** Short tag used to name the produced regression recipe. */
+  signature: string;
+  /** Console / page errors observed at the time. */
+  errorMessages?: string[];
+  /** Steps leading up to the failure, if known. Surfaced as objective context. */
+  preceding?: import("./types.js").RecipeStep[];
+  /** Free-form additional notes — e.g. "happened under api-500 chaos". */
+  notes?: string;
+}
+
+export interface InvestigateGoalOptions {
+  budget?: Goal["budget"];
+  /**
+   * Custom check. Defaults to "page URL matches the failure's pathname
+   * AND ≥ 1 console error was observed since starting" — i.e. "we're
+   * back at the broken page with a fresh error".
+   */
+  reproducedCheck?: (ctx: GoalContext) => Promise<boolean>;
+}
+
+/**
+ * "I'm a forensic investigator handed a failure — reproduce it with
+ * the smallest action sequence." The Goal's `objective` carries the
+ * captured error messages + notes so the AI driver gets enough
+ * context to start from the failure URL and re-trigger the same bug.
+ */
+export function investigateGoal(
+  failure: FailureContext,
+  opts: InvestigateGoalOptions = {},
+): Goal {
+  const errs = failure.errorMessages?.length
+    ? ` Observed errors: ${failure.errorMessages.slice(0, 5).map(trim).join(" / ")}.`
+    : "";
+  const notes = failure.notes ? ` Context: ${failure.notes}.` : "";
+  const precedingHint = failure.preceding?.length
+    ? ` Preceding actions before failure: ${failure.preceding.length} step(s) — use as a hint, not a script.`
+    : "";
+  return {
+    name: "investigate",
+    persona:
+      "a forensic test engineer trying to reproduce a known failure with the minimum number of actions",
+    objective: `A failure was observed at ${failure.url}.${notes}${errs}${precedingHint} Reproduce the failure using as few interactions as possible. Stop the moment the failure is observable again.`,
+    successCheck: opts.reproducedCheck ?? defaultReproducedCheck(failure),
+    budget: opts.budget ?? { maxSteps: 20, maxBudgetMs: 60_000 },
+  };
+}
+
+function defaultReproducedCheck(failure: FailureContext) {
+  let pathPrefix = "/";
+  try {
+    pathPrefix = new URL(failure.url).pathname;
+  } catch {
+    // failure.url might be a relative path; tolerate it.
+    pathPrefix = failure.url.startsWith("/") ? failure.url : "/";
+  }
+  return async (ctx: GoalContext): Promise<boolean> => {
+    if (!ctx.url.includes(pathPrefix)) return false;
+    return ctx.errors.length > 0;
+  };
+}
+
+function trim(s: string): string {
+  return s.length > 120 ? s.slice(0, 117) + "..." : s;
+}
+
+/**
  * Built-in goals as a flat namespace, for ergonomic imports.
  */
 export const goals = {
   completion: completionGoal,
   bugHunting: bugHuntingGoal,
   coverage: coverageGoal,
+  investigate: investigateGoal,
   byUrl: completionByUrl,
   bySelector: completionBySelector,
 };
