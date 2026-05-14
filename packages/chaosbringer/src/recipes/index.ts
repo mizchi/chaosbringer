@@ -112,6 +112,25 @@ export {
   type RecipeVars,
 } from "./templating.js";
 export {
+  diffRecipes,
+  formatRecipeDiff,
+  type DiffOp,
+  type FieldDiffEntry,
+  type FormatDiffOptions,
+  type RecipeDiff,
+  type StepDiffEntry,
+} from "./diff.js";
+export {
+  lintRecipe,
+  lintStore,
+  summarise,
+  type LintIssue,
+  type LintOptions,
+  type LintReport,
+  type LintRule,
+  type LintSeverity,
+} from "./lint.js";
+export {
   recipeStoreScenario,
   recipeStoreScenarioWithStats,
   scenarioLoadFromStore,
