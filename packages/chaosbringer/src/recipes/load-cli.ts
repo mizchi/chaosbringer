@@ -133,11 +133,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     console.error(HELP);
     process.exit(2);
   }
-  const workers = values.workers ? Number(values.workers) : 5;
-  if (!Number.isFinite(workers) || workers <= 0) {
-    console.error(`load: --workers must be a positive number, got ${values.workers}`);
-    process.exit(2);
-  }
+  const workers = parsePositiveInt("--workers", values.workers, 5);
   // Validate at the CLI boundary so a typo in --duration / --ramp-up
   // fails before launching Chromium, with the bad input echoed.
   const duration = validateDuration("--duration", values.duration ?? "60s");
@@ -170,13 +166,31 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     thinkTime,
     selection: selectionStr,
     filterStatus: filterStatusRaw,
-    maxIterations: values["max-iterations"] ? Number(values["max-iterations"]) : undefined,
+    maxIterations: values["max-iterations"]
+      ? parsePositiveInt("--max-iterations", values["max-iterations"])
+      : undefined,
     store,
     output: values.output,
     headless,
     quiet: Boolean(values.quiet),
     json: Boolean(values.json),
   };
+}
+
+function parsePositiveInt(flag: string, raw: string | undefined, fallback?: number): number {
+  if (raw === undefined) {
+    if (fallback === undefined) {
+      console.error(`load: ${flag} is required`);
+      process.exit(2);
+    }
+    return fallback;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`load: ${flag} must be a positive integer, got ${raw}`);
+    process.exit(2);
+  }
+  return n;
 }
 
 function validateDuration(flag: string, raw: string): DurationInput {
