@@ -69,3 +69,15 @@ export {
   type RepairOptions,
   type RepairResult,
 } from "./repair.js";
+export {
+  resolveDependencies,
+  runRecipeWithRequires,
+  type ChainProgressEvent,
+  type RunWithRequiresOptions,
+  type RunWithRequiresResult,
+} from "./composition.js";
+export {
+  minimizeRecipeTrace,
+  type MinimizeRecipeOptions,
+  type MinimizeRecipeResult,
+} from "./minimize.js";

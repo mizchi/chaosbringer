@@ -26,6 +26,7 @@ import type {
 } from "../drivers/types.js";
 import { extractCandidate } from "./capture.js";
 import { investigateGoal, type FailureContext } from "./goals.js";
+import { minimizeRecipeTrace } from "./minimize.js";
 import type { RecipeStore } from "./store.js";
 import { tracingDriver, type TracingDriver } from "./tracing-driver.js";
 import type { ActionRecipe, ActionTrace, Goal } from "./types.js";
@@ -69,6 +70,18 @@ export interface InvestigateOptions {
     : never;
   /** Verbose log on `console.log`. Default: false. */
   verbose?: boolean;
+  /**
+   * After reproduction, delta-debug the captured trace to the
+   * 1-minimal subset. Costs up to N² extra replays for an N-step
+   * trace, so opt-in. The stored regression recipe contains the
+   * minimised steps; `trace.steps` reflects the raw AI trajectory.
+   */
+  minimize?: boolean;
+  /**
+   * Cap on minimisation replays. Default: `trace.steps.length²`.
+   * Lower to bound cost on long traces.
+   */
+  minimizeMaxReplays?: number;
 }
 
 export interface InvestigateResult {
@@ -199,14 +212,45 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
     if (trace.successful && trace.steps.length > 0) {
       const name = (opts.recipeName ?? defaultRecipeName)(opts.failure);
       const description = `Regression: ${opts.failure.notes ?? opts.failure.signature}`;
-      recipe = extractCandidate(trace, {
+
+      // Optional delta-debugging step: shrink the trace before
+      // committing it to the store. The raw trace is still surfaced
+      // on the InvestigateResult; only the recipe is minimised.
+      let recipeSteps = trace.steps;
+      if (opts.minimize && trace.steps.length > 1) {
+        const setupPage = async (): Promise<{ page: Page; cleanup: () => Promise<void> }> => {
+          const ctx = await browser.newContext();
+          const pg = await ctx.newPage();
+          await pg.goto(opts.failure.url, { waitUntil: "domcontentloaded" });
+          return { page: pg, cleanup: () => ctx.close() };
+        };
+        const minimized = await minimizeRecipeTrace({
+          trace,
+          goal,
+          setupPage,
+          maxReplays: opts.minimizeMaxReplays,
+          verbose: opts.verbose,
+        }).catch((err) => {
+          log(`minimize threw: ${(err as Error).message}`);
+          return null;
+        });
+        if (minimized) {
+          log(
+            `minimised ${minimized.originalLength} → ${minimized.minimizedLength} steps (${minimized.replays} replays, ${minimized.reason})`,
+          );
+          recipeSteps = minimized.steps;
+        }
+      }
+
+      const recipeTrace: ActionTrace = { ...trace, steps: recipeSteps };
+      recipe = extractCandidate(recipeTrace, {
         name,
         description,
         origin: "regression",
         ...((opts.captureExtras as Record<string, unknown>) ?? {}),
       });
       opts.store.upsert(recipe);
-      log(`stored ${name} (${trace.steps.length} steps)`);
+      log(`stored ${name} (${recipeSteps.length} step(s))`);
     } else {
       log(`gave up — reproduced=${trace.successful}, steps=${trace.steps.length}`);
     }

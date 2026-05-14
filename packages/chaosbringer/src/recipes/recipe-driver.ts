@@ -19,6 +19,7 @@
  */
 import type { ActionResult } from "../types.js";
 import type { Driver, DriverPick, DriverStep } from "../drivers/types.js";
+import { runRecipeWithRequires } from "./composition.js";
 import { preconditionsHold } from "./match.js";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
@@ -44,11 +45,27 @@ export interface RecipeDriverOptions {
   verbose?: boolean;
   /** Identifier surfaced in DriverPick.source. Default: `"recipe"`. */
   source?: string;
+  /**
+   * When true (default), `requires` dependencies are replayed in topo
+   * order before the matched recipe runs. Set false for legacy
+   * "metadata only" semantics — the runner will fire the matched
+   * recipe directly even if its preconditions assume a logged-in
+   * state.
+   *
+   * Already-replayed dependencies are tracked per-Page, so a single
+   * `auth/login` recipe doesn't re-run for every dependent recipe
+   * after it.
+   */
+  chainRequires?: boolean;
 }
 
 export function recipeDriver(opts: RecipeDriverOptions): Driver {
   const log = opts.verbose ? (msg: string) => console.log(`[recipeDriver] ${msg}`) : () => {};
   const source = opts.source ?? "recipe";
+  const chain = opts.chainRequires !== false;
+  // Per-Page memory of which recipes already ran in this session.
+  // WeakMap so closed pages don't leak.
+  const sessionReplayed = new WeakMap<DriverStep["page"], Set<string>>();
 
   return {
     name: "recipe",
@@ -63,27 +80,82 @@ export function recipeDriver(opts: RecipeDriverOptions): Driver {
         return {
           kind: "custom",
           source,
-          reasoning: `replay recipe ${recipe.name}`,
+          reasoning:
+            recipe.requires.length > 0 && chain
+              ? `replay recipe ${recipe.name} (with ${recipe.requires.length} dep(s))`
+              : `replay recipe ${recipe.name}`,
           perform: async (page) => {
-            const result = await runRecipe(page, recipe);
             const base = {
               type: "click" as const,
               selector: `__recipe__::${recipe.name}`,
               target: recipe.name,
               timestamp: Date.now(),
             };
-            if (result.ok) {
-              opts.store.recordSuccess(recipe.name, result.durationMs);
-              log(`replayed ${recipe.name} ok (${result.durationMs.toFixed(0)}ms)`);
+
+            if (!chain || recipe.requires.filter((d) => !d.startsWith("__")).length === 0) {
+              // Fast path: no deps to resolve.
+              const result = await runRecipe(page, recipe);
+              if (result.ok) {
+                opts.store.recordSuccess(recipe.name, result.durationMs);
+                log(`replayed ${recipe.name} ok (${result.durationMs.toFixed(0)}ms)`);
+                return { ...base, success: true } satisfies ActionResult;
+              }
+              opts.store.recordFailure(recipe.name);
+              log(`replayed ${recipe.name} FAIL at step ${result.failedAt?.index} — ${result.failedAt?.reason}`);
+              return {
+                ...base,
+                success: false,
+                error: `recipe:${recipe.name}: ${result.failedAt?.reason ?? "unknown"}`,
+              } satisfies ActionResult;
+            }
+
+            // Chained path: resolve + run dependencies first, then the
+            // matched recipe. Stats are recorded per-recipe inside the
+            // chain so a flaky dependency drags its own success rate
+            // down, not the dependent.
+            let replayed = sessionReplayed.get(page);
+            if (!replayed) {
+              replayed = new Set();
+              sessionReplayed.set(page, replayed);
+            }
+            let chainOk = true;
+            let chainErr = "";
+            try {
+              const out = await runRecipeWithRequires({
+                page,
+                recipe,
+                store: opts.store,
+                alreadyRan: replayed,
+                onProgress: (ev) => {
+                  if (ev.kind === "complete") {
+                    if (ev.result.ok) {
+                      opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
+                    } else {
+                      opts.store.recordFailure(ev.recipe);
+                    }
+                    log(
+                      `${ev.recipe}: ${ev.result.ok ? "ok" : "FAIL"} (${ev.result.durationMs.toFixed(0)}ms)`,
+                    );
+                  } else if (ev.kind === "skip") {
+                    log(`${ev.recipe}: skipped (already-ran)`);
+                  }
+                },
+              });
+              if (!out.ok) {
+                chainOk = false;
+                const failed = out.failedAt!;
+                const r = out.results[failed];
+                chainErr = `chain failed at ${failed}: ${r?.failedAt?.reason ?? "unknown"}`;
+              }
+            } catch (err) {
+              chainOk = false;
+              chainErr = err instanceof Error ? err.message : String(err);
+            }
+
+            if (chainOk) {
               return { ...base, success: true } satisfies ActionResult;
             }
-            opts.store.recordFailure(recipe.name);
-            log(`replayed ${recipe.name} FAIL at step ${result.failedAt?.index} — ${result.failedAt?.reason}`);
-            return {
-              ...base,
-              success: false,
-              error: `recipe:${recipe.name}: ${result.failedAt?.reason ?? "unknown"}`,
-            } satisfies ActionResult;
+            return { ...base, success: false, error: `recipe:${recipe.name}: ${chainErr}` } satisfies ActionResult;
           },
         };
       }
