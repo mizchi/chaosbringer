@@ -48,6 +48,13 @@ export interface WorkerSamples {
   iterations: WorkerIterationSample[];
   network: NetworkSample[];
   errors: WorkerError[];
+  /**
+   * Snapshot of `window.__chaosbringerRuntimeStats` captured just
+   * before the worker's BrowserContext closes. Indexed by stringified
+   * compiled-runtime-fault id (same shape `mergeRuntimeStats` consumes).
+   * Empty when runtime faults weren't configured for this worker.
+   */
+  runtimeFaultStats: Record<string, { matched: number; fired: number }>;
 }
 
 export interface WorkerOptions {
@@ -78,6 +85,7 @@ export class ScenarioWorker {
     iterations: [],
     network: [],
     errors: [],
+    runtimeFaultStats: {},
   };
   private iteration = 0;
 
@@ -112,6 +120,23 @@ export class ScenarioWorker {
     } finally {
       this.samples.network.push(...this.sampler.drain());
       this.sampler.stop();
+      // Capture runtime fault stats from the in-page counter before
+      // tearing down the context. Best-effort: page may already be in
+      // an error state, in which case we leave the {} default.
+      if (this.page) {
+        try {
+          const pageStats = await this.page.evaluate(() =>
+            (globalThis as {
+              __chaosbringerRuntimeStats?: Record<string, { matched: number; fired: number }>;
+            }).__chaosbringerRuntimeStats ?? {},
+          );
+          if (pageStats && typeof pageStats === "object") {
+            this.samples.runtimeFaultStats = pageStats;
+          }
+        } catch {
+          // ignored — diagnostics, not load-bearing
+        }
+      }
       await this.context.close().catch(() => {});
       this.context = null;
       this.page = null;
@@ -178,7 +203,7 @@ export class ScenarioWorker {
           step.thinkTime,
         );
         if (wait > 0 && !this.opts.shouldStop()) {
-          await sleep(wait);
+          await cancellableSleep(wait, this.opts.shouldStop);
         }
       }
     }
@@ -234,4 +259,23 @@ export class ScenarioWorker {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Sleep that exits early when the deadline fires. Polls in short
+ * chunks so a worker doesn't continue thinking past the configured
+ * `duration` — without this, total run time can overshoot by up to
+ * `thinkTime.maxMs` per worker, skewing throughput / error stats.
+ *
+ * 50ms chunk is fine-grained enough for any reasonable load run
+ * (deadline detection latency ≤ 50ms) without burning CPU on small
+ * thinkTimes.
+ */
+async function cancellableSleep(ms: number, shouldStop: () => boolean): Promise<void> {
+  const CHUNK = 50;
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (shouldStop()) return;
+    await sleep(Math.min(CHUNK, deadline - Date.now()));
+  }
 }

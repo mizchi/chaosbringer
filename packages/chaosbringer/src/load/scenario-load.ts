@@ -11,7 +11,11 @@
  * RPS optimisation.
  */
 import { chromium, type Browser, type BrowserContext } from "playwright";
-import { buildRuntimeFaultsScript, compileRuntimeFaults } from "../runtime-faults.js";
+import {
+  buildRuntimeFaultsScript,
+  compileRuntimeFaults,
+  mergeRuntimeStats,
+} from "../runtime-faults.js";
 import {
   compileLoadFaultRules,
   faultFiringsFrom,
@@ -139,7 +143,7 @@ export async function scenarioLoad(
       }
       if (shouldStop()) {
         // Deadline fired before this worker could start — return empty samples.
-        return { steps: [], iterations: [], network: [], errors: [] };
+        return { steps: [], iterations: [], network: [], errors: [], runtimeFaultStats: {} };
       }
       return w.run(browser);
     });
@@ -163,6 +167,15 @@ export async function scenarioLoad(
     // don't fit the FaultInjectionStats shape, so we attach them as a
     // companion field via the report rather than expanding the type.
     if (runtimeFaultScript) {
+      // Workers capture `window.__chaosbringerRuntimeStats` before
+      // their context closes. Merge every worker's snapshot into the
+      // compiled counters so `matched` / `fired` reflect actual
+      // page-side firings, not zeroes.
+      for (const s of samples) {
+        if (s.runtimeFaultStats && Object.keys(s.runtimeFaultStats).length > 0) {
+          mergeRuntimeStats(compiledRuntimeFaults, s.runtimeFaultStats);
+        }
+      }
       (report as LoadReport & { runtimeFaults?: unknown }).runtimeFaults =
         summariseRuntimeFaultStats(compiledRuntimeFaults);
     }
