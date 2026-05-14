@@ -74,10 +74,10 @@ export interface LintOptions {
 }
 
 export interface LintReport {
-  issues: LintIssue[];
-  errorCount: number;
-  warnCount: number;
-  infoCount: number;
+  readonly issues: ReadonlyArray<LintIssue>;
+  readonly errorCount: number;
+  readonly warnCount: number;
+  readonly infoCount: number;
 }
 
 const DEFAULT_LONG_WAIT_MS = 2000;

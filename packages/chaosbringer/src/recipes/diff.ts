@@ -187,32 +187,37 @@ export function formatRecipeDiff(diff: RecipeDiff, opts: FormatDiffOptions = {})
   out.push(`--- ${leftLabel}`);
   out.push(`+++ ${rightLabel}`);
 
-  // Mark each entry's distance to the nearest change for context windowing.
-  const changeIndexes = new Set<number>();
-  diff.steps.forEach((s, i) => { if (s.op !== "equal") changeIndexes.add(i); });
   if (diff.steps.length === 0) {
     out.push(dim("(both recipes have zero steps)"));
-  } else if (changeIndexes.size === 0) {
-    out.push(dim("(no step changes)"));
   } else {
-    let lastPrinted = -1;
-    diff.steps.forEach((entry, idx) => {
-      const near = [...changeIndexes].some((ci) => Math.abs(ci - idx) <= ctx);
-      if (!near) return;
-      if (lastPrinted >= 0 && idx - lastPrinted > 1) {
-        out.push(dim(`... (${idx - lastPrinted - 1} unchanged)`));
+    // One pass marks each index that sits within `ctx` of a change.
+    // The previous implementation scanned every change index per step,
+    // which was O(steps × changes) — fine for recipes today but
+    // gratuitous when the fix is straightforward.
+    const nearChange = new Array<boolean>(diff.steps.length).fill(false);
+    diff.steps.forEach((s, i) => {
+      if (s.op === "equal") return;
+      for (let j = Math.max(0, i - ctx); j <= Math.min(diff.steps.length - 1, i + ctx); j++) {
+        nearChange[j] = true;
       }
-      if (entry.op === "equal") {
-        out.push(`  ${entry.json}`);
-      } else if (entry.op === "remove") {
-        out.push(red(`- ${entry.json}`));
-      } else {
-        out.push(green(`+ ${entry.json}`));
-      }
-      lastPrinted = idx;
     });
-    const trailing = diff.steps.length - 1 - lastPrinted;
-    if (trailing > 0) out.push(dim(`... (${trailing} unchanged)`));
+    if (nearChange.every((v) => !v)) {
+      out.push(dim("(no step changes)"));
+    } else {
+      let lastPrinted = -1;
+      diff.steps.forEach((entry, idx) => {
+        if (!nearChange[idx]) return;
+        if (lastPrinted >= 0 && idx - lastPrinted > 1) {
+          out.push(dim(`... (${idx - lastPrinted - 1} unchanged)`));
+        }
+        if (entry.op === "equal") out.push(`  ${entry.json}`);
+        else if (entry.op === "remove") out.push(red(`- ${entry.json}`));
+        else out.push(green(`+ ${entry.json}`));
+        lastPrinted = idx;
+      });
+      const trailing = diff.steps.length - 1 - lastPrinted;
+      if (trailing > 0) out.push(dim(`... (${trailing} unchanged)`));
+    }
   }
 
   if (diff.fields.length > 0) {

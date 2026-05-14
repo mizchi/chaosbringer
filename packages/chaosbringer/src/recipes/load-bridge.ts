@@ -24,6 +24,7 @@
  */
 import { defineScenario, type Scenario, type ScenarioContext } from "../load/index.js";
 import { scenarioLoad } from "../load/index.js";
+import { weightedPick, type Rng } from "../random.js";
 import type {
   DurationInput,
   ScenarioLoadOptions,
@@ -269,35 +270,27 @@ function pickRecipe(
   ctx: SelectionContext,
 ): ActionRecipe {
   if (typeof strategy === "function") return strategy(candidates, ctx);
+  // scenarioLoad is non-deterministic by design — see scenario-load.ts's
+  // per-run seed comment. So we wrap Math.random in the Rng shape rather
+  // than threading the driver-layer Rng through.
+  const rng: Rng = { next: Math.random, seed: 0 };
   if (strategy === "uniform") {
-    const idx = Math.floor(Math.random() * candidates.length);
-    return candidates[idx]!;
+    return weightedPick(candidates, () => 1, rng);
   }
-  if (strategy === "by-success-rate") {
-    // Weight each candidate by (successes + 1) / (total + 1) so a
-    // brand-new candidate gets ~uniform weight, while a long-tested
-    // reliable one wins more often. Capped weights so a single
-    // 99%-reliable recipe doesn't crowd out everything else.
-    const weights = candidates.map((r) => {
+  // strategy === "by-success-rate":
+  // Weight each candidate by (successes + 1) / (total + 1) so a
+  // brand-new candidate gets ~uniform weight, while a long-tested
+  // reliable one wins more often. Capped to [0.1, 1] so a single
+  // 99%-reliable recipe doesn't crowd out everything else.
+  return weightedPick(
+    candidates,
+    (r) => {
       const total = r.stats.successCount + r.stats.failCount;
       const rate = (r.stats.successCount + 1) / (total + 1);
       return Math.max(0.1, Math.min(1, rate));
-    });
-    return weightedPick(candidates, weights);
-  }
-  // Should be unreachable; fall back to uniform.
-  return candidates[Math.floor(Math.random() * candidates.length)]!;
-}
-
-function weightedPick<T>(items: ReadonlyArray<T>, weights: ReadonlyArray<number>): T {
-  const total = weights.reduce((a, b) => a + b, 0);
-  if (total <= 0) return items[Math.floor(Math.random() * items.length)]!;
-  let r = Math.random() * total;
-  for (let i = 0; i < items.length; i++) {
-    r -= weights[i]!;
-    if (r <= 0) return items[i]!;
-  }
-  return items[items.length - 1]!;
+    },
+    rng,
+  );
 }
 
 function resolveVars(

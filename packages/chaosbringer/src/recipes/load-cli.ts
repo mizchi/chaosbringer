@@ -8,7 +8,7 @@
  */
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { formatLoadReport, type DurationInput } from "../load/index.js";
+import { formatLoadReport, parseDurationMs, type DurationInput } from "../load/index.js";
 import {
   isRecipeSelection,
   isRecipeStatus,
@@ -88,7 +88,7 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     if (result.recipes.length > 0) {
       console.log("\nRecipe firings:");
       for (const r of result.recipes) {
-        const rate = r.fired > 0 ? (r.succeeded / r.fired * 100).toFixed(1) : "0.0";
+        const rate = r.fired > 0 ? ((r.succeeded / r.fired) * 100).toFixed(1) : "0.0";
         console.log(
           `  ${r.name.padEnd(40)} fired=${r.fired} succ=${r.succeeded} fail=${r.failed} rate=${rate}% avg=${Math.round(r.avgDurationMs)}ms`,
         );
@@ -138,11 +138,12 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     console.error(`load: --workers must be a positive number, got ${values.workers}`);
     process.exit(2);
   }
-  // DurationInput is a template-literal union for compile-time safety.
-  // At the CLI boundary we hand the raw string to parseDurationMs, which
-  // rejects malformed input with a clearer message than a TS cast would.
-  const duration = (values.duration ?? "60s") as DurationInput;
-  const rampUp = values["ramp-up"] as DurationInput | undefined;
+  // Validate at the CLI boundary so a typo in --duration / --ramp-up
+  // fails before launching Chromium, with the bad input echoed.
+  const duration = validateDuration("--duration", values.duration ?? "60s");
+  const rampUp = values["ramp-up"]
+    ? validateDuration("--ramp-up", values["ramp-up"])
+    : undefined;
   const filterStatusRaw = values["filter-status"] ?? "verified";
   if (!isRecipeStatus(filterStatusRaw)) {
     console.error(`load: --filter-status must be ${RECIPE_STATUSES.join("|")}`);
@@ -158,15 +159,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     global: values.global,
     quiet: values.quiet,
   });
-  let thinkTime: ParsedArgs["thinkTime"];
-  if (values["think-time"]) {
-    const m = /^(\d+)-(\d+)$/.exec(values["think-time"]);
-    if (!m) {
-      console.error(`load: --think-time must be MIN-MAX ms, got ${values["think-time"]}`);
-      process.exit(2);
-    }
-    thinkTime = { minMs: Number(m[1]), maxMs: Number(m[2]) };
-  }
+  const thinkTime = parseThinkTime(values["think-time"]);
   // --no-headless wins over --headless when both pass through.
   const headless = values["no-headless"] ? false : values.headless !== false;
   return {
@@ -184,4 +177,42 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     quiet: Boolean(values.quiet),
     json: Boolean(values.json),
   };
+}
+
+function validateDuration(flag: string, raw: string): DurationInput {
+  try {
+    parseDurationMs(raw);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`load: ${flag} invalid (${detail})`);
+    process.exit(2);
+  }
+  return raw as DurationInput;
+}
+
+/**
+ * Accept `MIN-MAX` where each side is a duration parseable by
+ * `parseDurationMs` — so `100-500`, `100ms-500ms`, and `100ms-2s` all
+ * work. Matches the rest of the load CLI's duration vocabulary.
+ */
+function parseThinkTime(raw: string | undefined): { minMs: number; maxMs: number } | undefined {
+  if (!raw) return undefined;
+  const idx = raw.indexOf("-");
+  if (idx <= 0) {
+    console.error(`load: --think-time must be MIN-MAX, got ${raw}`);
+    process.exit(2);
+  }
+  try {
+    const minMs = parseDurationMs(raw.slice(0, idx));
+    const maxMs = parseDurationMs(raw.slice(idx + 1));
+    if (maxMs < minMs) {
+      console.error(`load: --think-time max (${maxMs}ms) is below min (${minMs}ms)`);
+      process.exit(2);
+    }
+    return { minMs, maxMs };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`load: --think-time invalid (${detail})`);
+    process.exit(2);
+  }
 }

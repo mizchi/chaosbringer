@@ -5,7 +5,7 @@
  * means a future flag (e.g. `--cache`) updates both surfaces.
  */
 import { RecipeStore } from "./store.js";
-import type { RecipeStatus } from "./types.js";
+import type { ActionRecipe, RecipeStatus } from "./types.js";
 
 export interface CommonOpts {
   dir?: string;
@@ -44,4 +44,30 @@ export function isRecipeSelection(
   value: string,
 ): value is (typeof RECIPE_SELECTIONS)[number] {
   return (RECIPE_SELECTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * `process.exit(1)` with a message when the recipe isn't in the store.
+ * Throws `never`, so TS narrows the caller's `recipe` to `ActionRecipe`.
+ */
+export function requireRecipe(store: RecipeStore, name: string): ActionRecipe {
+  const recipe = store.get(name);
+  if (!recipe) {
+    console.error(`Recipe not found: ${name}`);
+    process.exit(1);
+  }
+  return recipe;
+}
+
+export function requireVersion(
+  store: RecipeStore,
+  name: string,
+  version: number,
+): ActionRecipe {
+  const recipe = store.getVersion(name, version);
+  if (!recipe) {
+    console.error(`${name}: version ${version} not found`);
+    process.exit(1);
+  }
+  return recipe;
 }

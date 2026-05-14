@@ -23,9 +23,14 @@
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 import { weightedRandomDriver } from "../drivers/index.js";
-import { COMMON_OPTIONS, openStore } from "./cli-common.js";
+import {
+  COMMON_OPTIONS,
+  openStore,
+  requireRecipe,
+  requireVersion,
+} from "./cli-common.js";
 import { diffRecipes, formatRecipeDiff } from "./diff.js";
-import { lintRecipe, lintStore, summarise, type LintIssue } from "./lint.js";
+import { lintRecipe, lintStore, summarise } from "./lint.js";
 import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
 import { verifyAndPromote } from "./verify.js";
@@ -173,21 +178,9 @@ async function showCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  if (values.version !== undefined) {
-    const v = Number(values.version);
-    const hist = store.history(name).find((r) => r.version === v);
-    if (!hist) {
-      console.error(`No version ${v} for ${name}`);
-      process.exit(1);
-    }
-    process.stdout.write(JSON.stringify(hist, null, 2) + "\n");
-    return;
-  }
-  const recipe = store.get(name);
-  if (!recipe) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  const recipe = values.version !== undefined
+    ? requireVersion(store, name, Number(values.version))
+    : requireRecipe(store, name);
   process.stdout.write(JSON.stringify(recipe, null, 2) + "\n");
 }
 
@@ -206,12 +199,8 @@ async function historyCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
+  const current = requireRecipe(store, name);
   const history = store.history(name);
-  const current = store.get(name);
-  if (!current) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
   const entries = [
     { version: current.version, current: true, steps: current.steps.length, updatedAt: current.updatedAt },
     ...history.map((r) => ({
@@ -248,10 +237,7 @@ async function statusCmd(argv: string[], target: "verified" | "demoted"): Promis
     return;
   }
   const store = openStore(values);
-  if (!store.get(name)) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  requireRecipe(store, name);
   store.setStatus(name, target);
   if (!values.quiet) console.log(`${name}: ${target}`);
 }
@@ -274,11 +260,7 @@ async function deleteCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  const current = store.get(name);
-  if (!current) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  requireRecipe(store, name);
   const history = store.history(name);
   if (history.length > 0 && !values.force) {
     console.error(
@@ -416,11 +398,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
     process.exit(2);
   }
   const store = openStore(values);
-  const recipe = store.get(name);
-  if (!recipe) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  const recipe = requireRecipe(store, name);
   const runs = Number(values.runs ?? "5");
   const minSuccessRate = values["min-success-rate"]
     ? Number(values["min-success-rate"])
@@ -483,56 +461,10 @@ async function diffCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  const dotted = target.includes("..") ? target.split("..", 2) : null;
-  let left: ActionRecipe;
-  let right: ActionRecipe;
-  if (dotted) {
-    const a = store.get(dotted[0]!);
-    const b = store.get(dotted[1]!);
-    if (!a) {
-      console.error(`Recipe not found: ${dotted[0]}`);
-      process.exit(1);
-    }
-    if (!b) {
-      console.error(`Recipe not found: ${dotted[1]}`);
-      process.exit(1);
-    }
-    left = a;
-    right = b;
-  } else {
-    const current = store.get(target);
-    if (!current) {
-      console.error(`Recipe not found: ${target}`);
-      process.exit(1);
-    }
-    const history = store.history(target);
-    const toV = values["to-version"] ? Number(values["to-version"]) : current.version;
-    const fromV = values["from-version"]
-      ? Number(values["from-version"])
-      : history[0]?.version;
-    if (fromV === undefined) {
-      console.error(
-        `${target}: no history to diff against — pass --from-version, or use the \`name..other\` form`,
-      );
-      process.exit(1);
-    }
-    const resolve = (v: number): ActionRecipe | null => {
-      if (v === current.version) return current;
-      return history.find((r) => r.version === v) ?? null;
-    };
-    const l = resolve(fromV);
-    const r = resolve(toV);
-    if (!l) {
-      console.error(`${target}: version ${fromV} not found`);
-      process.exit(1);
-    }
-    if (!r) {
-      console.error(`${target}: version ${toV} not found`);
-      process.exit(1);
-    }
-    left = l;
-    right = r;
-  }
+  const [left, right] = resolveDiffOperands(store, target, {
+    fromVersion: values["from-version"],
+    toVersion: values["to-version"],
+  });
   const diff = diffRecipes(left, right);
   if (values.json) {
     process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
@@ -571,18 +503,10 @@ async function lintCmd(argv: string[]): Promise<void> {
   }
   const store = openStore(values);
   const target = positionals[0];
-  let issues: LintIssue[];
-  if (target) {
-    const recipe = store.get(target);
-    if (!recipe) {
-      console.error(`Recipe not found: ${target}`);
-      process.exit(1);
-    }
-    issues = lintRecipe(recipe, { store });
-  } else {
-    issues = lintStore(store).issues;
-  }
-  const report = summarise(issues);
+  const report = target
+    ? summarise(lintRecipe(requireRecipe(store, target), { store }))
+    : lintStore(store);
+  const issues = report.issues;
   if (values.json) {
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   } else if (issues.length === 0) {
@@ -631,11 +555,7 @@ async function repairCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  const recipe = store.get(name);
-  if (!recipe) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  const recipe = requireRecipe(store, name);
   const baseUrl = values["base-url"];
   const startUrl = values["start-url"];
   if (!baseUrl && !startUrl && recipe.steps[0]?.kind !== "navigate") {
@@ -674,4 +594,31 @@ async function repairCmd(argv: string[]): Promise<void> {
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+// -------- helpers --------
+
+function resolveDiffOperands(
+  store: ReturnType<typeof openStore>,
+  target: string,
+  opts: { fromVersion?: string; toVersion?: string },
+): [ActionRecipe, ActionRecipe] {
+  if (target.includes("..")) {
+    const [a, b] = target.split("..", 2);
+    return [requireRecipe(store, a!), requireRecipe(store, b!)];
+  }
+  const current = requireRecipe(store, target);
+  const history = store.history(target);
+  const toVersion = opts.toVersion ? Number(opts.toVersion) : current.version;
+  const fromVersion = opts.fromVersion ? Number(opts.fromVersion) : history[0]?.version;
+  if (fromVersion === undefined) {
+    console.error(
+      `${target}: no history to diff against — pass --from-version, or use the \`name..other\` form`,
+    );
+    process.exit(1);
+  }
+  return [
+    requireVersion(store, target, fromVersion),
+    requireVersion(store, target, toVersion),
+  ];
 }
