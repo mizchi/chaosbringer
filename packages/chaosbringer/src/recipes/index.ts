@@ -18,7 +18,24 @@ export type {
   ReplayResult,
 } from "./types.js";
 export { emptyStats } from "./types.js";
-export { RecipeStore, type RecipeStoreOptions, recipeFilename } from "./store.js";
+export {
+  RecipeStore,
+  parseRecipeHistoryFilename,
+  recipeFilename,
+  recipeHistoryFilename,
+  type RecipeStoreOptions,
+} from "./store.js";
+export {
+  applySnapshot,
+  captureSnapshot,
+  DEFAULT_SNAPSHOT_TTL_MS,
+  deleteSnapshot,
+  loadSnapshot,
+  SNAPSHOT_FORMAT_VERSION,
+  snapshotPath,
+  type CaptureOptions as CaptureSnapshotOptions,
+  type RecipeSnapshot,
+} from "./snapshot.js";
 export { preconditionsHold } from "./match.js";
 export { runRecipe } from "./replay.js";
 export { extractCandidate, type ExtractCandidateOptions } from "./capture.js";

@@ -34,6 +34,7 @@ The three doc surfaces:
 - **[Concepts borrowed from browser-harness + WebMCP](./browser-harness-concepts.md)** — `loadPageScenarios` (app self-declares its testable scenarios), `parseSkillMarkdown` (prose seeds), `RecipeStore.byDomain` (multi-host libraries), `repairRecipe` (AI patches recipe drift), per-step screenshots, coordinate-fallback clicks.
 - **[Recipe composition + delta-debugged regressions](./recipe-composition.md)** — `requires` now chains (auto-resolves login before checkout), `investigate({ minimize: true })` shrinks reproduction traces to the 1-minimal subset.
 - **[Load-test your whole recipe library](./load-from-recipe-store.md)** — `scenarioLoadFromStore` + recipe templating (`{{email}}`) drives N workers through verified recipes with per-iteration variables. Connects the recipe library to scenarioLoad + chaos in one call.
+- **[Production-safe recipe runs](./production-safety.md)** — storage-state snapshots cut the `requires` chain cost (issue #89), version history + rollback let you undo a bad `repairRecipe` (issue #90).
 
 ### Security testing
 

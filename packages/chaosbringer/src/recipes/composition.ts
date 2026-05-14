@@ -17,6 +17,12 @@
  */
 import type { Page } from "playwright";
 import { runRecipe } from "./replay.js";
+import {
+  applySnapshot,
+  captureSnapshot,
+  loadSnapshot,
+  DEFAULT_SNAPSHOT_TTL_MS,
+} from "./snapshot.js";
 import type { RecipeStore } from "./store.js";
 import type { RecipeVars } from "./templating.js";
 import type { ActionRecipe, ReplayResult } from "./types.js";
@@ -41,11 +47,36 @@ export interface RunWithRequiresOptions {
    * `shop/checkout` see the same `{{email}}`.
    */
   vars?: RecipeVars;
+  /**
+   * Storage-state snapshot policy (issue #89). When enabled, recipes
+   * marked as snapshotable have their storage state captured after
+   * the first successful replay; subsequent replays in fresh
+   * contexts inject the snapshot and skip the chain step entirely.
+   *
+   * Pass `false` (default) to disable the optimisation. Pass `true`
+   * to use the default TTL (30 min). Pass an object to customise.
+   */
+  snapshot?: boolean | SnapshotPolicy;
 }
+
+export interface SnapshotPolicy {
+  /** Time-to-live in milliseconds. Snapshots older than this are
+   *  discarded and the chain step replays normally. Default: 30 min. */
+  ttlMs?: number;
+  /**
+   * Predicate deciding which recipes are eligible for snapshot
+   * capture. Defaults to "name starts with `auth/`" — the dominant
+   * use case. Return false for recipes whose post-state is too
+   * volatile or order-dependent to snapshot safely.
+   */
+  eligible?: (recipe: ActionRecipe) => boolean;
+}
+
+const DEFAULT_SNAPSHOT_ELIGIBLE = (r: ActionRecipe): boolean => r.name.startsWith("auth/");
 
 export type ChainProgressEvent =
   | { kind: "start"; recipe: string; index: number; total: number }
-  | { kind: "skip"; recipe: string; reason: "already-ran" }
+  | { kind: "skip"; recipe: string; reason: "already-ran" | "snapshot-applied" }
   | { kind: "complete"; recipe: string; result: ReplayResult };
 
 export interface RunWithRequiresResult {
@@ -67,6 +98,13 @@ export interface RunWithRequiresResult {
  * `requires` list. Mutates `alreadyRan` (if provided) so a caller
  * can amortise the chain cost across multiple replays in the same
  * session.
+ *
+ * Storage-state snapshots (issue #89): when `opts.snapshot` is
+ * enabled and the chain link is eligible (default: `name.startsWith("auth/")`),
+ * a fresh-context replay attempts to apply a cached snapshot first.
+ * Snapshot hit → chain link is skipped with `reason: "snapshot-applied"`.
+ * Snapshot miss → chain link runs normally and the runner captures
+ * a new snapshot after success.
  */
 export async function runRecipeWithRequires(
   opts: RunWithRequiresOptions,
@@ -75,6 +113,7 @@ export async function runRecipeWithRequires(
   const alreadyRan = opts.alreadyRan ?? new Set<string>();
   const ranSequence: string[] = [];
   const results: Record<string, ReplayResult> = {};
+  const snapshotPolicy = normaliseSnapshot(opts.snapshot);
 
   for (let i = 0; i < order.length; i++) {
     const r = order[i]!;
@@ -83,18 +122,85 @@ export async function runRecipeWithRequires(
       opts.onProgress?.({ kind: "skip", recipe: r.name, reason: "already-ran" });
       continue;
     }
+
+    // Snapshot fast path: try to inject saved storage state. Only
+    // applies to chain links earlier than the target recipe (the
+    // last entry in `order`); the final entry must actually replay
+    // to satisfy the caller's success expectations.
+    const isTerminal = i === order.length - 1;
+    if (
+      snapshotPolicy &&
+      !isTerminal &&
+      snapshotPolicy.eligible(r) &&
+      opts.store.writeDir
+    ) {
+      const snap = loadSnapshot(opts.store.writeDir, r.name, {
+        recipeVersion: r.version,
+        ttlMs: snapshotPolicy.ttlMs,
+      });
+      if (snap) {
+        const applied = await applySnapshot(opts.page.context(), snap, {
+          currentOrigin: originOf(opts.page.url()),
+        });
+        if (applied) {
+          alreadyRan.add(r.name);
+          opts.onProgress?.({
+            kind: "skip",
+            recipe: r.name,
+            reason: "snapshot-applied",
+          });
+          continue;
+        }
+      }
+    }
+
     opts.onProgress?.({ kind: "start", recipe: r.name, index: i, total: order.length });
     const result = await runRecipe(opts.page, r, { vars: opts.vars });
     results[r.name] = result;
     opts.onProgress?.({ kind: "complete", recipe: r.name, result });
     if (result.ok) {
       alreadyRan.add(r.name);
+      // Successful chain link → snapshot if eligible.
+      if (
+        snapshotPolicy &&
+        !isTerminal &&
+        snapshotPolicy.eligible(r) &&
+        opts.store.writeDir
+      ) {
+        await captureSnapshot(opts.page.context(), {
+          name: r.name,
+          recipeVersion: r.version,
+          dir: opts.store.writeDir,
+          origin: originOf(opts.page.url()),
+        }).catch(() => {
+          // best-effort — a failed snapshot must not fail the run
+        });
+      }
       continue;
     }
     return { ok: false, ranSequence, failedAt: r.name, results };
   }
 
   return { ok: true, ranSequence, failedAt: null, results };
+}
+
+function normaliseSnapshot(
+  s: RunWithRequiresOptions["snapshot"],
+): { ttlMs: number; eligible: (r: ActionRecipe) => boolean } | null {
+  if (!s) return null;
+  if (s === true) return { ttlMs: DEFAULT_SNAPSHOT_TTL_MS, eligible: DEFAULT_SNAPSHOT_ELIGIBLE };
+  return {
+    ttlMs: s.ttlMs ?? DEFAULT_SNAPSHOT_TTL_MS,
+    eligible: s.eligible ?? DEFAULT_SNAPSHOT_ELIGIBLE,
+  };
+}
+
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -226,6 +226,10 @@ const pages: Record<string, Route> = {
             // Vulnerable username enumeration — distinct messages.
             if (u === "admin" || u === "chaosbringer-test@example.invalid") {
               if (p === "secret") {
+                // Simulate session establishment: set a cookie + localStorage
+                // so storage-state snapshots have something to capture.
+                document.cookie = 'session=user-' + encodeURIComponent(u) + '; path=/';
+                try { localStorage.setItem('authed_as', u); } catch {}
                 window.location.href = '/auth-thanks?via=login';
                 return;
               }

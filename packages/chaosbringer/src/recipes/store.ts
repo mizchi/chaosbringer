@@ -60,6 +60,24 @@ export function recipeFilename(name: string): string {
   return `${sanitised}.json`;
 }
 
+/**
+ * Filename for a HISTORICAL version of a recipe. Versions accumulate
+ * as siblings of the current file: `auth__login.v1.json`,
+ * `auth__login.v2.json`, etc. The current/active file stays at the
+ * un-versioned path.
+ */
+export function recipeHistoryFilename(name: string, version: number): string {
+  const sanitised = name.replace(/\//g, "__").replace(/[^A-Za-z0-9_.\-]/g, "_");
+  return `${sanitised}.v${version}.json`;
+}
+
+/** Parse a history filename back into `{ name, version }` or null. */
+export function parseRecipeHistoryFilename(file: string): { stem: string; version: number } | null {
+  const m = /^(.+?)\.v(\d+)\.json$/.exec(file);
+  if (!m) return null;
+  return { stem: m[1]!, version: Number(m[2]!) };
+}
+
 export class RecipeStore {
   private readonly local: string | null;
   private readonly global: string | null;
@@ -81,6 +99,16 @@ export class RecipeStore {
     this.silent = opts.silent ?? false;
   }
 
+  /**
+   * Directory where new writes land (local tier when present, else
+   * global). Returns null if both tiers are disabled. Exposed for
+   * the snapshot module (issue #89) which co-locates `*.state.json`
+   * files alongside the recipe files.
+   */
+  get writeDir(): string | null {
+    return this.local ?? this.global;
+  }
+
   /** Load both tiers into the in-memory cache. Local overrides global. */
   load(): void {
     this.cache.clear();
@@ -99,6 +127,11 @@ export class RecipeStore {
     }
     for (const file of names) {
       if (!file.endsWith(".json")) continue;
+      // Skip historical archive entries (`name.vN.json`) and snapshot
+      // sidecars (`name.state.json`). Both belong next to recipes but
+      // aren't recipes themselves.
+      if (parseRecipeHistoryFilename(file)) continue;
+      if (file.endsWith(".state.json")) continue;
       const full = join(dir, file);
       try {
         const raw = readFileSync(full, "utf8");
@@ -169,9 +202,15 @@ export class RecipeStore {
    * empty stats unless explicitly provided. The write target is the
    * local dir if available, otherwise global. Writing to neither is
    * an error (call sites should check `canWrite` first).
+   *
+   * Before overwriting, if the existing version differs from the
+   * incoming one, the current file is renamed to its history slot
+   * (`name.vN.json`). This is the rollback safety net for
+   * `repairRecipe` — never lose the previous good version.
    */
   upsert(recipe: ActionRecipe): void {
     this.ensureLoaded();
+    const prior = this.cache.get(recipe.name);
     const stored: ActionRecipe = {
       ...recipe,
       status: recipe.status ?? "candidate",
@@ -180,8 +219,117 @@ export class RecipeStore {
       createdAt: recipe.createdAt ?? Date.now(),
       updatedAt: Date.now(),
     };
+    if (prior && prior.version !== stored.version) {
+      this.archive(prior);
+    }
     this.cache.set(stored.name, stored);
     this.persist(stored);
+  }
+
+  /**
+   * Return the recipe's historical versions (newest first). The
+   * current version is NOT included — use `get(name)` for that.
+   * Empty array when no history exists.
+   */
+  history(name: string): ActionRecipe[] {
+    this.ensureLoaded();
+    const out: ActionRecipe[] = [];
+    for (const dir of [this.local, this.global]) {
+      if (!dir) continue;
+      if (!existsSync(dir)) continue;
+      let entries: string[];
+      try { entries = readdirSync(dir); } catch { continue; }
+      const stem = recipeFilename(name).replace(/\.json$/, "");
+      for (const file of entries) {
+        const parsed = parseRecipeHistoryFilename(file);
+        if (!parsed) continue;
+        if (parsed.stem !== stem) continue;
+        try {
+          const raw = readFileSync(join(dir, file), "utf8");
+          const recipe = JSON.parse(raw) as ActionRecipe;
+          if (recipe.name === name) out.push(recipe);
+        } catch { /* skip corrupt entries */ }
+      }
+    }
+    return out.sort((a, b) => b.version - a.version);
+  }
+
+  /**
+   * Replace the current version with a prior one. The historical
+   * file is consumed (moved back to current); the current pre-rollback
+   * version is archived in turn so rollback is fully reversible.
+   *
+   * The rolled-back recipe is bumped to a NEW version number so
+   * downstream `recipe.version === N` checks see the change clearly.
+   * Stats from the current version are PRESERVED — rollback is a
+   * step-list swap, not a stats reset.
+   */
+  rollback(name: string, opts: { toVersion: number }): ActionRecipe | null {
+    this.ensureLoaded();
+    const current = this.cache.get(name);
+    if (!current) return null;
+    const history = this.history(name);
+    const target = history.find((r) => r.version === opts.toVersion);
+    if (!target) {
+      if (!this.silent) console.warn(`recipe-store: rollback target version ${opts.toVersion} not found for ${name}`);
+      return null;
+    }
+    // Find the highest known version so the rolled-back recipe gets a
+    // fresh, monotonic version number.
+    const allVersions = [current.version, ...history.map((r) => r.version)];
+    const newVersion = Math.max(...allVersions) + 1;
+    const rolled: ActionRecipe = {
+      ...target,
+      version: newVersion,
+      stats: current.stats,            // keep accumulated stats
+      status: current.status,          // keep current status
+      updatedAt: Date.now(),
+      requires: [
+        ...target.requires.filter((d) => !d.startsWith("__rolled-back-from")),
+        `__rolled-back-from-v${current.version}`,
+      ],
+    };
+    // Save and remove the consumed history entry.
+    this.archive(current);
+    this.cache.set(name, rolled);
+    this.persist(rolled);
+    this.deleteHistoryEntry(name, target.version);
+    return rolled;
+  }
+
+  /**
+   * Trim historical versions. Keeps the `keepLast` newest entries and
+   * deletes the rest. The current version is never touched.
+   */
+  pruneHistory(name: string, opts: { keepLast: number }): number {
+    const keep = Math.max(0, opts.keepLast);
+    const history = this.history(name); // newest first
+    const toDelete = history.slice(keep);
+    for (const r of toDelete) {
+      this.deleteHistoryEntry(name, r.version);
+    }
+    return toDelete.length;
+  }
+
+  private archive(recipe: ActionRecipe): void {
+    const dir = this.local ?? this.global;
+    if (!dir) return;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const archivePath = join(dir, recipeHistoryFilename(recipe.name, recipe.version));
+    const tmp = `${archivePath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(recipe, null, 2) + "\n", "utf8");
+    renameSync(tmp, archivePath);
+  }
+
+  private deleteHistoryEntry(name: string, version: number): void {
+    const filename = recipeHistoryFilename(name, version);
+    for (const dir of [this.local, this.global]) {
+      if (!dir) continue;
+      const path = join(dir, filename);
+      if (existsSync(path)) {
+        try { unlinkSync(path); } catch { /* best-effort */ }
+      }
+    }
   }
 
   /** Remove from cache + disk. No-op if the recipe doesn't exist. */
