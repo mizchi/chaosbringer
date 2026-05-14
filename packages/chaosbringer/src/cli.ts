@@ -100,6 +100,26 @@ if (subcommand === "diff") {
     process.exit(1);
   }
 }
+if (subcommand === "cluster-artifacts") {
+  const { runClusterArtifactsCli } = await import("./cluster-artifacts-cli.js");
+  try {
+    await runClusterArtifactsCli(process.argv.slice(3));
+    process.exit(process.exitCode ?? 0);
+  } catch (err) {
+    console.error("cluster-artifacts failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+if (subcommand === "parity") {
+  const { runParityCli } = await import("./parity-cli.js");
+  try {
+    await runParityCli(process.argv.slice(3));
+    process.exit(process.exitCode ?? 0);
+  } catch (err) {
+    console.error("parity failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {
