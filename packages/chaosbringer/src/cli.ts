@@ -156,6 +156,8 @@ const { values, positionals } = parseArgs({
     "visual-diff-dir": { type: "string" },
     "visual-update": { type: "boolean", default: false },
     "failure-artifacts": { type: "string" },
+    "cluster-artifacts": { type: "boolean", default: false },
+    "cluster-min-count": { type: "string" },
     "failure-max": { type: "string" },
     "trace-out": { type: "string" },
     "trace-replay": { type: "string" },
@@ -221,6 +223,8 @@ OPTIONS:
   --visual-update       Overwrite baselines with current screenshots (for intentional UI updates)
   --failure-artifacts <dir>  Write a bundle (screenshot + html + errors + trace + repro.sh) per failing page
   --failure-max <n>     Cap the number of failure bundles per run (default: unlimited)
+  --cluster-artifacts   After the crawl, emit one representative bundle per error cluster in <failure-artifacts>/clusters/
+  --cluster-min-count <n>  Skip clusters with count below n when --cluster-artifacts is set
   --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
@@ -525,6 +529,27 @@ async function main() {
       if (heatmapOut) {
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
         if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+      }
+    }
+
+    if (values["cluster-artifacts"]) {
+      const failureDir = values["failure-artifacts"];
+      if (!failureDir) {
+        console.error(
+          "--cluster-artifacts requires --failure-artifacts <dir> (it copies from the per-page bundles)",
+        );
+        process.exit(1);
+      }
+      const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
+      const minCount = values["cluster-min-count"]
+        ? parseInt(values["cluster-min-count"], 10)
+        : undefined;
+      const results = writeClusterArtifacts(report, {
+        bundleDir: failureDir,
+        minCount,
+      });
+      if (!isQuiet) {
+        console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
       }
     }
 
