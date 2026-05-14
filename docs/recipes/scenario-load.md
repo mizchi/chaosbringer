@@ -1,5 +1,11 @@
 # Scenario-load — realistic user workers, optionally under chaos
 
+> Looking for a paste-and-edit snippet for a specific task? Try the cookbook
+> first: [CI gating](../cookbook/ci-slo-gating.md), [fault timeline](../cookbook/chaos-under-load.md),
+> [per-worker auth](../cookbook/per-worker-auth.md), [probability ramp](../cookbook/probability-ramp.md),
+> [think-time shaping](../cookbook/think-time-shaping.md). This doc is the
+> longer "what is this feature and why".
+
 `scenarioLoad()` runs N "virtual users" in parallel, each looping a scripted user journey (login → browse → checkout → …) with realistic think time, and produces a `LoadReport` with per-step latency percentiles and per-endpoint timing. Combine with `faultInjection` / `runtimeFaults` to ask the chaos question under realistic concurrency: *does the app still work when 10 users hit checkout while half the API responses 500?*
 
 ## When to reach for it

@@ -59,16 +59,29 @@ process.exit(passed ? 0 : 1);
 
 The full feature list, CLI reference, and report-shape walkthrough live in [`packages/chaosbringer/README.md`](packages/chaosbringer/README.md).
 
-## Recipes
+## Cookbook — "I want to…"
 
-Common patterns extracted from real consumer code (rather than rediscovered every time):
+Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
+
+- [`docs/cookbook/`](docs/cookbook/) — index of all recipes. Highlights:
+  - [Fail CI on latency / error regression](docs/cookbook/ci-slo-gating.md) (`assertSlo`)
+  - [Wire chaos into GitHub Actions](docs/cookbook/github-actions.md)
+  - [Read cause-and-effect from the fault timeline](docs/cookbook/chaos-under-load.md)
+  - [Ramp fault probability to find the breaking point](docs/cookbook/probability-ramp.md)
+  - [Multiple per-worker logged-in identities](docs/cookbook/per-worker-auth.md)
+  - [Standard invariants toolkit](docs/cookbook/invariant-toolkit.md) (toast / state-machine / response shape / monotonic)
+  - [Which fault layer for which bug](docs/cookbook/fault-layer-cheatsheet.md)
+  - [Find out what actually broke](docs/cookbook/debugging-failures.md) (errors → artifacts → HAR replay)
+  - [Realistic think-time shaping](docs/cookbook/think-time-shaping.md)
+
+## Recipes — feature explanations
+
+Longer-form "what does this feature do and why" docs:
 
 - [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
 - [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
-
-More recipes (auth via storageState, SPA-routing tips, Playwright Test integration, CI on GitHub Actions) live inline in `packages/chaosbringer/README.md` until split out.
 
 ## Examples
 
