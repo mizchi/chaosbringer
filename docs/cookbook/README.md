@@ -27,6 +27,10 @@ The three doc surfaces:
 - **[Multiple per-worker logged-in identities](./per-worker-auth.md)** — `storageState` as a factory; reset between iterations.
 - **[Realistic think-time shaping](./think-time-shaping.md)** — uniform vs. gaussian vs. none, plus step-level overrides.
 
+### AI-driven exploration
+
+- **[Grow an AI skill library (Goals + Recipes)](./ai-recipe-skills.md)** — `recipeDriver` replays verified trajectories without LLM calls; `Goal` defines the persona (normal user / bug hunter / coverage explorer) the AI operates as.
+
 ### Invariants (what counts as "broken")
 
 - **[Standard invariants toolkit](./invariant-toolkit.md)** — no-error-toast, state-machine, response-shape, monotonic-counter. Copy-paste shapes.

@@ -73,6 +73,7 @@ Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
   - [Which fault layer for which bug](docs/cookbook/fault-layer-cheatsheet.md)
   - [Find out what actually broke](docs/cookbook/debugging-failures.md) (errors → artifacts → HAR replay)
   - [Realistic think-time shaping](docs/cookbook/think-time-shaping.md)
+  - [Grow an AI skill library (Goals + Recipes)](docs/cookbook/ai-recipe-skills.md) — `recipeDriver` replays verified trajectories without LLM calls. See [`examples/recipe-skills/`](examples/recipe-skills/README.md).
 
 ## Recipes — feature explanations
 
@@ -90,6 +91,7 @@ Runnable demos under [`examples/`](examples/), workspace-linked to the local pac
 - **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above.
 - **[`examples/playwright-test/`](examples/playwright-test/)** — chaosbringer inside an `@playwright/test` suite via the `chaos` fixture. Both `chaosTest` and `withChaos()` extension patterns in one file.
 - **[`examples/load-with-chaos/`](examples/load-with-chaos/)** — `scenarioLoad` running 5 virtual users through a shopping journey while 10% of `/api/*` is forced to 500. Boots its own in-process HTTP server. Shows per-step latency rollups, the per-second timeline sparkline, and fault-rule injection stats co-existing in one report.
+- **[`examples/recipe-skills/`](examples/recipe-skills/)** — Recipe layer demo: hand-written `ActionRecipe` → `verifyAndPromote` across 3 fresh contexts → re-load store from disk → drive the verified recipe through `recipeDriver`. Self-contained, no API key.
 
 ## Internal design docs
 
