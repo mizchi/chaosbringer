@@ -42,7 +42,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
 - **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary.
 - **Playwright Test integration** for when you'd rather run chaos inside an existing test file.
-- **CLI** for running from a shell or CI, with `minimize` / `flake` / `shard` subcommands.
+- **CLI** for running from a shell or CI, with `minimize` / `flake` / `shard` / `diff` / `parity` / `cluster-artifacts` / `recipes` / `load` subcommands.
 
 ## Install
 
@@ -963,6 +963,49 @@ chaosbringer --url ... --shard 1/4 --output shard-1.json
 import { mergeReports } from "chaosbringer";
 const merged = mergeReports([r0, r1, r2, r3]);
 ```
+
+### `diff`
+
+Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both (likely third-party noise). Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed.
+
+```bash
+chaosbringer --url http://127.0.0.1:3000 --seed 1 --output left.json
+chaosbringer --url http://127.0.0.1:3001 --seed 1 --output right.json
+chaosbringer diff left.json right.json
+```
+
+Flags: `--json` (machine output), `--shared-only` / `--left-only` / `--right-only` (filtered views for piping into wrapper scripts). Distinct from the `--baseline` flag, which assumes a directional baseline-vs-current comparison.
+
+### `parity`
+
+Non-random side-by-side HTTP probe. For each path in a file, GETs the same path against two base URLs and surfaces status mismatches, redirect-target mismatches, and one-side-only fetch failures. Use this when random crawls produce too much third-party noise to isolate route divergence.
+
+```bash
+chaosbringer parity \
+  --left http://127.0.0.1:3000 \
+  --right http://127.0.0.1:3001 \
+  --paths paths.txt \
+  --output parity.json
+```
+
+Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits non-zero on any mismatch so it slots into CI as a gate.
+
+### `cluster-artifacts`
+
+Walks a report's `errorClusters` and emits one representative artifact bundle per cluster — copying `page.html` / `trace.jsonl` / `repro.sh` / screenshot from the matching per-page failure bundle and writing a filtered `errors.json` (only the cluster's own errors, not the whole page's). Triage-friendly: a cluster with 30 pages produces one directory the reviewer skims.
+
+```bash
+# Post-hoc: against an already-written failure-artifacts directory.
+chaosbringer cluster-artifacts chaos-report.json --bundle-dir ./artifacts
+
+# Inline: hook the main crawl so cluster bundles are emitted at the end.
+chaosbringer --url http://localhost:3000 \
+  --failure-artifacts ./artifacts \
+  --cluster-artifacts \
+  --cluster-min-count 5
+```
+
+`--min-count` (or `--cluster-min-count` inline) filters low-frequency noise. The inline form requires `--failure-artifacts` since it copies from the per-page bundles.
 
 ## CLI reference
 
