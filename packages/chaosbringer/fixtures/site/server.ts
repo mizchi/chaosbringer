@@ -196,6 +196,172 @@ const pages: Record<string, Route> = {
       `,
     }),
   },
+
+  // -------- Intentionally vulnerable auth pages, used by the
+  //          auth-attack-driver E2E tests. DO NOT mirror these patterns
+  //          in real apps.
+  "/login": {
+    body: html({
+      title: "Log in",
+      body: `
+        <h1>Log in</h1>
+        <form id="form">
+          <label>Username <input name="username" id="username" autocomplete="username" /></label>
+          <label>Password <input name="password" id="password" type="password" autocomplete="current-password" /></label>
+          <button type="submit">Sign in</button>
+        </form>
+        <div id="error" role="alert" data-test="error" style="color:red"></div>
+        <script>
+          // Vulnerable session fixation — set a deterministic session cookie
+          // BEFORE login. A correct implementation would set it AFTER
+          // successful auth, with a fresh value.
+          if (!document.cookie.match(/(^|; )sid=/)) {
+            document.cookie = 'sid=fixed-pre-auth-' + Math.floor(Date.now() / 86400000) + '; path=/';
+          }
+          const form = document.getElementById('form');
+          const err  = document.getElementById('error');
+          form.addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            const u = document.getElementById('username').value || "";
+            const p = document.getElementById('password').value || "";
+            // Vulnerable SQL bypass — naive "concatenate then check" mock.
+            if (u.toLowerCase().includes("' or ") || u === "admin'--") {
+              window.location.href = '/auth-thanks?via=sqli';
+              return;
+            }
+            // Vulnerable username enumeration — distinct messages.
+            if (u === "admin" || u === "chaosbringer-test@example.invalid") {
+              if (p === "secret") {
+                // Simulate session establishment: set a cookie + localStorage
+                // so storage-state snapshots have something to capture.
+                document.cookie = 'session=user-' + encodeURIComponent(u) + '; path=/';
+                try { localStorage.setItem('authed_as', u); } catch {}
+                window.location.href = '/auth-thanks?via=login';
+                return;
+              }
+              err.textContent = 'Wrong password for ' + u;
+            } else {
+              err.textContent = 'No such user: ' + u;
+            }
+            // Vulnerable XSS — reflects via innerHTML.
+            if (u.includes('<') || u.includes('"')) {
+              err.innerHTML = 'Login error for ' + u;
+            }
+          });
+        </script>
+      `,
+    }),
+  },
+
+  "/signup": {
+    body: html({
+      title: "Sign up",
+      body: `
+        <h1>Create account</h1>
+        <form id="form">
+          <label>Email <input name="email" id="email" type="email" autocomplete="email" /></label>
+          <label>Password <input name="password" id="password" type="password" autocomplete="new-password" /></label>
+          <button type="submit">Sign up</button>
+        </form>
+        <div id="error" role="alert" data-test="error" style="color:red"></div>
+        <script>
+          const form = document.getElementById('form');
+          const err  = document.getElementById('error');
+          form.addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            const e = document.getElementById('email').value || "";
+            const p = document.getElementById('password').value || "";
+            if (!e || !p) {
+              err.textContent = 'Missing fields';
+              return;
+            }
+            // Vulnerable XSS — reflects email back via innerHTML.
+            if (e.includes('<') || e.includes('"')) {
+              err.innerHTML = 'Welcome ' + e;
+              return;
+            }
+            // Vulnerable weak-password policy — no checks at all, accepts
+            // everything from "password" down.
+            window.location.href = '/auth-thanks?via=signup';
+          });
+        </script>
+      `,
+    }),
+  },
+
+  "/auth-thanks": {
+    body: html({
+      title: "Authenticated",
+      body: `<h1 data-test="auth-thanks">Welcome</h1><p>Authenticated successfully.</p>`,
+    }),
+  },
+
+  "/forgot-password": {
+    body: html({
+      title: "Forgot password",
+      body: `
+        <h1>Forgot password</h1>
+        <p>Enter your email — we will display a reset link inline (dev mode).</p>
+        <form id="form">
+          <label>Email <input name="email" id="email" type="email" autocomplete="email" /></label>
+          <button type="submit">Send reset link</button>
+        </form>
+        <div id="result" data-test="reset-link"></div>
+        <script>
+          // Intentionally weak token: fixed prefix + day-of-week + sequential
+          // suffix counter. A real implementation would use crypto.randomUUID().
+          let counter = Number(localStorage.getItem('cb_reset_counter') ?? '0');
+          document.getElementById('form').addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            counter += 1;
+            localStorage.setItem('cb_reset_counter', String(counter));
+            const day = new Date().getDay();
+            const token = 'reset_fixed_prefix_v1_' + day + '_' + String(counter).padStart(4, '0');
+            document.getElementById('result').textContent = 'Reset URL: /reset?token=' + token;
+          });
+        </script>
+      `,
+    }),
+  },
+
+  // WebMCP-style page that self-declares testable scenarios on
+  // `window.__chaosbringer`. Used by the `loadPageScenarios` E2E.
+  "/page-scenarios": {
+    body: html({
+      title: "Self-declared scenarios",
+      body: `
+        <h1>Page-declared scenarios fixture</h1>
+        <p>Publishes two scenarios for the harness to harvest.</p>
+        <script>
+          window.__chaosbringer = {
+            version: 1,
+            scenarios: [
+              {
+                name: "demo/visit-about",
+                description: "Click About link",
+                goal: "completion",
+                preconditions: [{ urlPattern: "/page-scenarios" }],
+                steps: [
+                  { kind: "click", selector: 'a[href="/about"]' }
+                ],
+                postconditions: [{ urlPattern: "/about" }]
+              },
+              {
+                name: "demo/visit-form",
+                steps: [
+                  { kind: "navigate", url: "/form" }
+                ]
+              }
+            ]
+          };
+        </script>
+        <nav>
+          <a href="/about">About</a>
+          <a href="/form">Form</a>
+        </nav>
+      `,
+    }),
+  },
 };
 
 function html({ title, body, nav }: { title: string; body: string; nav?: boolean }): string {

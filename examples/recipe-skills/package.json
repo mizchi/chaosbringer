@@ -1,0 +1,17 @@
+{
+  "name": "@mizchi/chaosbringer-example-recipe-skills",
+  "private": true,
+  "type": "module",
+  "description": "Recipe layer demo: hand-written recipe → verify → replay via recipeDriver. Self-contained HTTP server, no API key needed.",
+  "scripts": {
+    "start": "tsx run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.52.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

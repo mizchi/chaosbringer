@@ -59,21 +59,45 @@ process.exit(passed ? 0 : 1);
 
 The full feature list, CLI reference, and report-shape walkthrough live in [`packages/chaosbringer/README.md`](packages/chaosbringer/README.md).
 
-## Recipes
+## Cookbook — "I want to…"
 
-Common patterns extracted from real consumer code (rather than rediscovered every time):
+Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
 
+- [`docs/cookbook/`](docs/cookbook/) — index of all recipes. Highlights:
+  - [Fail CI on latency / error regression](docs/cookbook/ci-slo-gating.md) (`assertSlo`)
+  - [Wire chaos into GitHub Actions](docs/cookbook/github-actions.md)
+  - [Read cause-and-effect from the fault timeline](docs/cookbook/chaos-under-load.md)
+  - [Ramp fault probability to find the breaking point](docs/cookbook/probability-ramp.md)
+  - [Multiple per-worker logged-in identities](docs/cookbook/per-worker-auth.md)
+  - [Standard invariants toolkit](docs/cookbook/invariant-toolkit.md) (toast / state-machine / response shape / monotonic)
+  - [Which fault layer for which bug](docs/cookbook/fault-layer-cheatsheet.md)
+  - [Find out what actually broke](docs/cookbook/debugging-failures.md) (errors → artifacts → HAR replay)
+  - [Realistic think-time shaping](docs/cookbook/think-time-shaping.md)
+  - [Grow an AI skill library (Goals + Recipes)](docs/cookbook/ai-recipe-skills.md) — `recipeDriver` replays verified trajectories without LLM calls. See [`examples/recipe-skills/`](examples/recipe-skills/README.md).
+  - [The AI ↔ Recipe flywheel](docs/cookbook/ai-flywheel.md) — full A→B→C→D loop: AI discovers, verifier promotes, production replays cheaply under chaos, `investigate()` turns failures into regression recipes.
+  - [Attack login / signup forms (OWASP-aligned)](docs/cookbook/auth-attack-driver.md) — `authAttackDriver` runs weak-password, username-enumeration, SQLi, XSS, and rate-limit checks against detected auth forms.
+  - [Concepts borrowed from browser-harness + WebMCP](docs/cookbook/browser-harness-concepts.md) — `loadPageScenarios` (app self-declares scenarios), markdown skill seeds, domain-scoped recipe lookup, per-step screenshots, coordinate-fallback clicks, `repairRecipe` for surviving UI drift.
+  - [Recipe composition + delta-debugged regressions](docs/cookbook/recipe-composition.md) — `requires` actually chains (auto-runs login before checkout), `investigate({ minimize: true })` shrinks AI reproductions to 1-minimal traces.
+  - [Load-test your whole recipe library](docs/cookbook/load-from-recipe-store.md) — `scenarioLoadFromStore` + `{{var}}` recipe templating drives N workers through verified recipes with per-iteration variables.
+  - [Production-safe recipe runs](docs/cookbook/production-safety.md) — storage-state snapshots short-circuit repeated `auth/login` runs; version history + rollback let you undo a bad `repairRecipe`.
+
+## Recipes — feature explanations
+
+Longer-form "what does this feature do and why" docs:
+
+- [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
+- [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
 
-More recipes (auth via storageState, SPA-routing tips, Playwright Test integration, CI on GitHub Actions) live inline in `packages/chaosbringer/README.md` until split out.
-
 ## Examples
 
-Two runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs both end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
+Runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs them end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
 
 - **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above.
 - **[`examples/playwright-test/`](examples/playwright-test/)** — chaosbringer inside an `@playwright/test` suite via the `chaos` fixture. Both `chaosTest` and `withChaos()` extension patterns in one file.
+- **[`examples/load-with-chaos/`](examples/load-with-chaos/)** — `scenarioLoad` running 5 virtual users through a shopping journey while 10% of `/api/*` is forced to 500. Boots its own in-process HTTP server. Shows per-step latency rollups, the per-second timeline sparkline, and fault-rule injection stats co-existing in one report.
+- **[`examples/recipe-skills/`](examples/recipe-skills/)** — Recipe layer demo: hand-written `ActionRecipe` → `verifyAndPromote` across 3 fresh contexts → re-load store from disk → drive the verified recipe through `recipeDriver`. Self-contained, no API key.
 
 ## Internal design docs
 
@@ -109,6 +133,19 @@ chaosbringer/
 ├── package.json                  # workspace root (private, not published)
 └── pnpm-workspace.yaml
 ```
+
+## Contributing / testing
+
+```bash
+pnpm install
+pnpm -F chaosbringer test              # unit + fixture E2E (no API key needed)
+PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm -F chaosbringer test       # if you need to point at a shared cache
+ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (issue #95). Costs a few haiku-tier calls per run.
+```
+
+The `test:ai` smoke exercises the live Anthropic pipeline — Phase A
+discovery + Phase D investigation — that no other test in the repo
+hits. Without `ANTHROPIC_API_KEY` the suite skips silently.
 
 ## License
 

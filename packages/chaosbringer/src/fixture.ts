@@ -21,6 +21,18 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
 import type { ChaosTestOptions, PageResult, CrawlReport } from "./types.js";
+import { runRecipeWithRequires } from "./recipes/composition.js";
+import { investigate as runInvestigate, type InvestigateResult } from "./recipes/investigate.js";
+import { loadPageScenarios } from "./recipes/page-scenarios.js";
+import { runRecipe as replayRecipe } from "./recipes/replay.js";
+import {
+  RecipeStore,
+  type RecipeStoreOptions,
+} from "./recipes/store.js";
+import type { RecipeVars } from "./recipes/templating.js";
+import type { ActionRecipe } from "./recipes/types.js";
+import type { FailureContext } from "./recipes/goals.js";
+import type { SnapshotPolicy } from "./recipes/composition.js";
 
 export interface ChaosFixture {
   /** Test a single page with chaos testing */
@@ -124,6 +136,173 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
  * Pre-configured test with chaos fixture
  */
 export const chaosTest = base.extend<ChaosFixtures>(withChaos());
+
+// -------- Recipe fixture (issue #91) --------
+
+export interface RecipesFixture {
+  /** Shared `RecipeStore` instance — same store across the test. */
+  store: RecipeStore;
+  /**
+   * Replay a verified recipe by name. Throws when the recipe doesn't
+   * exist or replay fails. `requires` chain is honoured by default.
+   */
+  runRecipe(name: string, opts?: RunRecipeFixtureOptions): Promise<void>;
+  /**
+   * Harvest scenarios the current page self-declares on
+   * `window.__chaosbringer` (WebMCP-style). Returns the candidate
+   * recipes; the caller decides whether to upsert.
+   */
+  harvestPageScenarios(opts?: { trustPublisher?: boolean }): Promise<ActionRecipe[]>;
+  /**
+   * Run the Phase-D investigator against a captured failure. Returns
+   * the InvestigateResult — the regression recipe (if any) is also
+   * upserted into the fixture's store.
+   */
+  investigate(failure: FailureContext, opts?: InvestigateFixtureOptions): Promise<InvestigateResult>;
+}
+
+export interface RunRecipeFixtureOptions {
+  /** Template variables for `{{var}}` substitution. */
+  vars?: RecipeVars;
+  /** Skip `requires` chaining (default: chained). */
+  chainRequires?: boolean;
+  /** Storage-state snapshot policy. */
+  snapshot?: boolean | SnapshotPolicy;
+}
+
+export interface InvestigateFixtureOptions {
+  /** Max actions to spend reproducing. Default: 20. */
+  budget?: number;
+  /** Drives the investigator; required if you want a real AI replay. */
+  driver?: import("./drivers/types.js").Driver;
+  /** Run minimisation (1-minimal delta debugging). */
+  minimize?: boolean;
+}
+
+export interface RecipesFixtureOptions {
+  /** `RecipeStore` options. Defaults to `localDir: "./chaosbringer-recipes"`. */
+  store?: RecipeStoreOptions;
+  /**
+   * Re-use a pre-built store. If set, `store` options are ignored.
+   * Useful when you want every test to see the same in-memory cache
+   * accumulated by a `beforeAll`.
+   */
+  storeInstance?: RecipeStore;
+}
+
+export interface RecipesFixtures {
+  store: RecipeStore;
+  runRecipe: RecipesFixture["runRecipe"];
+  harvestPageScenarios: RecipesFixture["harvestPageScenarios"];
+  investigate: RecipesFixture["investigate"];
+}
+
+/**
+ * Build the recipes fixture set. Extend an existing Playwright Test
+ * with:
+ *
+ *   const test = base.extend<RecipesFixtures>(withRecipes());
+ *   test("buy flow", async ({ runRecipe }) => {
+ *     await runRecipe("shop/buy-tshirt", { vars: { email: "..." } });
+ *   });
+ */
+export function withRecipes(defaults: RecipesFixtureOptions = {}) {
+  const sharedStore = defaults.storeInstance ?? new RecipeStore({ silent: true, ...(defaults.store ?? {}) });
+
+  return {
+    // Playwright Test inspects the parameter declaration to wire
+    // up `store: { use }` against the fixture's dependencies. The
+    // body doesn't need any of them, but the destructured pattern
+    // must be present.
+    store: async (
+      { page: _page }: { page: Page },
+      use: (s: RecipeStore) => Promise<void>,
+    ) => {
+      void _page;
+      await use(sharedStore);
+    },
+
+    runRecipe: async (
+      { page, store }: { page: Page; store: RecipeStore },
+      use: (fn: RecipesFixture["runRecipe"]) => Promise<void>,
+    ) => {
+      await use(async (name, opts = {}) => {
+        const recipe = store.get(name);
+        if (!recipe) throw new Error(`runRecipe: "${name}" not found in store`);
+
+        const chain = opts.chainRequires !== false;
+        if (chain && recipe.requires.filter((d) => !d.startsWith("__")).length > 0) {
+          const result = await runRecipeWithRequires({
+            page,
+            recipe,
+            store,
+            vars: opts.vars,
+            snapshot: opts.snapshot,
+            onProgress: (ev) => {
+              if (ev.kind === "complete") {
+                if (ev.result.ok) store.recordSuccess(ev.recipe, ev.result.durationMs);
+                else store.recordFailure(ev.recipe);
+              }
+            },
+          });
+          if (!result.ok) {
+            throw new Error(
+              `runRecipe(${name}): chain failed at ${result.failedAt}: ${result.results[result.failedAt!]?.failedAt?.reason ?? "unknown"}`,
+            );
+          }
+          return;
+        }
+        const result = await replayRecipe(page, recipe, { vars: opts.vars });
+        if (result.ok) {
+          store.recordSuccess(name, result.durationMs);
+          return;
+        }
+        store.recordFailure(name);
+        throw new Error(
+          `runRecipe(${name}): step ${result.failedAt?.index} failed — ${result.failedAt?.reason ?? "unknown"}`,
+        );
+      });
+    },
+
+    harvestPageScenarios: async (
+      { page, store }: { page: Page; store: RecipeStore },
+      use: (fn: RecipesFixture["harvestPageScenarios"]) => Promise<void>,
+    ) => {
+      await use(async (opts = {}) => {
+        const harvested = await loadPageScenarios(page, opts);
+        // Mirror the auto-upsert convention from the cookbook examples.
+        for (const r of harvested) store.upsert(r);
+        return harvested;
+      });
+    },
+
+    investigate: async (
+      { store }: { store: RecipeStore },
+      use: (fn: RecipesFixture["investigate"]) => Promise<void>,
+    ) => {
+      await use(async (failure, opts = {}) => {
+        if (!opts.driver) {
+          throw new Error(
+            "investigate fixture: a `driver` is required — typically `aiDriver({ provider: anthropicDriverProvider(...) })`",
+          );
+        }
+        return runInvestigate({
+          failure,
+          driver: opts.driver,
+          store,
+          budget: opts.budget,
+          minimize: opts.minimize,
+        });
+      });
+    },
+  };
+}
+
+/**
+ * Pre-configured test with both chaos AND recipes fixtures. Use this
+ * when you want a single `test` symbol with everything wired.
+ */
+export const recipesTest = base.extend<RecipesFixtures>(withRecipes());
 
 /**
  * Helper to run chaos test on current page

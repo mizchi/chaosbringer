@@ -164,6 +164,26 @@ export interface CrawlerOptions {
    * Default: undefined (advisor disabled, zero overhead).
    */
   advisor?: AdvisorConfig;
+  /**
+   * Pluggable action selector. When set, the chaos action loop delegates
+   * per-step action selection to this driver instead of the built-in
+   * weighted-random heuristic. Combine with `compositeDriver` /
+   * `samplingDriver` / `aiDriver` to mix cheap heuristics with model
+   * calls. Default: undefined (legacy weighted-random + optional advisor
+   * fallback behaviour).
+   *
+   * The driver is opaque to the crawler at the type level — see
+   * `./drivers/index.js` for concrete implementations and combinators.
+   * Typed as `unknown` here to avoid a circular import; the crawler
+   * does a structural check at runtime.
+   */
+  driver?: unknown;
+  /**
+   * Optional goal hint forwarded to AI-backed drivers. Surfaces in the
+   * prompt as a `Goal: ...` line. Example: "find form validation bugs".
+   * Default: undefined.
+   */
+  driverGoal?: string;
   /** @internal Set by `chaos({ server })`. */
   server?: ChaosRemoteServer;
 }

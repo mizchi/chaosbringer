@@ -39,6 +39,24 @@ importers:
         specifier: ^3.90.0
         version: 3.114.17(@cloudflare/workers-types@4.20260506.1)
 
+  examples/load-with-chaos:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      chaosbringer:
+        specifier: workspace:*
+        version: link:../../packages/chaosbringer
+      playwright:
+        specifier: ^1.52.0
+        version: 1.59.1
+      tsx:
+        specifier: ^4.19.4
+        version: 4.21.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   examples/playwright-test:
     devDependencies:
       '@playwright/test':
@@ -47,6 +65,24 @@ importers:
       chaosbringer:
         specifier: workspace:*
         version: link:../../packages/chaosbringer
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
+  examples/recipe-skills:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      chaosbringer:
+        specifier: workspace:*
+        version: link:../../packages/chaosbringer
+      playwright:
+        specifier: ^1.52.0
+        version: 1.59.1
+      tsx:
+        specifier: ^4.19.4
+        version: 4.21.0
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
