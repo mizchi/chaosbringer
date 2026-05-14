@@ -134,6 +134,19 @@ chaosbringer/
 └── pnpm-workspace.yaml
 ```
 
+## Contributing / testing
+
+```bash
+pnpm install
+pnpm -F chaosbringer test              # unit + fixture E2E (no API key needed)
+PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm -F chaosbringer test       # if you need to point at a shared cache
+ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (issue #95). Costs a few haiku-tier calls per run.
+```
+
+The `test:ai` smoke exercises the live Anthropic pipeline — Phase A
+discovery + Phase D investigation — that no other test in the repo
+hits. Without `ANTHROPIC_API_KEY` the suite skips silently.
+
 ## License
 
 MIT

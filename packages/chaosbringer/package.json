@@ -39,6 +39,7 @@
     "prepare": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "test:ai": "vitest run fixtures/runner/real-ai.e2e.test.ts",
     "lint": "biome check src/",
     "lint:nul": "node scripts/check-no-nul.mjs src fixtures scripts",
     "crawl": "tsx src/cli.ts",
