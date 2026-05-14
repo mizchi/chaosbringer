@@ -87,11 +87,11 @@ export function fastifyPlugin(cfg: ServerFaultConfig) {
         }
         return;
       }
-      if (verdict.kind === "partial") {
+      if (verdict.kind === "partial" || verdict.kind === "slowStream") {
         // Unreachable: assertAdapterSupportsConfig() refuses construction
-        // when partialResponseRate > 0. Kept so exhaustive narrowing
-        // catches any future verdict additions at compile time.
-        throw new Error("server-faults: unexpected partial verdict on fastify adapter");
+        // when these are enabled. Kept so exhaustive narrowing catches
+        // any future verdict additions at compile time.
+        throw new Error(`server-faults: unexpected ${verdict.kind} verdict on fastify adapter`);
       }
       if (verdict.kind === "annotate") {
         // Stamp headers; the real route runs after this hook returns. If a

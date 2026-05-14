@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { truncateStream } from "./stream-transforms.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { slowStream, truncateStream } from "./stream-transforms.js";
 
 function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   let i = 0;
@@ -56,5 +56,76 @@ describe("truncateStream", () => {
     const src = streamFromChunks([new Uint8Array([0xe3, 0x81, 0x82])]);
     const out = await readAll(truncateStream(src, 2));
     expect(Array.from(out)).toEqual([0xe3, 0x81]);
+  });
+});
+
+describe("slowStream", () => {
+  it("emits the same total bytes when chunkSize is omitted (preserves source chunking)", async () => {
+    const src = streamFromChunks([
+      new Uint8Array([1, 2, 3]),
+      new Uint8Array([4, 5]),
+      new Uint8Array([6, 7, 8, 9]),
+    ]);
+    const out = await readAll(slowStream(src, { chunkDelayMs: 0 }));
+    expect(Array.from(out)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("rechunks to fixed chunkSize when set, preserving total bytes", async () => {
+    const src = streamFromChunks([new Uint8Array([1, 2, 3, 4, 5, 6, 7])]);
+    const stream = slowStream(src, { chunkDelayMs: 0, chunkSize: 3 });
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    expect(chunks.map((c) => Array.from(c))).toEqual([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7],
+    ]);
+  });
+
+  it("returns an empty stream when source is null", async () => {
+    const out = await readAll(slowStream(null, { chunkDelayMs: 100 }));
+    expect(out.byteLength).toBe(0);
+  });
+
+  describe("timing", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("sleeps chunkDelayMs before each emitted chunk", async () => {
+      const src = streamFromChunks([new Uint8Array([1]), new Uint8Array([2])]);
+      const stream = slowStream(src, { chunkDelayMs: 100 });
+      const reader = stream.getReader();
+      const p1 = reader.read();
+      // Before the timer advances, no chunk is yielded yet.
+      let r1Settled = false;
+      p1.then(() => {
+        r1Settled = true;
+      });
+      await Promise.resolve();
+      expect(r1Settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      const r1 = await p1;
+      expect(r1.done).toBe(false);
+      // Second chunk also waits 100ms.
+      const p2 = reader.read();
+      let r2Settled = false;
+      p2.then(() => {
+        r2Settled = true;
+      });
+      await Promise.resolve();
+      expect(r2Settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      const r2 = await p2;
+      expect(r2.done).toBe(false);
+    });
   });
 });

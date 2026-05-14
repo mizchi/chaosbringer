@@ -93,11 +93,11 @@ export function expressMiddleware(
         // Do NOT call next() — the request is over.
         return;
       }
-      if (verdict.kind === "partial") {
+      if (verdict.kind === "partial" || verdict.kind === "slowStream") {
         // Unreachable: assertAdapterSupportsConfig() refuses construction
-        // when partialResponseRate > 0. Kept so exhaustive narrowing
-        // catches any future verdict additions at compile time.
-        throw new Error("server-faults: unexpected partial verdict on express adapter");
+        // when these are enabled. Kept so exhaustive narrowing catches
+        // any future verdict additions at compile time.
+        throw new Error(`server-faults: unexpected ${verdict.kind} verdict on express adapter`);
       }
       if (verdict.kind === "annotate") {
         // Stamp headers BEFORE calling next() — Express buffers headers on the

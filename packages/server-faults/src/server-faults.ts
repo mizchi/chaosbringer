@@ -12,7 +12,7 @@
  * (1 roll for 5xx, conditionally 1 roll for latency).
  */
 
-export type FaultKind = "5xx" | "latency" | "abort" | "partial";
+export type FaultKind = "5xx" | "latency" | "abort" | "partial" | "slowStream";
 
 /**
  * How an abort fault tears down the connection.
@@ -46,6 +46,10 @@ export interface FaultAttrs {
   abortStyle?: AbortStyle;
   /** Populated only on `kind: "partial"`. Number of bytes emitted from the real body before close. */
   afterBytes?: number;
+  /** Populated only on `kind: "slowStream"`. Milliseconds slept between chunks. */
+  chunkDelayMs?: number;
+  /** Populated only on `kind: "slowStream"`. Rechunk size in bytes (omitted = leave source chunking intact). */
+  chunkSize?: number;
   /** Trace-id from incoming traceparent (W3C Trace Context). 32 lowercase hex. */
   traceId?: string;
 }
@@ -66,6 +70,11 @@ export interface FaultAttrs {
  *   stream is closed. Status + headers are delivered normally (so
  *   `metadataHeader` works), but `Content-Length` MUST be stripped or
  *   recomputed by the adapter — the real value no longer matches.
+ * - `slowStream`: the real handler runs; the adapter wraps the response body
+ *   so each chunk is emitted with `chunkDelayMs` of sleep between. Status +
+ *   headers are delivered immediately, matching real-world "congested
+ *   backend" / "throttled pod" behaviour. `Content-Length` is preserved when
+ *   `chunkSize` is omitted (rechunking doesn't change total length).
  * - `null`: bypass / exempt / no raffle won — pass through unchanged.
  */
 export type FaultVerdict =
@@ -73,6 +82,7 @@ export type FaultVerdict =
   | { kind: "annotate"; attrs: FaultAttrs }
   | { kind: "abort"; attrs: FaultAttrs; abortStyle: AbortStyle }
   | { kind: "partial"; attrs: FaultAttrs; afterBytes: number }
+  | { kind: "slowStream"; attrs: FaultAttrs; chunkDelayMs: number; chunkSize?: number }
   | null;
 
 export interface ServerFaultObserver {
@@ -114,6 +124,26 @@ export interface ServerFaultConfig {
    * is the realistic failure mode, not a bug.
    */
   partialResponseAfterBytes?: number;
+  /**
+   * Slow-stream the response body: emit each chunk with a sleep in
+   * between. Mimics congested backend / throttled pod / slow disk where
+   * status + headers arrive immediately but bytes trickle. The whole-
+   * request `latencyMs` cannot expose this — it delays the response
+   * before it starts and then dumps the body in one shot.
+   *
+   * `chunkSize` (optional) rechunks the source body to fixed-size pieces
+   * before delaying — useful when the source is a single large chunk and
+   * you want to spread the slowness across many small ones. Omitting it
+   * preserves whatever chunking the source emits.
+   *
+   * Adapter support: Hono only at present. Express / Koa / Fastify throw
+   * at construction when set, same as `partialResponseRate`.
+   */
+  slowStreaming?: {
+    rate: number;
+    chunkDelayMs: number;
+    chunkSize?: number;
+  };
   /** RegExp or pattern string. Only matching paths are considered for fault injection. */
   pathPattern?: RegExp | string;
   /**
@@ -220,6 +250,8 @@ const FAULT_HEADER_KEY_SUFFIX: Record<keyof FaultAttrs, string> = {
   latencyMs: "latency-ms",
   abortStyle: "abort-style",
   afterBytes: "after-bytes",
+  chunkDelayMs: "chunk-delay-ms",
+  chunkSize: "chunk-size",
   traceId: "trace-id",
 };
 
@@ -275,6 +307,12 @@ export function assertAdapterSupportsConfig(cfg: ServerFaultConfig, adapter: str
   if ((cfg.partialResponseRate ?? 0) > 0) {
     throw new Error(
       `server-faults: ${adapter} adapter does not yet support partialResponseRate. ` +
+        `Use honoMiddleware for stream-based faults, or wait for Node-res interception.`,
+    );
+  }
+  if ((cfg.slowStreaming?.rate ?? 0) > 0) {
+    throw new Error(
+      `server-faults: ${adapter} adapter does not yet support slowStreaming. ` +
         `Use honoMiddleware for stream-based faults, or wait for Node-res interception.`,
     );
   }
@@ -361,6 +399,26 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         return { kind: "partial", attrs: attrsPartial, afterBytes };
       }
 
+      const slowCfg = cfg.slowStreaming;
+      const rS = slowCfg?.rate ?? 0;
+      if (rS > 0 && rng.next() < rS) {
+        const chunkDelayMs = slowCfg!.chunkDelayMs;
+        const chunkSize = slowCfg!.chunkSize;
+        const attrsSlow: FaultAttrs = {
+          kind: "slowStream",
+          path: url.pathname,
+          method,
+          chunkDelayMs,
+        };
+        if (chunkSize !== undefined) attrsSlow.chunkSize = chunkSize;
+        if (traceId !== undefined) attrsSlow.traceId = traceId;
+        Object.freeze(attrsSlow);
+        cfg.observer?.onFault?.("slowStream", attrsSlow);
+        return chunkSize !== undefined
+          ? { kind: "slowStream", attrs: attrsSlow, chunkDelayMs, chunkSize }
+          : { kind: "slowStream", attrs: attrsSlow, chunkDelayMs };
+      }
+
       const rL = cfg.latencyRate ?? 0;
       if (rL > 0 && rng.next() < rL) {
         const ms = pickLatencyMs(cfg.latencyMs);
@@ -400,6 +458,8 @@ const FAULT_KEY_MAP: Record<keyof FaultAttrs, string> = {
   latencyMs: "fault.latency_ms",
   abortStyle: "fault.abort_style",
   afterBytes: "fault.after_bytes",
+  chunkDelayMs: "fault.chunk_delay_ms",
+  chunkSize: "fault.chunk_size",
   traceId: "fault.trace_id",
 };
 

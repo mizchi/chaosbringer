@@ -97,6 +97,31 @@ describe("honoMiddleware", () => {
     expect(text).toBe("hello");
   });
 
+  it("wraps response body in slowStream when slowStreaming raffle wins (full body delivered)", async () => {
+    const mw = honoMiddleware({
+      slowStreaming: { rate: 1, chunkDelayMs: 0 },
+      metadataHeader: true,
+    });
+    const body = "abcdefghij";
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/plain", "content-length": String(body.length) },
+      }),
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c, next);
+    const finalRes = c.res as Response;
+    expect(finalRes.status).toBe(200);
+    // chunkSize unset => total bytes unchanged, Content-Length preserved.
+    expect(finalRes.headers.get("content-length")).toBe(String(body.length));
+    expect(finalRes.headers.get("x-chaos-fault-kind")).toBe("slowStream");
+    expect(finalRes.headers.get("x-chaos-fault-chunk-delay-ms")).toBe("0");
+    const text = await finalRes.text();
+    expect(text).toBe(body);
+  });
+
   it("preserves status + null-body for partial verdict when handler returns null body", async () => {
     const mw = honoMiddleware({ partialResponseRate: 1, partialResponseAfterBytes: 0 });
     const c: HonoLikeContext = {
@@ -275,6 +300,12 @@ describe("expressMiddleware", () => {
   it("rejects partialResponseRate at construction time (unsupported on this adapter)", () => {
     expect(() => expressMiddleware({ partialResponseRate: 0.1 })).toThrow(/express adapter/);
     expect(() => expressMiddleware({ partialResponseRate: 0.1 })).toThrow(/partialResponseRate/);
+  });
+
+  it("rejects slowStreaming at construction time", () => {
+    expect(() => expressMiddleware({ slowStreaming: { rate: 0.1, chunkDelayMs: 100 } })).toThrow(
+      /slowStreaming/,
+    );
   });
 
   it("allows partialResponseRate=0 (no opt-in, no rejection)", () => {
@@ -465,6 +496,12 @@ describe("fastifyPlugin", () => {
   it("rejects partialResponseRate at construction time", () => {
     expect(() => fastifyPlugin({ partialResponseRate: 0.1 })).toThrow(/fastify adapter/);
   });
+
+  it("rejects slowStreaming at construction time", () => {
+    expect(() => fastifyPlugin({ slowStreaming: { rate: 0.1, chunkDelayMs: 100 } })).toThrow(
+      /slowStreaming/,
+    );
+  });
 });
 
 describe("koaMiddleware", () => {
@@ -552,6 +589,12 @@ describe("koaMiddleware", () => {
 
   it("rejects partialResponseRate at construction time", () => {
     expect(() => koaMiddleware({ partialResponseRate: 0.1 })).toThrow(/koa adapter/);
+  });
+
+  it("rejects slowStreaming at construction time", () => {
+    expect(() => koaMiddleware({ slowStreaming: { rate: 0.1, chunkDelayMs: 100 } })).toThrow(
+      /slowStreaming/,
+    );
   });
 
   it("tears down ctx.req.socket on abort and skips next()", async () => {

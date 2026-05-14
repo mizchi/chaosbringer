@@ -17,7 +17,7 @@ import {
   type AbortStyle,
   type ServerFaultConfig,
 } from "../server-faults.js";
-import { truncateStream } from "../stream-transforms.js";
+import { slowStream, truncateStream } from "../stream-transforms.js";
 
 /**
  * Error thrown by `honoMiddleware` when an abort fault wins.
@@ -115,6 +115,43 @@ export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
         }
       }
       c.res = new Response(truncated, {
+        status: current.status,
+        statusText: current.statusText,
+        headers,
+      });
+      return;
+    }
+    if (verdict.kind === "slowStream") {
+      // Real handler runs; we then wrap its body in a per-chunk delay
+      // stream. Headers leave immediately (matching the real-world
+      // "fast start, slow body" pattern), so `metadataHeader` round-
+      // trips fine.
+      await next();
+      const current = c.res;
+      if (!isFullResponse(current)) return;
+      if (current.body === null) {
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            current.headers.set(name, value);
+          }
+        }
+        return;
+      }
+      const slowed = slowStream(current.body, {
+        chunkDelayMs: verdict.chunkDelayMs,
+        chunkSize: verdict.chunkSize,
+      });
+      const headers = new Headers(current.headers);
+      // When chunkSize is set the consumer sees fixed-size chunks, but the
+      // total length is unchanged, so Content-Length stays valid. When
+      // chunkSize is omitted, source chunking is preserved end-to-end.
+      // Either way we do not need to strip Content-Length.
+      if (metadataPrefix) {
+        for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+          headers.set(name, value);
+        }
+      }
+      c.res = new Response(slowed, {
         status: current.status,
         statusText: current.statusText,
         headers,

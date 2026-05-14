@@ -410,6 +410,71 @@ describe("serverFaults", () => {
     });
   });
 
+  describe("slowStreaming", () => {
+    it("returns a slowStream verdict when raffle wins", async () => {
+      const fault = serverFaults({
+        slowStreaming: { rate: 1, chunkDelayMs: 250 },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("slowStream");
+      expect((v as { chunkDelayMs: number }).chunkDelayMs).toBe(250);
+      expect((v as { attrs: FaultAttrs }).attrs).toEqual({
+        kind: "slowStream",
+        path: "/api/x",
+        method: "GET",
+        chunkDelayMs: 250,
+      });
+    });
+
+    it("carries chunkSize when configured", async () => {
+      const fault = serverFaults({
+        slowStreaming: { rate: 1, chunkDelayMs: 50, chunkSize: 128 },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect((v as { chunkSize?: number }).chunkSize).toBe(128);
+      expect((v as { attrs: FaultAttrs }).attrs.chunkSize).toBe(128);
+    });
+
+    it("invokes observer.onFault for slowStream faults", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        slowStreaming: { rate: 1, chunkDelayMs: 100 },
+        observer: { onFault },
+      });
+      await fault.maybeInject(req("/api/x"));
+      expect(onFault).toHaveBeenCalledWith("slowStream", {
+        kind: "slowStream",
+        path: "/api/x",
+        method: "GET",
+        chunkDelayMs: 100,
+      });
+    });
+
+    it("rolls after partial — partial wins over slowStream", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        partialResponseRate: 1,
+        slowStreaming: { rate: 1, chunkDelayMs: 1 },
+        observer: { onFault },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("partial");
+    });
+
+    it("rolls before latency — slowStream wins over latency", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        slowStreaming: { rate: 1, chunkDelayMs: 1 },
+        latencyRate: 1,
+        latencyMs: 1,
+        observer: { onFault },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("slowStream");
+      expect(onFault).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not roll latency raffle when 5xx already won", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
@@ -497,6 +562,23 @@ describe("serverFaults", () => {
       });
       expect("fault.target_status" in out).toBe(false);
       expect("fault.trace_id" in out).toBe(false);
+    });
+
+    it("maps chunkDelayMs and chunkSize for slowStream verdicts", () => {
+      const out = toOtelAttrs({
+        kind: "slowStream",
+        path: "/api/x",
+        method: "GET",
+        chunkDelayMs: 500,
+        chunkSize: 256,
+      });
+      expect(out).toEqual({
+        "fault.kind": "slowStream",
+        "fault.path": "/api/x",
+        "fault.method": "GET",
+        "fault.chunk_delay_ms": 500,
+        "fault.chunk_size": 256,
+      });
     });
 
     it("maps afterBytes for partial verdicts", () => {
