@@ -80,6 +80,16 @@ if (subcommand === "recipes") {
     process.exit(1);
   }
 }
+if (subcommand === "load") {
+  const { runLoadCli } = await import("./recipes/load-cli.js");
+  try {
+    await runLoadCli(process.argv.slice(3));
+    process.exit(process.exitCode ?? 0);
+  } catch (err) {
+    console.error("load failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {

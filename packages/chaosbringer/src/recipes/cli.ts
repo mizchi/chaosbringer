@@ -22,8 +22,17 @@
 
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
+import { weightedRandomDriver } from "../drivers/index.js";
+import {
+  COMMON_OPTIONS,
+  openStore,
+  requireRecipe,
+  requireVersion,
+} from "./cli-common.js";
+import { diffRecipes, formatRecipeDiff } from "./diff.js";
+import { lintRecipe, lintStore, summarise } from "./lint.js";
 import { loadPageScenarios } from "./page-scenarios.js";
-import { RecipeStore } from "./store.js";
+import { repairRecipe } from "./repair.js";
 import { verifyAndPromote } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
 
@@ -40,6 +49,10 @@ Subcommands:
   rollback <name>     Restore a historical version (--to-version N)
   harvest <url>       Read window.__chaosbringer, upsert into store
   verify <name>       Run K verification replays (--runs N --base-url URL)
+  diff <name>         Diff two versions (--from-version M --to-version N)
+                      or two recipes (\`diff <nameA>..<nameB>\`)
+  lint [name]         Lint a recipe (or every recipe when no name given)
+  repair <name>       Auto-repair a broken recipe with the AI driver
 
 Common options:
   --dir <path>        Store directory (default: ./chaosbringer-recipes)
@@ -78,36 +91,16 @@ export async function runRecipesCli(argv: string[]): Promise<void> {
       return harvestCmd(rest);
     case "verify":
       return verifyCmd(rest);
+    case "diff":
+      return diffCmd(rest);
+    case "lint":
+      return lintCmd(rest);
+    case "repair":
+      return repairCmd(rest);
     default:
       console.error(`Unknown subcommand: ${sub}\n\n${HELP}`);
       process.exit(2);
   }
-}
-
-interface CommonOpts {
-  dir?: string;
-  global?: boolean;
-  json?: boolean;
-  quiet?: boolean;
-}
-
-const COMMON_OPTIONS = {
-  dir: { type: "string" as const },
-  global: { type: "boolean" as const },
-  json: { type: "boolean" as const },
-  quiet: { type: "boolean" as const },
-  help: { type: "boolean" as const, short: "h" },
-};
-
-function openStore(opts: CommonOpts): RecipeStore {
-  if (opts.global) {
-    return new RecipeStore({ localDir: false, silent: opts.quiet });
-  }
-  return new RecipeStore({
-    localDir: opts.dir ?? "./chaosbringer-recipes",
-    globalDir: false,
-    silent: opts.quiet,
-  });
 }
 
 // -------- list --------
@@ -185,21 +178,9 @@ async function showCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  if (values.version !== undefined) {
-    const v = Number(values.version);
-    const hist = store.history(name).find((r) => r.version === v);
-    if (!hist) {
-      console.error(`No version ${v} for ${name}`);
-      process.exit(1);
-    }
-    process.stdout.write(JSON.stringify(hist, null, 2) + "\n");
-    return;
-  }
-  const recipe = store.get(name);
-  if (!recipe) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  const recipe = values.version !== undefined
+    ? requireVersion(store, name, Number(values.version))
+    : requireRecipe(store, name);
   process.stdout.write(JSON.stringify(recipe, null, 2) + "\n");
 }
 
@@ -218,12 +199,8 @@ async function historyCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
+  const current = requireRecipe(store, name);
   const history = store.history(name);
-  const current = store.get(name);
-  if (!current) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
   const entries = [
     { version: current.version, current: true, steps: current.steps.length, updatedAt: current.updatedAt },
     ...history.map((r) => ({
@@ -260,10 +237,7 @@ async function statusCmd(argv: string[], target: "verified" | "demoted"): Promis
     return;
   }
   const store = openStore(values);
-  if (!store.get(name)) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  requireRecipe(store, name);
   store.setStatus(name, target);
   if (!values.quiet) console.log(`${name}: ${target}`);
 }
@@ -286,11 +260,7 @@ async function deleteCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  const current = store.get(name);
-  if (!current) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  requireRecipe(store, name);
   const history = store.history(name);
   if (history.length > 0 && !values.force) {
     console.error(
@@ -428,11 +398,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
     process.exit(2);
   }
   const store = openStore(values);
-  const recipe = store.get(name);
-  if (!recipe) {
-    console.error(`Recipe not found: ${name}`);
-    process.exit(1);
-  }
+  const recipe = requireRecipe(store, name);
   const runs = Number(values.runs ?? "5");
   const minSuccessRate = values["min-success-rate"]
     ? Number(values["min-success-rate"])
@@ -469,3 +435,190 @@ async function verifyCmd(argv: string[]): Promise<void> {
   }
 }
 
+// -------- diff --------
+
+async function diffCmd(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      ...COMMON_OPTIONS,
+      "from-version": { type: "string" },
+      "to-version": { type: "string" },
+      context: { type: "string" },
+      color: { type: "boolean" },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const target = positionals[0];
+  if (values.help || !target) {
+    console.log(
+      "recipes diff <name> [--from-version M] [--to-version N]\n" +
+        "recipes diff <nameA>..<nameB>\n\n" +
+        "  Default: --from-version = newest history entry, --to-version = current.\n" +
+        "  Use --color for ANSI in tty output.",
+    );
+    return;
+  }
+  const store = openStore(values);
+  const [left, right] = resolveDiffOperands(store, target, {
+    fromVersion: values["from-version"],
+    toVersion: values["to-version"],
+  });
+  const diff = diffRecipes(left, right);
+  if (values.json) {
+    process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
+    return;
+  }
+  if (diff.identical) {
+    if (!values.quiet) console.log("(recipes are identical)");
+    return;
+  }
+  const context = values.context ? Number(values.context) : 1;
+  const isTty = Boolean(process.stdout.isTTY);
+  process.stdout.write(
+    formatRecipeDiff(diff, { context, color: values.color ?? isTty }) + "\n",
+  );
+}
+
+// -------- lint --------
+
+async function lintCmd(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      ...COMMON_OPTIONS,
+      strict: { type: "boolean" },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  if (values.help) {
+    console.log(
+      "recipes lint [name] [--strict]\n\n" +
+        "  Lints one recipe (when name given) or every recipe in the store.\n" +
+        "  Exit code: 1 on any error. With --strict, also 1 on any warning.",
+    );
+    return;
+  }
+  const store = openStore(values);
+  const target = positionals[0];
+  const report = target
+    ? summarise(lintRecipe(requireRecipe(store, target), { store }))
+    : lintStore(store);
+  const issues = report.issues;
+  if (values.json) {
+    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+  } else if (issues.length === 0) {
+    if (!values.quiet) console.log("No issues.");
+  } else {
+    for (const issue of issues) {
+      const where = issue.stepIndex !== undefined ? `:step${issue.stepIndex}` : "";
+      console.log(
+        `${issue.severity.toUpperCase()}  ${issue.recipe}${where}  [${issue.rule}]  ${issue.message}`,
+      );
+    }
+    if (!values.quiet) {
+      console.log(
+        `\n${report.errorCount} error(s), ${report.warnCount} warning(s), ${report.infoCount} info`,
+      );
+    }
+  }
+  if (report.errorCount > 0) process.exitCode = 1;
+  else if (values.strict && report.warnCount > 0) process.exitCode = 1;
+}
+
+// -------- repair --------
+
+async function repairCmd(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      ...COMMON_OPTIONS,
+      "base-url": { type: "string" },
+      "start-url": { type: "string" },
+      "repair-budget": { type: "string" },
+      seed: { type: "string" },
+      headless: { type: "boolean" },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  const name = positionals[0];
+  if (values.help || !name) {
+    console.log(
+      "recipes repair <name> --base-url URL [--start-url URL] [--repair-budget N] [--seed N]\n\n" +
+        "  Uses the weighted-random driver to discover a working tail after the\n" +
+        "  failing step. For LLM-driven repair, call repairRecipe() programmatically\n" +
+        "  with `driver: aiDriver(...)` instead.",
+    );
+    return;
+  }
+  const store = openStore(values);
+  const recipe = requireRecipe(store, name);
+  const baseUrl = values["base-url"];
+  const startUrl = values["start-url"];
+  if (!baseUrl && !startUrl && recipe.steps[0]?.kind !== "navigate") {
+    console.error(
+      "repair: --base-url (or --start-url) is required when the recipe does not start with a navigate step",
+    );
+    process.exit(2);
+  }
+  const seed = values.seed ? Number(values.seed) : undefined;
+  const budget = values["repair-budget"] ? Number(values["repair-budget"]) : undefined;
+  const browser = await chromium.launch({ headless: values.headless !== false });
+  try {
+    const result = await repairRecipe({
+      recipe,
+      store,
+      driver: weightedRandomDriver(),
+      browser,
+      baseUrl,
+      startUrl,
+      repairBudget: budget,
+      seed,
+      verbose: !values.quiet,
+    });
+    if (values.json) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else if (result.repaired) {
+      console.log(
+        `${name}: repaired — kept ${result.failedAt} prefix step(s), added ${result.newTailSteps} new tail step(s), now at v${result.recipe!.version}`,
+      );
+    } else {
+      console.log(
+        `${name}: NOT repaired — failedAt step ${result.failedAt}, driver added ${result.newTailSteps} step(s) but didn't satisfy postconditions`,
+      );
+    }
+    if (!result.repaired) process.exitCode = 1;
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+// -------- helpers --------
+
+function resolveDiffOperands(
+  store: ReturnType<typeof openStore>,
+  target: string,
+  opts: { fromVersion?: string; toVersion?: string },
+): [ActionRecipe, ActionRecipe] {
+  if (target.includes("..")) {
+    const [a, b] = target.split("..", 2);
+    return [requireRecipe(store, a!), requireRecipe(store, b!)];
+  }
+  const current = requireRecipe(store, target);
+  const history = store.history(target);
+  const toVersion = opts.toVersion ? Number(opts.toVersion) : current.version;
+  const fromVersion = opts.fromVersion ? Number(opts.fromVersion) : history[0]?.version;
+  if (fromVersion === undefined) {
+    console.error(
+      `${target}: no history to diff against — pass --from-version, or use the \`name..other\` form`,
+    );
+    process.exit(1);
+  }
+  return [
+    requireVersion(store, target, fromVersion),
+    requireVersion(store, target, toVersion),
+  ];
+}

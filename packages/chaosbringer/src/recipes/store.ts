@@ -255,6 +255,17 @@ export class RecipeStore {
   }
 
   /**
+   * Resolve a recipe at a specific version — current if `version`
+   * matches `get(name).version`, otherwise the history entry. Returns
+   * null when the recipe or the version doesn't exist.
+   */
+  getVersion(name: string, version: number): ActionRecipe | null {
+    const current = this.get(name);
+    if (current && current.version === version) return current;
+    return this.history(name).find((r) => r.version === version) ?? null;
+  }
+
+  /**
    * Replace the current version with a prior one. The historical
    * file is consumed (moved back to current); the current pre-rollback
    * version is archived in turn so rollback is fully reversible.
