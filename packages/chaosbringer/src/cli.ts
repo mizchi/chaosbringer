@@ -24,7 +24,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+import { ChaosCrawler, COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./crawler.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
@@ -90,6 +90,16 @@ if (subcommand === "load") {
     process.exit(1);
   }
 }
+if (subcommand === "diff") {
+  const { runDiffCli } = await import("./diff-cli.js");
+  try {
+    await runDiffCli(process.argv.slice(3));
+    process.exit(process.exitCode ?? 0);
+  } catch (err) {
+    console.error("diff failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
 
 const { values, positionals } = parseArgs({
   options: {
@@ -107,6 +117,7 @@ const { values, positionals } = parseArgs({
     exclude: { type: "string", multiple: true },
     "ignore-error": { type: "string", multiple: true },
     "ignore-analytics": { type: "boolean", default: false },
+    "ignore-preset": { type: "string", multiple: true },
     spa: { type: "string", multiple: true },
     "log-file": { type: "string" },
     "log-level": { type: "string" },
@@ -169,6 +180,8 @@ OPTIONS:
   --ignore-analytics    Ignore common analytics script errors (googletagmanager,
                         google-analytics, hotjar, clarity, segment, amplitude,
                         cloudflareinsights, facebook.net, and net::ERR_FAILED)
+  --ignore-preset <p>   Apply a named ignore-error preset (can be repeated; comma-separated).
+                        Known: analytics, maps, media-embeds, pdf-orb, iframe-sandbox
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
   --log-level <level>   Log level: debug, info, warn, error (default: info)
@@ -241,6 +254,15 @@ if (!baseUrl) {
 const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
 if (values["ignore-analytics"]) {
   ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
+}
+for (const presetSpec of values["ignore-preset"] ?? []) {
+  try {
+    ignoreErrorPatterns.push(...resolveIgnorePresets(presetSpec));
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : err}`);
+    console.error(`Tip: --ignore-preset accepts comma-separated names. Known: ${Object.keys(IGNORE_PRESETS).join(", ")}`);
+    process.exit(1);
+  }
 }
 
 // Validate log level
