@@ -14,6 +14,7 @@
  */
 import type { Page } from "playwright";
 import type { ExpectClause, ActionRecipe, RecipeStep, ReplayResult } from "./types.js";
+import { substituteSteps, type RecipeVars } from "./templating.js";
 
 const DEFAULT_EXPECT_TIMEOUT_MS = 5000;
 /**
@@ -24,10 +25,25 @@ const DEFAULT_EXPECT_TIMEOUT_MS = 5000;
  */
 const DEFAULT_ACTION_TIMEOUT_MS = 5000;
 
-export async function runRecipe(page: Page, recipe: ActionRecipe): Promise<ReplayResult> {
+export interface RunRecipeOptions {
+  /**
+   * Variable bag for template substitution. Templated values in
+   * recipe steps (`{{email}}` etc.) are resolved against this map
+   * before each step executes. Throws if a referenced variable is
+   * missing — silent fallback would let typos bypass form fills.
+   */
+  vars?: RecipeVars;
+}
+
+export async function runRecipe(
+  page: Page,
+  recipe: ActionRecipe,
+  opts: RunRecipeOptions = {},
+): Promise<ReplayResult> {
   const start = performance.now();
-  for (let i = 0; i < recipe.steps.length; i++) {
-    const step = recipe.steps[i]!;
+  const steps = opts.vars ? substituteSteps(recipe.steps, opts.vars) : recipe.steps;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
     try {
       await executeStep(page, step);
     } catch (err) {
@@ -65,7 +81,7 @@ export async function runRecipe(page: Page, recipe: ActionRecipe): Promise<Repla
           ok: false,
           durationMs: performance.now() - start,
           failedAt: {
-            index: recipe.steps.length,
+            index: steps.length,
             reason: "postcondition not satisfied",
           },
         };

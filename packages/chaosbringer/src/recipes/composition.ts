@@ -18,6 +18,7 @@
 import type { Page } from "playwright";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
+import type { RecipeVars } from "./templating.js";
 import type { ActionRecipe, ReplayResult } from "./types.js";
 
 export interface RunWithRequiresOptions {
@@ -33,6 +34,13 @@ export interface RunWithRequiresOptions {
   alreadyRan?: Set<string>;
   /** Fires before each recipe in the chain starts. */
   onProgress?: (event: ChainProgressEvent) => void;
+  /**
+   * Variable bag forwarded to every replay in the chain. Templates
+   * like `{{email}}` in any recipe's step values resolve from here.
+   * The same bag is shared across the chain — `auth/login` and
+   * `shop/checkout` see the same `{{email}}`.
+   */
+  vars?: RecipeVars;
 }
 
 export type ChainProgressEvent =
@@ -76,7 +84,7 @@ export async function runRecipeWithRequires(
       continue;
     }
     opts.onProgress?.({ kind: "start", recipe: r.name, index: i, total: order.length });
-    const result = await runRecipe(opts.page, r);
+    const result = await runRecipe(opts.page, r, { vars: opts.vars });
     results[r.name] = result;
     opts.onProgress?.({ kind: "complete", recipe: r.name, result });
     if (result.ok) {

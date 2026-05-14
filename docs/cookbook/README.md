@@ -33,6 +33,7 @@ The three doc surfaces:
 - **[The AI ↔ Recipe flywheel](./ai-flywheel.md)** — full A→B→C→D loop: AI discovers (`tracingDriver`), verifier promotes (`verifyAndPromote`), production replays cheaply under chaos (`recipeDriver` + faults), and `investigate()` turns failures back into regression recipes.
 - **[Concepts borrowed from browser-harness + WebMCP](./browser-harness-concepts.md)** — `loadPageScenarios` (app self-declares its testable scenarios), `parseSkillMarkdown` (prose seeds), `RecipeStore.byDomain` (multi-host libraries), `repairRecipe` (AI patches recipe drift), per-step screenshots, coordinate-fallback clicks.
 - **[Recipe composition + delta-debugged regressions](./recipe-composition.md)** — `requires` now chains (auto-resolves login before checkout), `investigate({ minimize: true })` shrinks reproduction traces to the 1-minimal subset.
+- **[Load-test your whole recipe library](./load-from-recipe-store.md)** — `scenarioLoadFromStore` + recipe templating (`{{email}}`) drives N workers through verified recipes with per-iteration variables. Connects the recipe library to scenarioLoad + chaos in one call.
 
 ### Security testing
 

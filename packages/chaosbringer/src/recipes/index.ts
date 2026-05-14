@@ -81,3 +81,18 @@ export {
   type MinimizeRecipeOptions,
   type MinimizeRecipeResult,
 } from "./minimize.js";
+export {
+  hasTemplates,
+  substituteStep,
+  substituteSteps,
+  substituteString,
+  type RecipeVars,
+} from "./templating.js";
+export {
+  recipeStoreScenario,
+  scenarioLoadFromStore,
+  type RecipeSelection,
+  type RecipeStoreScenarioOptions,
+  type ScenarioLoadFromStoreOptions,
+  type SelectionContext,
+} from "./load-bridge.js";

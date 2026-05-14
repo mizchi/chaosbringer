@@ -78,6 +78,7 @@ Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
   - [Attack login / signup forms (OWASP-aligned)](docs/cookbook/auth-attack-driver.md) — `authAttackDriver` runs weak-password, username-enumeration, SQLi, XSS, and rate-limit checks against detected auth forms.
   - [Concepts borrowed from browser-harness + WebMCP](docs/cookbook/browser-harness-concepts.md) — `loadPageScenarios` (app self-declares scenarios), markdown skill seeds, domain-scoped recipe lookup, per-step screenshots, coordinate-fallback clicks, `repairRecipe` for surviving UI drift.
   - [Recipe composition + delta-debugged regressions](docs/cookbook/recipe-composition.md) — `requires` actually chains (auto-runs login before checkout), `investigate({ minimize: true })` shrinks AI reproductions to 1-minimal traces.
+  - [Load-test your whole recipe library](docs/cookbook/load-from-recipe-store.md) — `scenarioLoadFromStore` + `{{var}}` recipe templating drives N workers through verified recipes with per-iteration variables.
 
 ## Recipes — feature explanations
 
