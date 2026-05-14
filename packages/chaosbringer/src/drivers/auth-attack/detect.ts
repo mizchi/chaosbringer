@@ -24,10 +24,29 @@ const SIGNUP_URL_RE = /signup|sign[-_]?up|register|join|create[-_]?account/i;
 const LOGIN_URL_RE = /(^|\/)log[-_]?in|signin|sign[-_]?in/i;
 const SIGNUP_TEXT_RE = /sign\s*up|create\s+account|register/i;
 const LOGIN_TEXT_RE = /log\s*in|sign\s*in/i;
+const RESET_URL_RE = /forgot|password[-_]?reset|reset[-_]?password|recover/i;
+const RESET_TEXT_RE = /forgot.+password|reset.+password|password.+recovery/i;
 
 export async function detectAuthForm(page: Page): Promise<DetectedAuthForm | null> {
+  // Password-reset forms typically have NO password input — just an
+  // email + submit. Try that path first when URL / page text hints at
+  // a reset flow.
+  const url = page.url();
+  if (RESET_URL_RE.test(url)) {
+    const reset = await detectPasswordResetForm(page);
+    if (reset) return reset;
+  }
   const passwordInputs = await page.locator('input[type="password"]:visible').all();
-  if (passwordInputs.length === 0) return null;
+  if (passwordInputs.length === 0) {
+    // No password input AND no URL hint. Try one more time: maybe the
+    // page text gives the hint we need.
+    const bodyText = await page.locator("body").innerText({ timeout: 500 }).catch(() => "");
+    if (RESET_TEXT_RE.test(bodyText.slice(0, 4000))) {
+      const reset = await detectPasswordResetForm(page);
+      if (reset) return reset;
+    }
+    return null;
+  }
 
   // Use the first visible password field. The classifier below decides
   // whether a SECOND password field hints at signup.
@@ -135,4 +154,29 @@ async function classify(input: {
   if (SIGNUP_TEXT_RE.test(snippet)) return "signup";
   if (LOGIN_TEXT_RE.test(snippet)) return "login";
   return "login";
+}
+
+/**
+ * Password-reset form detection — used for the
+ * `password-reset-token-entropy` attack (issue #93). Reset flows
+ * typically have NO password input — just an email + submit — so the
+ * primary detector won't find them.
+ */
+async function detectPasswordResetForm(page: Page): Promise<DetectedAuthForm | null> {
+  const emailInput = page.locator('input[type="email"]:visible, input[name*="email" i]:visible').first();
+  if ((await emailInput.count()) === 0) return null;
+  const formLocator = page.locator("body");
+  const submit = await findSubmit(page, formLocator);
+  if (!submit) return null;
+  // The driver expects passwordField to be defined. For reset forms
+  // the field doesn't exist — use the email locator as a stand-in so
+  // attack code that conditions on form.type doesn't have to special-case.
+  return {
+    type: "password-reset",
+    form: formLocator,
+    usernameField: emailInput,
+    emailField: emailInput,
+    passwordField: emailInput,
+    submitButton: submit,
+  };
 }

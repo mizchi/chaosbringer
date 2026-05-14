@@ -20,9 +20,13 @@ export type AuthAttackName =
   | "username-enumeration"
   | "sqli-credentials"
   | "xss-credentials"
-  | "rate-limit-login";
+  | "rate-limit-login"
+  // Issue #93 — extended OWASP coverage
+  | "csrf-state-change"
+  | "session-fixation"
+  | "password-reset-token-entropy";
 
-export type AuthFormType = "login" | "signup";
+export type AuthFormType = "login" | "signup" | "password-reset";
 
 export type AuthFindingSeverity = "info" | "low" | "medium" | "high" | "critical";
 

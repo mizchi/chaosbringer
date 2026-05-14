@@ -27,7 +27,7 @@ afterAll(async () => {
   await server.close();
 });
 
-async function runOn(path: "/login" | "/signup"): Promise<AuthFinding[]> {
+async function runOn(path: "/login" | "/signup" | "/forgot-password"): Promise<AuthFinding[]> {
   const context = await browser.newContext();
   const page = await context.newPage();
   const findings: AuthFinding[] = [];
@@ -113,5 +113,31 @@ describe("authAttackDriver against vulnerable fixture", () => {
     const xss = findings.find((f) => f.attack === "xss-credentials")!;
     expect(["medium", "critical"]).toContain(xss.severity);
     expect(xss.reference).toMatch(/A03|WSTG-INPV-01/);
+  }, 120000);
+
+  // Issue #93 — extended OWASP coverage.
+  it("/login: surfaces CSRF missing + session fixation", async () => {
+    const findings = await runOn("/login");
+    const attacks = new Set(findings.map((f) => f.attack));
+
+    expect(attacks.has("csrf-state-change")).toBe(true);
+    const csrf = findings.find((f) => f.attack === "csrf-state-change")!;
+    expect(csrf.severity).toBe("high");
+    expect(csrf.reference).toMatch(/A01|WSTG-SESS-05/);
+
+    expect(attacks.has("session-fixation")).toBe(true);
+    const fix = findings.find((f) => f.attack === "session-fixation")!;
+    expect(fix.severity).toBe("high");
+    expect(fix.reference).toMatch(/A07|WSTG-SESS-03/);
+  }, 120000);
+
+  it("/forgot-password: surfaces predictable reset tokens", async () => {
+    const findings = await runOn("/forgot-password");
+    const attacks = new Set(findings.map((f) => f.attack));
+
+    expect(attacks.has("password-reset-token-entropy")).toBe(true);
+    const entropy = findings.find((f) => f.attack === "password-reset-token-entropy")!;
+    expect(entropy.severity).toBe("high");
+    expect(entropy.reference).toMatch(/NIST|WSTG-ATHN-09/);
   }, 120000);
 });

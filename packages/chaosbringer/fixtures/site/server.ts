@@ -212,6 +212,12 @@ const pages: Record<string, Route> = {
         </form>
         <div id="error" role="alert" data-test="error" style="color:red"></div>
         <script>
+          // Vulnerable session fixation — set a deterministic session cookie
+          // BEFORE login. A correct implementation would set it AFTER
+          // successful auth, with a fresh value.
+          if (!document.cookie.match(/(^|; )sid=/)) {
+            document.cookie = 'sid=fixed-pre-auth-' + Math.floor(Date.now() / 86400000) + '; path=/';
+          }
           const form = document.getElementById('form');
           const err  = document.getElementById('error');
           form.addEventListener('submit', (ev) => {
@@ -287,6 +293,34 @@ const pages: Record<string, Route> = {
     body: html({
       title: "Authenticated",
       body: `<h1 data-test="auth-thanks">Welcome</h1><p>Authenticated successfully.</p>`,
+    }),
+  },
+
+  "/forgot-password": {
+    body: html({
+      title: "Forgot password",
+      body: `
+        <h1>Forgot password</h1>
+        <p>Enter your email — we will display a reset link inline (dev mode).</p>
+        <form id="form">
+          <label>Email <input name="email" id="email" type="email" autocomplete="email" /></label>
+          <button type="submit">Send reset link</button>
+        </form>
+        <div id="result" data-test="reset-link"></div>
+        <script>
+          // Intentionally weak token: fixed prefix + day-of-week + sequential
+          // suffix counter. A real implementation would use crypto.randomUUID().
+          let counter = Number(localStorage.getItem('cb_reset_counter') ?? '0');
+          document.getElementById('form').addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            counter += 1;
+            localStorage.setItem('cb_reset_counter', String(counter));
+            const day = new Date().getDay();
+            const token = 'reset_fixed_prefix_v1_' + day + '_' + String(counter).padStart(4, '0');
+            document.getElementById('result').textContent = 'Reset URL: /reset?token=' + token;
+          });
+        </script>
+      `,
     }),
   },
 

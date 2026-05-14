@@ -22,6 +22,9 @@ deeper diagnosis.
 | `sqli-credentials` | login | A03:2021 Injection / WSTG-INPV-05 | An auth-bypass SQLi payload (`' OR '1'='1`) succeeds *or* elicits a database error in the response. |
 | `xss-credentials` | login + signup | A03:2021 Injection / WSTG-INPV-01 | A submitted payload either fires JS in the response or is reflected verbatim into the rendered HTML. |
 | `rate-limit-login` | login | ASVS V2.2.1 / WSTG-ATHN-03 | 8 consecutive failed logins produce neither a 429/423 nor any observable slowdown. |
+| `csrf-state-change` | login + signup | A01:2021 / WSTG-SESS-05 | Form has no `csrf_token` / `_token` / `authenticity_token` hidden field AND the session cookie's `SameSite` is not `Strict`. (#93) |
+| `session-fixation` | login | A07:2021 / WSTG-SESS-03 | Session cookie value is unchanged across a successful login — an attacker who fixed the cookie pre-auth is logged in as the victim. (#93) |
+| `password-reset-token-entropy` | password reset | NIST 800-63B §5.1.1.2 / WSTG-ATHN-09 | 4 sampled reset tokens vary in fewer than 25% of positions OR share ≥ 70% common prefix. (#93) |
 
 ## Quickstart
 

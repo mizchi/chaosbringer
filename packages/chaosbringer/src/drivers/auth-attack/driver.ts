@@ -25,6 +25,10 @@ const ALL_ATTACKS: ReadonlyArray<AuthAttackName> = [
   "sqli-credentials",
   "xss-credentials",
   "rate-limit-login",
+  // Issue #93 — extended OWASP coverage
+  "csrf-state-change",
+  "session-fixation",
+  "password-reset-token-entropy",
 ];
 
 const SEVERITY_ORDER: Record<AuthFindingSeverity, number> = {
