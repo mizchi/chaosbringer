@@ -125,6 +125,43 @@ export interface ServerFaultConfig {
    */
   partialResponseAfterBytes?: number;
   /**
+   * Windowed 5xx flapping: inside a repeating `windowMs` period, the
+   * first `badMs` of each cycle returns 5xx unconditionally; outside
+   * that slice the request falls through to the other raffles.
+   *
+   * Models the canonical retry-with-backoff scenario: a constant 5xx
+   * rate is too easy because clients give up, but a 5-second sick
+   * window inside a 30-second healthy window catches retry storms,
+   * alerting de-dup quirks, and circuit-breaker thresholds that a
+   * stateless `status5xxRate` cannot reproduce.
+   *
+   * **Composes with `status5xxRate` via OR**: statusFlapping is checked
+   * first; if the window is bad, it short-circuits and emits 5xx. If
+   * the window is healthy, `status5xxRate` still rolls normally. So
+   * setting both yields "always bad inside the window, sometimes bad
+   * outside" — the layered shape most users want for testing.
+   *
+   * **Not seed-reproducible.** Time-based gates break the "same seed
+   * → same outcomes" contract because wall-clock varies between runs.
+   * Distributed deployments needing phase-locked flapping across
+   * multiple instances can pass `phaseOffsetMs` to stagger or align.
+   */
+  statusFlapping?: {
+    /** Status code returned during the bad window. Default 503. */
+    code?: 500 | 502 | 503 | 504;
+    /** Full period of the flap, in milliseconds. */
+    windowMs: number;
+    /** How long inside each period the server is "sick". Must be ≤ `windowMs`. */
+    badMs: number;
+    /**
+     * Optional millisecond offset added to `Date.now()` before the
+     * modulo. Lets multiple instances of `serverFaults` align (same
+     * offset → in phase) or stagger (different offsets → out of phase).
+     * Defaults to 0.
+     */
+    phaseOffsetMs?: number;
+  };
+  /**
    * Slow-stream the response body: emit each chunk with a sleep in
    * between. Mimics congested backend / throttled pod / slow disk where
    * status + headers arrive immediately but bytes trickle. The whole-
@@ -318,6 +355,45 @@ export function assertAdapterSupportsConfig(cfg: ServerFaultConfig, adapter: str
   }
 }
 
+/**
+ * Mint a `synthetic 5xx` verdict. Shared by the probabilistic
+ * `status5xxRate` raffle and the windowed `statusFlapping` gate — both
+ * produce the same wire-level outcome (a JSON 5xx) and the same observer
+ * event, only the decision rule differs.
+ */
+function mintSyntheticFault(
+  status: 500 | 502 | 503 | 504,
+  path: string,
+  method: string,
+  traceId: string | undefined,
+  cfg: ServerFaultConfig,
+  metadataPrefix: string | null,
+): { kind: "synthetic"; response: Response; attrs: FaultAttrs } {
+  const attrs: FaultAttrs = {
+    kind: "5xx",
+    path,
+    method,
+    targetStatus: status,
+  };
+  if (traceId !== undefined) attrs.traceId = traceId;
+  // Frozen because the same reference is handed to observer.onFault and
+  // returned in the verdict; either consumer mutating it would corrupt
+  // the other's view.
+  Object.freeze(attrs);
+  cfg.observer?.onFault?.("5xx", attrs);
+  const headers = new Headers();
+  if (metadataPrefix) {
+    for (const [name, value] of attrsToHeaderEntries(attrs, metadataPrefix)) {
+      headers.set(name, value);
+    }
+  }
+  const response = Response.json(
+    { error: "chaos: synthetic 5xx", path, status },
+    { status, headers },
+  );
+  return { kind: "synthetic", response, attrs };
+}
+
 export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
   const pattern = compileStatelessPattern(cfg.pathPattern);
   const exemptPattern = compileStatelessPattern(cfg.exemptPathPattern);
@@ -356,32 +432,20 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
         return { kind: "abort", attrs: attrsAbort, abortStyle };
       }
 
+      const flap = cfg.statusFlapping;
+      if (flap && flap.windowMs > 0 && flap.badMs > 0) {
+        const offset = flap.phaseOffsetMs ?? 0;
+        const phase = ((Date.now() - offset) % flap.windowMs + flap.windowMs) % flap.windowMs;
+        if (phase < flap.badMs) {
+          const status = flap.code ?? 503;
+          return mintSyntheticFault(status, url.pathname, method, traceId, cfg, metadataPrefix);
+        }
+      }
+
       const r5 = cfg.status5xxRate ?? 0;
       if (r5 > 0 && rng.next() < r5) {
         const status = cfg.status5xxCode ?? 503;
-        const attrs5xx: FaultAttrs = {
-          kind: "5xx",
-          path: url.pathname,
-          method,
-          targetStatus: status,
-        };
-        if (traceId !== undefined) attrs5xx.traceId = traceId;
-        // Frozen because the same reference is handed to observer.onFault and
-        // returned in the verdict; either consumer mutating it would corrupt
-        // the other's view.
-        Object.freeze(attrs5xx);
-        cfg.observer?.onFault?.("5xx", attrs5xx);
-        const headers = new Headers();
-        if (metadataPrefix) {
-          for (const [name, value] of attrsToHeaderEntries(attrs5xx, metadataPrefix)) {
-            headers.set(name, value);
-          }
-        }
-        const response = Response.json(
-          { error: "chaos: synthetic 5xx", path: url.pathname, status },
-          { status, headers },
-        );
-        return { kind: "synthetic", response, attrs: attrs5xx };
+        return mintSyntheticFault(status, url.pathname, method, traceId, cfg, metadataPrefix);
       }
 
       const rP = cfg.partialResponseRate ?? 0;

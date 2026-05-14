@@ -1,6 +1,6 @@
 # @mizchi/server-faults
 
-Framework-agnostic server-side fault injection (5xx + latency + abort + partial response + slow streaming) for Web Standard `Request` / `Response`. Sits between network-side fault interception (outside the server) and any client-side mocking. Independent of any HTTP framework — wire it as a 1-2 line middleware.
+Framework-agnostic server-side fault injection (5xx + latency + abort + partial response + slow streaming + status flapping) for Web Standard `Request` / `Response`. Sits between network-side fault interception (outside the server) and any client-side mocking. Independent of any HTTP framework — wire it as a 1-2 line middleware.
 
 ## Install
 
@@ -79,6 +79,7 @@ if (response) {
 |---|---|---|---|
 | `status5xxRate` | `number` (0..1) | `0` | Probability of synthetic 5xx response |
 | `status5xxCode` | `500 \| 502 \| 503 \| 504` | `503` | Status to return when the 5xx raffle wins |
+| `statusFlapping` | `{ code?, windowMs, badMs, phaseOffsetMs? }` | none | Windowed 5xx: the first `badMs` of each `windowMs` period returns 5xx. Composes with `status5xxRate` via OR. Time-based, so **not seed-reproducible** |
 | `latencyRate` | `number` (0..1) | `0` | Probability of injected latency |
 | `latencyMs` | `number \| {minMs, maxMs}` | — | Sleep duration. Number = constant; range = uniform pick |
 | `abortRate` | `number` (0..1) | `0` | Probability of tearing down the connection without sending a response. Rolled before 5xx / latency — wins short-circuit both |
@@ -103,7 +104,7 @@ if (response) {
 ## Semantics
 
 - `null` = no fault, continue normally; `Response` = synthetic response, skip the handler.
-- All fault kinds are **mutually exclusive in the same request**. Roll order is `abort → 5xx → partial → slowStream → latency`; the first one that wins short-circuits the rest. Single-fault-per-request keeps observability data clean.
+- All fault kinds are **mutually exclusive in the same request**. Roll order is `abort → statusFlapping → 5xx → partial → slowStream → latency`; the first one that wins short-circuits the rest. Single-fault-per-request keeps observability data clean.
 - `seed` drives **fault selection** (which raffles win), not exact ms values inside a `latencyMs` range — the inner range pick uses `Math.random()` so config tweaks don't shift the RNG sequence.
 - **abort caveat**: the connection is torn down before any bytes can be sent, so `metadataHeader` cannot round-trip on the abort path. `observer.onFault` is the only observability channel. Express / Fastify / Koa call `socket.end()` (hangup) or `socket.destroy(err)` (reset) on the underlying Node socket. Hono throws `ServerFaultsAbortError` — runtimes propagate it as a connection error; Node-hosts can install an `onError` handler that translates it to a TCP-level teardown.
 
