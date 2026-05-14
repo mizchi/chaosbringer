@@ -23,11 +23,11 @@
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 import { weightedRandomDriver } from "../drivers/index.js";
+import { COMMON_OPTIONS, openStore } from "./cli-common.js";
 import { diffRecipes, formatRecipeDiff } from "./diff.js";
 import { lintRecipe, lintStore, summarise, type LintIssue } from "./lint.js";
 import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
-import { RecipeStore } from "./store.js";
 import { verifyAndPromote } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
 
@@ -96,32 +96,6 @@ export async function runRecipesCli(argv: string[]): Promise<void> {
       console.error(`Unknown subcommand: ${sub}\n\n${HELP}`);
       process.exit(2);
   }
-}
-
-interface CommonOpts {
-  dir?: string;
-  global?: boolean;
-  json?: boolean;
-  quiet?: boolean;
-}
-
-const COMMON_OPTIONS = {
-  dir: { type: "string" as const },
-  global: { type: "boolean" as const },
-  json: { type: "boolean" as const },
-  quiet: { type: "boolean" as const },
-  help: { type: "boolean" as const, short: "h" },
-};
-
-function openStore(opts: CommonOpts): RecipeStore {
-  if (opts.global) {
-    return new RecipeStore({ localDir: false, silent: opts.quiet });
-  }
-  return new RecipeStore({
-    localDir: opts.dir ?? "./chaosbringer-recipes",
-    globalDir: false,
-    silent: opts.quiet,
-  });
 }
 
 // -------- list --------

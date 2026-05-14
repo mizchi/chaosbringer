@@ -60,6 +60,13 @@ export interface LintOptions {
    */
   store?: RecipeStore;
   /**
+   * Pre-computed set of names known to the store. Pass when linting a
+   * batch (`lintStore`) to avoid re-listing the store inside every
+   * recipe — `store.list()` deep-clones every entry, so without this
+   * the cost is O(N²) deep-clones.
+   */
+  knownNames?: ReadonlySet<string>;
+  /**
    * Wait threshold (ms) above which raw `wait` steps emit a `long-raw-wait`.
    * Default: 2000ms.
    */
@@ -74,7 +81,6 @@ export interface LintReport {
 }
 
 const DEFAULT_LONG_WAIT_MS = 2000;
-const CRED_KEY_RX = /^(password|passwd|pwd|secret|token|api[_-]?key|auth)$/i;
 
 export function lintRecipe(recipe: ActionRecipe, opts: LintOptions = {}): LintIssue[] {
   const out: LintIssue[] = [];
@@ -161,8 +167,7 @@ export function lintRecipe(recipe: ActionRecipe, opts: LintOptions = {}): LintIs
   });
 
   if (opts.store) {
-    const all = opts.store.list();
-    const known = new Set(all.map((r) => r.name));
+    const known = opts.knownNames ?? new Set(opts.store.list().map((r) => r.name));
     for (const dep of recipe.requires) {
       // Sentinel markers (`__repaired-from-vN`, `__rolled-back-from-vN`)
       // are bookkeeping, not real requires — skip them.
@@ -203,9 +208,11 @@ export function lintRecipe(recipe: ActionRecipe, opts: LintOptions = {}): LintIs
 }
 
 export function lintStore(store: RecipeStore, opts: LintOptions = {}): LintReport {
+  const recipes = store.list();
+  const knownNames = new Set(recipes.map((r) => r.name));
   const issues: LintIssue[] = [];
-  for (const r of store.list()) {
-    issues.push(...lintRecipe(r, { ...opts, store }));
+  for (const r of recipes) {
+    issues.push(...lintRecipe(r, { ...opts, store, knownNames }));
   }
   return summarise(issues);
 }
@@ -237,25 +244,15 @@ function hasExpectAfter(step: RecipeStep): boolean {
   return "expectAfter" in step && step.expectAfter !== undefined;
 }
 
+const CRED_SELECTOR_RX =
+  /\b(password|passwd|pwd|secret|token|api[_-]?key|auth)\b/;
+
 function looksLikeRawCredential(step: RecipeStep): boolean {
   if (step.kind !== "fill") return false;
-  // Selector hints — "input[name=password]", "#password", "[type=password]".
-  const sel = step.selector.toLowerCase();
-  const selectorSmells =
-    sel.includes("password") ||
-    sel.includes("type=password") ||
-    /\b(token|secret|api[_-]?key)\b/.test(sel) ||
-    CRED_KEY_RX.test(extractAttr(sel, "name") ?? "") ||
-    CRED_KEY_RX.test(extractAttr(sel, "id") ?? "");
-  if (!selectorSmells) return false;
+  if (!CRED_SELECTOR_RX.test(step.selector.toLowerCase())) return false;
   // Already templated — caller did the right thing.
   if (step.value.includes("{{")) return false;
   // Empty / "test" values are probably probes, not real credentials.
   if (step.value === "" || /^test/i.test(step.value)) return false;
   return true;
-}
-
-function extractAttr(selector: string, attr: string): string | null {
-  const m = new RegExp(`${attr}=["']?([^"'\\]\\s>]+)`).exec(selector);
-  return m ? m[1]! : null;
 }

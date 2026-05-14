@@ -97,10 +97,10 @@ function diffSteps(
 function diffFields(left: ActionRecipe, right: ActionRecipe): FieldDiffEntry[] {
   const out: FieldDiffEntry[] = [];
   for (const f of TRACKED_FIELDS) {
-    const l = (left as unknown as Record<string, unknown>)[f as string];
-    const r = (right as unknown as Record<string, unknown>)[f as string];
-    if (!deepEqual(l, r)) {
-      out.push({ field: f as string, left: l, right: r });
+    const l = left[f];
+    const r = right[f];
+    if (canonicalJson(l) !== canonicalJson(r)) {
+      out.push({ field: f, left: l, right: r });
     }
   }
   return out;
@@ -142,13 +142,25 @@ function lcs(left: ReadonlyArray<string>, right: ReadonlyArray<string>): DiffOp[
 }
 
 function canonicaliseStep(step: RecipeStep): string {
-  // Sort keys so semantically identical steps compare equal regardless
-  // of how the file laid them out.
-  return JSON.stringify(step, Object.keys(step).sort());
+  return canonicalJson(step);
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+/**
+ * JSON.stringify with sorted keys at every nesting level. Necessary
+ * for `diffFields` — postconditions / preconditions are nested objects
+ * and a key-order swap would otherwise be a phantom diff.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        sorted[k] = (v as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return v;
+  });
 }
 
 export interface FormatDiffOptions {

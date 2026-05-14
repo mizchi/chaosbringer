@@ -9,8 +9,15 @@
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { formatLoadReport, type DurationInput } from "../load/index.js";
+import {
+  isRecipeSelection,
+  isRecipeStatus,
+  openStore,
+  RECIPE_SELECTIONS,
+  RECIPE_STATUSES,
+} from "./cli-common.js";
 import { scenarioLoadFromStore, type RecipeSelection } from "./load-bridge.js";
-import { RecipeStore } from "./store.js";
+import type { RecipeStatus } from "./types.js";
 
 const HELP = `chaosbringer load --base-url URL [options]
 
@@ -43,9 +50,9 @@ interface ParsedArgs {
   rampUp?: DurationInput;
   thinkTime?: { minMs: number; maxMs: number };
   selection: RecipeSelection;
-  filterStatus: "verified" | "candidate" | "demoted";
+  filterStatus: RecipeStatus;
   maxIterations?: number;
-  store: RecipeStore;
+  store: ReturnType<typeof openStore>;
   output?: string;
   headless: boolean;
   quiet: boolean;
@@ -88,8 +95,6 @@ export async function runLoadCli(argv: string[]): Promise<void> {
       }
     }
   }
-  // Surface SLO / error-driven exit code consistency with `scenarioLoad`:
-  // any iteration or step failure → exit 1.
   const failed =
     result.report.totals.iterationFailures > 0 || result.report.totals.stepFailures > 0;
   if (failed) process.exitCode = 1;
@@ -133,29 +138,26 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     console.error(`load: --workers must be a positive number, got ${values.workers}`);
     process.exit(2);
   }
-  // parseDurationMs (called inside scenarioLoad) accepts "60s", "2m",
-  // raw ms, etc. The TS type is a template-literal union for safety in
-  // programmatic callers — at the CLI boundary we accept any string and
-  // let parseDurationMs reject malformed input with a clear message.
+  // DurationInput is a template-literal union for compile-time safety.
+  // At the CLI boundary we hand the raw string to parseDurationMs, which
+  // rejects malformed input with a clearer message than a TS cast would.
   const duration = (values.duration ?? "60s") as DurationInput;
   const rampUp = values["ramp-up"] as DurationInput | undefined;
-  const filterStatus = (values["filter-status"] ?? "verified") as ParsedArgs["filterStatus"];
-  if (!["verified", "candidate", "demoted"].includes(filterStatus)) {
-    console.error(`load: --filter-status must be verified|candidate|demoted`);
+  const filterStatusRaw = values["filter-status"] ?? "verified";
+  if (!isRecipeStatus(filterStatusRaw)) {
+    console.error(`load: --filter-status must be ${RECIPE_STATUSES.join("|")}`);
     process.exit(2);
   }
   const selectionStr = values.selection ?? "uniform";
-  if (selectionStr !== "uniform" && selectionStr !== "by-success-rate") {
-    console.error(`load: --selection must be uniform|by-success-rate`);
+  if (!isRecipeSelection(selectionStr)) {
+    console.error(`load: --selection must be ${RECIPE_SELECTIONS.join("|")}`);
     process.exit(2);
   }
-  const store = values.global
-    ? new RecipeStore({ localDir: false, silent: values.quiet })
-    : new RecipeStore({
-        localDir: values.dir ?? "./chaosbringer-recipes",
-        globalDir: false,
-        silent: values.quiet,
-      });
+  const store = openStore({
+    dir: values.dir,
+    global: values.global,
+    quiet: values.quiet,
+  });
   let thinkTime: ParsedArgs["thinkTime"];
   if (values["think-time"]) {
     const m = /^(\d+)-(\d+)$/.exec(values["think-time"]);
@@ -174,7 +176,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     rampUp,
     thinkTime,
     selection: selectionStr,
-    filterStatus,
+    filterStatus: filterStatusRaw,
     maxIterations: values["max-iterations"] ? Number(values["max-iterations"]) : undefined,
     store,
     output: values.output,
