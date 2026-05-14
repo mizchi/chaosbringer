@@ -32,6 +32,10 @@ The three doc surfaces:
 - **[Grow an AI skill library (Goals + Recipes)](./ai-recipe-skills.md)** — `recipeDriver` replays verified trajectories without LLM calls; `Goal` defines the persona (normal user / bug hunter / coverage explorer) the AI operates as.
 - **[The AI ↔ Recipe flywheel](./ai-flywheel.md)** — full A→B→C→D loop: AI discovers (`tracingDriver`), verifier promotes (`verifyAndPromote`), production replays cheaply under chaos (`recipeDriver` + faults), and `investigate()` turns failures back into regression recipes.
 
+### Security testing
+
+- **[Attack login / signup forms (OWASP-aligned)](./auth-attack-driver.md)** — `authAttackDriver` detects auth forms and runs five attack scenarios: weak-password acceptance, username enumeration, SQLi auth-bypass, reflected XSS, missing rate limiting. Findings carry OWASP / NIST references.
+
 ### Invariants (what counts as "broken")
 
 - **[Standard invariants toolkit](./invariant-toolkit.md)** — no-error-toast, state-machine, response-shape, monotonic-counter. Copy-paste shapes.

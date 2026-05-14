@@ -69,3 +69,21 @@ export {
   type PayloadSetName,
 } from "./payloads.js";
 export { flowDriver, type FlowDriverOptions, type FlowStep } from "./flow-driver.js";
+export {
+  authAttackDriver,
+  detectAuthForm,
+  freshTestEmail,
+  NONEXISTENT_USERNAME,
+  SQL_ERROR_SIGNATURES,
+  SQLI_AUTH_BYPASS_PAYLOADS,
+  WEAK_PASSWORDS,
+  XSS_AUTH_MARKER,
+  XSS_CREDENTIAL_PAYLOADS,
+  type AuthAttackDriver,
+  type AuthAttackName,
+  type AuthAttackOptions,
+  type AuthFinding,
+  type AuthFindingSeverity,
+  type AuthFormType,
+  type DetectedAuthForm,
+} from "./auth-attack/index.js";

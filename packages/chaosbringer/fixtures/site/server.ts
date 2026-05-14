@@ -196,6 +196,95 @@ const pages: Record<string, Route> = {
       `,
     }),
   },
+
+  // -------- Intentionally vulnerable auth pages, used by the
+  //          auth-attack-driver E2E tests. DO NOT mirror these patterns
+  //          in real apps.
+  "/login": {
+    body: html({
+      title: "Log in",
+      body: `
+        <h1>Log in</h1>
+        <form id="form">
+          <label>Username <input name="username" id="username" autocomplete="username" /></label>
+          <label>Password <input name="password" id="password" type="password" autocomplete="current-password" /></label>
+          <button type="submit">Sign in</button>
+        </form>
+        <div id="error" role="alert" data-test="error" style="color:red"></div>
+        <script>
+          const form = document.getElementById('form');
+          const err  = document.getElementById('error');
+          form.addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            const u = document.getElementById('username').value || "";
+            const p = document.getElementById('password').value || "";
+            // Vulnerable SQL bypass — naive "concatenate then check" mock.
+            if (u.toLowerCase().includes("' or ") || u === "admin'--") {
+              window.location.href = '/auth-thanks?via=sqli';
+              return;
+            }
+            // Vulnerable username enumeration — distinct messages.
+            if (u === "admin" || u === "chaosbringer-test@example.invalid") {
+              if (p === "secret") {
+                window.location.href = '/auth-thanks?via=login';
+                return;
+              }
+              err.textContent = 'Wrong password for ' + u;
+            } else {
+              err.textContent = 'No such user: ' + u;
+            }
+            // Vulnerable XSS — reflects via innerHTML.
+            if (u.includes('<') || u.includes('"')) {
+              err.innerHTML = 'Login error for ' + u;
+            }
+          });
+        </script>
+      `,
+    }),
+  },
+
+  "/signup": {
+    body: html({
+      title: "Sign up",
+      body: `
+        <h1>Create account</h1>
+        <form id="form">
+          <label>Email <input name="email" id="email" type="email" autocomplete="email" /></label>
+          <label>Password <input name="password" id="password" type="password" autocomplete="new-password" /></label>
+          <button type="submit">Sign up</button>
+        </form>
+        <div id="error" role="alert" data-test="error" style="color:red"></div>
+        <script>
+          const form = document.getElementById('form');
+          const err  = document.getElementById('error');
+          form.addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            const e = document.getElementById('email').value || "";
+            const p = document.getElementById('password').value || "";
+            if (!e || !p) {
+              err.textContent = 'Missing fields';
+              return;
+            }
+            // Vulnerable XSS — reflects email back via innerHTML.
+            if (e.includes('<') || e.includes('"')) {
+              err.innerHTML = 'Welcome ' + e;
+              return;
+            }
+            // Vulnerable weak-password policy — no checks at all, accepts
+            // everything from "password" down.
+            window.location.href = '/auth-thanks?via=signup';
+          });
+        </script>
+      `,
+    }),
+  },
+
+  "/auth-thanks": {
+    body: html({
+      title: "Authenticated",
+      body: `<h1 data-test="auth-thanks">Welcome</h1><p>Authenticated successfully.</p>`,
+    }),
+  },
 };
 
 function html({ title, body, nav }: { title: string; body: string; nav?: boolean }): string {
