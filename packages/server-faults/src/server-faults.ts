@@ -12,7 +12,19 @@
  * (1 roll for 5xx, conditionally 1 roll for latency).
  */
 
-export type FaultKind = "5xx" | "latency";
+export type FaultKind = "5xx" | "latency" | "abort";
+
+/**
+ * How an abort fault tears down the connection.
+ *
+ * - `hangup`: clean half-close (Node `socket.end()`). The peer sees EOF on
+ *   read with no error; equivalent to the server politely terminating.
+ * - `reset`: forced reset (Node `socket.destroy(err)`). The peer sees
+ *   `ECONNRESET` / `net::ERR_CONNECTION_RESET`.
+ *
+ * Not every framework can express both — see per-adapter docs.
+ */
+export type AbortStyle = "hangup" | "reset";
 
 /**
  * Stable attribute schema fed to `observer.onFault`.
@@ -30,6 +42,8 @@ export interface FaultAttrs {
   method: string;
   targetStatus?: number;
   latencyMs?: number;
+  /** Populated only on `kind: "abort"`. */
+  abortStyle?: AbortStyle;
   /** Trace-id from incoming traceparent (W3C Trace Context). 32 lowercase hex. */
   traceId?: string;
 }
@@ -42,11 +56,15 @@ export interface FaultAttrs {
  * - `annotate`: no synthetic response, but the request was perturbed (e.g.
  *   latency was injected). The adapter should run the real handler and
  *   surface `attrs` (as response headers, span attributes, etc.).
+ * - `abort`: the adapter must tear down the connection without sending a
+ *   response. `metadataHeader` cannot round-trip on this path — no headers
+ *   are ever delivered — so the only observability channel is `observer`.
  * - `null`: bypass / exempt / no raffle won — pass through unchanged.
  */
 export type FaultVerdict =
   | { kind: "synthetic"; response: Response; attrs: FaultAttrs }
   | { kind: "annotate"; attrs: FaultAttrs }
+  | { kind: "abort"; attrs: FaultAttrs; abortStyle: AbortStyle }
   | null;
 
 export interface ServerFaultObserver {
@@ -62,6 +80,14 @@ export interface ServerFaultConfig {
   latencyRate?: number;
   /** Sleep duration when the latency raffle wins. Number = constant ms; range = uniform pick. */
   latencyMs?: number | { minMs: number; maxMs: number };
+  /**
+   * 0..1, default 0. Probability of tearing down the connection without
+   * sending a response. Rolled before `status5xxRate` and `latencyRate` —
+   * a winning abort short-circuits all other kinds in the same request.
+   */
+  abortRate?: number;
+  /** Connection-termination style when the abort raffle wins. Default `"hangup"`. */
+  abortStyle?: AbortStyle;
   /** RegExp or pattern string. Only matching paths are considered for fault injection. */
   pathPattern?: RegExp | string;
   /**
@@ -166,6 +192,7 @@ const FAULT_HEADER_KEY_SUFFIX: Record<keyof FaultAttrs, string> = {
   method: "method",
   targetStatus: "target-status",
   latencyMs: "latency-ms",
+  abortStyle: "abort-style",
   traceId: "trace-id",
 };
 
@@ -224,6 +251,24 @@ export function serverFaults(cfg: ServerFaultConfig): ServerFaultHandle {
 
       const method = req.method.toUpperCase();
       const traceId = extractTraceId(req);
+
+      const rA = cfg.abortRate ?? 0;
+      if (rA > 0 && rng.next() < rA) {
+        const abortStyle: AbortStyle = cfg.abortStyle ?? "hangup";
+        const attrsAbort: FaultAttrs = {
+          kind: "abort",
+          path: url.pathname,
+          method,
+          abortStyle,
+        };
+        if (traceId !== undefined) attrsAbort.traceId = traceId;
+        // No metadata headers on the abort path: the connection is torn down
+        // before any headers can be delivered. Observers are the only channel.
+        Object.freeze(attrsAbort);
+        cfg.observer?.onFault?.("abort", attrsAbort);
+        return { kind: "abort", attrs: attrsAbort, abortStyle };
+      }
+
       const r5 = cfg.status5xxRate ?? 0;
       if (r5 > 0 && rng.next() < r5) {
         const status = cfg.status5xxCode ?? 503;
@@ -289,6 +334,7 @@ const FAULT_KEY_MAP: Record<keyof FaultAttrs, string> = {
   method: "fault.method",
   targetStatus: "fault.target_status",
   latencyMs: "fault.latency_ms",
+  abortStyle: "fault.abort_style",
   traceId: "fault.trace_id",
 };
 

@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { honoMiddleware, type HonoLikeContext } from "./hono.js";
+import { honoMiddleware, ServerFaultsAbortError, type HonoLikeContext } from "./hono.js";
 import { expressMiddleware } from "./express.js";
 import { fastifyPlugin } from "./fastify.js";
 import { koaMiddleware } from "./koa.js";
@@ -66,6 +66,19 @@ describe("honoMiddleware", () => {
     // Stronger than checking just one header: the entire Headers object stays
     // empty so no other fault.* key sneaks through.
     expect([...headers.entries()]).toHaveLength(0);
+  });
+
+  it("throws ServerFaultsAbortError carrying abortStyle when abort wins", async () => {
+    const mw = honoMiddleware({ abortRate: 1, abortStyle: "reset" });
+    const next = vi.fn();
+    const c = { req: { raw: new Request("https://test.local/api/x") } };
+    await expect(mw(c, next)).rejects.toBeInstanceOf(ServerFaultsAbortError);
+    expect(next).not.toHaveBeenCalled();
+    try {
+      await mw(c, next);
+    } catch (err) {
+      expect((err as ServerFaultsAbortError).abortStyle).toBe("reset");
+    }
   });
 });
 
@@ -159,6 +172,61 @@ describe("expressMiddleware", () => {
     await mw(req, res, next);
     expect(res.statusCode).toBe(503);
     expect(res.headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
+
+  it("calls socket.end() for hangup abort and skips next()", async () => {
+    const mw = expressMiddleware({ abortRate: 1, abortStyle: "hangup" });
+    const next = vi.fn();
+    const end = vi.fn();
+    const destroy = vi.fn();
+    const req = {
+      method: "GET",
+      originalUrl: "/api/x",
+      headers: { host: "test.local" },
+      socket: { destroy, end },
+    };
+    const res = makeRes();
+    await mw(req, res, next);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(0);
+  });
+
+  it("calls socket.destroy(err) for reset abort", async () => {
+    const mw = expressMiddleware({ abortRate: 1, abortStyle: "reset" });
+    const next = vi.fn();
+    const end = vi.fn();
+    const destroy = vi.fn();
+    const req = {
+      method: "GET",
+      originalUrl: "/api/x",
+      headers: { host: "test.local" },
+      socket: { destroy, end },
+    };
+    const res = makeRes();
+    await mw(req, res, next);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(end).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("falls back to socket.destroy() when end() is unavailable on hangup", async () => {
+    const mw = expressMiddleware({ abortRate: 1, abortStyle: "hangup" });
+    const next = vi.fn();
+    const destroy = vi.fn();
+    const req = {
+      method: "GET",
+      originalUrl: "/api/x",
+      headers: { host: "test.local" },
+      socket: { destroy },
+    };
+    const res = makeRes();
+    await mw(req, res, next);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy.mock.calls[0][0]).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
   });
 });
 
@@ -290,6 +358,57 @@ describe("fastifyPlugin", () => {
     expect(reply._code).toBe(503);
     expect(reply._headers["x-chaos-fault-kind"]).toBe("5xx");
   });
+
+  it("tears down req.raw.socket on abort and never touches reply", async () => {
+    const plugin = fastifyPlugin({ abortRate: 1, abortStyle: "reset" });
+    let registered: ((req: unknown, reply: unknown) => Promise<void>) | null = null;
+    const fastify = {
+      addHook(_: "onRequest", h: (req: unknown, reply: unknown) => Promise<void>) {
+        registered = h;
+      },
+    };
+    await plugin(fastify);
+    const destroy = vi.fn();
+    const end = vi.fn();
+    const req = {
+      method: "GET",
+      url: "/api/x",
+      headers: { host: "test.local" },
+      raw: { socket: { destroy, end } },
+    };
+    const code = vi.fn(() => reply);
+    const send = vi.fn();
+    const header = vi.fn(() => reply);
+    const reply = { code, send, header };
+    await registered!(req, reply);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(send).not.toHaveBeenCalled();
+    expect(code).not.toHaveBeenCalled();
+  });
+
+  it("falls back to req.socket when req.raw is absent", async () => {
+    const plugin = fastifyPlugin({ abortRate: 1, abortStyle: "hangup" });
+    let registered: ((req: unknown, reply: unknown) => Promise<void>) | null = null;
+    const fastify = {
+      addHook(_: "onRequest", h: (req: unknown, reply: unknown) => Promise<void>) {
+        registered = h;
+      },
+    };
+    await plugin(fastify);
+    const end = vi.fn();
+    const destroy = vi.fn();
+    const req = {
+      method: "GET",
+      url: "/api/x",
+      headers: { host: "test.local" },
+      socket: { destroy, end },
+    };
+    const reply = { code: vi.fn(), header: vi.fn(), send: vi.fn() };
+    await registered!(req, reply);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+  });
 });
 
 describe("koaMiddleware", () => {
@@ -373,5 +492,29 @@ describe("koaMiddleware", () => {
     await mw(ctx, next);
     expect(ctx.status).toBe(503);
     expect(ctx._headers["x-chaos-fault-kind"]).toBe("5xx");
+  });
+
+  it("tears down ctx.req.socket on abort and skips next()", async () => {
+    const mw = koaMiddleware({ abortRate: 1, abortStyle: "reset" });
+    const next = vi.fn();
+    const end = vi.fn();
+    const destroy = vi.fn();
+    const ctx = {
+      req: {
+        method: "GET",
+        url: "/api/x",
+        headers: { host: "test.local" },
+        socket: { destroy, end },
+      },
+      status: 0,
+      body: undefined as unknown,
+      set: vi.fn(),
+    };
+    await mw(ctx, next);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(end).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+    expect(ctx.status).toBe(0);
   });
 });

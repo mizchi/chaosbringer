@@ -16,11 +16,18 @@ import {
 } from "../server-faults.js";
 
 // Loosely-typed Express surface to keep server-faults zero-dep.
+interface ExpressLikeSocket {
+  /** Forced reset (TCP RST → ECONNRESET on the client). */
+  destroy(err?: Error): void;
+  /** Clean half-close (FIN → EOF on the client). */
+  end?: () => void;
+}
 interface ExpressLikeRequest {
   method: string;
   originalUrl?: string;
   url?: string;
   headers: Record<string, string | string[] | undefined>;
+  socket?: ExpressLikeSocket;
 }
 interface ExpressLikeResponse {
   status(code: number): ExpressLikeResponse;
@@ -66,6 +73,22 @@ export function expressMiddleware(
           res.setHeader(key, value);
         });
         res.json(await verdict.response.json());
+        return;
+      }
+      if (verdict.kind === "abort") {
+        // Tear down the TCP connection. `reset` calls socket.destroy(err) so
+        // the client sees ECONNRESET; `hangup` half-closes via socket.end()
+        // for a clean EOF. Fall back to destroy() if end() is unavailable.
+        // Metadata headers cannot be delivered — observer is the only channel.
+        const socket = req.socket;
+        if (verdict.abortStyle === "reset") {
+          socket?.destroy(new Error("server-faults: synthetic abort"));
+        } else if (socket?.end) {
+          socket.end();
+        } else {
+          socket?.destroy();
+        }
+        // Do NOT call next() — the request is over.
         return;
       }
       if (verdict.kind === "annotate") {

@@ -273,6 +273,80 @@ describe("serverFaults", () => {
     });
   });
 
+  describe("abort", () => {
+    it("returns null when abortRate is 0", async () => {
+      const fault = serverFaults({ abortRate: 0 });
+      for (let i = 0; i < 50; i += 1) {
+        expect(await fault.maybeInject(req(`/api/${i}`))).toBeNull();
+      }
+    });
+
+    it("always returns an abort verdict when abortRate=1", async () => {
+      const fault = serverFaults({ abortRate: 1 });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("abort");
+      const abort = v as { kind: "abort"; abortStyle: "hangup" | "reset"; attrs: FaultAttrs };
+      expect(abort.abortStyle).toBe("hangup");
+      expect(abort.attrs).toEqual({
+        kind: "abort",
+        path: "/api/x",
+        method: "GET",
+        abortStyle: "hangup",
+      });
+    });
+
+    it("honours abortStyle=reset", async () => {
+      const fault = serverFaults({ abortRate: 1, abortStyle: "reset" });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect((v as { abortStyle: string }).abortStyle).toBe("reset");
+      expect((v as { attrs: FaultAttrs }).attrs.abortStyle).toBe("reset");
+    });
+
+    it("invokes observer.onFault for abort faults", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        abortRate: 1,
+        abortStyle: "reset",
+        observer: { onFault },
+      });
+      await fault.maybeInject(req("/api/x"));
+      expect(onFault).toHaveBeenCalledWith("abort", {
+        kind: "abort",
+        path: "/api/x",
+        method: "GET",
+        abortStyle: "reset",
+      });
+    });
+
+    it("populates traceId on abort events too", async () => {
+      const TP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+      const onFault = vi.fn();
+      const fault = serverFaults({ abortRate: 1, observer: { onFault } });
+      await fault.maybeInject(
+        new Request("https://test.local/api/x", { headers: { traceparent: TP } }),
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        "abort",
+        expect.objectContaining({ traceId: "0af7651916cd43dd8448eb211c80319c" }),
+      );
+    });
+
+    it("short-circuits 5xx and latency rolls when abort wins", async () => {
+      const onFault = vi.fn();
+      const fault = serverFaults({
+        abortRate: 1,
+        status5xxRate: 1,
+        latencyRate: 1,
+        latencyMs: 1,
+        observer: { onFault },
+      });
+      const v = await fault.maybeInject(req("/api/x"));
+      expect(v?.kind).toBe("abort");
+      expect(onFault).toHaveBeenCalledTimes(1);
+      expect(onFault).toHaveBeenCalledWith("abort", expect.anything());
+    });
+  });
+
   it("does not roll latency raffle when 5xx already won", async () => {
     const onFault = vi.fn();
     const fault = serverFaults({
@@ -360,6 +434,21 @@ describe("serverFaults", () => {
       });
       expect("fault.target_status" in out).toBe(false);
       expect("fault.trace_id" in out).toBe(false);
+    });
+
+    it("maps abortStyle for abort verdicts", () => {
+      const out = toOtelAttrs({
+        kind: "abort",
+        path: "/api/x",
+        method: "GET",
+        abortStyle: "reset",
+      });
+      expect(out).toEqual({
+        "fault.kind": "abort",
+        "fault.path": "/api/x",
+        "fault.method": "GET",
+        "fault.abort_style": "reset",
+      });
     });
   });
 

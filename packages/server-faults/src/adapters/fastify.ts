@@ -13,11 +13,18 @@ import {
   type ServerFaultConfig,
 } from "../server-faults.js";
 
+interface FastifyLikeSocket {
+  destroy(err?: Error): void;
+  end?: () => void;
+}
 interface FastifyLikeRequest {
   method: string;
   url: string;
   hostname?: string;
   headers: Record<string, string | string[] | undefined>;
+  /** Underlying Node IncomingMessage; carries `.socket` for teardown. */
+  raw?: { socket?: FastifyLikeSocket };
+  socket?: FastifyLikeSocket;
 }
 interface FastifyLikeReply {
   code(statusCode: number): FastifyLikeReply;
@@ -61,6 +68,21 @@ export function fastifyPlugin(cfg: ServerFaultConfig) {
           reply.header(key, value);
         });
         await reply.send(await verdict.response.json());
+        return;
+      }
+      if (verdict.kind === "abort") {
+        // Prefer req.raw.socket (the canonical Fastify accessor for the
+        // underlying Node socket); fall back to req.socket which newer
+        // Fastify versions also expose. Reset uses destroy(err); hangup
+        // half-closes via end() and falls back to destroy() if absent.
+        const socket = req.raw?.socket ?? req.socket;
+        if (verdict.abortStyle === "reset") {
+          socket?.destroy(new Error("server-faults: synthetic abort"));
+        } else if (socket?.end) {
+          socket.end();
+        } else {
+          socket?.destroy();
+        }
         return;
       }
       if (verdict.kind === "annotate") {

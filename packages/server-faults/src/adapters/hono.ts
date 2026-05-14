@@ -14,8 +14,28 @@ import {
   attrsToHeaderEntries,
   resolveMetadataPrefix,
   serverFaults,
+  type AbortStyle,
   type ServerFaultConfig,
 } from "../server-faults.js";
+
+/**
+ * Error thrown by `honoMiddleware` when an abort fault wins.
+ *
+ * Hono targets Node, Bun, Workers, Deno, etc. — there is no portable
+ * "destroy the socket" call we can make from the middleware. Throwing a
+ * tagged error is the only adapter-agnostic option: Workers' `fetch()`
+ * propagates the throw as a connection error, while Node-based Hono users
+ * can install an `app.onError` handler that recognises this error and
+ * calls `c.env.incoming.socket.destroy()` for a real TCP teardown.
+ */
+export class ServerFaultsAbortError extends Error {
+  readonly abortStyle: AbortStyle;
+  constructor(abortStyle: AbortStyle) {
+    super("server-faults: synthetic abort");
+    this.name = "ServerFaultsAbortError";
+    this.abortStyle = abortStyle;
+  }
+}
 
 export interface HonoLikeContext {
   req: { raw: Request };
@@ -39,6 +59,14 @@ export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
       return;
     }
     if (verdict.kind === "synthetic") return verdict.response;
+    if (verdict.kind === "abort") {
+      // No portable socket teardown across Hono's runtime targets — throw a
+      // tagged error and let either the runtime (Workers / Bun) treat it as
+      // a connection error, or a Node-host's onError handler call
+      // `c.env.incoming.socket.destroy()` if a real TCP-level abort is
+      // required. Metadata headers cannot be delivered on this path.
+      throw new ServerFaultsAbortError(verdict.abortStyle);
+    }
     if (verdict.kind === "annotate") {
       // Real handler runs, then stamp headers. Mutating `c.res.headers` after
       // the handler returns relies on Hono's live `Headers` object — if a
