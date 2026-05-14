@@ -12,7 +12,12 @@
  */
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { buildRuntimeFaultsScript, compileRuntimeFaults } from "../runtime-faults.js";
-import { compileLoadFaultRules, faultStatsFrom, installFaultRoutes } from "./fault-routes.js";
+import {
+  compileLoadFaultRules,
+  faultFiringsFrom,
+  faultStatsFrom,
+  installFaultRoutes,
+} from "./fault-routes.js";
 import { parseDurationMs } from "./histogram.js";
 import { buildLoadReport } from "./report.js";
 import { ScenarioWorker, type WorkerSamples } from "./worker.js";
@@ -151,6 +156,7 @@ export async function scenarioLoad(
       planned,
       samples,
       timelineBucketMs: options.timelineBucketMs,
+      faultFirings: faultFiringsFrom(compiledFaultRules),
     });
     const faultStats = faultStatsFrom(compiledFaultRules);
     // Surface runtime fault stats in a side channel — runtime faults

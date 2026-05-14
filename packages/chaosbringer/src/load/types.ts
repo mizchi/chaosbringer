@@ -180,6 +180,13 @@ export interface TimelineBucket {
   iterationFailures: number;
   networkRequests: number;
   networkErrors: number;
+  /**
+   * Per-fault-rule firing counts inside this bucket. Keyed by rule
+   * name (`FaultRule.name`, falling back to `fault-${index}`). Empty
+   * object when no faults are configured. Lets you literally read
+   * cause-and-effect on the same axis as `iterations` / `errors`.
+   */
+  faults: Record<string, number>;
 }
 
 export interface LoadReport {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compileLoadFaultRules, faultStatsFrom } from "./fault-routes.js";
+import { compileLoadFaultRules, faultFiringsFrom, faultStatsFrom } from "./fault-routes.js";
 
 describe("compileLoadFaultRules", () => {
   it("returns [] for undefined / empty input", () => {
@@ -36,6 +36,26 @@ describe("compileLoadFaultRules", () => {
       { urlPattern: ".*", fault: { kind: "abort" } },
     ]);
     expect(compiled.length).toBe(1);
+  });
+
+  it("faultFiringsFrom returns timestamps per rule (including empty rules)", () => {
+    const compiled = compileLoadFaultRules([
+      { name: "fires", urlPattern: ".*", fault: { kind: "abort" } },
+      { name: "quiet", urlPattern: ".*", fault: { kind: "abort" } },
+    ]);
+    compiled[0]!.firings.push(1000, 1500, 2000);
+    const firings = faultFiringsFrom(compiled);
+    expect(firings.fires).toEqual([1000, 1500, 2000]);
+    expect(firings.quiet).toEqual([]);
+  });
+
+  it("faultFiringsFrom auto-derives rule name when missing", () => {
+    const compiled = compileLoadFaultRules([
+      { urlPattern: ".*", fault: { kind: "abort" } },
+    ]);
+    compiled[0]!.firings.push(123);
+    const firings = faultFiringsFrom(compiled);
+    expect(firings["fault-0"]).toEqual([123]);
   });
 
   it("faultStatsFrom reports per-rule counters", () => {

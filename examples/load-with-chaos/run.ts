@@ -11,10 +11,12 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
+  assertSlo,
   defineScenario,
   faults,
   formatLoadReport,
   scenarioLoad,
+  type SloDefinition,
 } from "chaosbringer";
 
 // -------- tiny demo app --------
@@ -138,7 +140,28 @@ async function main() {
       console.log(`  ${f.rule}: matched=${f.matched}  injected=${f.injected}`);
     }
 
-    // Non-zero exit if no iterations completed — useful as a CI signal.
+    // SLO gating: the kind of thresholds you'd actually check in CI.
+    // p95Ms is intentionally loose so the demo passes consistently —
+    // tighten these for real apps. errorRate is set to mirror the fault
+    // probability so we fail loudly only if reality is meaningfully
+    // worse than the chaos we configured.
+    const slo: SloDefinition = {
+      steps: {
+        "shop/open": { p95Ms: 1500, errorRate: 0.05 },
+        "shop/add-to-cart": { p95Ms: 1500, errorRate: 0.3 },
+        "shop/checkout": { p95Ms: 1500, errorRate: 0.3 },
+      },
+      scenarios: { shop: { minThroughputPerSec: 1 } },
+      totals: { maxNetworkErrors: 100 },
+    };
+    try {
+      assertSlo(report, slo);
+      console.log("\nSLO: ok");
+    } catch (err) {
+      console.error("\n" + (err as Error).message);
+      process.exit(1);
+    }
+
     if (report.totals.iterations === 0) process.exit(1);
   } finally {
     await server.close();

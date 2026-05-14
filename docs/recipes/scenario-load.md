@@ -113,7 +113,7 @@ scenarios: [
 | `scenarios[].steps[].latency.{p50Ms,p95Ms,p99Ms}` | Per-step percentiles across every worker × iteration. |
 | `endpoints[].latency` | Same shape, keyed by URL pattern (numeric ids → `:id`, UUIDs → `:uuid`). |
 | `workers[]` | Per-worker iteration counts (debugging). |
-| `timeline[]` | Per-bucket counts (`iterations`, `iterationFailures`, `networkRequests`, `networkErrors`). Default bucket: 1000ms. Configure with `timelineBucketMs`. `formatLoadReport` renders this as a sparkline. |
+| `timeline[]` | Per-bucket counts (`iterations`, `iterationFailures`, `networkRequests`, `networkErrors`, **`faults: Record<ruleName, count>`**). Default bucket: 1000ms. Configure with `timelineBucketMs`. `formatLoadReport` renders this as a sparkline with one row per fired fault rule. |
 | `errors[]` | Capped flat error list (200 max) — first errors win. |
 
 ## Recipe: chaos + scenario load
@@ -182,14 +182,55 @@ const worst = report.timeline.reduce(
 console.log(`Worst bucket: t=${worst.tMs}ms, fail=${worst.iterationFailures}`);
 ```
 
-The ASCII formatter renders this as a sparkline so you can eyeball the run:
+The ASCII formatter renders this as a sparkline so you can eyeball the run. Each fault rule that actually fired gets its own row, named via the rule's `name`:
 
 ```
-Timeline (bucket=1.0s):
-  iterations  ▁▃▆▇█▇▆▃▁▁▁▃▆▇█
-  errors      ▁▁▁▁▁█▇▆▃▁▁▁▁▁▁
-  peak: 8/bucket
+Timeline (bucket=500ms):
+  iterations      ▁▁▂▄▂▄▄▄▅▂▄▅▁▇▂▂█
+  errors          ▁▁▁▁▁▁▁█▅▅█▁▅▅▁▁▁
+  fault:api-500   ▁▁▁▁▁▁▁█▃▃█▁▃▃▁▁▁
+  peak: 5/bucket
 ```
+
+The fault row lines up with the `errors` row by construction — that's the cause-and-effect you came here to see.
+
+## Recipe: SLO gating in CI
+
+`assertSlo()` throws an error listing every breached threshold so the
+load run fails CI loudly:
+
+```ts
+import { assertSlo, scenarioLoad, type SloDefinition } from "chaosbringer";
+
+const { report } = await scenarioLoad({ /* ... */ });
+
+const slo: SloDefinition = {
+  // Step key format: "scenarioName/stepName"
+  steps: {
+    "shop/checkout": { p95Ms: 800, errorRate: 0.05 },
+  },
+  scenarios: {
+    shop: { minThroughputPerSec: 3 },
+  },
+  endpoints: {
+    "/api/checkout": { p99Ms: 1500, errorRate: 0.05 },
+  },
+  totals: {
+    maxNetworkErrors: 50,
+  },
+};
+
+assertSlo(report, slo); // throws on any breach; thrown error.violations carries the structured list
+```
+
+Comparisons are inclusive: `p95Ms: 800` passes if actual ≤ 800.
+`minThroughputPerSec` is the only "must be ≥" threshold (everything
+else is a max). Missing targets (e.g. a step the report didn't see)
+are themselves violations — the point of an SLO is to express
+expectations, so a silently-skipped check defeats the purpose.
+
+If you want non-throwing handling, use `evaluateSlo(report, slo)` which
+returns `{ ok, violations[] }`.
 
 ## Limits / non-goals
 

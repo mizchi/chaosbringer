@@ -35,6 +35,12 @@ export interface BuildLoadReportInput {
   samples: ReadonlyArray<WorkerSamples>;
   /** Default 1000ms. Values <= 0 disable the timeline (returned empty). */
   timelineBucketMs?: number;
+  /**
+   * Per-fault-rule wall-clock firing timestamps. Keys appear in the
+   * `faults` map of every TimelineBucket (zero for buckets where the
+   * rule didn't fire) so consumers can read row × column.
+   */
+  faultFirings?: Record<string, ReadonlyArray<number>>;
 }
 
 export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
@@ -173,6 +179,7 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     durationMs: input.durationMs,
     bucketMs: input.timelineBucketMs ?? DEFAULT_TIMELINE_BUCKET_MS,
     samples: input.samples,
+    faultFirings: input.faultFirings,
   });
 
   return {
@@ -199,6 +206,7 @@ interface BuildTimelineInput {
   durationMs: number;
   bucketMs: number;
   samples: ReadonlyArray<WorkerSamples>;
+  faultFirings?: Record<string, ReadonlyArray<number>>;
 }
 
 /**
@@ -212,14 +220,21 @@ interface BuildTimelineInput {
 function buildTimeline(input: BuildTimelineInput): TimelineBucket[] {
   if (input.bucketMs <= 0 || input.durationMs <= 0) return [];
   const bucketCount = Math.max(1, Math.ceil(input.durationMs / input.bucketMs));
+  const ruleNames = input.faultFirings ? Object.keys(input.faultFirings) : [];
   const buckets: TimelineBucket[] = [];
   for (let i = 0; i < bucketCount; i++) {
+    // Pre-fill every rule's count to 0 so consumers see a stable
+    // key set per-bucket — `bucket.faults["api-500"] ?? 0` is annoying
+    // to write everywhere if some buckets omit the key.
+    const faults: Record<string, number> = {};
+    for (const name of ruleNames) faults[name] = 0;
     buckets.push({
       tMs: i * input.bucketMs,
       iterations: 0,
       iterationFailures: 0,
       networkRequests: 0,
       networkErrors: 0,
+      faults,
     });
   }
   const indexFor = (timestamp: number): number | null => {
@@ -241,6 +256,15 @@ function buildTimeline(input: BuildTimelineInput): TimelineBucket[] {
       if (idx === null) continue;
       buckets[idx]!.networkRequests += 1;
       if (isNetworkError(n)) buckets[idx]!.networkErrors += 1;
+    }
+  }
+  if (input.faultFirings) {
+    for (const [name, firings] of Object.entries(input.faultFirings)) {
+      for (const t of firings) {
+        const idx = indexFor(t);
+        if (idx === null) continue;
+        buckets[idx]!.faults[name] = (buckets[idx]!.faults[name] ?? 0) + 1;
+      }
     }
   }
   return buckets;
@@ -288,8 +312,14 @@ export function formatLoadReport(report: LoadReport): string {
   if (report.timeline.length > 0) {
     lines.push("");
     lines.push(`Timeline (bucket=${ms(timelineBucketMs(report))}):`);
-    lines.push(`  iterations  ${sparkline(report.timeline.map((b) => b.iterations))}`);
-    lines.push(`  errors      ${sparkline(report.timeline.map((b) => b.iterationFailures + b.networkErrors))}`);
+    lines.push(`  ${"iterations".padEnd(16)}${sparkline(report.timeline.map((b) => b.iterations))}`);
+    lines.push(`  ${"errors".padEnd(16)}${sparkline(report.timeline.map((b) => b.iterationFailures + b.networkErrors))}`);
+    const ruleNames = collectFaultRuleNames(report);
+    for (const rule of ruleNames) {
+      const series = report.timeline.map((b) => b.faults[rule] ?? 0);
+      if (series.every((v) => v === 0)) continue;
+      lines.push(`  ${("fault:" + rule).padEnd(16)}${sparkline(series)}`);
+    }
     const maxIter = Math.max(...report.timeline.map((b) => b.iterations));
     lines.push(`  peak: ${maxIter}/bucket`);
   }
@@ -333,6 +363,14 @@ export function sparkline(values: ReadonlyArray<number>): string {
       return SPARK_CHARS[idx]!;
     })
     .join("");
+}
+
+function collectFaultRuleNames(report: LoadReport): string[] {
+  const seen = new Set<string>();
+  for (const b of report.timeline) {
+    for (const name of Object.keys(b.faults)) seen.add(name);
+  }
+  return [...seen].sort();
 }
 
 function timelineBucketMs(report: LoadReport): number {

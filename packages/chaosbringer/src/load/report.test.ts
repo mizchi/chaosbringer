@@ -169,6 +169,56 @@ describe("buildLoadReport", () => {
     expect(report.timeline.map((b) => b.tMs)).toEqual([0, 500, 1000, 1500]);
   });
 
+  it("folds fault firings into the timeline keyed by rule name", () => {
+    const start = 10_000;
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: start,
+      endTime: start + 5000,
+      durationMs: 5000,
+      plannedDurationMs: 5000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec: { scenario, workers: 1 } }],
+      samples: [{ steps: [], iterations: [], network: [], errors: [] }],
+      faultFirings: {
+        "api-500": [start + 200, start + 700, start + 2500],
+        "delay-2s": [start + 4900],
+      },
+    });
+    expect(report.timeline.length).toBe(5);
+    // Bucket 0 (0-1000ms): two api-500, no delay-2s
+    expect(report.timeline[0]!.faults["api-500"]).toBe(2);
+    expect(report.timeline[0]!.faults["delay-2s"]).toBe(0);
+    // Bucket 2 (2000-3000ms): one api-500
+    expect(report.timeline[2]!.faults["api-500"]).toBe(1);
+    // Bucket 4 (4000-5000ms): one delay-2s, no api-500
+    expect(report.timeline[4]!.faults["api-500"]).toBe(0);
+    expect(report.timeline[4]!.faults["delay-2s"]).toBe(1);
+    // Empty buckets still have both keys (stable shape).
+    expect(report.timeline[1]!.faults).toEqual({ "api-500": 0, "delay-2s": 0 });
+  });
+
+  it("omits unfired fault rules from the ASCII summary", () => {
+    const start = 10_000;
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: start,
+      endTime: start + 5000,
+      durationMs: 5000,
+      plannedDurationMs: 5000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec: { scenario, workers: 1 } }],
+      samples: [{ steps: [], iterations: [], network: [], errors: [] }],
+      faultFirings: {
+        "fired": [start + 100],
+        "never-fired": [],
+      },
+    });
+    const text = formatLoadReport(report);
+    expect(text).toContain("fault:fired");
+    expect(text).not.toContain("fault:never-fired");
+  });
+
   it("disables the timeline when bucketMs <= 0", () => {
     const report = buildLoadReport({
       baseUrl: "https://x",

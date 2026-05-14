@@ -10,6 +10,19 @@ export { defineScenario, pickThinkTimeMs } from "./scenario.js";
 export { buildLoadReport, formatLoadReport, sparkline } from "./report.js";
 export { latencyStats, parseDurationMs, emptyLatencyStats, quantile } from "./histogram.js";
 export { endpointKey, NetworkSampler, type NetworkSample } from "./sampler.js";
+export {
+  assertSlo,
+  evaluateSlo,
+  formatSloViolations,
+  type EndpointSloThresholds,
+  type ScenarioSloThresholds,
+  type SloDefinition,
+  type SloResult,
+  type SloScope,
+  type SloViolation,
+  type StepSloThresholds,
+  type TotalsSloThresholds,
+} from "./slo.js";
 export type {
   DurationInput,
   EndpointReport,

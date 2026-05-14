@@ -14,6 +14,13 @@ interface CompiledRule {
   methods?: string[];
   matched: number;
   injected: number;
+  /**
+   * Wall-clock timestamps (ms) at which this rule actually injected
+   * a fault. Captured so the runner can correlate fault firings with
+   * throughput / error dips in the timeline. Bounded only by `injected`
+   * — at load-run scale (~thousands per rule max) the memory is trivial.
+   */
+  firings: number[];
 }
 
 function toRegExp(matcher: UrlMatcher | undefined): RegExp | null {
@@ -44,6 +51,7 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
       methods: r.methods?.map((m) => m.toUpperCase()),
       matched: 0,
       injected: 0,
+      firings: [],
     });
   }
   return out;
@@ -91,6 +99,7 @@ export async function installFaultRoutes(
       const probability = c.rule.probability ?? 1;
       if (Math.random() >= probability) continue;
       c.injected += 1;
+      c.firings.push(Date.now());
       await applyFault(route, c.rule.fault);
       return;
     }
@@ -106,4 +115,20 @@ export function faultStatsFrom(
     matched: c.matched,
     injected: c.injected,
   }));
+}
+
+/**
+ * Return (ruleName → wall-clock firing timestamps) for every compiled
+ * rule, including rules that never fired (empty array). Used by the
+ * report builder to bucket firings into the timeline.
+ */
+export function faultFiringsFrom(
+  compiled: ReadonlyArray<CompiledRule>,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  compiled.forEach((c, i) => {
+    const name = c.rule.name ?? `fault-${i}`;
+    out[name] = [...c.firings];
+  });
+  return out;
 }
