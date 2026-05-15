@@ -75,25 +75,26 @@ jobs:
           pnpm exec tsx loop.ts --expect-mismatches ${{ env.EXPECTED_MISMATCHES }} 2>&1 | tee loop-output.log
           exit ${PIPESTATUS[0]}
 
-      - name: Diagnose loop failure (PR comment)
-        # `if: failure()` + `pull_request` event: post the captured
-        # output as a PR comment so the failure is debuggable without
-        # workflow-log access. Tail to 200 lines so the comment fits
-        # GitHub's 65k-char limit even on a noisy run. Also dumps the
-        # `summary` section + `diff.json` keys for quick triage.
-        if: failure() && github.event_name == 'pull_request'
+      - name: Diagnose loop failure (step summary + PR comment)
+        # `if: failure()`: runs whenever a previous step failed.
+        # Writes the captured log + report summaries to
+        # `$GITHUB_STEP_SUMMARY` (always works, no token perms needed
+        # — visible on the job's "Summary" tab in the GitHub UI), and
+        # ALSO attempts to post as a PR comment when triggered by
+        # `pull_request`. `continue-on-error: true` so a 403 on the
+        # comment path doesn't bury the step-summary fallback.
+        if: failure()
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
-            const path = require("path");
             const read = (p) => {
               try { return fs.readFileSync(p, "utf8"); } catch { return null; }
             };
             const tail = (s, n) => {
               if (!s) return "(empty)";
-              const lines = s.split("\n");
-              return lines.slice(-n).join("\n");
+              return s.split("\n").slice(-n).join("\n");
             };
             const summary = (jsonStr) => {
               if (!jsonStr) return "(missing)";
@@ -130,12 +131,47 @@ jobs:
               v2,
               "```",
             ].join("\n");
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body,
-            });
+
+            // Step summary always works, even without write tokens.
+            await core.summary.addRaw(body).write();
+
+            // Best-effort PR comment. Will 403 if workflow permissions
+            // are read-only; we already wrote to step summary above so
+            // the data isn't lost.
+            if (context.eventName === "pull_request") {
+              try {
+                await github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body,
+                });
+                core.info("Diagnostic comment posted.");
+              } catch (e) {
+                core.warning(`Could not post PR comment (likely workflow permissions): ${e.message}`);
+              }
+            }
+
+      - name: Commit loop output to PR branch (filesystem fallback)
+        # Final fallback: if PR-comment write is blocked, push the log
+        # as a file on the PR branch. The MCP toolkit driving this
+        # session can read files at a ref via the GitHub contents API,
+        # so a committed file is recoverable even when issue comments
+        # aren't writable. `continue-on-error: true` so a 403 here
+        # doesn't mask the step-summary path either.
+        if: failure() && github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          set +e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p debug-loop
+          cp playground/loop-output.log debug-loop/loop-output.log 2>/dev/null || echo "(no loop-output.log)" > debug-loop/loop-output.log
+          [ -f playground/reports/v1.json ] && cp playground/reports/v1.json debug-loop/v1.json
+          [ -f playground/reports/v2.json ] && cp playground/reports/v2.json debug-loop/v2.json
+          git add debug-loop/
+          git commit -m "debug: loop diagnostics from run ${{ github.run_id }}"
+          git push origin HEAD:${{ github.head_ref }}
 
       - name: Upload loop reports + artifacts
         # `if: always()` so the artifacts are available even when the
