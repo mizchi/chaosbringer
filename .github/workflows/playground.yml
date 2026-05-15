@@ -57,15 +57,82 @@ jobs:
         run: npx playwright install-deps chromium
 
       - name: Run dogfood loop with seeded-baseline assertion
+        id: loop_run
         working-directory: playground
-        run: pnpm exec tsx loop.ts --expect-mismatches ${{ env.EXPECTED_MISMATCHES }}
+        # `tee` to a log so the failure-diagnostics step can surface
+        # the output in $GITHUB_STEP_SUMMARY *and* so the artifact
+        # upload bundles a self-contained log. `PIPESTATUS[0]`
+        # propagates the actual loop.ts exit code (without it `tee`'s
+        # exit-0 would mask failures).
+        run: |
+          set +e
+          pnpm exec tsx loop.ts --expect-mismatches ${{ env.EXPECTED_MISMATCHES }} 2>&1 | tee loop-output.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Diagnose loop failure (step summary, no token perms)
+        # Read-only diagnostics: write the captured log + report
+        # summaries to `$GITHUB_STEP_SUMMARY` (visible on the job's
+        # "Summary" tab in the GitHub UI) — always works, no token
+        # perms needed. The same content is in the uploaded artifact,
+        # downloadable from the same UI even when workflow
+        # permissions are read-only.
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const read = (p) => {
+              try { return fs.readFileSync(p, "utf8"); } catch { return null; }
+            };
+            const tail = (s, n) => {
+              if (!s) return "(empty)";
+              return s.split("\n").slice(-n).join("\n");
+            };
+            const summary = (jsonStr) => {
+              if (!jsonStr) return "(missing)";
+              try {
+                const j = JSON.parse(jsonStr);
+                return JSON.stringify({
+                  config: j.config,
+                  mismatches: j.mismatches?.length,
+                  matches: j.matches?.length,
+                  kinds: j.mismatches?.flatMap((m) => m.kinds ?? []),
+                }, null, 2);
+              } catch (e) {
+                return `(parse error: ${e.message})`;
+              }
+            };
+            const output = read("playground/loop-output.log");
+            const v1 = summary(read("playground/reports/v1.json"));
+            const v2 = summary(read("playground/reports/v2.json"));
+            const body = [
+              "### playground-dogfood `loop` failure diagnostics",
+              "",
+              "**Last 200 lines of loop output:**",
+              "```",
+              tail(output, 200),
+              "```",
+              "",
+              "**reports/v1.json summary:**",
+              "```json",
+              v1,
+              "```",
+              "",
+              "**reports/v2.json summary:**",
+              "```json",
+              v2,
+              "```",
+            ].join("\n");
+            await core.summary.addRaw(body).write();
 
       - name: Upload loop reports + artifacts
         # `if: always()` so the artifacts are available even when the
-        # assertion fails — the reports/ + artifacts/ trees are what
-        # the maintainer (or a follow-up agent) needs to diagnose the
-        # regression. Without this, a CI failure leaves nothing to
-        # debug from.
+        # assertion fails — the reports/ + artifacts/ trees plus the
+        # captured loop-output.log are what the maintainer (or a
+        # follow-up agent) needs to diagnose the regression. Without
+        # this, a CI failure leaves nothing to debug from. This is
+        # the diagnostic path of last resort and needs no token
+        # perms, only repo Actions enabled.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -73,4 +140,5 @@ jobs:
           path: |
             playground/reports/
             playground/artifacts/
+            playground/loop-output.log
           if-no-files-found: ignore

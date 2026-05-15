@@ -133,11 +133,12 @@ async function main(): Promise<void> {
         // a contended runner is the noisiest possible choice. Median
         // of 5 takes the 3rd-fastest sample — trims a cold-start blip
         // on either end. BUG-9's v2-side 120ms sleep is consistent
-        // across samples so its median is still well above the 50ms
-        // threshold, while a one-off jitter spike on an unrelated path
-        // can no longer trip a false positive.
+        // across samples so its median sits at ~120ms above v1, well
+        // above the 100ms threshold below, while a generic CI-load
+        // spike on an unrelated path is now ~2x harder to trip a
+        // false positive than at the previous 50ms threshold.
         "--perf-delta-ms",
-        "50",
+        "100",
         "--perf-samples",
         "5",
         "--perf-percentile",
