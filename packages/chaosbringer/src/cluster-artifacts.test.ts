@@ -218,4 +218,59 @@ describe("writeClusterArtifacts", () => {
     const [result] = writeClusterArtifacts(report, { bundleDir: dir });
     expect(result.representativeBundleFound).toBe(true);
   });
+
+  it("returns an empty result list for a report with no error clusters", () => {
+    const results = writeClusterArtifacts(makeReport(), { bundleDir: dir });
+    expect(results).toEqual([]);
+  });
+
+  it("tolerates a non-existent bundleDir (no representative bundle, errors.json still written)", () => {
+    const sample = err({ type: "console", message: "x", url: "http://app/x" });
+    const report = makeReport({
+      pages: [page({ url: "http://app/x", errors: [sample] })],
+      errorClusters: [cluster({ key: "console|x", fingerprint: "x", sample, urls: ["http://app/x"] })],
+    });
+    const ghostDir = join(dir, "does-not-exist");
+    const outputDir = join(dir, "out");
+    const [result] = writeClusterArtifacts(report, { bundleDir: ghostDir, outputDir });
+    expect(result.representativeBundleFound).toBe(false);
+    expect(result.copiedFiles).toEqual([]);
+    expect(readFileSync(join(result.bundlePath, "errors.json"), "utf-8")).toContain("x");
+  });
+
+  it("picks the earliest sequence-prefixed bundle when multiple bundles exist for one URL", () => {
+    // Two bundles for the same URL (e.g. crawled twice across recovery). The
+    // index should prefer the lexicographically earliest dirname so triagers
+    // see the first failure occurrence.
+    makeBundle("0002__later", { url: "http://app/x" }, { "page.html": "later" });
+    makeBundle("0001__earlier", { url: "http://app/x" }, { "page.html": "earlier" });
+    const sample = err({ type: "console", message: "x", url: "http://app/x" });
+    const report = makeReport({
+      pages: [page({ url: "http://app/x", errors: [sample] })],
+      errorClusters: [cluster({ key: "console|x", fingerprint: "x", sample, urls: ["http://app/x"] })],
+    });
+    const [result] = writeClusterArtifacts(report, { bundleDir: dir });
+    expect(readFileSync(join(result.bundlePath, "page.html"), "utf-8")).toBe("earlier");
+  });
+
+  it("sanitises cluster keys with special characters into safe directory names", () => {
+    // Real fingerprints can contain "/", spaces, quotes, etc. The output
+    // dirname must not contain path separators or shell metacharacters.
+    const sample = err({ type: "console", message: "a/b 'c'", url: "http://app/x" });
+    const report = makeReport({
+      errorClusters: [
+        cluster({
+          key: 'console|a/b "c" foo<bar>',
+          fingerprint: 'a/b "c" foo<bar>',
+          sample,
+        }),
+      ],
+    });
+    const [result] = writeClusterArtifacts(report, { bundleDir: dir });
+    const dirName = result.bundlePath.split("/").pop()!;
+    expect(dirName).not.toMatch(/[\\/"<>'`\s]/);
+    // The original key is preserved in info.json for downstream tools.
+    const info = JSON.parse(readFileSync(join(result.bundlePath, "info.json"), "utf-8"));
+    expect(info.clusterKey).toBe('console|a/b "c" foo<bar>');
+  });
 });

@@ -131,4 +131,72 @@ describe("runParity", () => {
       "http://right/bar",
     ]);
   });
+
+  it("passes redirect: 'manual' by default, 'follow' when followRedirects=true", async () => {
+    const seenInit: Array<RequestInit | undefined> = [];
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seenInit.push(init);
+      return new Response("", { status: 200 });
+    }) as typeof fetch;
+
+    await runParity({
+      left: "http://l",
+      right: "http://r",
+      paths: ["/x"],
+      fetcher,
+    });
+    expect(seenInit[0]?.redirect).toBe("manual");
+
+    seenInit.length = 0;
+    await runParity({
+      left: "http://l",
+      right: "http://r",
+      paths: ["/x"],
+      followRedirects: true,
+      fetcher,
+    });
+    expect(seenInit[0]?.redirect).toBe("follow");
+  });
+
+  it("aborts a slow request after timeoutMs and records the error", async () => {
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      // Honour the abort signal so the timeout actually fires.
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new Error("aborted by timeout"));
+        });
+      });
+    }) as typeof fetch;
+
+    const report = await runParity({
+      left: "http://left",
+      right: "http://right",
+      paths: ["slow"],
+      timeoutMs: 5,
+      fetcher,
+    });
+    // Both sides hit the same timeout, so they "match" per the both-failed rule.
+    expect(report.mismatches).toHaveLength(0);
+    expect(report.matches).toHaveLength(1);
+    expect(report.matches[0].left.error).toBeDefined();
+    expect(report.matches[0].right.error).toBeDefined();
+  });
+
+  it("flags 3xx → 200 status mismatch (not redirect mismatch)", async () => {
+    // Same status family check guards against false-positive redirects:
+    // 301 vs 200 should be reported as a status mismatch, not a redirect mismatch.
+    const fetcher = makeFetcher({
+      "http://left/x": () =>
+        new Response("", { status: 301, headers: { location: "/dest" } }),
+      "http://right/x": () => new Response("", { status: 200 }),
+    });
+    const report = await runParity({
+      left: "http://left",
+      right: "http://right",
+      paths: ["x"],
+      fetcher,
+    });
+    expect(report.mismatches).toHaveLength(1);
+    expect(report.mismatches[0].kind).toBe("status");
+  });
 });
