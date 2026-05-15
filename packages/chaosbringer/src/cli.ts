@@ -38,85 +38,35 @@ import { visualRegression } from "./visual.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
+//
+// Each entry lazy-imports its handler so a `chaosbringer --help` invocation
+// doesn't pay the cost of compiling every subcommand. The handler is
+// expected to set `process.exitCode` on a non-fatal failure; thrown errors
+// are surfaced with the subcommand name and an exit code of 1. Legacy
+// handlers (minimize / flake / shard) call `process.exit` directly inside
+// themselves and never return, so the final `process.exit` here is only
+// reached by the newer handlers that opt into exitCode-based signalling.
+const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void>>> = {
+  minimize: () => import("./minimize.js").then((m) => m.runMinimizeCli),
+  flake: () => import("./flake.js").then((m) => m.runFlakeCli),
+  shard: () => import("./shard.js").then((m) => m.runShardCli),
+  recipes: () => import("./recipes/cli.js").then((m) => m.runRecipesCli),
+  load: () => import("./recipes/load-cli.js").then((m) => m.runLoadCli),
+  diff: () => import("./diff-cli.js").then((m) => m.runDiffCli),
+  "cluster-artifacts": () =>
+    import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
+  parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
+};
+
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
-if (subcommand === "minimize") {
-  const { runMinimizeCli } = await import("./minimize.js");
+if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   try {
-    await runMinimizeCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("minimize failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "flake") {
-  const { runFlakeCli } = await import("./flake.js");
-  try {
-    await runFlakeCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("flake failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "shard") {
-  const { runShardCli } = await import("./shard.js");
-  try {
-    await runShardCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("shard failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "recipes") {
-  const { runRecipesCli } = await import("./recipes/cli.js");
-  try {
-    await runRecipesCli(process.argv.slice(3));
+    const run = await SUBCOMMANDS[subcommand]();
+    await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
-    console.error("recipes failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "load") {
-  const { runLoadCli } = await import("./recipes/load-cli.js");
-  try {
-    await runLoadCli(process.argv.slice(3));
-    process.exit(process.exitCode ?? 0);
-  } catch (err) {
-    console.error("load failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "diff") {
-  const { runDiffCli } = await import("./diff-cli.js");
-  try {
-    await runDiffCli(process.argv.slice(3));
-    process.exit(process.exitCode ?? 0);
-  } catch (err) {
-    console.error("diff failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "cluster-artifacts") {
-  const { runClusterArtifactsCli } = await import("./cluster-artifacts-cli.js");
-  try {
-    await runClusterArtifactsCli(process.argv.slice(3));
-    process.exit(process.exitCode ?? 0);
-  } catch (err) {
-    console.error("cluster-artifacts failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "parity") {
-  const { runParityCli } = await import("./parity-cli.js");
-  try {
-    await runParityCli(process.argv.slice(3));
-    process.exit(process.exitCode ?? 0);
-  } catch (err) {
-    console.error("parity failed:", err instanceof Error ? err.message : err);
+    console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
