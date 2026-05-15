@@ -148,6 +148,69 @@ describe("honoMiddleware", () => {
       expect((err as ServerFaultsAbortError).abortStyle).toBe("reset");
     }
   });
+
+  it("partial verdict with afterBytes > body length delivers the full body", async () => {
+    // Truncation that is larger than the body should be a no-op for the
+    // content but still stamp headers + strip Content-Length so the wire
+    // shape is consistent with shorter truncations.
+    const mw = honoMiddleware({
+      partialResponseRate: 1,
+      partialResponseAfterBytes: 9999,
+      metadataHeader: true,
+    });
+    const body = "short body";
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(body, { status: 200 }),
+    };
+    const next = vi.fn(async () => undefined);
+    await mw(c, next);
+    const final = c.res as Response;
+    expect(await final.text()).toBe(body);
+    expect(final.headers.get("x-chaos-fault-kind")).toBe("partial");
+  });
+
+  it("partial verdict without metadataHeader stamps no fault headers", async () => {
+    const mw = honoMiddleware({ partialResponseRate: 1, partialResponseAfterBytes: 3 });
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response("abcdefg", { status: 200 }),
+    };
+    await mw(c, vi.fn(async () => undefined));
+    const final = c.res as Response;
+    expect(await final.text()).toBe("abc");
+    expect(final.headers.get("x-chaos-fault-kind")).toBeNull();
+  });
+
+  it("slowStream with chunkSize rechunks the body (full content preserved)", async () => {
+    const mw = honoMiddleware({
+      slowStreaming: { rate: 1, chunkDelayMs: 0, chunkSize: 4 },
+    });
+    const body = "abcdefghij";
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(body, { status: 200 }),
+    };
+    await mw(c, vi.fn(async () => undefined));
+    const final = c.res as Response;
+    expect(await final.text()).toBe(body);
+  });
+
+  it("slowStream short-circuits cleanly on null-body responses (204)", async () => {
+    const mw = honoMiddleware({
+      slowStreaming: { rate: 1, chunkDelayMs: 0 },
+      metadataHeader: true,
+    });
+    const c: HonoLikeContext = {
+      req: { raw: new Request("https://test.local/api/x") },
+      res: new Response(null, { status: 204 }),
+    };
+    await mw(c, vi.fn(async () => undefined));
+    const final = c.res as Response;
+    expect(final.status).toBe(204);
+    // Metadata still gets stamped on the null-body short-circuit.
+    expect(final.headers.get("x-chaos-fault-kind")).toBe("slowStream");
+  });
 });
 
 describe("expressMiddleware", () => {

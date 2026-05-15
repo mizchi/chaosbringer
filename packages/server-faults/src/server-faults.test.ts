@@ -518,6 +518,50 @@ describe("serverFaults", () => {
       const b = serverFaults({ statusFlapping: { windowMs: 30_000, badMs: 0 } });
       expect(await b.maybeInject(req("/api/x"))).toBeNull();
     });
+
+    it("respects bypassHeader (no fault even inside the bad window)", async () => {
+      vi.setSystemTime(0);
+      const fault = serverFaults({
+        statusFlapping: { windowMs: 30_000, badMs: 5_000 },
+        bypassHeader: "x-chaos-bypass",
+      });
+      const r = new Request("https://test.local/api/x", {
+        headers: { "x-chaos-bypass": "1" },
+      });
+      expect(await fault.maybeInject(r)).toBeNull();
+    });
+
+    it("respects exemptPathPattern (no fault on exempt paths)", async () => {
+      vi.setSystemTime(0);
+      const fault = serverFaults({
+        statusFlapping: { windowMs: 30_000, badMs: 5_000 },
+        exemptPathPattern: /^\/health/,
+      });
+      expect(await fault.maybeInject(req("/health"))).toBeNull();
+      expect((await fault.maybeInject(req("/api/x")))?.kind).toBe("synthetic");
+    });
+
+    it("respects pathPattern (non-matching paths fall through)", async () => {
+      vi.setSystemTime(0);
+      const fault = serverFaults({
+        statusFlapping: { windowMs: 30_000, badMs: 5_000 },
+        pathPattern: /^\/api\//,
+      });
+      expect(await fault.maybeInject(req("/static/x"))).toBeNull();
+      expect((await fault.maybeInject(req("/api/x")))?.kind).toBe("synthetic");
+    });
+
+    it("handles negative wall-clock values gracefully (e.g. Date.now() < phaseOffsetMs)", async () => {
+      // (Date.now() - phaseOffsetMs) can go negative; without the JS modulo
+      // correction the result would be a negative phase that always reads
+      // as < badMs. Verify the gate behaves sanely when offset > now.
+      vi.setSystemTime(100);
+      const fault = serverFaults({
+        statusFlapping: { windowMs: 30_000, badMs: 5_000, phaseOffsetMs: 10_000 },
+      });
+      // phase = ((100 - 10_000) mod 30_000 + 30_000) mod 30_000 = 20_100 → healthy
+      expect(await fault.maybeInject(req("/api/x"))).toBeNull();
+    });
   });
 
   describe("slowStreaming", () => {
