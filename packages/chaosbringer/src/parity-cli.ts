@@ -42,10 +42,17 @@ Examples:
 
 function readPaths(file: string): string[] {
   const text = readFileSync(file, "utf-8");
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  return (
+    text
+      .split(/\r?\n/)
+      // Strip inline `#` comments first — the unescaped `#` would later be
+      // parsed as a URL fragment, silently dropping everything after it and
+      // letting accidentally-correct results mask the parse failure. Doing
+      // this before the empty-line filter keeps comment-only lines from
+      // surviving as a stray empty path.
+      .map((line) => line.replace(/(^|\s)#.*$/, "").trim())
+      .filter((line) => line.length > 0)
+  );
 }
 
 export async function runParityCli(argv: string[]): Promise<void> {

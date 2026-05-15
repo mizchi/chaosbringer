@@ -1,0 +1,13 @@
+# Paths fed to `chaosbringer parity`. The right-hand-side comments
+# document the seeded divergence (or its absence). Re-run after a fix
+# to confirm the bug class is resolved.
+/
+/users
+/users/1            # both 200
+/users/10           # both 200
+/users/11           # v1 404, v2 500 (BUG-1)
+/api/users
+/api/users/1
+/api/users/2        # v2 missing email (BUG-2)
+/admin
+/health             # exempt from chaos

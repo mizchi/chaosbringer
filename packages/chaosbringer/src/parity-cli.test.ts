@@ -109,6 +109,23 @@ describe("runParityCli", () => {
     expect(logged()).toContain("Checked 1 path(s)");
   });
 
+  it("strips inline `#` comments so they don't leak into the request URL", async () => {
+    // Without this guard the path "/foo  # comment" would be passed to
+    // `new URL(...)` and `#` would be parsed as a fragment marker —
+    // the server would receive "/foo  " with trailing whitespace and
+    // never see the comment, masking the parse failure with an
+    // accidentally-correct route match.
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const u = typeof input === "string" ? input : input.toString();
+      seen.push(u);
+      return new Response("", { status: 200 });
+    }) as typeof fetch;
+    const pathsFile = writePaths("paths.txt", ["/foo  # this is an annotation"]);
+    await runParityCli(["--left", "http://l", "--right", "http://r", "--paths", pathsFile]);
+    expect(seen).toEqual(["http://l/foo", "http://r/foo"]);
+  });
+
   it("exits 1 with a helpful error when required flags are missing", async () => {
     await runParityCli(["--left", "http://l"]);
     expect(process.exitCode).toBe(1);
