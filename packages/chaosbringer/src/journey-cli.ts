@@ -6,6 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { summariseBodyDiff } from "./body-diff.js";
 import { runJourney, type JourneyStep } from "./journey.js";
 
 const HELP = `Usage: chaosbringer journey --left <url> --right <url> --steps <file> [options]
@@ -143,9 +144,9 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
       }
       console.log(`${prefix}  HEADER ${diffs.join(" | ")}`);
     } else if (m.kind === "body") {
-      console.log(
-        `${prefix}  BODY   left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`,
-      );
+      const summary = summariseBodyDiff(m.bodyDiff);
+      const head = `${prefix}  BODY   left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
+      console.log(summary ? `${head}\n         ${summary}` : head);
     } else {
       const leftMsg = m.left.error ?? `status ${m.left.status}`;
       const rightMsg = m.right.error ?? `status ${m.right.status}`;

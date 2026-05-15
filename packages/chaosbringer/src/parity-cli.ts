@@ -6,6 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { summariseBodyDiff } from "./body-diff.js";
 import { runParity } from "./parity.js";
 
 const HELP = `Usage: chaosbringer parity --left <url> --right <url> --paths <file> [options]
@@ -135,9 +136,9 @@ export async function runParityCli(argv: string[]): Promise<void> {
     } else if (m.kind === "redirect") {
       console.log(`  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`);
     } else if (m.kind === "body") {
-      console.log(
-        `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`,
-      );
+      const summary = summariseBodyDiff(m.bodyDiff);
+      const head = `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
+      console.log(summary ? `${head}\n         ${summary}` : head);
     } else if (m.kind === "header") {
       // Find the first differing header so the printed line is
       // immediately actionable; the JSON report carries the full map.

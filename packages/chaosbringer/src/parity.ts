@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { diffJsonBodies, type BodyDiffResult } from "./body-diff.js";
 
 export type MismatchKind =
   /** HTTP status codes differ. */
@@ -95,6 +96,12 @@ export interface ParityMismatch extends ParityProbe {
    *  "failure" and "status" depending on the consumer's view; we record
    *  the strongest one). */
   kind: MismatchKind;
+  /**
+   * Localised body diff. Populated only on `kind: "body"` when both
+   * sides' bodies parsed as JSON. Carries up to ~50 path-level
+   * entries; a truncated flag fires when the diff overflows.
+   */
+  bodyDiff?: BodyDiffResult;
 }
 
 export interface ParityReport {
@@ -251,6 +258,17 @@ async function probeBrowserSide(
   return { pageErrors, consoleErrors };
 }
 
+interface ProbedSide {
+  result: SideResult;
+  /**
+   * Raw decoded body text. Kept transient (not on SideResult) so the
+   * JSON report doesn't balloon with full bodies; only the body-diff
+   * (computed from this) gets serialised. `null` when the body wasn't
+   * read (checkBody off).
+   */
+  bodyText: string | null;
+}
+
 async function probeSide(
   base: string,
   path: string,
@@ -261,7 +279,7 @@ async function probeSide(
     checkBody: boolean;
     checkHeaders: string[];
   },
-): Promise<SideResult> {
+): Promise<ProbedSide> {
   const url = joinBase(base, path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
@@ -281,6 +299,7 @@ async function probeSide(
       }
       result.headers = out;
     }
+    let bodyText: string | null = null;
     if (opts.checkBody) {
       // Reading the body is part of the same timeout window — a slow
       // body trickle counts against the per-request budget so one
@@ -290,12 +309,16 @@ async function probeSide(
       const bytes = new Uint8Array(await resp.arrayBuffer());
       result.bodyLength = bytes.byteLength;
       result.bodyHash = createHash("sha256").update(bytes).digest("hex");
+      bodyText = new TextDecoder().decode(bytes);
     }
-    return result;
+    return { result, bodyText };
   } catch (err) {
     return {
-      status: null,
-      error: err instanceof Error ? err.message : String(err),
+      result: {
+        status: null,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      bodyText: null,
     };
   } finally {
     clearTimeout(timer);
@@ -400,10 +423,12 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
       // Probe both sides in parallel — they're independent and the report
       // is symmetric, so there's no reason to serialise.
       const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders };
-      const [left, right] = await Promise.all([
+      const [leftProbe, rightProbe] = await Promise.all([
         probeSide(opts.left, path, sideOpts),
         probeSide(opts.right, path, sideOpts),
       ]);
+      const left = leftProbe.result;
+      const right = rightProbe.result;
 
       if (browser) {
         // Browser visits are slower (~1s+ per page) and must use real
@@ -421,8 +446,17 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
 
       const probe: ParityProbe = { path, left, right };
       const kind = classify(left, right);
-      if (kind) mismatches.push({ ...probe, kind });
-      else matches.push(probe);
+      if (kind) {
+        const m: ParityMismatch = { ...probe, kind };
+        // Localise body drift to specific JSON paths when we have the
+        // bytes. Skipped for other kinds — a status mismatch's body
+        // delta is downstream noise the diff would just amplify.
+        if (kind === "body") {
+          const diff = diffJsonBodies(leftProbe.bodyText, rightProbe.bodyText);
+          if (diff) m.bodyDiff = diff;
+        }
+        mismatches.push(m);
+      } else matches.push(probe);
     }
   } finally {
     // Always tear down — leaking a Chromium across CI runs is a

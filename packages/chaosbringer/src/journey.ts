@@ -22,6 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { diffJsonBodies, type BodyDiffResult } from "./body-diff.js";
 import type {
   MismatchKind,
   ParityReport,
@@ -91,6 +92,8 @@ export interface JourneyStepResult {
 
 export interface JourneyMismatch extends JourneyStepResult {
   kind: MismatchKind;
+  /** Localised JSON body diff, populated only on kind=body (see parity.ts). */
+  bodyDiff?: BodyDiffResult;
 }
 
 export interface JourneyReport {
@@ -272,6 +275,11 @@ function readSetCookie(headers: Headers): string[] | null {
   return joined ? [joined] : null;
 }
 
+interface ProbedStep {
+  result: SideResult;
+  bodyText: string | null;
+}
+
 async function runStepOnSide(
   base: string,
   step: JourneyStep,
@@ -281,7 +289,7 @@ async function runStepOnSide(
     checkHeaders: string[];
     fetcher: typeof fetch;
   },
-): Promise<SideResult> {
+): Promise<ProbedStep> {
   // All three of path / headers / body can carry `{{var}}` references
   // captured by earlier steps. Substitution happens BEFORE the request
   // goes out so the server sees the resolved value; the SideResult
@@ -343,11 +351,14 @@ async function runStepOnSide(
       }
     }
     applyCaptures(step.capture, bodyText, resp.headers, vars);
-    return result;
+    return { result, bodyText };
   } catch (err) {
     return {
-      status: null,
-      error: err instanceof Error ? err.message : String(err),
+      result: {
+        status: null,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      bodyText: null,
     };
   } finally {
     clearTimeout(timer);
@@ -414,10 +425,12 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
     const sideOpts = { timeoutMs, checkBody, checkHeaders, fetcher };
     // Per-step parallel: each side advances independently. State
     // accumulates in its own jar.
-    const [left, right] = await Promise.all([
+    const [leftProbe, rightProbe] = await Promise.all([
       runStepOnSide(opts.left, step, leftJar, leftVars, sideOpts),
       runStepOnSide(opts.right, step, rightJar, rightVars, sideOpts),
     ]);
+    const left = leftProbe.result;
+    const right = rightProbe.result;
     const label = step.label ?? `${step.method.toUpperCase()} ${step.path}`;
     const result: JourneyStepResult = {
       index: i,
@@ -429,7 +442,12 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
     stepsChecked++;
     const kind = classifyStep(left, right);
     if (kind) {
-      mismatches.push({ ...result, kind });
+      const mismatch: JourneyMismatch = { ...result, kind };
+      if (kind === "body") {
+        const diff = diffJsonBodies(leftProbe.bodyText, rightProbe.bodyText);
+        if (diff) mismatch.bodyDiff = diff;
+      }
+      mismatches.push(mismatch);
       if (stopOnMismatch) break;
     } else {
       matches.push(result);
