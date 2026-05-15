@@ -1,0 +1,13 @@
+{
+  "_comment": "Demonstrates BUG-8: per-side capture/templating. Step 0 (POST) returns 201 + id; identical on both sides. Step 1 (GET /api/todos/{{todoId}}) resolves each side's own captured id, and v2 returns the title UPPERCASED. Single-shot parity could never hit /api/todos/<id> because <id> is server-assigned.",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/api/todos",
+      "body": { "title": "buy milk" },
+      "capture": [{ "from": "body.id", "as": "todoId" }],
+      "label": "create"
+    },
+    { "method": "GET", "path": "/api/todos/{{todoId}}", "label": "read-by-id" }
+  ]
+}

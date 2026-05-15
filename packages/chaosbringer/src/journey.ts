@@ -29,18 +29,53 @@ import type {
   SideResult,
 } from "./parity.js";
 
+export interface CaptureSpec {
+  /**
+   * Source to extract from. Two prefixes are supported:
+   * - `body.<dot.path>` — parse the response as JSON and walk the path
+   *   (e.g. `body.id`, `body.user.id`, `body.items.0.id`).
+   * - `header.<name>` — case-insensitive response header (e.g.
+   *   `header.x-request-id`).
+   *
+   * Extraction failures (non-JSON body, missing path) leave the var
+   * unset on that side, so a subsequent `{{var}}` template renders as
+   * the literal `{{var}}` — visible noise in the URL that the parity
+   * comparison then flags as a status mismatch. The journey doesn't
+   * silently swallow extraction failures.
+   */
+  from: string;
+  /** Variable name to bind. Substituted as `{{as}}` in later steps. */
+  as: string;
+}
+
 export interface JourneyStep {
   /** HTTP method. Case-insensitive; uppercased internally. */
   method: string;
-  /** Pathname (joined with the base URL). */
+  /**
+   * Pathname (joined with the base URL). May contain `{{var}}`
+   * placeholders that reference variables captured by earlier steps.
+   */
   path: string;
   /**
    * Request body. Strings sent verbatim; objects JSON-stringified with
-   * `application/json` content-type unless `headers` overrides.
+   * `application/json` content-type unless `headers` overrides. Both
+   * forms may contain `{{var}}` placeholders.
    */
   body?: string | Record<string, unknown>;
-  /** Extra request headers (case-insensitive merged with content-type). */
+  /**
+   * Extra request headers (case-insensitive merged with content-type).
+   * Header values may contain `{{var}}` (useful for Authorization
+   * tokens captured from a login step).
+   */
   headers?: Record<string, string>;
+  /**
+   * Variables to capture from this step's response. Each is bound on
+   * the side it ran on, so a token captured from left's login is only
+   * visible to subsequent left steps. Asymmetric values across sides
+   * (e.g. server-generated IDs that differ) are exactly the point —
+   * the comparison runs on the substituted result.
+   */
+  capture?: CaptureSpec[];
   /** Optional label for reporting — defaults to `<METHOD> <path>`. */
   label?: string;
 }
@@ -133,6 +168,95 @@ function joinBase(base: string, path: string): string {
 }
 
 /**
+ * Substitute `{{name}}` placeholders against a variable bag. Missing
+ * vars are intentionally left as literal `{{name}}` text so the parity
+ * comparison sees the failure (the request goes out with garbled
+ * URLs / bodies) rather than silently inserting `undefined`.
+ */
+function subst(input: string, vars: Record<string, string>): string {
+  return input.replace(/\{\{([^}]+)\}\}/g, (match, key) => {
+    const k = (key as string).trim();
+    return Object.hasOwn(vars, k) ? vars[k] : match;
+  });
+}
+
+/**
+ * Apply `subst` recursively through a JSON-shaped body. Leaves
+ * non-string leaves (numbers, booleans, nulls) untouched.
+ */
+function substBody(body: unknown, vars: Record<string, string>): unknown {
+  if (typeof body === "string") return subst(body, vars);
+  if (Array.isArray(body)) return body.map((v) => substBody(v, vars));
+  if (body !== null && typeof body === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(body)) out[k] = substBody(v, vars);
+    return out;
+  }
+  return body;
+}
+
+/**
+ * Walk a dotted path into a JSON value. Numeric segments index into
+ * arrays (`body.items.0.id`). Returns `undefined` when any segment
+ * misses — the capture is then skipped, leaving the var unset.
+ */
+function dotGet(value: unknown, path: string): unknown {
+  if (path.length === 0) return value;
+  let curr: unknown = value;
+  for (const seg of path.split(".")) {
+    if (curr === null || curr === undefined) return undefined;
+    if (Array.isArray(curr)) {
+      const idx = Number.parseInt(seg, 10);
+      if (!Number.isFinite(idx)) return undefined;
+      curr = curr[idx];
+    } else if (typeof curr === "object") {
+      curr = (curr as Record<string, unknown>)[seg];
+    } else {
+      return undefined;
+    }
+  }
+  return curr;
+}
+
+/**
+ * Apply capture specs against a response's body (parsed JSON) and
+ * headers, mutating `vars` on the side that just ran. Failures
+ * (non-JSON body, missing path) skip silently so a downstream
+ * substitution leaves `{{var}}` literal — the journey doesn't
+ * pretend a missing capture is an empty string.
+ */
+function applyCaptures(
+  captures: CaptureSpec[] | undefined,
+  bodyText: string | null,
+  headers: Headers,
+  vars: Record<string, string>,
+): void {
+  if (!captures || captures.length === 0) return;
+  let parsed: unknown = null;
+  let parsedReady = false;
+  for (const cap of captures) {
+    let value: unknown;
+    if (cap.from.startsWith("body.") || cap.from === "body") {
+      if (!parsedReady) {
+        try {
+          parsed = bodyText !== null && bodyText.length > 0 ? JSON.parse(bodyText) : null;
+        } catch {
+          parsed = null;
+        }
+        parsedReady = true;
+      }
+      const sub = cap.from === "body" ? "" : cap.from.slice("body.".length);
+      value = dotGet(parsed, sub);
+    } else if (cap.from.startsWith("header.")) {
+      value = headers.get(cap.from.slice("header.".length));
+    }
+    if (value !== undefined && value !== null) {
+      vars[cap.as] = String(value);
+    }
+  }
+}
+
+/**
  * Read the raw Set-Cookie values from a Response. `Headers.get("set-cookie")`
  * collapses repeats with `, ` which loses the per-cookie boundary. Where
  * available, `Headers.getSetCookie()` (Node 19+, undici 5.x+) preserves them.
@@ -152,22 +276,31 @@ async function runStepOnSide(
   base: string,
   step: JourneyStep,
   jar: CookieJar,
+  vars: Record<string, string>,
   opts: Required<Pick<RunJourneyOptions, "timeoutMs" | "checkBody">> & {
     checkHeaders: string[];
     fetcher: typeof fetch;
   },
 ): Promise<SideResult> {
-  const url = joinBase(base, step.path);
+  // All three of path / headers / body can carry `{{var}}` references
+  // captured by earlier steps. Substitution happens BEFORE the request
+  // goes out so the server sees the resolved value; the SideResult
+  // captures the actual response (whose body still feeds the NEXT
+  // step's captures).
+  const resolvedPath = subst(step.path, vars);
+  const url = joinBase(base, resolvedPath);
   const method = step.method.toUpperCase();
 
   const headers = new Headers();
-  for (const [k, v] of Object.entries(step.headers ?? {})) headers.set(k, v);
+  for (const [k, v] of Object.entries(step.headers ?? {})) {
+    headers.set(k, subst(v, vars));
+  }
   let body: BodyInit | undefined;
   if (step.body !== undefined) {
     if (typeof step.body === "string") {
-      body = step.body;
+      body = subst(step.body, vars);
     } else {
-      body = JSON.stringify(step.body);
+      body = JSON.stringify(substBody(step.body, vars));
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
     }
   }
@@ -197,11 +330,19 @@ async function runStepOnSide(
       for (const name of opts.checkHeaders) out[name] = resp.headers.get(name);
       result.headers = out;
     }
-    if (opts.checkBody) {
+    // We read the body when ANY of capture / checkBody asked for it.
+    // Reading once + reusing both lets us avoid two body reads.
+    const needsBody = opts.checkBody || (step.capture && step.capture.length > 0);
+    let bodyText: string | null = null;
+    if (needsBody) {
       const bytes = new Uint8Array(await resp.arrayBuffer());
-      result.bodyLength = bytes.byteLength;
-      result.bodyHash = createHash("sha256").update(bytes).digest("hex");
+      bodyText = new TextDecoder().decode(bytes);
+      if (opts.checkBody) {
+        result.bodyLength = bytes.byteLength;
+        result.bodyHash = createHash("sha256").update(bytes).digest("hex");
+      }
     }
+    applyCaptures(step.capture, bodyText, resp.headers, vars);
     return result;
   } catch (err) {
     return {
@@ -257,6 +398,12 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
 
   const leftJar = makeJar();
   const rightJar = makeJar();
+  // Variable bags are per-side: a value captured from left's response
+  // is only visible to subsequent left steps. Asymmetric IDs / tokens
+  // (which is the common case) Just Work — each side resolves its
+  // template against its own bag.
+  const leftVars: Record<string, string> = {};
+  const rightVars: Record<string, string> = {};
 
   const mismatches: JourneyMismatch[] = [];
   const matches: JourneyStepResult[] = [];
@@ -268,8 +415,8 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
     // Per-step parallel: each side advances independently. State
     // accumulates in its own jar.
     const [left, right] = await Promise.all([
-      runStepOnSide(opts.left, step, leftJar, sideOpts),
-      runStepOnSide(opts.right, step, rightJar, sideOpts),
+      runStepOnSide(opts.left, step, leftJar, leftVars, sideOpts),
+      runStepOnSide(opts.right, step, rightJar, rightVars, sideOpts),
     ]);
     const label = step.label ?? `${step.method.toUpperCase()} ${step.path}`;
     const result: JourneyStepResult = {

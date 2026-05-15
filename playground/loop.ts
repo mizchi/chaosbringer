@@ -101,19 +101,21 @@ async function main(): Promise<void> {
     }
 
     if (mode === "all" || mode === "parity" || mode === "journey") {
-      console.log("\n=== journey: write-then-read ===");
-      const code = await runCli([
-        "journey",
-        "--left",
-        `http://127.0.0.1:${PORT_V1}`,
-        "--right",
-        `http://127.0.0.1:${PORT_V2}`,
-        "--steps",
-        "journey-todos.json",
-        "--output",
-        `${REPORTS}/journey-todos.json`,
-      ]);
-      if (code !== 0) exitCode = 1;
+      for (const file of ["journey-todos.json", "journey-by-id.json"]) {
+        console.log(`\n=== journey: ${file} ===`);
+        const code = await runCli([
+          "journey",
+          "--left",
+          `http://127.0.0.1:${PORT_V1}`,
+          "--right",
+          `http://127.0.0.1:${PORT_V2}`,
+          "--steps",
+          file,
+          "--output",
+          `${REPORTS}/${file}`,
+        ]);
+        if (code !== 0) exitCode = 1;
+      }
     }
 
     if (mode === "all" || mode === "chaos") {

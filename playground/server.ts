@@ -75,6 +75,13 @@ export const BUG_LEDGER = [
       "v2's POST returns 201 with an identical-shaped JSON response, but silently no-ops the write. A subsequent GET shows an empty list on v2 / one item on v1. Single-shot probes (parity --check-body on either path alone) can't see it.",
     catcher: "chaosbringer journey",
   },
+  {
+    id: "BUG-8",
+    where: "POST /api/todos → GET /api/todos/<id>",
+    symptom:
+      "Both variants return matching 201 + id on POST. v1's GET by id returns the original title; v2's GET by id returns the title uppercased. Needs capture+template — single-shot parity can't hit the right id without knowing it in advance.",
+    catcher: "chaosbringer journey (with capture: body.id → {{todoId}})",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -217,7 +224,12 @@ let nextTodoId = 1;
 app.post("/api/todos", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { title?: string };
   const created: Todo = { id: nextTodoId++, title: body.title ?? "untitled" };
-  if (VARIANT !== "v2") TODOS.push(created);
+  // BUG-7 is gated on the title to avoid colliding with BUG-8 (which
+  // needs the write to actually persist so the GET-by-id can find it).
+  // Real-world equivalent: a tenant-specific flag that drops certain
+  // record classes silently.
+  const dropOnV2 = (body.title ?? "").startsWith("drop:");
+  if (!(VARIANT === "v2" && dropOnV2)) TODOS.push(created);
   c.header("cache-control", apiCache());
   return c.json(created, 201);
 });
@@ -225,6 +237,19 @@ app.post("/api/todos", async (c) => {
 app.get("/api/todos", (c) => {
   c.header("cache-control", apiCache());
   return c.json(TODOS);
+});
+
+// BUG-8: GET by id returns a mutated title on v2. The POST is identical
+// across variants and BUG-7 doesn't fire on v1 (which persists), so a
+// journey that captures the id and reads it back is the only way to
+// see this.
+app.get("/api/todos/:id", (c) => {
+  const id = Number.parseInt(c.req.param("id"), 10);
+  const todo = TODOS.find((t) => t.id === id);
+  c.header("cache-control", apiCache());
+  if (!todo) return c.notFound();
+  if (VARIANT === "v2") return c.json({ ...todo, title: todo.title.toUpperCase() });
+  return c.json(todo);
 });
 
 app.get("/api/users/:id", (c) => {

@@ -1,7 +1,7 @@
 {
-  "_comment": "Demonstrates BUG-7: silent write drop on v2. Step 0 (POST) matches on both sides — both return 201 with the created todo. Step 1 (GET) diverges because v2 didn't actually persist. Single-shot parity on either path alone would miss this; only the stateful sequence reveals it.",
+  "_comment": "Demonstrates BUG-7: silent write drop on v2 when the title is prefixed with 'drop:'. Step 0 (POST) returns 201 on both sides; Step 1 (GET list) diverges because v2 didn't persist. Single-shot parity on either path alone would miss this.",
   "steps": [
-    { "method": "POST", "path": "/api/todos", "body": { "title": "buy milk" }, "label": "create-todo" },
+    { "method": "POST", "path": "/api/todos", "body": { "title": "drop: groceries" }, "label": "create-todo" },
     { "method": "GET", "path": "/api/todos", "label": "list-after-create" }
   ]
 }

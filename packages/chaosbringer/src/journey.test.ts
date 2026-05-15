@@ -236,4 +236,264 @@ describe("runJourney", () => {
     expect(report.mismatches).toHaveLength(0);
     expect(report.matches[0].left.bodyHash).toBeUndefined();
   });
+
+  describe("capture + template substitution", () => {
+    /**
+     * Stateful synthetic server with create-then-read-by-id flow.
+     * Both sides assign IDs independently, so the per-side var bag
+     * has to resolve the right template.
+     */
+    function makeIdServer(opts: { wrongTitleOnGet?: boolean } = {}) {
+      const todos: Record<number, { id: number; title: string }> = {};
+      let nextId = 1;
+      return (url: string, init: RequestInit | undefined): Response => {
+        const u = new URL(url);
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (u.pathname === "/api/todos" && method === "POST") {
+          const body = JSON.parse(init?.body as string);
+          const id = nextId++;
+          todos[id] = { id, ...body };
+          return new Response(JSON.stringify(todos[id]), { status: 201 });
+        }
+        const matchId = u.pathname.match(/^\/api\/todos\/(\d+)$/);
+        if (matchId && method === "GET") {
+          const id = Number.parseInt(matchId[1], 10);
+          const todo = todos[id];
+          if (!todo) return new Response("not found", { status: 404 });
+          if (opts.wrongTitleOnGet) {
+            return new Response(JSON.stringify({ ...todo, title: "WRONG" }), { status: 200 });
+          }
+          return new Response(JSON.stringify(todo), { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      };
+    }
+
+    function fetcherForHandlers(handlers: Record<string, ReturnType<typeof makeIdServer>>): typeof fetch {
+      return (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const base = `${new URL(url).protocol}//${new URL(url).host}`;
+        const handler = handlers[base];
+        if (!handler) throw new Error(`unexpected host: ${base}`);
+        return handler(url, init);
+      }) as typeof fetch;
+    }
+
+    it("captures body.<dotpath> from step N and substitutes in step N+1's path", async () => {
+      const leftHandler = makeIdServer();
+      const rightHandler = makeIdServer();
+      const steps: JourneyStep[] = [
+        {
+          method: "POST",
+          path: "/api/todos",
+          body: { title: "x" },
+          capture: [{ from: "body.id", as: "todoId" }],
+          label: "create",
+        },
+        { method: "GET", path: "/api/todos/{{todoId}}", label: "read-by-id" },
+      ];
+      const report = await runJourney({
+        left: "http://left",
+        right: "http://right",
+        steps,
+        fetcher: fetcherForHandlers({ "http://left": leftHandler, "http://right": rightHandler }),
+      });
+      expect(report.mismatches).toHaveLength(0);
+      expect(report.matches[1].request.path).toBe("/api/todos/{{todoId}}");
+      // Both sides resolved {{todoId}} → 1 and got 200 with matching body.
+      expect(report.matches[1].left.status).toBe(200);
+    });
+
+    it("flags the read step when v2 returns a wrong title on the captured id", async () => {
+      // Per-side captures both yield id=1, but v2's read by id returns
+      // a mutated title. The body hash diverges on step 1.
+      const steps: JourneyStep[] = [
+        {
+          method: "POST",
+          path: "/api/todos",
+          body: { title: "buy milk" },
+          capture: [{ from: "body.id", as: "todoId" }],
+        },
+        { method: "GET", path: "/api/todos/{{todoId}}" },
+      ];
+      const report = await runJourney({
+        left: "http://left",
+        right: "http://right",
+        steps,
+        fetcher: fetcherForHandlers({
+          "http://left": makeIdServer(),
+          "http://right": makeIdServer({ wrongTitleOnGet: true }),
+        }),
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kind).toBe("body");
+      expect(report.mismatches[0].index).toBe(1);
+    });
+
+    it("template substitution works in headers (bearer-token flow)", async () => {
+      // capture Authorization-bound token from a login response;
+      // substitute it into the next step's Authorization header.
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/login")) {
+          return new Response(JSON.stringify({ token: "abc123" }), { status: 200 });
+        }
+        const auth = (init?.headers as Headers).get("authorization") ?? "";
+        seen.push(auth);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      const steps: JourneyStep[] = [
+        {
+          method: "POST",
+          path: "/login",
+          body: {},
+          capture: [{ from: "body.token", as: "tok" }],
+        },
+        {
+          method: "GET",
+          path: "/profile",
+          headers: { authorization: "Bearer {{tok}}" },
+        },
+      ];
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps,
+        fetcher,
+      });
+      // Both sides sent the substituted header verbatim.
+      expect(seen).toContain("Bearer abc123");
+      expect(seen.filter((s) => s === "Bearer abc123")).toHaveLength(2);
+    });
+
+    it("template substitution works inside JSON object bodies", async () => {
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/seed")) {
+          return new Response(JSON.stringify({ ref: "ref-7" }), { status: 200 });
+        }
+        seen.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      const steps: JourneyStep[] = [
+        {
+          method: "POST",
+          path: "/seed",
+          body: {},
+          capture: [{ from: "body.ref", as: "ref" }],
+        },
+        {
+          method: "POST",
+          path: "/use",
+          body: { parent: "{{ref}}", nested: { also: "{{ref}}" } },
+        },
+      ];
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps,
+        fetcher,
+      });
+      const parsed = JSON.parse(seen[0]);
+      expect(parsed.parent).toBe("ref-7");
+      expect(parsed.nested.also).toBe("ref-7");
+    });
+
+    it("captures from response headers (header.<name>)", async () => {
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/start")) {
+          return new Response("", {
+            status: 200,
+            headers: { "x-trace-id": "trace-42" },
+          });
+        }
+        const traceHeader = (init?.headers as Headers).get("x-trace") ?? "";
+        seen.push(traceHeader);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "GET",
+            path: "/start",
+            capture: [{ from: "header.x-trace-id", as: "trace" }],
+          },
+          { method: "GET", path: "/follow", headers: { "x-trace": "{{trace}}" } },
+        ],
+        fetcher,
+      });
+      expect(seen).toContain("trace-42");
+    });
+
+    it("a failed capture leaves the var unset; downstream {{var}} renders as literal", async () => {
+      // The journey doesn't lie about missing data. A path containing
+      // an unresolved {{var}} goes out garbled and the server's response
+      // (or lack thereof) shows up in the SideResult.
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        seen.push(url);
+        if (url.endsWith("/seed")) {
+          return new Response("not-json", { status: 200 });
+        }
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "GET",
+            path: "/seed",
+            // Body isn't JSON → parse fails → capture skipped.
+            capture: [{ from: "body.id", as: "todoId" }],
+          },
+          { method: "GET", path: "/items/{{todoId}}" },
+        ],
+        fetcher,
+      });
+      expect(seen).toContain("http://l/items/%7B%7BtodoId%7D%7D");
+    });
+
+    it("per-side vars stay isolated — left's capture does not leak to right", async () => {
+      // Each side captures id=1 from its own POST. If they shared a
+      // var bag, a race would let one side see the other's id.
+      const calls: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const host = new URL(url).host;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url.endsWith("/api/todos") && method === "POST") {
+          // Left assigns id=100, right assigns id=200.
+          const id = host === "l" ? 100 : 200;
+          return new Response(JSON.stringify({ id }), { status: 201 });
+        }
+        calls.push(url);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "POST",
+            path: "/api/todos",
+            body: { title: "x" },
+            capture: [{ from: "body.id", as: "todoId" }],
+          },
+          { method: "GET", path: "/api/todos/{{todoId}}" },
+        ],
+        fetcher,
+      });
+      // Each side resolved its OWN id, not the other's.
+      expect(calls).toContain("http://l/api/todos/100");
+      expect(calls).toContain("http://r/api/todos/200");
+    });
+  });
 });
