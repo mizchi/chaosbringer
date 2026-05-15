@@ -90,6 +90,9 @@ async function main(): Promise<void> {
         "paths.txt",
         "--output",
         `${REPORTS}/parity.json`,
+        // Opt into body comparison so JSON-shape drift surfaces as a
+        // first-class mismatch alongside status/redirect/failure.
+        "--check-body",
       ]);
       if (code !== 0) exitCode = 1;
     }

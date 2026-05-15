@@ -182,6 +182,83 @@ describe("runParity", () => {
     expect(report.matches[0].right.error).toBeDefined();
   });
 
+  describe("checkBody", () => {
+    it("flags a body mismatch when status agrees but bytes differ", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response(JSON.stringify({ id: 1, email: "a@x" }), { status: 200 }),
+        "http://right/api": () =>
+          new Response(JSON.stringify({ id: 1 }), { status: 200 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkBody: true,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      const m = report.mismatches[0];
+      expect(m.kind).toBe("body");
+      // bodyLength + bodyHash populated on both sides so a consumer of
+      // the JSON report can prove the drift without refetching.
+      expect(m.left.bodyHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(m.right.bodyHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(m.left.bodyHash).not.toBe(m.right.bodyHash);
+      expect(m.left.bodyLength).toBeGreaterThan(m.right.bodyLength!);
+    });
+
+    it("treats identical bodies as a match", async () => {
+      const payload = '{"id":1,"email":"a@x"}';
+      const fetcher = makeFetcher({
+        "http://left/api": () => new Response(payload, { status: 200 }),
+        "http://right/api": () => new Response(payload, { status: 200 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkBody: true,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(0);
+      expect(report.matches[0].left.bodyHash).toBe(report.matches[0].right.bodyHash);
+    });
+
+    it("does not populate bodyHash when checkBody is off (default)", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () => new Response("a", { status: 200 }),
+        "http://right/api": () => new Response("b", { status: 200 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        fetcher,
+      });
+      // Different bytes, but checkBody off → no body mismatch fires.
+      expect(report.mismatches).toHaveLength(0);
+      expect(report.matches[0].left.bodyHash).toBeUndefined();
+    });
+
+    it("status mismatch still wins over body mismatch", async () => {
+      // If status already differs, body comparison is redundant noise.
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("a", { status: 200 }),
+        "http://right/x": () => new Response("b", { status: 500 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkBody: true,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kind).toBe("status");
+    });
+  });
+
   it("flags 3xx → 200 status mismatch (not redirect mismatch)", async () => {
     // Same status family check guards against false-positive redirects:
     // 301 vs 200 should be reported as a status mismatch, not a redirect mismatch.

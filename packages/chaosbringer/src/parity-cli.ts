@@ -28,6 +28,11 @@ Options:
                      final status. Default is manual (compare the 3xx
                      status + Location directly, the more sensitive
                      mode for routing-bug detection).
+  --check-body       Also compare response body bytes (SHA-256 hash).
+                     Off by default — adds a full body read per side
+                     per path. Required to catch silent schema drift
+                     where two endpoints agree on status but differ on
+                     payload (e.g. a JSON field dropped on one side).
   --timeout <ms>     Per-request timeout. Default 10000.
   --help             Show this help
 
@@ -64,6 +69,7 @@ export async function runParityCli(argv: string[]): Promise<void> {
       paths: { type: "string" },
       output: { type: "string" },
       "follow-redirects": { type: "boolean", default: false },
+      "check-body": { type: "boolean", default: false },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -91,6 +97,7 @@ export async function runParityCli(argv: string[]): Promise<void> {
     right: values.right,
     paths,
     followRedirects: values["follow-redirects"],
+    checkBody: values["check-body"],
     timeoutMs,
   });
 
@@ -105,6 +112,10 @@ export async function runParityCli(argv: string[]): Promise<void> {
       console.log(`  STATUS ${m.path}  left=${m.left.status}  right=${m.right.status}`);
     } else if (m.kind === "redirect") {
       console.log(`  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`);
+    } else if (m.kind === "body") {
+      console.log(
+        `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`,
+      );
     } else {
       const leftMsg = m.left.error ?? `status ${m.left.status}`;
       const rightMsg = m.right.error ?? `status ${m.right.status}`;
