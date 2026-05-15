@@ -128,18 +128,20 @@ async function main(): Promise<void> {
         "content-type,cache-control",
         "--check-exceptions",
         // Single-sample wall-clock on a loaded CI runner is too noisy
-        // for a hard-pass gate: a cold-start blip on v1 alone can hide
-        // BUG-9 (v2 sleeps 120ms), and noise on an unrelated path can
-        // trip a false-positive. Use the N-sample percentile mode the
-        // sibling parity feature in this same package adds — 5 samples
-        // at p95 reduces both directions of flake to negligible while
-        // BUG-9's 120ms floor still trips the 50ms threshold.
+        // for a hard-pass gate. Use N-sample median: p95 of 5 samples
+        // is just the max (nearest-rank: ceil(0.95*5)-1 = 4), which on
+        // a contended runner is the noisiest possible choice. Median
+        // of 5 takes the 3rd-fastest sample — trims a cold-start blip
+        // on either end. BUG-9's v2-side 120ms sleep is consistent
+        // across samples so its median is still well above the 50ms
+        // threshold, while a one-off jitter spike on an unrelated path
+        // can no longer trip a false positive.
         "--perf-delta-ms",
         "50",
         "--perf-samples",
         "5",
         "--perf-percentile",
-        "p95",
+        "median",
       ]);
       if (code !== 0) exitCode = 1;
     }
