@@ -55,6 +55,12 @@ export const BUG_LEDGER = [
     symptom: "v2 home page has an extra <a href='/does-not-exist'> that 404s on click",
     catcher: "chaosbringer (crawler hits the link, both report 404 → ignore-preset must NOT swallow it)",
   },
+  {
+    id: "BUG-5",
+    where: "GET /api/users (and /api/users/:id)",
+    symptom: "v2 returns `cache-control: no-store` where v1 returns `max-age=60` (policy drift)",
+    catcher: "chaosbringer parity --check-headers cache-control",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -172,12 +178,23 @@ app.get("/users/:id", (c) => {
   return c.notFound();
 });
 
-app.get("/api/users", (c) => c.json(USERS));
+// BUG-5: v2's cache policy on /api/* is stricter (no-store vs max-age=60).
+// Either could be the "intended" policy — the point is the divergence,
+// which parity --check-headers must surface as a header mismatch.
+function apiCache(): string {
+  return VARIANT === "v2" ? "no-store" : "max-age=60";
+}
+
+app.get("/api/users", (c) => {
+  c.header("cache-control", apiCache());
+  return c.json(USERS);
+});
 
 app.get("/api/users/:id", (c) => {
   const id = Number.parseInt(c.req.param("id"), 10);
   const user = USERS.find((u) => u.id === id);
   if (!user) return c.notFound();
+  c.header("cache-control", apiCache());
   // BUG-2: v2 strips the `email` field on /api/users/2 specifically.
   if (VARIANT === "v2" && id === 2) {
     const { email: _drop, ...rest } = user;

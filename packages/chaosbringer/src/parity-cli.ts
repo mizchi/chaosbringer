@@ -33,6 +33,12 @@ Options:
                      per path. Required to catch silent schema drift
                      where two endpoints agree on status but differ on
                      payload (e.g. a JSON field dropped on one side).
+  --check-headers <list>
+                     Compare the named response headers (comma-separated,
+                     case-insensitive). e.g. --check-headers content-type,cache-control
+                     Catches policy drift like one side dropping
+                     cache-control or returning a different CORS origin.
+                     Reported before body drift.
   --timeout <ms>     Per-request timeout. Default 10000.
   --help             Show this help
 
@@ -70,6 +76,7 @@ export async function runParityCli(argv: string[]): Promise<void> {
       output: { type: "string" },
       "follow-redirects": { type: "boolean", default: false },
       "check-body": { type: "boolean", default: false },
+      "check-headers": { type: "string" },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -92,12 +99,18 @@ export async function runParityCli(argv: string[]): Promise<void> {
     return;
   }
 
+  const checkHeaders = values["check-headers"]
+    ?.split(",")
+    .map((h) => h.trim())
+    .filter((h) => h.length > 0);
+
   const report = await runParity({
     left: values.left,
     right: values.right,
     paths,
     followRedirects: values["follow-redirects"],
     checkBody: values["check-body"],
+    checkHeaders,
     timeoutMs,
   });
 
@@ -116,6 +129,18 @@ export async function runParityCli(argv: string[]): Promise<void> {
       console.log(
         `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`,
       );
+    } else if (m.kind === "header") {
+      // Find the first differing header so the printed line is
+      // immediately actionable; the JSON report carries the full map.
+      const diffs: string[] = [];
+      const left = m.left.headers ?? {};
+      const right = m.right.headers ?? {};
+      for (const name of Object.keys(left)) {
+        if (left[name] !== right[name]) {
+          diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+        }
+      }
+      console.log(`  HEADER ${m.path}  ${diffs.join(" | ")}`);
     } else {
       const leftMsg = m.left.error ?? `status ${m.left.status}`;
       const rightMsg = m.right.error ?? `status ${m.right.status}`;

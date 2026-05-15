@@ -259,6 +259,116 @@ describe("runParity", () => {
     });
   });
 
+  describe("checkHeaders", () => {
+    it("flags a header mismatch when a named header differs", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response("", { status: 200, headers: { "cache-control": "max-age=60" } }),
+        "http://right/api": () =>
+          new Response("", { status: 200, headers: { "cache-control": "no-store" } }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkHeaders: ["cache-control"],
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      const m = report.mismatches[0];
+      expect(m.kind).toBe("header");
+      expect(m.left.headers?.["cache-control"]).toBe("max-age=60");
+      expect(m.right.headers?.["cache-control"]).toBe("no-store");
+    });
+
+    it("distinguishes 'absent' from 'empty' in the captured header map", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response("", { status: 200, headers: { "x-custom": "value" } }),
+        "http://right/api": () => new Response("", { status: 200 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkHeaders: ["x-custom"],
+        fetcher,
+      });
+      expect(report.mismatches[0].right.headers?.["x-custom"]).toBeNull();
+    });
+
+    it("is case-insensitive on the input list (lowercase normalised internally)", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response("", { status: 200, headers: { "content-type": "text/html" } }),
+        "http://right/api": () =>
+          new Response("", { status: 200, headers: { "content-type": "application/json" } }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkHeaders: ["Content-Type"],
+        fetcher,
+      });
+      expect(report.mismatches[0].kind).toBe("header");
+      expect(report.mismatches[0].left.headers?.["content-type"]).toBe("text/html");
+    });
+
+    it("does not flag headers that aren't in the list (no over-broad detection)", async () => {
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response("", { status: 200, headers: { "x-internal": "a" } }),
+        "http://right/api": () =>
+          new Response("", { status: 200, headers: { "x-internal": "b" } }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkHeaders: ["cache-control"], // not the differing one
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(0);
+    });
+
+    it("header drift reported before body drift when both differ", async () => {
+      // A header-policy change (cache-control TTL, CORS origin) is the
+      // upstream cause; the body difference is downstream noise.
+      // Reporting header first keeps the triage signal clean.
+      const fetcher = makeFetcher({
+        "http://left/api": () =>
+          new Response("body-a", { status: 200, headers: { "cache-control": "max-age=60" } }),
+        "http://right/api": () =>
+          new Response("body-b", { status: 200, headers: { "cache-control": "no-store" } }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["api"],
+        checkBody: true,
+        checkHeaders: ["cache-control"],
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kind).toBe("header");
+    });
+
+    it("an empty/unset checkHeaders list does not populate the headers map", async () => {
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 200 }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        fetcher,
+      });
+      expect(report.matches[0].left.headers).toBeUndefined();
+    });
+  });
+
   it("flags 3xx → 200 status mismatch (not redirect mismatch)", async () => {
     // Same status family check guards against false-positive redirects:
     // 301 vs 200 should be reported as a status mismatch, not a redirect mismatch.

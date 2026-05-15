@@ -26,7 +26,12 @@ export type MismatchKind =
    * Status agreed but the response body bytes differ. Only fires when
    * `checkBody` is enabled in the run options.
    */
-  | "body";
+  | "body"
+  /**
+   * Status agreed but one or more of the named response headers
+   * differ. Only fires when `checkHeaders` is non-empty.
+   */
+  | "header";
 
 export interface SideResult {
   /** Final status. `null` when the fetch threw before getting a response. */
@@ -49,6 +54,13 @@ export interface SideResult {
    * drift, not flakiness).
    */
   bodyHash?: string;
+  /**
+   * Named response headers, lowercased and de-duplicated. Populated
+   * only for headers listed in `checkHeaders`. A header that was
+   * absent on a given side appears as `null`, so consumers can
+   * distinguish "missing" from "empty".
+   */
+  headers?: Record<string, string | null>;
 }
 
 export interface ParityProbe {
@@ -98,6 +110,18 @@ export interface RunParityOptions {
    * field that doesn't move the status code.
    */
   checkBody?: boolean;
+  /**
+   * Header names to compare. Case-insensitive; lowercased internally
+   * and matched against the response's header bag. When empty (the
+   * default) no header comparison is done — headers vary too much
+   * between requests for an unconditional check to be useful.
+   *
+   * Typical opt-ins: `["content-type", "cache-control", "set-cookie",
+   * "access-control-allow-origin"]`. The list is the caller's policy;
+   * we don't ship defaults so each consumer is forced to think about
+   * which headers actually matter to their app.
+   */
+  checkHeaders?: string[];
   /** Override fetch for testing. */
   fetcher?: typeof fetch;
 }
@@ -116,6 +140,7 @@ async function probeSide(
     timeoutMs: number;
     fetcher: typeof fetch;
     checkBody: boolean;
+    checkHeaders: string[];
   },
 ): Promise<SideResult> {
   const url = joinBase(base, path);
@@ -130,6 +155,13 @@ async function probeSide(
       status: resp.status,
       location: resp.headers.get("location"),
     };
+    if (opts.checkHeaders.length > 0) {
+      const out: Record<string, string | null> = {};
+      for (const name of opts.checkHeaders) {
+        out[name] = resp.headers.get(name);
+      }
+      result.headers = out;
+    }
     if (opts.checkBody) {
       // Reading the body is part of the same timeout window — a slow
       // body trickle counts against the per-request budget so one
@@ -171,6 +203,16 @@ function classify(left: SideResult, right: SideResult): MismatchKind | null {
   ) {
     return "redirect";
   }
+  // Header comparison is opt-in (gated by `checkHeaders` length) and
+  // checked BEFORE body — a header drift (e.g. `cache-control`
+  // changing TTL) usually causes downstream symptoms whose body
+  // signal is downstream noise, so we report the header difference
+  // as the primary cause.
+  if (left.headers && right.headers) {
+    for (const name of Object.keys(left.headers)) {
+      if (left.headers[name] !== right.headers[name]) return "header";
+    }
+  }
   // Body comparison is opt-in (gated by `checkBody`) — both hashes
   // are only populated when the caller asked for it, so a missing
   // hash on either side disables this branch automatically.
@@ -189,6 +231,10 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const fetcher = opts.fetcher ?? fetch;
   const checkBody = opts.checkBody ?? false;
+  // Normalise header names to lowercase up front so the comparison
+  // can use `Headers.get()` (which is case-insensitive anyway) and
+  // the result map is keyed predictably for downstream consumers.
+  const checkHeaders = (opts.checkHeaders ?? []).map((h) => h.toLowerCase());
 
   const mismatches: ParityMismatch[] = [];
   const matches: ParityProbe[] = [];
@@ -196,7 +242,7 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   for (const path of opts.paths) {
     // Probe both sides in parallel — they're independent and the report
     // is symmetric, so there's no reason to serialise.
-    const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody };
+    const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders };
     const [left, right] = await Promise.all([
       probeSide(opts.left, path, sideOpts),
       probeSide(opts.right, path, sideOpts),
