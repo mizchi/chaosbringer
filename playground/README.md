@@ -28,6 +28,12 @@ pnpm loop chaos          # crawl v1 + v2 + diff only
 
 # Exit code is non-zero when the loop detected something (parity
 # mismatch, new clusters on v2, etc.) — drop into reports/ to see.
+
+# CI-gate mode: flip the exit code semantics. Success means the loop
+# caught EXACTLY the expected number of seeded mismatches; less is a
+# regression in detection, more is a false positive. Used by the
+# `playground-dogfood` workflow.
+pnpm loop --expect-mismatches 10
 ```
 
 Outputs land in:

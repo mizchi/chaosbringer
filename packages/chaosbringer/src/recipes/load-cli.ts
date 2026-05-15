@@ -6,7 +6,8 @@
  * or invariants; the CLI is the "I just want N workers replaying my
  * verified recipes for K minutes" path.
  */
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { formatLoadReport, parseDurationMs, type DurationInput } from "../load/index.js";
 import {
@@ -79,6 +80,7 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     thinkTime: parsed.thinkTime,
   });
   if (parsed.output) {
+    mkdirSync(dirname(parsed.output), { recursive: true });
     writeFileSync(parsed.output, JSON.stringify(result, null, 2));
   }
   if (parsed.json) {
