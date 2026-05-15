@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.8.1...chaosbringer-v0.9.0) (2026-05-15)
+
+
+### Features
+
+* AI-driven recipe layer + scenarioLoad + OWASP auth attacks ([#97](https://github.com/mizchi/chaosbringer/issues/97)) ([72ce951](https://github.com/mizchi/chaosbringer/commit/72ce95107097d4f44cdcc7842a4f54091e3a92e0))
+* CLI surface — recipes diff/lint/repair + `chaosbringer load` ([#98](https://github.com/mizchi/chaosbringer/issues/98)) ([99a48c0](https://github.com/mizchi/chaosbringer/commit/99a48c00b1bb0fe6f2b06f7e9aa20c1c4b3d2ed7))
+* parity N-sample perf + playground CI gate + sibling `--output` mkdir fixes ([#105](https://github.com/mizchi/chaosbringer/issues/105)) ([8b57adf](https://github.com/mizchi/chaosbringer/commit/8b57adf327397a4cbf8baa35f3807b6365ed73f3))
+* close out remaining open issues ([#80](https://github.com/mizchi/chaosbringer/issues/80), [#81](https://github.com/mizchi/chaosbringer/issues/81), [#82](https://github.com/mizchi/chaosbringer/issues/82), [#83](https://github.com/mizchi/chaosbringer/issues/83), [#87](https://github.com/mizchi/chaosbringer/issues/87), [#88](https://github.com/mizchi/chaosbringer/issues/88)) + test coverage ([#99](https://github.com/mizchi/chaosbringer/issues/99)) ([a38a7fc](https://github.com/mizchi/chaosbringer/commit/a38a7fc26e84bbedab2da55e29c95c4937c5d4f5))
+* dogfood playground + 11 iterations of agent-driven parity/journey improvements ([#101](https://github.com/mizchi/chaosbringer/issues/101)) ([521078e](https://github.com/mizchi/chaosbringer/commit/521078edb98b6d56e9f9a7d09efc4bd5e9d1aaa7))
+
+
+### Bug Fixes
+
+* **cluster-artifacts:** strip `|` from cluster bundle dirnames so `actions/upload-artifact@v4` (which rejects `" : < > | * ? \r \n`) no longer kills CI jobs even when every assertion inside them passed ([#106](https://github.com/mizchi/chaosbringer/issues/106)) ([2bc9133](https://github.com/mizchi/chaosbringer/commit/2bc9133e4703a04d263cf8b2fb24347390d65dec))
+
 ## [0.8.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.8.0...chaosbringer-v0.8.1) (2026-05-06)
 
 

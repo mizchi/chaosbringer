@@ -1,5 +1,5 @@
 {
-  "packages/chaosbringer": "0.8.1",
+  "packages/chaosbringer": "0.9.0",
   "packages/server-faults": "0.1.0",
   "packages/playwright-faults": "0.1.0",
   "packages/playwright-v8-coverage": "0.1.0",
