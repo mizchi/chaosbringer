@@ -43,11 +43,42 @@ export type MismatchKind =
   | "exception"
   /**
    * Right was slower than left by more than the configured budget.
-   * Single-sample wall-clock — noisy by nature, so the threshold
-   * (`perfDeltaMs` and/or `perfRatio`) must be set explicitly. Pair
-   * with N-sample sweeping at the call site if you need percentiles.
+   * Single-sample wall-clock is noisy by nature, so the threshold
+   * (`perfDeltaMs` and/or `perfRatio`) must be set explicitly. When
+   * `perfSamples > 1` the comparison runs against the configured
+   * percentile of N serial samples (`perfStats[percentile]`) instead
+   * of the single first-sample `durationMs` — same threshold flags,
+   * fewer false positives.
    */
   | "perf";
+
+/**
+ * Percentile of N-sample timings used for the perf comparison when
+ * `perfSamples > 1`. `p95` is the SLO-standard default; `median`
+ * smooths harder for noisy backends; `min` is best-case (closest to
+ * a warm-cache lower bound); `p99` reserves jitter headroom for
+ * cold-start outliers.
+ */
+export type PerfPercentile = "min" | "median" | "p95" | "p99";
+
+/**
+ * Distribution of N serial-sample timings for one side of a probe.
+ * Populated by `runParity` when `perfSamples > 1`; `undefined` for
+ * the default single-sample mode (in that case `durationMs` is the
+ * only timing available).
+ *
+ * `samples` is the count of samples that actually completed — a
+ * sample that errored after the first one doesn't contribute a
+ * duration and is excluded. So a `perfSamples: 10` run with one
+ * mid-run failure yields `samples: 9` here.
+ */
+export interface PerfStats {
+  samples: number;
+  min: number;
+  median: number;
+  p95: number;
+  p99: number;
+}
 
 export interface SideResult {
   /** Final status. `null` when the fetch threw before getting a response. */
@@ -94,8 +125,18 @@ export interface SideResult {
    * every successful probe (free — we already have the start time
    * before fetch). `undefined` when the probe failed before
    * timing could be meaningful (DNS error, connection refused).
+   * When `perfSamples > 1` this is the FIRST sample's timing —
+   * `perfStats` carries the distribution across all samples.
    */
   durationMs?: number;
+  /**
+   * N-sample timing distribution. Set only when the run was
+   * configured with `perfSamples > 1` and at least one sample beyond
+   * the first completed successfully. The classifier uses
+   * `perfStats[perfPercentile]` for the perf comparison when this is
+   * present; otherwise it falls back to `durationMs`.
+   */
+  perfStats?: PerfStats;
 }
 
 export interface ParityProbe {
@@ -161,6 +202,8 @@ export interface ParityReport {
     timeoutMs: number;
     perfDeltaMs?: number;
     perfRatio?: number;
+    perfSamples?: number;
+    perfPercentile?: PerfPercentile;
   };
 }
 
@@ -232,6 +275,27 @@ export interface RunParityOptions {
    * mismatch.
    */
   perfRatio?: number;
+  /**
+   * Number of serial fetch samples per side per path. Defaults to 1
+   * (single-sample, the original behaviour). Set to >1 to defeat
+   * wall-clock jitter — `perfStats` is populated with the distribution
+   * and the perf threshold compares the configured `perfPercentile`
+   * instead of `durationMs`.
+   *
+   * Samples run serially (single connection — concurrent samples would
+   * change the timing model). The per-sample timeout is `timeoutMs`,
+   * so worst-case wall-clock per probe is `perfSamples * timeoutMs`
+   * per side. The first sample captures status/headers/body as
+   * before; later samples contribute timing only.
+   */
+  perfSamples?: number;
+  /**
+   * Which percentile of `perfStats` to compare against `perfDeltaMs` /
+   * `perfRatio` when `perfSamples > 1`. Defaults to `"p95"` — the
+   * SLO-standard target. Ignored when `perfSamples <= 1` because there
+   * is no distribution to take a percentile of.
+   */
+  perfPercentile?: PerfPercentile;
   /** Override fetch for testing. */
   fetcher?: typeof fetch;
   /**
@@ -336,18 +400,15 @@ interface ProbedSide {
   bodyText: string | null;
 }
 
-async function probeSide(
-  base: string,
-  path: string,
-  opts: {
-    followRedirects: boolean;
-    timeoutMs: number;
-    fetcher: typeof fetch;
-    checkBody: boolean;
-    checkHeaders: string[];
-  },
-): Promise<ProbedSide> {
-  const url = joinBase(base, path);
+interface SampleOpts {
+  followRedirects: boolean;
+  timeoutMs: number;
+  fetcher: typeof fetch;
+  checkBody: boolean;
+  checkHeaders: string[];
+}
+
+async function probeOneSample(url: string, opts: SampleOpts): Promise<ProbedSide> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
   // Wall-clock timer wraps the full fetch including body read (when
@@ -381,6 +442,19 @@ async function probeSide(
       result.bodyLength = bytes.byteLength;
       result.bodyHash = createHash("sha256").update(bytes).digest("hex");
       bodyText = new TextDecoder().decode(bytes);
+    } else {
+      // Drain the body so each sample's timing reflects a comparable
+      // transaction. Without this, a server that streams a large
+      // response would look artificially fast (we'd return as soon as
+      // headers landed). The drain is best-effort — some response
+      // bodies aren't readable twice or at all in test doubles, so a
+      // failure here is silently swallowed.
+      try {
+        await resp.arrayBuffer();
+      } catch {
+        // Body drain failed (test double, already-consumed stream).
+        // Timing already captured pre-catch; carry on.
+      }
     }
     result.durationMs = performance.now() - startedAt;
     return { result, bodyText };
@@ -397,9 +471,79 @@ async function probeSide(
   }
 }
 
+function percentile(sortedAsc: number[], p: number): number {
+  if (sortedAsc.length === 0) return 0;
+  if (sortedAsc.length === 1) return sortedAsc[0];
+  // Nearest-rank with ceiling: matches the conventional "p95 of 10
+  // samples is the 10th element" reading. Clamped to the array so the
+  // worst sample is always reachable.
+  const idx = Math.min(
+    sortedAsc.length - 1,
+    Math.max(0, Math.ceil((p / 100) * sortedAsc.length) - 1),
+  );
+  return sortedAsc[idx];
+}
+
+function computePerfStats(durations: number[]): PerfStats {
+  const sorted = [...durations].sort((a, b) => a - b);
+  return {
+    samples: sorted.length,
+    min: sorted[0],
+    median: percentile(sorted, 50),
+    p95: percentile(sorted, 95),
+    p99: percentile(sorted, 99),
+  };
+}
+
+async function probeSide(
+  base: string,
+  path: string,
+  opts: SampleOpts & { perfSamples: number },
+): Promise<ProbedSide> {
+  const url = joinBase(base, path);
+  const first = await probeOneSample(url, opts);
+  // First-sample failure short-circuits: extra samples wouldn't change
+  // the classification (status=null wins over any timing) and would
+  // just pay N × timeoutMs in wall-clock for nothing.
+  if (first.result.status === null || opts.perfSamples <= 1) {
+    return first;
+  }
+  const durations: number[] = [];
+  if (typeof first.result.durationMs === "number") {
+    durations.push(first.result.durationMs);
+  }
+  for (let i = 1; i < opts.perfSamples; i++) {
+    const next = await probeOneSample(url, opts);
+    if (typeof next.result.durationMs === "number") {
+      durations.push(next.result.durationMs);
+    }
+    // We deliberately do NOT replace `first` even if a later sample
+    // produced a different status / body — the first sample is the
+    // canonical record. Mixed status across samples is a bug worth
+    // catching, but that's the job of a flakiness probe, not parity.
+  }
+  if (durations.length >= 2) {
+    first.result.perfStats = computePerfStats(durations);
+  }
+  return first;
+}
+
 interface ClassifyOptions {
   perfDeltaMs?: number;
   perfRatio?: number;
+  perfPercentile?: PerfPercentile;
+}
+
+/**
+ * Pick the timing value the perf threshold should compare. When the
+ * side carries `perfStats` (N-sample mode) we use the configured
+ * percentile so wall-clock jitter on a single sample can't trip the
+ * threshold. Otherwise the legacy single-sample `durationMs` is the
+ * only thing we have.
+ */
+function pickPerfValue(side: SideResult, percentile: PerfPercentile): number | undefined {
+  if (side.perfStats) return side.perfStats[percentile];
+  return side.durationMs;
 }
 
 /**
@@ -473,14 +617,20 @@ function classify(
   // mismatch. Skipped silently when either side has no duration
   // (probe failed before timing was meaningful) or when no threshold
   // is configured — leaves single-sample latency noise off by default.
+  // `pickPerfValue` switches to `perfStats[percentile]` when N-sample
+  // mode is on, so the OR-of-thresholds runs against the chosen
+  // percentile rather than a noisy single sample.
+  const percentile = opts.perfPercentile ?? "p95";
+  const lPerf = pickPerfValue(left, percentile);
+  const rPerf = pickPerfValue(right, percentile);
   if (
-    typeof left.durationMs === "number" &&
-    typeof right.durationMs === "number" &&
-    ((opts.perfDeltaMs && opts.perfDeltaMs > 0 && right.durationMs - left.durationMs > opts.perfDeltaMs) ||
+    typeof lPerf === "number" &&
+    typeof rPerf === "number" &&
+    ((opts.perfDeltaMs && opts.perfDeltaMs > 0 && rPerf - lPerf > opts.perfDeltaMs) ||
       (opts.perfRatio &&
         opts.perfRatio > 0 &&
-        left.durationMs > 0 &&
-        right.durationMs > left.durationMs * opts.perfRatio))
+        lPerf > 0 &&
+        rPerf > lPerf * opts.perfRatio))
   ) {
     kinds.push("perf");
   }
@@ -506,6 +656,11 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   // the result map is keyed predictably for downstream consumers.
   const checkHeaders = (opts.checkHeaders ?? []).map((h) => h.toLowerCase());
   const checkExceptions = opts.checkExceptions ?? false;
+  // perfSamples normalised to >=1; 0/negative would silently disable
+  // probing entirely otherwise. Default 1 keeps single-sample as the
+  // base behaviour.
+  const perfSamples = Math.max(1, Math.floor(opts.perfSamples ?? 1));
+  const perfPercentile: PerfPercentile = opts.perfPercentile ?? "p95";
 
   // Browser launch is amortised across all paths — one Chromium for
   // the whole run, fresh context per visit. Only fires when
@@ -522,8 +677,10 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   try {
     for (const path of opts.paths) {
       // Probe both sides in parallel — they're independent and the report
-      // is symmetric, so there's no reason to serialise.
-      const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders };
+      // is symmetric, so there's no reason to serialise. Inside each
+      // side the N samples run serially (single-connection timing
+      // model); only the left/right pairing is concurrent.
+      const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders, perfSamples };
       const [leftProbe, rightProbe] = await Promise.all([
         probeSide(opts.left, path, sideOpts),
         probeSide(opts.right, path, sideOpts),
@@ -549,6 +706,7 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
       const kinds = classify(left, right, {
         perfDeltaMs: opts.perfDeltaMs,
         perfRatio: opts.perfRatio,
+        perfPercentile,
       });
       if (kinds.length > 0) {
         const m: ParityMismatch = { ...probe, kinds };
@@ -584,6 +742,10 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
       timeoutMs,
       ...(opts.perfDeltaMs !== undefined ? { perfDeltaMs: opts.perfDeltaMs } : {}),
       ...(opts.perfRatio !== undefined ? { perfRatio: opts.perfRatio } : {}),
+      // Echo the resolved sampling config only when N-sample mode is
+      // actually on, so the legacy single-sample report shape stays
+      // unchanged for existing consumers.
+      ...(perfSamples > 1 ? { perfSamples, perfPercentile } : {}),
     },
   };
 }

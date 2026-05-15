@@ -142,4 +142,83 @@ describe("runParityCli", () => {
     await runParityCli(["--help"]);
     expect(logged()).toContain("Usage: chaosbringer parity");
   });
+
+  describe("perf N-sample flags", () => {
+    it("--perf-samples and --perf-percentile flow through to the report config", async () => {
+      stubFetch({
+        "http://l/foo": () => new Response("", { status: 200 }),
+        "http://r/foo": () => new Response("", { status: 200 }),
+      });
+      const pathsFile = writePaths("paths.txt", ["/foo"]);
+      const outPath = join(dir, "parity.json");
+      await runParityCli([
+        "--left", "http://l",
+        "--right", "http://r",
+        "--paths", pathsFile,
+        "--perf-samples", "3",
+        "--perf-percentile", "median",
+        "--output", outPath,
+      ]);
+      const parsed = JSON.parse(readFileSync(outPath, "utf-8"));
+      expect(parsed.config.perfSamples).toBe(3);
+      expect(parsed.config.perfPercentile).toBe("median");
+      // First sample populates durationMs; perfStats carries the
+      // distribution from all 3.
+      expect(parsed.matches[0].left.perfStats.samples).toBe(3);
+    });
+
+    it("rejects --perf-percentile values not in the allow-list", async () => {
+      const pathsFile = writePaths("paths.txt", ["/foo"]);
+      await runParityCli([
+        "--left", "http://l",
+        "--right", "http://r",
+        "--paths", pathsFile,
+        "--perf-percentile", "p50", // not in the allow-list (we expose median, not p50)
+      ]);
+      expect(process.exitCode).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--perf-percentile must be one of"),
+      );
+    });
+
+    it("rejects --perf-samples that aren't positive integers", async () => {
+      const pathsFile = writePaths("paths.txt", ["/foo"]);
+      await runParityCli([
+        "--left", "http://l",
+        "--right", "http://r",
+        "--paths", pathsFile,
+        "--perf-samples", "0",
+      ]);
+      expect(process.exitCode).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--perf-samples must be a positive integer"),
+      );
+    });
+
+    it("PERF line in CLI output shows the percentile + sample count when N>1", async () => {
+      // Right side: four fast samples + one outlier. With p95 of 5
+      // the outlier wins; PERF line should annotate "p95 of 5/5".
+      const counters: Record<string, number> = {};
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const idx = counters[url] ?? 0;
+        counters[url] = idx + 1;
+        if (url.startsWith("http://r/") && idx === 4) {
+          await new Promise((r) => setTimeout(r, 80));
+        }
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      const pathsFile = writePaths("paths.txt", ["/foo"]);
+      await runParityCli([
+        "--left", "http://l",
+        "--right", "http://r",
+        "--paths", pathsFile,
+        "--perf-samples", "5",
+        "--perf-percentile", "p95",
+        "--perf-delta-ms", "30",
+      ]);
+      expect(process.exitCode).toBe(1);
+      expect(logged()).toMatch(/PERF.*p95 of 5\/5/);
+    });
+  });
 });

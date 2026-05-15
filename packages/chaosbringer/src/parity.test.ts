@@ -744,6 +744,194 @@ describe("runParity", () => {
     });
   });
 
+  describe("perf N-sample mode", () => {
+    /**
+     * Fetcher that returns a fixed delay per (URL, call-index) so we
+     * can mix fast samples with deliberate outliers. Each URL has a
+     * queue; subsequent calls walk the queue and the last entry
+     * repeats once exhausted (so a single-entry array works as a
+     * fixed-time stub).
+     */
+    function makeQueuedTimedFetcher(timings: Record<string, number[]>): typeof fetch {
+      const counters: Record<string, number> = {};
+      return (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const arr = timings[url] ?? [0];
+        const idx = counters[url] ?? 0;
+        counters[url] = idx + 1;
+        const ms = arr[Math.min(idx, arr.length - 1)];
+        if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+    }
+
+    it("populates perfStats with one entry per sample on both sides", async () => {
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 5,
+        fetcher: makeQueuedTimedFetcher({
+          "http://l/x": [0, 0, 0, 0, 0],
+          "http://r/x": [0, 0, 0, 0, 0],
+        }),
+      });
+      const probe = report.matches[0];
+      expect(probe.left.perfStats?.samples).toBe(5);
+      expect(probe.right.perfStats?.samples).toBe(5);
+      // p95 / p99 must be >= median by construction; serves as a
+      // sanity check on the percentile math rather than a stub-tied
+      // exact-millisecond comparison (which would be flaky).
+      expect(probe.left.perfStats!.p95).toBeGreaterThanOrEqual(probe.left.perfStats!.median);
+      expect(probe.left.perfStats!.p99).toBeGreaterThanOrEqual(probe.left.perfStats!.p95);
+      // First-sample durationMs is preserved as the legacy timing.
+      expect(typeof probe.left.durationMs).toBe("number");
+    });
+
+    it("leaves perfStats undefined in default (single-sample) mode", async () => {
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [0] }),
+      });
+      expect(report.matches[0].left.perfStats).toBeUndefined();
+      expect(report.matches[0].right.perfStats).toBeUndefined();
+    });
+
+    it("median percentile is immune to a single high outlier; p95 catches it", async () => {
+      // The whole point of N-sample: a cold-cache 100ms outlier on
+      // one side would false-positive a 30ms-budget single-sample
+      // perf check. Median sees through it; p95 still raises the
+      // alarm so we're not blind to genuine tail-latency regressions.
+      const timings = {
+        "http://l/x": [0, 0, 0, 0, 0],
+        "http://r/x": [0, 0, 0, 0, 100],
+      };
+
+      const medianReport = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 5,
+        perfPercentile: "median",
+        perfDeltaMs: 30,
+        fetcher: makeQueuedTimedFetcher(timings),
+      });
+      expect(medianReport.mismatches).toHaveLength(0);
+
+      const p95Report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 5,
+        perfPercentile: "p95",
+        perfDeltaMs: 30,
+        fetcher: makeQueuedTimedFetcher(timings),
+      });
+      expect(p95Report.mismatches).toHaveLength(1);
+      expect(p95Report.mismatches[0].kinds).toContain("perf");
+    });
+
+    it("defaults to p95 when perfPercentile is omitted and perfSamples > 1", async () => {
+      // Same outlier scenario as above. With no explicit percentile
+      // the classifier must pick p95 (SLO-standard default) — so the
+      // outlier trips a 30ms budget.
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 5,
+        perfDeltaMs: 30,
+        fetcher: makeQueuedTimedFetcher({
+          "http://l/x": [0, 0, 0, 0, 0],
+          "http://r/x": [0, 0, 0, 0, 100],
+        }),
+      });
+      expect(report.mismatches[0]?.kinds).toContain("perf");
+    });
+
+    it("config echoes perfSamples and perfPercentile when N>1, omits them otherwise", async () => {
+      const sampled = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 3,
+        perfPercentile: "median",
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [0] }),
+      });
+      expect(sampled.config.perfSamples).toBe(3);
+      expect(sampled.config.perfPercentile).toBe("median");
+
+      const single = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [0] }),
+      });
+      // Single-sample mode keeps the legacy config shape — no
+      // surprise fields on consumers who don't opt in.
+      expect(single.config.perfSamples).toBeUndefined();
+      expect(single.config.perfPercentile).toBeUndefined();
+    });
+
+    it("short-circuits N-sample loop when the first sample fails (no N×timeout cost on dead hosts)", async () => {
+      let rightCalls = 0;
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("right")) {
+          rightCalls++;
+          throw new Error("ECONNREFUSED");
+        }
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        perfSamples: 5,
+        fetcher,
+      });
+      // Right side reports the failure kind from the single attempt.
+      expect(report.mismatches[0].kinds).toContain("failure");
+      expect(report.mismatches[0].right.perfStats).toBeUndefined();
+      // The whole point of short-circuit: we did NOT make 5 calls
+      // against a server we already know is down.
+      expect(rightCalls).toBe(1);
+    });
+
+    it("clamps perfSamples=0 to the single-sample default", async () => {
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 0,
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [0] }),
+      });
+      // 0 silently disabling all probes would be a footgun; we treat
+      // it as the default (=1) and report cleanly.
+      expect(report.matches[0].left.perfStats).toBeUndefined();
+      expect(report.matches[0].left.durationMs).toBeDefined();
+    });
+
+    it("falls back to durationMs when perfStats absent (single-sample with percentile set)", async () => {
+      // Setting perfPercentile without perfSamples>1 shouldn't break
+      // anything — the classifier just falls back to the single-sample
+      // durationMs. Validates the contract robustness.
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        perfSamples: 1,
+        perfPercentile: "p99",
+        perfDeltaMs: 30,
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [80] }),
+      });
+      expect(report.mismatches[0]?.kinds).toContain("perf");
+    });
+  });
+
   it("flags 3xx → 200 status mismatch (not redirect mismatch)", async () => {
     // Same status family check guards against false-positive redirects:
     // 301 vs 200 should be reported as a status mismatch, not a redirect mismatch.
