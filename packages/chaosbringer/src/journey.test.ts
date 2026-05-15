@@ -461,6 +461,126 @@ describe("runJourney", () => {
       expect(seen).toContain("http://l/items/%7B%7BtodoId%7D%7D");
     });
 
+    it("per-actor cookie jars stay isolated within one side", async () => {
+      const seenCookies: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const cookie = (init?.headers as Headers).get("cookie") ?? "";
+        if (url.endsWith("/login/alice")) {
+          return new Response("", { status: 200, headers: { "set-cookie": "u=alice; Path=/" } });
+        }
+        if (url.endsWith("/login/bob")) {
+          return new Response("", { status: 200, headers: { "set-cookie": "u=bob; Path=/" } });
+        }
+        seenCookies.push(cookie);
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          { method: "GET", path: "/login/alice", actor: "alice" },
+          { method: "GET", path: "/login/bob", actor: "bob" },
+          { method: "GET", path: "/whoami", actor: "bob" },
+        ],
+        fetcher,
+      });
+      expect(seenCookies.some((c) => c.includes("u=bob"))).toBe(true);
+      expect(seenCookies.every((c) => !c.includes("u=alice"))).toBe(true);
+    });
+
+    it("per-actor vars stay isolated within one side", async () => {
+      const calls: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/create/alice")) return new Response(JSON.stringify({ id: 1 }), { status: 200 });
+        if (url.includes("/create/bob")) return new Response(JSON.stringify({ id: 2 }), { status: 200 });
+        calls.push(url);
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "POST", path: "/create/alice", body: {},
+            actor: "alice", capture: [{ from: "body.id", as: "todoId" }],
+          },
+          {
+            method: "POST", path: "/create/bob", body: {},
+            actor: "bob", capture: [{ from: "body.id", as: "todoId" }],
+          },
+          { method: "GET", path: "/read/{{todoId}}", actor: "alice" },
+          { method: "GET", path: "/read/{{todoId}}", actor: "bob" },
+        ],
+        fetcher,
+      });
+      const reads = calls.filter((u) => u.includes("/read/"));
+      expect(reads).toContain("http://l/read/1");
+      expect(reads).toContain("http://l/read/2");
+      expect(reads).toContain("http://r/read/1");
+      expect(reads).toContain("http://r/read/2");
+    });
+
+    it("flags a body mismatch when v2 leaks actor A's data into actor B's read", async () => {
+      function makeTenantServer(opts: { leakAcrossUsers?: boolean } = {}) {
+        const byUser = new Map<string, Array<{ title: string }>>();
+        return (url: string, init: RequestInit | undefined): Response => {
+          const u = new URL(url);
+          const cookie = (init?.headers as Headers).get("cookie") ?? "";
+          const userMatch = cookie.match(/u=(\w+)/);
+          const user = userMatch ? userMatch[1] : "anon";
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (u.pathname === "/login" && method === "POST") {
+            const body = JSON.parse(init?.body as string);
+            return new Response("ok", {
+              status: 200,
+              headers: { "set-cookie": `u=${body.user}; Path=/` },
+            });
+          }
+          if (u.pathname === "/todos" && method === "POST") {
+            const body = JSON.parse(init?.body as string);
+            const list = byUser.get(user) ?? [];
+            list.push({ title: body.title });
+            byUser.set(user, list);
+            return new Response("ok", { status: 200 });
+          }
+          if (u.pathname === "/todos" && method === "GET") {
+            if (opts.leakAcrossUsers) {
+              const all: Array<{ title: string }> = [];
+              for (const v of byUser.values()) all.push(...v);
+              return new Response(JSON.stringify(all), { status: 200 });
+            }
+            return new Response(JSON.stringify(byUser.get(user) ?? []), { status: 200 });
+          }
+          return new Response("not found", { status: 404 });
+        };
+      }
+      const leftHandler = makeTenantServer();
+      const rightHandler = makeTenantServer({ leakAcrossUsers: true });
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const host = new URL(url).host;
+        const h = host === "left" ? leftHandler : rightHandler;
+        return h(url, init);
+      }) as typeof fetch;
+      const steps: JourneyStep[] = [
+        { method: "POST", path: "/login", body: { user: "alice" }, actor: "alice" },
+        { method: "POST", path: "/todos", body: { title: "alice-secret" }, actor: "alice" },
+        { method: "POST", path: "/login", body: { user: "bob" }, actor: "bob" },
+        { method: "GET", path: "/todos", actor: "bob", label: "bob-lists" },
+      ];
+      const report = await runJourney({
+        left: "http://left",
+        right: "http://right",
+        steps,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].label).toBe("bob-lists");
+      expect(report.mismatches[0].kinds).toContain("body");
+    });
+
     it("per-side vars stay isolated — left's capture does not leak to right", async () => {
       // Each side captures id=1 from its own POST. If they shared a
       // var bag, a race would let one side see the other's id.

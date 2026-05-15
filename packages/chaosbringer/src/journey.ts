@@ -77,6 +77,19 @@ export interface JourneyStep {
    * the comparison runs on the substituted result.
    */
   capture?: CaptureSpec[];
+  /**
+   * Actor identity for multi-tenant journeys. Each actor on each side
+   * has its own cookie jar and variable bag. Catches the bug class
+   * where v2 leaks one user's session state into another's
+   * subsequent request.
+   *
+   * Steps without an `actor` use the implicit `"_default"` actor, so
+   * single-actor journeys are unchanged. Switching actors mid-flow is
+   * the point — see the playground's tenant-isolation demo for the
+   * canonical shape (Alice creates → Bob lists → Bob must not see
+   * Alice's data).
+   */
+  actor?: string;
   /** Optional label for reporting — defaults to `<METHOD> <path>`. */
   label?: string;
 }
@@ -411,14 +424,34 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
   const fetcher = opts.fetcher ?? fetch;
   const stopOnMismatch = opts.stopOnMismatch ?? false;
 
-  const leftJar = makeJar();
-  const rightJar = makeJar();
-  // Variable bags are per-side: a value captured from left's response
-  // is only visible to subsequent left steps. Asymmetric IDs / tokens
-  // (which is the common case) Just Work — each side resolves its
-  // template against its own bag.
-  const leftVars: Record<string, string> = {};
-  const rightVars: Record<string, string> = {};
+  // Per-side, per-actor cookie jars + variable bags. The two levels
+  // of keying matter:
+  //   - Outer (left/right): the parity comparison axis.
+  //   - Inner (actor): the tenant isolation axis. A bug where v2
+  //     mixes actor A's session into actor B's request only shows
+  //     up if Bob's GET goes out with Bob's cookies, not Alice's.
+  const leftJars = new Map<string, CookieJar>();
+  const rightJars = new Map<string, CookieJar>();
+  const leftVarsByActor = new Map<string, Record<string, string>>();
+  const rightVarsByActor = new Map<string, Record<string, string>>();
+  function getJar(side: "left" | "right", actor: string): CookieJar {
+    const map = side === "left" ? leftJars : rightJars;
+    let jar = map.get(actor);
+    if (!jar) {
+      jar = makeJar();
+      map.set(actor, jar);
+    }
+    return jar;
+  }
+  function getVars(side: "left" | "right", actor: string): Record<string, string> {
+    const map = side === "left" ? leftVarsByActor : rightVarsByActor;
+    let vars = map.get(actor);
+    if (!vars) {
+      vars = {};
+      map.set(actor, vars);
+    }
+    return vars;
+  }
 
   const mismatches: JourneyMismatch[] = [];
   const matches: JourneyStepResult[] = [];
@@ -429,9 +462,10 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
     const sideOpts = { timeoutMs, checkBody, checkHeaders, fetcher };
     // Per-step parallel: each side advances independently. State
     // accumulates in its own jar.
+    const actor = step.actor ?? "_default";
     const [leftProbe, rightProbe] = await Promise.all([
-      runStepOnSide(opts.left, step, leftJar, leftVars, sideOpts),
-      runStepOnSide(opts.right, step, rightJar, rightVars, sideOpts),
+      runStepOnSide(opts.left, step, getJar("left", actor), getVars("left", actor), sideOpts),
+      runStepOnSide(opts.right, step, getJar("right", actor), getVars("right", actor), sideOpts),
     ]);
     const left = leftProbe.result;
     const right = rightProbe.result;

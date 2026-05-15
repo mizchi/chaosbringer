@@ -106,7 +106,11 @@ async function main(): Promise<void> {
     }
 
     if (mode === "all" || mode === "parity" || mode === "journey") {
-      for (const file of ["journey-todos.json", "journey-by-id.json"]) {
+      for (const file of [
+        "journey-todos.json",
+        "journey-by-id.json",
+        "journey-tenant-isolation.json",
+      ]) {
         console.log(`\n=== journey: ${file} ===`);
         const code = await runCli([
           "journey",

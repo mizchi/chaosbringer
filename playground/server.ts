@@ -89,6 +89,13 @@ export const BUG_LEDGER = [
       "v2 sleeps 120ms before responding (a regression that doesn't move status / body / headers — only latency). Invisible to every existing parity check.",
     catcher: "chaosbringer parity --perf-delta-ms",
   },
+  {
+    id: "BUG-10",
+    where: "Multi-actor journey: Alice creates a doc, Bob lists docs",
+    symptom:
+      "v1 isolates docs per user (Bob's list is empty). v2 ignores the session cookie and returns Alice's secret to Bob — a tenant-isolation breach invisible to any single-actor journey.",
+    catcher: "chaosbringer journey with actor=alice / actor=bob",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -246,6 +253,43 @@ app.post("/api/todos", async (c) => {
 app.get("/api/todos", (c) => {
   c.header("cache-control", apiCache());
   return c.json(TODOS);
+});
+
+// BUG-10: per-user document store. v1 keys by the `u=<user>` session
+// cookie. v2 has a bug where the listing endpoint ignores the cookie
+// and returns the global pile — a tenant-isolation breach.
+const DOCS_BY_USER = new Map<string, Array<{ title: string }>>();
+function currentUser(c: { req: { header: (name: string) => string | undefined } }): string {
+  const cookieHeader = c.req.header("cookie") ?? "";
+  const match = cookieHeader.match(/u=([^;]+)/);
+  return match ? match[1] : "anon";
+}
+
+app.post("/api/session", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { user?: string };
+  const user = body.user ?? "anon";
+  c.header("set-cookie", `u=${user}; Path=/; SameSite=Lax`);
+  return c.json({ user });
+});
+
+app.post("/api/docs", async (c) => {
+  const user = currentUser(c);
+  const body = (await c.req.json().catch(() => ({}))) as { title?: string };
+  const list = DOCS_BY_USER.get(user) ?? [];
+  list.push({ title: body.title ?? "untitled" });
+  DOCS_BY_USER.set(user, list);
+  return c.json({ ok: true }, 201);
+});
+
+app.get("/api/docs", (c) => {
+  const user = currentUser(c);
+  if (VARIANT === "v2") {
+    // Bug: ignore the user, return all docs across all users.
+    const all: Array<{ title: string }> = [];
+    for (const docs of DOCS_BY_USER.values()) all.push(...docs);
+    return c.json(all);
+  }
+  return c.json(DOCS_BY_USER.get(user) ?? []);
 });
 
 // BUG-8: GET by id returns a mutated title on v2. The POST is identical
