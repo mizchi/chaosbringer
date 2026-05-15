@@ -127,11 +127,19 @@ async function main(): Promise<void> {
         "--check-headers",
         "content-type,cache-control",
         "--check-exceptions",
-        // Generous budget — single-sample wall-clock has jitter even
-        // for fast localhost loops. The seeded BUG-9 sleeps 120ms,
-        // well above this floor.
+        // Single-sample wall-clock on a loaded CI runner is too noisy
+        // for a hard-pass gate: a cold-start blip on v1 alone can hide
+        // BUG-9 (v2 sleeps 120ms), and noise on an unrelated path can
+        // trip a false-positive. Use the N-sample percentile mode the
+        // sibling parity feature in this same package adds — 5 samples
+        // at p95 reduces both directions of flake to negligible while
+        // BUG-9's 120ms floor still trips the 50ms threshold.
         "--perf-delta-ms",
         "50",
+        "--perf-samples",
+        "5",
+        "--perf-percentile",
+        "p95",
       ]);
       if (code !== 0) exitCode = 1;
     }
