@@ -90,11 +90,12 @@ async function main(): Promise<void> {
         "paths.txt",
         "--output",
         `${REPORTS}/parity.json`,
-        // Opt into body + header comparison so JSON-shape drift and
-        // header-policy drift both surface as first-class mismatches.
+        // Opt into body + header + browser comparison so the full
+        // spectrum of seeded bug classes surfaces in one pass.
         "--check-body",
         "--check-headers",
         "content-type,cache-control",
+        "--check-exceptions",
       ]);
       if (code !== 0) exitCode = 1;
     }

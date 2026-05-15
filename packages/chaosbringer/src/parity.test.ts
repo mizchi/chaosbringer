@@ -1,5 +1,45 @@
 import { describe, expect, it, vi } from "vitest";
-import { runParity } from "./parity.js";
+import { runParity, type BrowserLike, type ContextLike, type PageLike } from "./parity.js";
+
+/**
+ * Minimal fake of the Playwright surface `probeBrowserSide` uses. Each
+ * test seeds error lists per URL; the fake replays them through the
+ * `pageerror` / `console` event handlers when `page.goto(url)` runs.
+ */
+function makeBrowserLauncher(
+  errorsByUrl: Record<string, { pageErrors?: string[]; consoleErrors?: string[] }>,
+): () => Promise<BrowserLike> {
+  return async () => ({
+    async newContext(): Promise<ContextLike> {
+      return {
+        async newPage(): Promise<PageLike> {
+          let pageErrorHandler: ((err: Error) => void) | null = null;
+          let consoleHandler:
+            | ((msg: { type(): string; text(): string }) => void)
+            | null = null;
+          return {
+            on(event: string, handler: (...args: unknown[]) => void) {
+              if (event === "pageerror") pageErrorHandler = handler as (err: Error) => void;
+              if (event === "console")
+                consoleHandler = handler as (msg: { type(): string; text(): string }) => void;
+            },
+            async goto(url: string) {
+              const seeded = errorsByUrl[url] ?? {};
+              for (const msg of seeded.pageErrors ?? []) {
+                pageErrorHandler?.(new Error(msg));
+              }
+              for (const msg of seeded.consoleErrors ?? []) {
+                consoleHandler?.({ type: () => "error", text: () => msg });
+              }
+            },
+          };
+        },
+        async close() {},
+      };
+    },
+    async close() {},
+  });
+}
 
 function makeFetcher(handlers: Record<string, () => Response | Promise<Response> | Promise<never>>): typeof fetch {
   return (async (input: RequestInfo | URL) => {
@@ -366,6 +406,137 @@ describe("runParity", () => {
         fetcher,
       });
       expect(report.matches[0].left.headers).toBeUndefined();
+    });
+  });
+
+  describe("checkExceptions", () => {
+    it("flags an exception mismatch when right has a JS error left doesn't", async () => {
+      const fetcher = makeFetcher({
+        "http://left/admin": () => new Response("", { status: 200 }),
+        "http://right/admin": () => new Response("", { status: 200 }),
+      });
+      const browserLauncher = makeBrowserLauncher({
+        "http://left/admin": {},
+        "http://right/admin": { pageErrors: ["ReferenceError: x is not defined"] },
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["admin"],
+        checkExceptions: true,
+        fetcher,
+        browserLauncher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kind).toBe("exception");
+      expect(report.mismatches[0].right.pageErrors).toEqual([
+        "ReferenceError: x is not defined",
+      ]);
+      expect(report.mismatches[0].left.pageErrors).toEqual([]);
+    });
+
+    it("collapses different source locations to the same fingerprint (no false positive)", async () => {
+      // The same bug fires from `app.js:123:5` on left and `app.js:124:9` on
+      // right after a recompile. Without normalisation this would be a
+      // false-positive exception mismatch.
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 200 }),
+      });
+      const browserLauncher = makeBrowserLauncher({
+        "http://left/x": { pageErrors: ["TypeError: foo at bundle.js:123:5"] },
+        "http://right/x": { pageErrors: ["TypeError: foo at bundle.js:124:9"] },
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkExceptions: true,
+        fetcher,
+        browserLauncher,
+      });
+      expect(report.mismatches).toHaveLength(0);
+    });
+
+    it("treats console.error as part of the exception set", async () => {
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 200 }),
+      });
+      const browserLauncher = makeBrowserLauncher({
+        "http://left/x": {},
+        "http://right/x": { consoleErrors: ["api failed"] },
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkExceptions: true,
+        fetcher,
+        browserLauncher,
+      });
+      expect(report.mismatches[0].kind).toBe("exception");
+      expect(report.mismatches[0].right.consoleErrors).toEqual(["api failed"]);
+    });
+
+    it("status mismatch wins over exception mismatch", async () => {
+      // A status difference is the upstream signal; whatever JS error
+      // the broken response causes is downstream noise.
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 500 }),
+      });
+      const browserLauncher = makeBrowserLauncher({
+        "http://left/x": {},
+        "http://right/x": { pageErrors: ["error"] },
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkExceptions: true,
+        fetcher,
+        browserLauncher,
+      });
+      expect(report.mismatches[0].kind).toBe("status");
+    });
+
+    it("matched probes carry the empty error arrays so consumers can prove cleanliness", async () => {
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 200 }),
+      });
+      const browserLauncher = makeBrowserLauncher({
+        "http://left/x": {},
+        "http://right/x": {},
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkExceptions: true,
+        fetcher,
+        browserLauncher,
+      });
+      expect(report.mismatches).toHaveLength(0);
+      expect(report.matches[0].left.pageErrors).toEqual([]);
+      expect(report.matches[0].right.pageErrors).toEqual([]);
+    });
+
+    it("does not load a browser when checkExceptions is off", async () => {
+      const fetcher = makeFetcher({
+        "http://left/x": () => new Response("", { status: 200 }),
+        "http://right/x": () => new Response("", { status: 200 }),
+      });
+      const browserLauncher = vi.fn();
+      await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        fetcher,
+        browserLauncher: browserLauncher as never,
+      });
+      expect(browserLauncher).not.toHaveBeenCalled();
     });
   });
 

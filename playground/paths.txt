@@ -10,4 +10,5 @@
 /api/users/1        # v2 cache-control drift (BUG-5)
 /api/users/2        # v2 missing email + cache-control drift (BUG-2, BUG-5)
 /admin
+/dashboard          # HTML identical, v2 bundle.js throws (BUG-6 — needs --check-exceptions)
 /health             # exempt from chaos

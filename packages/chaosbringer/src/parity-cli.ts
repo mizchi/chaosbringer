@@ -39,6 +39,13 @@ Options:
                      Catches policy drift like one side dropping
                      cache-control or returning a different CORS origin.
                      Reported before body drift.
+  --check-exceptions Visit each path in a real browser (Chromium) and
+                     compare uncaught JS errors + console.error
+                     between sides. Catches React hydration mismatches
+                     and other runtime-only bugs where HTTP looks
+                     identical. Slow — one browser visit per side per
+                     path. Requires \`playwright\` installed and a
+                     browser binary available.
   --timeout <ms>     Per-request timeout. Default 10000.
   --help             Show this help
 
@@ -77,6 +84,7 @@ export async function runParityCli(argv: string[]): Promise<void> {
       "follow-redirects": { type: "boolean", default: false },
       "check-body": { type: "boolean", default: false },
       "check-headers": { type: "string" },
+      "check-exceptions": { type: "boolean", default: false },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -111,6 +119,7 @@ export async function runParityCli(argv: string[]): Promise<void> {
     followRedirects: values["follow-redirects"],
     checkBody: values["check-body"],
     checkHeaders,
+    checkExceptions: values["check-exceptions"],
     timeoutMs,
   });
 
@@ -141,6 +150,17 @@ export async function runParityCli(argv: string[]): Promise<void> {
         }
       }
       console.log(`  HEADER ${m.path}  ${diffs.join(" | ")}`);
+    } else if (m.kind === "exception") {
+      const leftCount = (m.left.pageErrors?.length ?? 0) + (m.left.consoleErrors?.length ?? 0);
+      const rightCount =
+        (m.right.pageErrors?.length ?? 0) + (m.right.consoleErrors?.length ?? 0);
+      // Print one representative message per side (whichever set is
+      // non-empty first) so the line is actionable; full lists are in
+      // the JSON report.
+      const sample = (m.right.pageErrors ?? m.right.consoleErrors ?? m.left.pageErrors ?? m.left.consoleErrors ?? [])[0];
+      console.log(
+        `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
+      );
     } else {
       const leftMsg = m.left.error ?? `status ${m.left.status}`;
       const rightMsg = m.right.error ?? `status ${m.right.status}`;

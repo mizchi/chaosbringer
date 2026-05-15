@@ -31,7 +31,15 @@ export type MismatchKind =
    * Status agreed but one or more of the named response headers
    * differ. Only fires when `checkHeaders` is non-empty.
    */
-  | "header";
+  | "header"
+  /**
+   * Status / body / headers all agreed (or weren't checked) but a
+   * browser visit to one side surfaced JavaScript errors the other
+   * side did not — uncaught exceptions, console.error, hydration
+   * mismatches. The bug class that's invisible to HTTP-layer probes.
+   * Only fires when `checkExceptions` is enabled.
+   */
+  | "exception";
 
 export interface SideResult {
   /** Final status. `null` when the fetch threw before getting a response. */
@@ -61,6 +69,18 @@ export interface SideResult {
    * distinguish "missing" from "empty".
    */
   headers?: Record<string, string | null>;
+  /**
+   * Uncaught page errors (`window.onerror` / Playwright's `pageerror`
+   * event) captured during a browser visit. Populated only when
+   * `checkExceptions` is enabled.
+   */
+  pageErrors?: string[];
+  /**
+   * `console.error` lines captured during a browser visit. Populated
+   * only when `checkExceptions` is enabled. Console *warnings* are
+   * deliberately ignored — chaosbringer's crawler does the same.
+   */
+  consoleErrors?: string[];
 }
 
 export interface ParityProbe {
@@ -122,14 +142,113 @@ export interface RunParityOptions {
    * which headers actually matter to their app.
    */
   checkHeaders?: string[];
+  /**
+   * When `true`, each path is also visited in a real browser (Chromium)
+   * and uncaught page errors + `console.error` are recorded. The
+   * comparison fires "exception" when the captured error sets differ
+   * between sides — catches React hydration mismatches and other
+   * runtime-only failures where HTTP looks identical.
+   *
+   * Cost is dominant: one browser visit per side per path is orders
+   * of magnitude slower than the fetch probe. Browsers are reused
+   * across paths via a single launch; per-path isolation comes from
+   * a fresh `BrowserContext`.
+   *
+   * Playwright is loaded via dynamic import only when this is set,
+   * so consumers that don't opt in do not pay the install cost.
+   */
+  checkExceptions?: boolean;
   /** Override fetch for testing. */
   fetcher?: typeof fetch;
+  /**
+   * Override the browser launcher for testing. The default lazy-loads
+   * `playwright.chromium.launch()`. A test can pass a fake that
+   * produces canned `pageErrors` / `consoleErrors` per URL without
+   * actually starting Chromium.
+   */
+  browserLauncher?: () => Promise<BrowserLike>;
+}
+
+// ─── Browser abstraction (minimal subset of Playwright Page used here)
+//
+// The real `Browser` / `Page` types come from `playwright` and are huge.
+// We declare only the slice the parity probe actually touches, so test
+// doubles stay tiny and the integration boundary stays explicit.
+
+export interface PageLike {
+  on(event: "pageerror", handler: (err: Error) => void): void;
+  on(event: "console", handler: (msg: ConsoleMessageLike) => void): void;
+  goto(url: string, opts?: { timeout?: number; waitUntil?: string }): Promise<unknown>;
+  waitForLoadState?(
+    state: string,
+    opts?: { timeout?: number },
+  ): Promise<void>;
+}
+interface ConsoleMessageLike {
+  type(): string;
+  text(): string;
+}
+export interface ContextLike {
+  newPage(): Promise<PageLike>;
+  close(): Promise<void>;
+}
+export interface BrowserLike {
+  newContext(): Promise<ContextLike>;
+  close(): Promise<void>;
 }
 
 function joinBase(base: string, path: string): string {
   // Both `<base>/foo` and `<base>foo` are common in path files. Normalise
   // so we never double-slash or miss-slash. URL parses both cleanly.
   return new URL(path, base.endsWith("/") ? base : `${base}/`).toString();
+}
+
+/**
+ * Normalise an error message so two runs of the same bug collapse into
+ * the same string. Mirrors `clusterErrors`'s fingerprint logic but kept
+ * inline so parity stays free of a cross-module dependency on the
+ * crawler.
+ */
+function fingerprintErrorMessage(msg: string): string {
+  return msg
+    .replace(/https?:\/\/[^\s"'()<>]+/g, "<url>")
+    .replace(/:\d+:\d+/g, ":<loc>")
+    .replace(/\b\d{3,}\b/g, "<n>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function probeBrowserSide(
+  browser: BrowserLike,
+  url: string,
+  timeoutMs: number,
+): Promise<{ pageErrors: string[]; consoleErrors: string[] }> {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  const pageErrors: string[] = [];
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (err) => pageErrors.push(err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") consoleErrors.push(msg.text());
+  });
+  try {
+    await page.goto(url, { timeout: timeoutMs, waitUntil: "load" });
+    // Best-effort idle wait so async errors (post-load fetch failures,
+    // micro-task throwers) surface before we tear the page down. The
+    // catch swallows the inevitable timeout on apps that never idle.
+    if (page.waitForLoadState) {
+      await page.waitForLoadState("networkidle", { timeout: 1000 }).catch(() => {
+        // ignored: networkidle didn't settle within 1s — fine, we have what we have
+      });
+    }
+  } catch {
+    // Navigation errors (DNS, connection refused, etc.) are already
+    // reported by the fetch probe via the "failure" kind. We don't
+    // double-report them here.
+  } finally {
+    await ctx.close();
+  }
+  return { pageErrors, consoleErrors };
 }
 
 async function probeSide(
@@ -223,7 +342,34 @@ function classify(left: SideResult, right: SideResult): MismatchKind | null {
   ) {
     return "body";
   }
+  // Exception comparison runs LAST — it's only meaningful when status
+  // / headers / body all matched (an HTTP-level difference already
+  // captures any browser symptoms it causes). Compare normalised
+  // error sets so source-location jitter doesn't false-positive.
+  if (left.pageErrors && right.pageErrors) {
+    const leftFp = new Set([
+      ...left.pageErrors.map(fingerprintErrorMessage),
+      ...(left.consoleErrors ?? []).map(fingerprintErrorMessage),
+    ]);
+    const rightFp = new Set([
+      ...right.pageErrors.map(fingerprintErrorMessage),
+      ...(right.consoleErrors ?? []).map(fingerprintErrorMessage),
+    ]);
+    if (leftFp.size !== rightFp.size) return "exception";
+    for (const fp of leftFp) {
+      if (!rightFp.has(fp)) return "exception";
+    }
+  }
   return null;
+}
+
+async function defaultBrowserLauncher(): Promise<BrowserLike> {
+  // Dynamic import keeps Playwright off the import graph for users
+  // who never enable `checkExceptions`. TS doesn't follow the dynamic
+  // string into the package, so we narrow to BrowserLike at runtime.
+  const pw = await import("playwright");
+  const browser = await pw.chromium.launch({ headless: true });
+  return browser as unknown as BrowserLike;
 }
 
 export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
@@ -235,22 +381,53 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   // can use `Headers.get()` (which is case-insensitive anyway) and
   // the result map is keyed predictably for downstream consumers.
   const checkHeaders = (opts.checkHeaders ?? []).map((h) => h.toLowerCase());
+  const checkExceptions = opts.checkExceptions ?? false;
+
+  // Browser launch is amortised across all paths — one Chromium for
+  // the whole run, fresh context per visit. Only fires when
+  // checkExceptions is enabled so non-browser runs stay zero-cost.
+  let browser: BrowserLike | null = null;
+  if (checkExceptions) {
+    const launcher = opts.browserLauncher ?? defaultBrowserLauncher;
+    browser = await launcher();
+  }
 
   const mismatches: ParityMismatch[] = [];
   const matches: ParityProbe[] = [];
 
-  for (const path of opts.paths) {
-    // Probe both sides in parallel — they're independent and the report
-    // is symmetric, so there's no reason to serialise.
-    const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders };
-    const [left, right] = await Promise.all([
-      probeSide(opts.left, path, sideOpts),
-      probeSide(opts.right, path, sideOpts),
-    ]);
-    const probe: ParityProbe = { path, left, right };
-    const kind = classify(left, right);
-    if (kind) mismatches.push({ ...probe, kind });
-    else matches.push(probe);
+  try {
+    for (const path of opts.paths) {
+      // Probe both sides in parallel — they're independent and the report
+      // is symmetric, so there's no reason to serialise.
+      const sideOpts = { followRedirects, timeoutMs, fetcher, checkBody, checkHeaders };
+      const [left, right] = await Promise.all([
+        probeSide(opts.left, path, sideOpts),
+        probeSide(opts.right, path, sideOpts),
+      ]);
+
+      if (browser) {
+        // Browser visits are slower (~1s+ per page) and must use real
+        // resolution against the live server. Serial per-side to avoid
+        // hammering one server; parallel across sides for symmetry.
+        const [bLeft, bRight] = await Promise.all([
+          probeBrowserSide(browser, joinBase(opts.left, path), timeoutMs),
+          probeBrowserSide(browser, joinBase(opts.right, path), timeoutMs),
+        ]);
+        left.pageErrors = bLeft.pageErrors;
+        left.consoleErrors = bLeft.consoleErrors;
+        right.pageErrors = bRight.pageErrors;
+        right.consoleErrors = bRight.consoleErrors;
+      }
+
+      const probe: ParityProbe = { path, left, right };
+      const kind = classify(left, right);
+      if (kind) mismatches.push({ ...probe, kind });
+      else matches.push(probe);
+    }
+  } finally {
+    // Always tear down — leaking a Chromium across CI runs is a
+    // multi-hundred-MB-each kind of leak.
+    if (browser) await browser.close();
   }
 
   return {

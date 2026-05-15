@@ -61,6 +61,13 @@ export const BUG_LEDGER = [
     symptom: "v2 returns `cache-control: no-store` where v1 returns `max-age=60` (policy drift)",
     catcher: "chaosbringer parity --check-headers cache-control",
   },
+  {
+    id: "BUG-6",
+    where: "GET /dashboard",
+    symptom:
+      "v1 and v2 return byte-identical HTML; v2's bundle.js (served from /static/bundle.js) throws an uncaught ReferenceError on load. Invisible to status/body/header parity.",
+    catcher: "chaosbringer parity --check-exceptions",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -213,6 +220,28 @@ app.get("/admin", (c) => {
       : "";
   return c.html(`<!doctype html>
 <html><body><h1>Admin</h1>${bugScript}</body></html>`);
+});
+
+// BUG-6: byte-identical HTML on /dashboard for both variants — the only
+// difference lives in /static/bundle.js, which v2 ships with a broken
+// build (an undefined symbol). The HTTP-layer probes (status / headers
+// / body bytes) all match for /dashboard. The browser-level probe
+// catches it because the script throws on load.
+app.get("/dashboard", (c) =>
+  c.html(`<!doctype html>
+<html><body><h1>Dashboard</h1><script src="/static/bundle.js"></script></body></html>`),
+);
+
+app.get("/static/bundle.js", (c) => {
+  c.header("content-type", "application/javascript");
+  return c.body(
+    VARIANT === "v2"
+      ? // BUG-6 v2: uncaught ReferenceError on load. The HTML referencing
+        // bundle.js is identical on both sides, so this surfaces ONLY
+        // through a browser visit + page-error capture.
+        `(function(){ console.log('dashboard init:', undefinedDashboardSymbol); })();`
+      : `(function(){ /* dashboard ready */ })();`,
+  );
 });
 
 serve({ fetch: app.fetch, port: PORT }, (info) => {
