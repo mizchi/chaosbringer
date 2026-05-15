@@ -131,41 +131,41 @@ export async function runParityCli(argv: string[]): Promise<void> {
 
   console.log(`Checked ${report.pathsChecked} path(s): ${report.matches.length} match, ${report.mismatches.length} mismatch.`);
   for (const m of report.mismatches) {
-    if (m.kind === "status") {
-      console.log(`  STATUS ${m.path}  left=${m.left.status}  right=${m.right.status}`);
-    } else if (m.kind === "redirect") {
-      console.log(`  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`);
-    } else if (m.kind === "body") {
-      const summary = summariseBodyDiff(m.bodyDiff);
-      const head = `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
-      console.log(summary ? `${head}\n         ${summary}` : head);
-    } else if (m.kind === "header") {
-      // Find the first differing header so the printed line is
-      // immediately actionable; the JSON report carries the full map.
-      const diffs: string[] = [];
-      const left = m.left.headers ?? {};
-      const right = m.right.headers ?? {};
-      for (const name of Object.keys(left)) {
-        if (left[name] !== right[name]) {
-          diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+    // Print every detected kind for this probe, not just the primary —
+    // a header drift can mask a body drift if we only show the first.
+    for (const kind of m.kinds) {
+      if (kind === "status") {
+        console.log(`  STATUS ${m.path}  left=${m.left.status}  right=${m.right.status}`);
+      } else if (kind === "redirect") {
+        console.log(
+          `  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`,
+        );
+      } else if (kind === "body") {
+        const summary = summariseBodyDiff(m.bodyDiff);
+        const head = `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
+        console.log(summary ? `${head}\n         ${summary}` : head);
+      } else if (kind === "header") {
+        const diffs: string[] = [];
+        const left = m.left.headers ?? {};
+        const right = m.right.headers ?? {};
+        for (const name of Object.keys(left)) {
+          if (left[name] !== right[name]) {
+            diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+          }
         }
+        console.log(`  HEADER ${m.path}  ${diffs.join(" | ")}`);
+      } else if (kind === "exception") {
+        const leftCount = (m.left.pageErrors?.length ?? 0) + (m.left.consoleErrors?.length ?? 0);
+        const rightCount = (m.right.pageErrors?.length ?? 0) + (m.right.consoleErrors?.length ?? 0);
+        const sample = (m.right.pageErrors ?? m.right.consoleErrors ?? m.left.pageErrors ?? m.left.consoleErrors ?? [])[0];
+        console.log(
+          `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
+        );
+      } else if (kind === "failure") {
+        const leftMsg = m.left.error ?? `status ${m.left.status}`;
+        const rightMsg = m.right.error ?? `status ${m.right.status}`;
+        console.log(`  FAIL   ${m.path}  left=${leftMsg}  right=${rightMsg}`);
       }
-      console.log(`  HEADER ${m.path}  ${diffs.join(" | ")}`);
-    } else if (m.kind === "exception") {
-      const leftCount = (m.left.pageErrors?.length ?? 0) + (m.left.consoleErrors?.length ?? 0);
-      const rightCount =
-        (m.right.pageErrors?.length ?? 0) + (m.right.consoleErrors?.length ?? 0);
-      // Print one representative message per side (whichever set is
-      // non-empty first) so the line is actionable; full lists are in
-      // the JSON report.
-      const sample = (m.right.pageErrors ?? m.right.consoleErrors ?? m.left.pageErrors ?? m.left.consoleErrors ?? [])[0];
-      console.log(
-        `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
-      );
-    } else {
-      const leftMsg = m.left.error ?? `status ${m.left.status}`;
-      const rightMsg = m.right.error ?? `status ${m.right.status}`;
-      console.log(`  FAIL   ${m.path}  left=${leftMsg}  right=${rightMsg}`);
     }
   }
 

@@ -78,7 +78,7 @@ describe("runParity", () => {
       fetcher,
     });
     expect(report.mismatches).toHaveLength(1);
-    expect(report.mismatches[0].kind).toBe("status");
+    expect(report.mismatches[0].kinds[0]).toBe("status");
     expect(report.mismatches[0].left.status).toBe(200);
     expect(report.mismatches[0].right.status).toBe(500);
   });
@@ -97,7 +97,7 @@ describe("runParity", () => {
       fetcher,
     });
     expect(report.mismatches).toHaveLength(1);
-    expect(report.mismatches[0].kind).toBe("redirect");
+    expect(report.mismatches[0].kinds[0]).toBe("redirect");
     expect(report.mismatches[0].left.location).toBe("/new");
     expect(report.mismatches[0].right.location).toBe("/elsewhere");
   });
@@ -130,7 +130,7 @@ describe("runParity", () => {
       fetcher,
     });
     expect(report.mismatches).toHaveLength(1);
-    expect(report.mismatches[0].kind).toBe("failure");
+    expect(report.mismatches[0].kinds[0]).toBe("failure");
     expect(report.mismatches[0].left.error).toContain("ECONNREFUSED");
     expect(report.mismatches[0].right.status).toBe(200);
   });
@@ -239,7 +239,7 @@ describe("runParity", () => {
       });
       expect(report.mismatches).toHaveLength(1);
       const m = report.mismatches[0];
-      expect(m.kind).toBe("body");
+      expect(m.kinds[0]).toBe("body");
       // bodyLength + bodyHash populated on both sides so a consumer of
       // the JSON report can prove the drift without refetching.
       expect(m.left.bodyHash).toMatch(/^[a-f0-9]{64}$/);
@@ -295,7 +295,7 @@ describe("runParity", () => {
         fetcher,
       });
       expect(report.mismatches).toHaveLength(1);
-      expect(report.mismatches[0].kind).toBe("status");
+      expect(report.mismatches[0].kinds[0]).toBe("status");
     });
   });
 
@@ -316,7 +316,7 @@ describe("runParity", () => {
       });
       expect(report.mismatches).toHaveLength(1);
       const m = report.mismatches[0];
-      expect(m.kind).toBe("header");
+      expect(m.kinds[0]).toBe("header");
       expect(m.left.headers?.["cache-control"]).toBe("max-age=60");
       expect(m.right.headers?.["cache-control"]).toBe("no-store");
     });
@@ -351,7 +351,7 @@ describe("runParity", () => {
         checkHeaders: ["Content-Type"],
         fetcher,
       });
-      expect(report.mismatches[0].kind).toBe("header");
+      expect(report.mismatches[0].kinds[0]).toBe("header");
       expect(report.mismatches[0].left.headers?.["content-type"]).toBe("text/html");
     });
 
@@ -391,7 +391,7 @@ describe("runParity", () => {
         fetcher,
       });
       expect(report.mismatches).toHaveLength(1);
-      expect(report.mismatches[0].kind).toBe("header");
+      expect(report.mismatches[0].kinds[0]).toBe("header");
     });
 
     it("an empty/unset checkHeaders list does not populate the headers map", async () => {
@@ -428,7 +428,7 @@ describe("runParity", () => {
         browserLauncher,
       });
       expect(report.mismatches).toHaveLength(1);
-      expect(report.mismatches[0].kind).toBe("exception");
+      expect(report.mismatches[0].kinds[0]).toBe("exception");
       expect(report.mismatches[0].right.pageErrors).toEqual([
         "ReferenceError: x is not defined",
       ]);
@@ -475,7 +475,7 @@ describe("runParity", () => {
         fetcher,
         browserLauncher,
       });
-      expect(report.mismatches[0].kind).toBe("exception");
+      expect(report.mismatches[0].kinds[0]).toBe("exception");
       expect(report.mismatches[0].right.consoleErrors).toEqual(["api failed"]);
     });
 
@@ -498,7 +498,7 @@ describe("runParity", () => {
         fetcher,
         browserLauncher,
       });
-      expect(report.mismatches[0].kind).toBe("status");
+      expect(report.mismatches[0].kinds[0]).toBe("status");
     });
 
     it("matched probes carry the empty error arrays so consumers can prove cleanliness", async () => {
@@ -540,6 +540,57 @@ describe("runParity", () => {
     });
   });
 
+  describe("multi-kind reporting (overlapping bugs on one path)", () => {
+    it("reports BOTH header and body kinds when both differ", async () => {
+      // The bug that motivated this: with single-kind reporting, a
+      // header drift would mask an independent body drift on the
+      // same path. Now both surface.
+      const fetcher = makeFetcher({
+        "http://left/x": () =>
+          new Response(JSON.stringify({ id: 1 }), {
+            status: 200,
+            headers: { "cache-control": "max-age=60" },
+          }),
+        "http://right/x": () =>
+          new Response(JSON.stringify({ id: 2 }), {
+            status: 200,
+            headers: { "cache-control": "no-store" },
+          }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkBody: true,
+        checkHeaders: ["cache-control"],
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kinds).toEqual(["header", "body"]);
+      expect(report.mismatches[0].bodyDiff).toBeDefined();
+    });
+
+    it("status mismatch still short-circuits other checks", async () => {
+      // A status difference means the downstream body / header
+      // comparison is apples-to-oranges. Keep status exclusive.
+      const fetcher = makeFetcher({
+        "http://left/x": () =>
+          new Response("a", { status: 200, headers: { "cache-control": "max-age=60" } }),
+        "http://right/x": () =>
+          new Response("b", { status: 500, headers: { "cache-control": "no-store" } }),
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkBody: true,
+        checkHeaders: ["cache-control"],
+        fetcher,
+      });
+      expect(report.mismatches[0].kinds).toEqual(["status"]);
+    });
+  });
+
   it("flags 3xx → 200 status mismatch (not redirect mismatch)", async () => {
     // Same status family check guards against false-positive redirects:
     // 301 vs 200 should be reported as a status mismatch, not a redirect mismatch.
@@ -555,6 +606,6 @@ describe("runParity", () => {
       fetcher,
     });
     expect(report.mismatches).toHaveLength(1);
-    expect(report.mismatches[0].kind).toBe("status");
+    expect(report.mismatches[0].kinds[0]).toBe("status");
   });
 });

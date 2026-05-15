@@ -127,30 +127,32 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
   );
   for (const m of report.mismatches) {
     const prefix = `  [${m.index}] ${m.label}`;
-    if (m.kind === "status") {
-      console.log(`${prefix}  STATUS left=${m.left.status} right=${m.right.status}`);
-    } else if (m.kind === "redirect") {
-      console.log(
-        `${prefix}  REDIR  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`,
-      );
-    } else if (m.kind === "header") {
-      const diffs: string[] = [];
-      const left = m.left.headers ?? {};
-      const right = m.right.headers ?? {};
-      for (const name of Object.keys(left)) {
-        if (left[name] !== right[name]) {
-          diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+    for (const kind of m.kinds) {
+      if (kind === "status") {
+        console.log(`${prefix}  STATUS left=${m.left.status} right=${m.right.status}`);
+      } else if (kind === "redirect") {
+        console.log(
+          `${prefix}  REDIR  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`,
+        );
+      } else if (kind === "header") {
+        const diffs: string[] = [];
+        const left = m.left.headers ?? {};
+        const right = m.right.headers ?? {};
+        for (const name of Object.keys(left)) {
+          if (left[name] !== right[name]) {
+            diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+          }
         }
+        console.log(`${prefix}  HEADER ${diffs.join(" | ")}`);
+      } else if (kind === "body") {
+        const summary = summariseBodyDiff(m.bodyDiff);
+        const head = `${prefix}  BODY   left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
+        console.log(summary ? `${head}\n         ${summary}` : head);
+      } else if (kind === "failure") {
+        const leftMsg = m.left.error ?? `status ${m.left.status}`;
+        const rightMsg = m.right.error ?? `status ${m.right.status}`;
+        console.log(`${prefix}  FAIL   left=${leftMsg} right=${rightMsg}`);
       }
-      console.log(`${prefix}  HEADER ${diffs.join(" | ")}`);
-    } else if (m.kind === "body") {
-      const summary = summariseBodyDiff(m.bodyDiff);
-      const head = `${prefix}  BODY   left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
-      console.log(summary ? `${head}\n         ${summary}` : head);
-    } else {
-      const leftMsg = m.left.error ?? `status ${m.left.status}`;
-      const rightMsg = m.right.error ?? `status ${m.right.status}`;
-      console.log(`${prefix}  FAIL   left=${leftMsg} right=${rightMsg}`);
     }
   }
 

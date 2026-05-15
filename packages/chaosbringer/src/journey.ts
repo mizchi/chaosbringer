@@ -91,8 +91,9 @@ export interface JourneyStepResult {
 }
 
 export interface JourneyMismatch extends JourneyStepResult {
-  kind: MismatchKind;
-  /** Localised JSON body diff, populated only on kind=body (see parity.ts). */
+  /** See parity.ParityMismatch.kinds — all detected kinds in precedence order. */
+  kinds: MismatchKind[];
+  /** Localised JSON body diff, populated only when `kinds` contains `"body"`. */
   bodyDiff?: BodyDiffResult;
 }
 
@@ -366,28 +367,31 @@ async function runStepOnSide(
 }
 
 /**
- * Local copy of parity's classify with the same precedence chain.
- * Inlined (rather than imported) so journey can omit the exception
- * branch — see file header for why exception checking is not exposed
- * here in v1.
+ * Same shape as parity's classify — all detected kinds in precedence
+ * order, empty array means match. Inlined rather than imported so the
+ * journey omits exception detection (see file header).
  */
-function classifyStep(left: SideResult, right: SideResult): MismatchKind | null {
+function classifyStep(left: SideResult, right: SideResult): MismatchKind[] {
   const leftFailed = left.status === null;
   const rightFailed = right.status === null;
-  if (leftFailed !== rightFailed) return "failure";
-  if (leftFailed && rightFailed) return null;
-  if (left.status !== right.status) return "status";
+  if (leftFailed !== rightFailed) return ["failure"];
+  if (leftFailed && rightFailed) return [];
+  if (left.status !== right.status) return ["status"];
   if (
     typeof left.status === "number" &&
     left.status >= 300 &&
     left.status < 400 &&
     left.location !== right.location
   ) {
-    return "redirect";
+    return ["redirect"];
   }
+  const kinds: MismatchKind[] = [];
   if (left.headers && right.headers) {
     for (const name of Object.keys(left.headers)) {
-      if (left.headers[name] !== right.headers[name]) return "header";
+      if (left.headers[name] !== right.headers[name]) {
+        kinds.push("header");
+        break;
+      }
     }
   }
   if (
@@ -395,9 +399,9 @@ function classifyStep(left: SideResult, right: SideResult): MismatchKind | null 
     right.bodyHash !== undefined &&
     left.bodyHash !== right.bodyHash
   ) {
-    return "body";
+    kinds.push("body");
   }
-  return null;
+  return kinds;
 }
 
 export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport> {
@@ -440,10 +444,10 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
       right,
     };
     stepsChecked++;
-    const kind = classifyStep(left, right);
-    if (kind) {
-      const mismatch: JourneyMismatch = { ...result, kind };
-      if (kind === "body") {
+    const kinds = classifyStep(left, right);
+    if (kinds.length > 0) {
+      const mismatch: JourneyMismatch = { ...result, kinds };
+      if (kinds.includes("body")) {
         const diff = diffJsonBodies(leftProbe.bodyText, rightProbe.bodyText);
         if (diff) mismatch.bodyDiff = diff;
       }

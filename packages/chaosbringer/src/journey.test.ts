@@ -109,7 +109,7 @@ describe("runJourney", () => {
     expect(report.mismatches).toHaveLength(1);
     expect(report.mismatches[0].index).toBe(1);
     expect(report.mismatches[0].label).toBe("list");
-    expect(report.mismatches[0].kind).toBe("body");
+    expect(report.mismatches[0].kinds[0]).toBe("body");
   });
 
   it("threads per-side cookies — auth set in step 1 visible to step 2", async () => {
@@ -215,7 +215,7 @@ describe("runJourney", () => {
       steps: [{ method: "GET", path: "/x" }],
       fetcher,
     });
-    expect(report.mismatches[0].kind).toBe("status");
+    expect(report.mismatches[0].kinds[0]).toBe("status");
   });
 
   it("--no-check-body equivalent: checkBody=false skips body hashing", async () => {
@@ -326,7 +326,7 @@ describe("runJourney", () => {
         }),
       });
       expect(report.mismatches).toHaveLength(1);
-      expect(report.mismatches[0].kind).toBe("body");
+      expect(report.mismatches[0].kinds[0]).toBe("body");
       expect(report.mismatches[0].index).toBe(1);
     });
 

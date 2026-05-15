@@ -91,14 +91,22 @@ export interface ParityProbe {
 }
 
 export interface ParityMismatch extends ParityProbe {
-  /** Mismatch kinds detected for this probe. A single probe can carry
-   *  multiple kinds (e.g. left fails + right returns 200 → both
-   *  "failure" and "status" depending on the consumer's view; we record
-   *  the strongest one). */
-  kind: MismatchKind;
   /**
-   * Localised body diff. Populated only on `kind: "body"` when both
-   * sides' bodies parsed as JSON. Carries up to ~50 path-level
+   * All mismatch kinds detected for this probe, ordered by precedence
+   * (status / failure → header → body → exception). Empty array can't
+   * happen — a probe with no detected drift goes into `matches`
+   * instead.
+   *
+   * Where a previous version exposed `kind: MismatchKind`, callers
+   * should use `kinds[0]` for the primary signal — but `kinds` lets
+   * a triager see ALL coexisting bugs at once (header + body + body
+   * shape all firing on the same path). Hiding the body drift behind
+   * the header drift was the bug.
+   */
+  kinds: MismatchKind[];
+  /**
+   * Localised body diff. Populated when `kinds` contains `"body"` and
+   * both sides' bodies parsed as JSON. Carries up to ~50 path-level
    * entries; a truncated flag fires when the diff overflows.
    */
   bodyDiff?: BodyDiffResult;
@@ -325,50 +333,49 @@ async function probeSide(
   }
 }
 
-function classify(left: SideResult, right: SideResult): MismatchKind | null {
+/**
+ * Detect every mismatch kind applicable to a (left, right) probe pair.
+ * Returns the kinds in precedence order so `kinds[0]` is the primary
+ * signal — but a triager with the full list sees overlapping bugs
+ * (e.g. header drift AND body drift on the same path) at once.
+ *
+ * Failure / status / redirect are still exclusive at the top of the
+ * chain: a connection-level or status-level difference means the
+ * downstream body/header inspection is comparing apples to oranges.
+ * Once those pass, header / body / exception can ALL fire and each
+ * gets reported.
+ */
+function classify(left: SideResult, right: SideResult): MismatchKind[] {
   const leftFailed = left.status === null;
   const rightFailed = right.status === null;
-  if (leftFailed !== rightFailed) return "failure";
-  if (leftFailed && rightFailed) {
-    // Both failed — not a parity mismatch per the feature request
-    // ("only one side fails"), so treat as a match. The caller can
-    // still see both error strings via the probe data if needed.
-    return null;
-  }
-  if (left.status !== right.status) return "status";
-  // Status matched. For 3xx, also check the redirect target.
+  if (leftFailed !== rightFailed) return ["failure"];
+  if (leftFailed && rightFailed) return []; // both failed → matched per spec
+  if (left.status !== right.status) return ["status"];
   if (
     typeof left.status === "number" &&
     left.status >= 300 &&
     left.status < 400 &&
     left.location !== right.location
   ) {
-    return "redirect";
+    return ["redirect"];
   }
-  // Header comparison is opt-in (gated by `checkHeaders` length) and
-  // checked BEFORE body — a header drift (e.g. `cache-control`
-  // changing TTL) usually causes downstream symptoms whose body
-  // signal is downstream noise, so we report the header difference
-  // as the primary cause.
+
+  const kinds: MismatchKind[] = [];
   if (left.headers && right.headers) {
     for (const name of Object.keys(left.headers)) {
-      if (left.headers[name] !== right.headers[name]) return "header";
+      if (left.headers[name] !== right.headers[name]) {
+        kinds.push("header");
+        break;
+      }
     }
   }
-  // Body comparison is opt-in (gated by `checkBody`) — both hashes
-  // are only populated when the caller asked for it, so a missing
-  // hash on either side disables this branch automatically.
   if (
     left.bodyHash !== undefined &&
     right.bodyHash !== undefined &&
     left.bodyHash !== right.bodyHash
   ) {
-    return "body";
+    kinds.push("body");
   }
-  // Exception comparison runs LAST — it's only meaningful when status
-  // / headers / body all matched (an HTTP-level difference already
-  // captures any browser symptoms it causes). Compare normalised
-  // error sets so source-location jitter doesn't false-positive.
   if (left.pageErrors && right.pageErrors) {
     const leftFp = new Set([
       ...left.pageErrors.map(fingerprintErrorMessage),
@@ -378,12 +385,18 @@ function classify(left: SideResult, right: SideResult): MismatchKind | null {
       ...right.pageErrors.map(fingerprintErrorMessage),
       ...(right.consoleErrors ?? []).map(fingerprintErrorMessage),
     ]);
-    if (leftFp.size !== rightFp.size) return "exception";
-    for (const fp of leftFp) {
-      if (!rightFp.has(fp)) return "exception";
+    let differs = leftFp.size !== rightFp.size;
+    if (!differs) {
+      for (const fp of leftFp) {
+        if (!rightFp.has(fp)) {
+          differs = true;
+          break;
+        }
+      }
     }
+    if (differs) kinds.push("exception");
   }
-  return null;
+  return kinds;
 }
 
 async function defaultBrowserLauncher(): Promise<BrowserLike> {
@@ -445,13 +458,14 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
       }
 
       const probe: ParityProbe = { path, left, right };
-      const kind = classify(left, right);
-      if (kind) {
-        const m: ParityMismatch = { ...probe, kind };
-        // Localise body drift to specific JSON paths when we have the
-        // bytes. Skipped for other kinds — a status mismatch's body
-        // delta is downstream noise the diff would just amplify.
-        if (kind === "body") {
+      const kinds = classify(left, right);
+      if (kinds.length > 0) {
+        const m: ParityMismatch = { ...probe, kinds };
+        // Localise body drift to specific JSON paths when both sides
+        // carry hashes and the kinds include "body". Other kinds
+        // (status / header / exception) don't need this — their
+        // primary signal is already actionable on its own.
+        if (kinds.includes("body")) {
           const diff = diffJsonBodies(leftProbe.bodyText, rightProbe.bodyText);
           if (diff) m.bodyDiff = diff;
         }
