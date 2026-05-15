@@ -20,7 +20,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const PORT_V1 = 5001;
@@ -166,7 +166,54 @@ async function main(): Promise<void> {
     // Give them a moment so the process group is gone before exit.
     await sleep(200);
   }
+  printSummary();
   process.exit(exitCode);
+}
+
+/**
+ * Read every JSON report under `reports/` and tally up mismatches by
+ * `MismatchKind`. Prints a table at the end of the loop so an
+ * operator (or sub-agent) sees the overall shape at a glance —
+ * useful as the CI gate's "did this run get worse" signal.
+ */
+function printSummary(): void {
+  if (!existsSync(REPORTS)) return;
+  type ReportShape = {
+    mismatches?: Array<{ kinds?: string[]; path?: string; label?: string }>;
+  };
+  const counts = new Map<string, number>();
+  const detail: Array<{ source: string; where: string; kinds: string[] }> = [];
+  const reports = ["parity.json", "journey-todos.json", "journey-by-id.json", "journey-tenant-isolation.json"];
+  for (const name of reports) {
+    const path = `${REPORTS}/${name}`;
+    if (!existsSync(path)) continue;
+    let parsed: ReportShape;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf-8")) as ReportShape;
+    } catch {
+      continue;
+    }
+    for (const m of parsed.mismatches ?? []) {
+      const where = m.path ?? m.label ?? "?";
+      const kinds = m.kinds ?? [];
+      detail.push({ source: name, where, kinds });
+      for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) {
+    console.log("\n=== summary === no mismatches");
+    return;
+  }
+  console.log("\n=== summary ===");
+  // Stable order: by precedence-ish then alphabetical.
+  const order = ["status", "failure", "redirect", "header", "body", "exception", "perf"];
+  const sortedKinds = Array.from(counts.keys()).sort(
+    (a, b) => order.indexOf(a) - order.indexOf(b),
+  );
+  for (const k of sortedKinds) {
+    console.log(`  ${k.padEnd(10)} ${counts.get(k)}`);
+  }
+  console.log(`  ${"TOTAL".padEnd(10)} ${detail.length} finding(s) across ${detail.length} kind-occurrences`);
 }
 
 main().catch((err) => {

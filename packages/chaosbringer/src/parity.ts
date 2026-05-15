@@ -134,6 +134,22 @@ export interface ParityReport {
   /** Paths that agreed on every comparison. Carried so consumers can
    *  prove which routes are stable without re-running. */
   matches: ParityProbe[];
+  /**
+   * The threshold + opt-in switches that produced this report. An
+   * operator re-reading the JSON can tell at a glance which checks
+   * were on, and which threshold a `perf` mismatch tripped against.
+   * Re-running with a different config produces a different report —
+   * the config is part of the result, not external state.
+   */
+  config: {
+    checkBody: boolean;
+    checkHeaders: string[];
+    checkExceptions: boolean;
+    followRedirects: boolean;
+    timeoutMs: number;
+    perfDeltaMs?: number;
+    perfRatio?: number;
+  };
 }
 
 export interface RunParityOptions {
@@ -547,5 +563,14 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
     pathsChecked: opts.paths.length,
     mismatches,
     matches,
+    config: {
+      checkBody,
+      checkHeaders,
+      checkExceptions,
+      followRedirects,
+      timeoutMs,
+      ...(opts.perfDeltaMs !== undefined ? { perfDeltaMs: opts.perfDeltaMs } : {}),
+      ...(opts.perfRatio !== undefined ? { perfRatio: opts.perfRatio } : {}),
+    },
   };
 }

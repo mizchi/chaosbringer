@@ -32,10 +32,36 @@ pnpm loop chaos          # crawl v1 + v2 + diff only
 
 Outputs land in:
 
-- `reports/parity.json` — full parity report (status / redirect / failure mismatches)
+- `reports/parity.json` — full parity report (status / redirect / failure / header / body / exception / perf mismatches)
+- `reports/journey-*.json` — one per journey file (write-then-read, capture-by-id, tenant-isolation)
 - `reports/v1.json` / `reports/v2.json` — chaosbringer crawl reports
 - `artifacts/v1/` / `artifacts/v2/` — per-page failure bundles
 - `artifacts/{v1,v2}/clusters/` — one representative bundle per error cluster (via `--cluster-artifacts`)
+
+`pnpm loop` ends with a `=== summary ===` table tallying mismatches by kind across every report, so a CI gate has a single line to grep on.
+
+## Parity check kinds
+
+A single `chaosbringer parity` invocation can opt into any subset of:
+
+| Flag                                | Catches                                                  |
+| ----------------------------------- | -------------------------------------------------------- |
+| (always on)                         | status / redirect / one-sided failure                    |
+| `--check-body`                      | byte hash differs; JSON-aware diff names which field     |
+| `--check-headers <list>`            | named response headers differ (CORS / cache-control)     |
+| `--check-exceptions`                | uncaught JS errors + console.error from a browser visit  |
+| `--perf-delta-ms <n>`               | right slower than left by more than N ms (single-sample) |
+| `--perf-ratio <n>`                  | right > left × N (composes with `--perf-delta-ms` via OR) |
+
+Every detected kind for a probe fires — they don't shadow each other. A path with both a header drift and a body drift prints both lines (and the JSON carries `kinds: ["header","body"]`).
+
+## Journey: multi-step + per-actor
+
+`chaosbringer journey --steps file.json` replays a sequence with per-side cookie jars. Each step accepts:
+
+- `method`, `path`, `body`, `headers`, `label` — standard request shape.
+- `capture: [{ from: "body.id", as: "todoId" }]` — extract a value from the response and bind it as a variable on the side it ran on. `{{todoId}}` in later steps' path / body / headers is substituted before sending.
+- `actor: "alice"` — per-side, per-actor cookie jar + variable bag. Lets a journey verify tenant isolation: Alice creates a doc, Bob lists his docs, Bob must not see Alice's payload.
 
 ## Exercise individual fault kinds
 

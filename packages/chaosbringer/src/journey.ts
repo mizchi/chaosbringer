@@ -116,6 +116,13 @@ export interface JourneyReport {
   stepsChecked: number;
   mismatches: JourneyMismatch[];
   matches: JourneyStepResult[];
+  /** Thresholds + opt-ins that produced this report (see parity.ParityReport.config). */
+  config: {
+    checkBody: boolean;
+    checkHeaders: string[];
+    stopOnMismatch: boolean;
+    timeoutMs: number;
+  };
 }
 
 export interface RunJourneyOptions {
@@ -498,6 +505,7 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
     stepsChecked,
     mismatches,
     matches,
+    config: { checkBody, checkHeaders, stopOnMismatch, timeoutMs },
   };
 }
 
