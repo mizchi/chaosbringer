@@ -582,15 +582,20 @@ describe("runParity", () => {
     }
 
     it("flags a perf mismatch when right is slower than left by more than the delta budget", async () => {
+      // Margins sized for contended CI runners: 0ms baseline can
+      // measure as 50ms+ under event-loop contention, so the right
+      // wait and threshold both need generous headroom above that
+      // floor. 200ms vs 0ms with an 80ms threshold survives even when
+      // the runner adds ~80ms of jitter to either side.
       const fetcher = makeTimedFetcher({
-        "http://left/x": 5,
-        "http://right/x": 80,
+        "http://left/x": 0,
+        "http://right/x": 200,
       });
       const report = await runParity({
         left: "http://left",
         right: "http://right",
         paths: ["x"],
-        perfDeltaMs: 30,
+        perfDeltaMs: 80,
         fetcher,
       });
       expect(report.mismatches).toHaveLength(1);
@@ -601,30 +606,38 @@ describe("runParity", () => {
     });
 
     it("does not flag perf when the delta is below the budget", async () => {
+      // Both sides 0ms so the asymmetric wait can't trip the
+      // threshold; budget set well above any plausible jitter delta
+      // between two same-event-loop awaits on a busy CI runner.
       const fetcher = makeTimedFetcher({
-        "http://left/x": 5,
-        "http://right/x": 10,
+        "http://left/x": 0,
+        "http://right/x": 0,
       });
       const report = await runParity({
         left: "http://left",
         right: "http://right",
         paths: ["x"],
-        perfDeltaMs: 50,
+        perfDeltaMs: 150,
         fetcher,
       });
       expect(report.mismatches).toHaveLength(0);
     });
 
     it("perfRatio fires independently of perfDeltaMs", async () => {
+      // Use a wide left/right spread so a few-ms of measurement jitter
+      // on `left` can't drag the ratio below the threshold. With
+      // left=10ms (so the ratio path doesn't skip on 0) and right=300ms
+      // and a 2x threshold, even a +50ms CI jitter on left (60ms
+      // measured) keeps ratio at 5+ — well clear of 2x.
       const fetcher = makeTimedFetcher({
-        "http://left/x": 30,
-        "http://right/x": 120,
+        "http://left/x": 10,
+        "http://right/x": 300,
       });
       const report = await runParity({
         left: "http://left",
         right: "http://right",
         paths: ["x"],
-        perfRatio: 3.0,
+        perfRatio: 2.0,
         fetcher,
       });
       expect(report.mismatches[0]?.kinds).toContain("perf");
@@ -804,9 +817,13 @@ describe("runParity", () => {
       // one side would false-positive a 30ms-budget single-sample
       // perf check. Median sees through it; p95 still raises the
       // alarm so we're not blind to genuine tail-latency regressions.
+      // Outlier sized for CI: a 300ms spike against a 0ms baseline
+      // and a 100ms threshold survives ~80ms of per-sample jitter on
+      // either side. With perfSamples=5, p95 = max sample; median = 3rd
+      // sample (untouched by the single outlier).
       const timings = {
         "http://l/x": [0, 0, 0, 0, 0],
-        "http://r/x": [0, 0, 0, 0, 100],
+        "http://r/x": [0, 0, 0, 0, 300],
       };
 
       const medianReport = await runParity({
@@ -815,7 +832,7 @@ describe("runParity", () => {
         paths: ["x"],
         perfSamples: 5,
         perfPercentile: "median",
-        perfDeltaMs: 30,
+        perfDeltaMs: 100,
         fetcher: makeQueuedTimedFetcher(timings),
       });
       expect(medianReport.mismatches).toHaveLength(0);
@@ -826,7 +843,7 @@ describe("runParity", () => {
         paths: ["x"],
         perfSamples: 5,
         perfPercentile: "p95",
-        perfDeltaMs: 30,
+        perfDeltaMs: 100,
         fetcher: makeQueuedTimedFetcher(timings),
       });
       expect(p95Report.mismatches).toHaveLength(1);
@@ -836,16 +853,17 @@ describe("runParity", () => {
     it("defaults to p95 when perfPercentile is omitted and perfSamples > 1", async () => {
       // Same outlier scenario as above. With no explicit percentile
       // the classifier must pick p95 (SLO-standard default) — so the
-      // outlier trips a 30ms budget.
+      // outlier trips the budget. Sized for CI jitter (see sibling
+      // test).
       const report = await runParity({
         left: "http://l",
         right: "http://r",
         paths: ["x"],
         perfSamples: 5,
-        perfDeltaMs: 30,
+        perfDeltaMs: 100,
         fetcher: makeQueuedTimedFetcher({
           "http://l/x": [0, 0, 0, 0, 0],
-          "http://r/x": [0, 0, 0, 0, 100],
+          "http://r/x": [0, 0, 0, 0, 300],
         }),
       });
       expect(report.mismatches[0]?.kinds).toContain("perf");
@@ -925,8 +943,8 @@ describe("runParity", () => {
         paths: ["x"],
         perfSamples: 1,
         perfPercentile: "p99",
-        perfDeltaMs: 30,
-        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [80] }),
+        perfDeltaMs: 80,
+        fetcher: makeQueuedTimedFetcher({ "http://l/x": [0], "http://r/x": [200] }),
       });
       expect(report.mismatches[0]?.kinds).toContain("perf");
     });
