@@ -65,7 +65,25 @@ Every detected kind for a probe fires — they don't shadow each other. A path w
 
 ## Exercise individual fault kinds
 
-Every fault kind shipped on this PR is reachable via env vars passed to either variant. Examples:
+Every fault kind shipped by `@mizchi/server-faults` is reachable via env vars passed to either variant. Leave a var unset and that fault stays off.
+
+| Env var                 | Maps to                                       |
+| ----------------------- | --------------------------------------------- |
+| `CHAOS_5XX_RATE`        | `status5xxRate` (0..1)                        |
+| `CHAOS_5XX_CODE`        | `status5xxCode` (500 / 502 / 503 / 504)       |
+| `CHAOS_LATENCY_RATE`    | `latencyRate` (0..1)                          |
+| `CHAOS_LATENCY_MS`      | `latencyMs` (constant ms)                     |
+| `CHAOS_ABORT_RATE`      | `abortRate` (0..1)                            |
+| `CHAOS_ABORT_STYLE`     | `abortStyle` (`hangup` / `reset`)             |
+| `CHAOS_PARTIAL_RATE`    | `partialResponseRate` (0..1, Hono only)       |
+| `CHAOS_PARTIAL_AFTER`   | `partialResponseAfterBytes`                   |
+| `CHAOS_SLOW_RATE`       | `slowStreaming.rate` (0..1, Hono only)        |
+| `CHAOS_SLOW_DELAY`      | `slowStreaming.chunkDelayMs`                  |
+| `CHAOS_SLOW_CHUNK`      | `slowStreaming.chunkSize` (rechunk to N bytes) |
+| `CHAOS_FLAP_WINDOW`     | `statusFlapping.windowMs` (cycle length)      |
+| `CHAOS_FLAP_BAD`        | `statusFlapping.badMs` (sick slice per cycle) |
+
+Examples:
 
 ```bash
 # Probabilistic 5xx + abort

@@ -110,7 +110,12 @@ export interface JourneyMismatch extends JourneyStepResult {
   bodyDiff?: BodyDiffResult;
 }
 
+/** Independent of `PARITY_REPORT_SCHEMA_VERSION` — bumped per shape. */
+export const JOURNEY_REPORT_SCHEMA_VERSION = 1;
+
 export interface JourneyReport {
+  /** Stable integer. See `JOURNEY_REPORT_SCHEMA_VERSION`. */
+  schemaVersion: number;
   left: string;
   right: string;
   stepsChecked: number;
@@ -122,6 +127,8 @@ export interface JourneyReport {
     checkHeaders: string[];
     stopOnMismatch: boolean;
     timeoutMs: number;
+    perfDeltaMs?: number;
+    perfRatio?: number;
   };
 }
 
@@ -139,6 +146,19 @@ export interface RunJourneyOptions {
   checkBody?: boolean;
   /** Compare named response headers per step. Same semantics as parity. */
   checkHeaders?: string[];
+  /**
+   * Flag a `perf` mismatch when `right.durationMs - left.durationMs`
+   * exceeds this many milliseconds on any step. Same semantics +
+   * caveats as `parity.RunParityOptions.perfDeltaMs` — single-sample,
+   * set well above your jitter floor.
+   */
+  perfDeltaMs?: number;
+  /**
+   * Flag a `perf` mismatch when `right.durationMs > left.durationMs * ratio`.
+   * Composes with `perfDeltaMs` via OR. Skipped on a step where
+   * `left.durationMs === 0` to avoid divide-by-zero noise.
+   */
+  perfRatio?: number;
   /**
    * Stop the journey on the first mismatch instead of running every
    * step. Useful when later steps depend on earlier ones succeeding
@@ -338,6 +358,10 @@ async function runStepOnSide(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  // Wall-clock around the full step (request + body read) so a slow-
+  // body step on one side doesn't look faster than a fast-body one.
+  // Mirrors parity's approach.
+  const startedAt = performance.now();
   try {
     const resp = await opts.fetcher(url, {
       method,
@@ -372,6 +396,7 @@ async function runStepOnSide(
       }
     }
     applyCaptures(step.capture, bodyText, resp.headers, vars);
+    result.durationMs = performance.now() - startedAt;
     return { result, bodyText };
   } catch (err) {
     return {
@@ -391,7 +416,11 @@ async function runStepOnSide(
  * order, empty array means match. Inlined rather than imported so the
  * journey omits exception detection (see file header).
  */
-function classifyStep(left: SideResult, right: SideResult): MismatchKind[] {
+function classifyStep(
+  left: SideResult,
+  right: SideResult,
+  perfOpts: { perfDeltaMs?: number; perfRatio?: number },
+): MismatchKind[] {
   const leftFailed = left.status === null;
   const rightFailed = right.status === null;
   if (leftFailed !== rightFailed) return ["failure"];
@@ -420,6 +449,19 @@ function classifyStep(left: SideResult, right: SideResult): MismatchKind[] {
     left.bodyHash !== right.bodyHash
   ) {
     kinds.push("body");
+  }
+  if (
+    typeof left.durationMs === "number" &&
+    typeof right.durationMs === "number" &&
+    ((perfOpts.perfDeltaMs &&
+      perfOpts.perfDeltaMs > 0 &&
+      right.durationMs - left.durationMs > perfOpts.perfDeltaMs) ||
+      (perfOpts.perfRatio &&
+        perfOpts.perfRatio > 0 &&
+        left.durationMs > 0 &&
+        right.durationMs > left.durationMs * perfOpts.perfRatio))
+  ) {
+    kinds.push("perf");
   }
   return kinds;
 }
@@ -485,7 +527,10 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
       right,
     };
     stepsChecked++;
-    const kinds = classifyStep(left, right);
+    const kinds = classifyStep(left, right, {
+      perfDeltaMs: opts.perfDeltaMs,
+      perfRatio: opts.perfRatio,
+    });
     if (kinds.length > 0) {
       const mismatch: JourneyMismatch = { ...result, kinds };
       if (kinds.includes("body")) {
@@ -500,12 +545,20 @@ export async function runJourney(opts: RunJourneyOptions): Promise<JourneyReport
   }
 
   return {
+    schemaVersion: JOURNEY_REPORT_SCHEMA_VERSION,
     left: opts.left,
     right: opts.right,
     stepsChecked,
     mismatches,
     matches,
-    config: { checkBody, checkHeaders, stopOnMismatch, timeoutMs },
+    config: {
+      checkBody,
+      checkHeaders,
+      stopOnMismatch,
+      timeoutMs,
+      ...(opts.perfDeltaMs !== undefined ? { perfDeltaMs: opts.perfDeltaMs } : {}),
+      ...(opts.perfRatio !== undefined ? { perfRatio: opts.perfRatio } : {}),
+    },
   };
 }
 

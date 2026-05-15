@@ -218,6 +218,54 @@ describe("runJourney", () => {
     expect(report.mismatches[0].kinds[0]).toBe("status");
   });
 
+  describe("perf threshold (consistency with parity)", () => {
+    it("flags a perf mismatch when right's step is slower than left by more than the budget", async () => {
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("left")) return new Response("ok", { status: 200 });
+        await new Promise((r) => setTimeout(r, 60));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      const report = await runJourney({
+        left: "http://left",
+        right: "http://right",
+        steps: [{ method: "GET", path: "/slow" }],
+        perfDeltaMs: 30,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kinds).toContain("perf");
+      expect(report.mismatches[0].left.durationMs).toBeLessThan(
+        report.mismatches[0].right.durationMs!,
+      );
+    });
+
+    it("populates durationMs on every step (even when perf isn't checked)", async () => {
+      const fetcher = (async () => new Response("ok", { status: 200 })) as typeof fetch;
+      const report = await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [{ method: "GET", path: "/x" }],
+        fetcher,
+      });
+      expect(report.matches[0].left.durationMs).toBeGreaterThanOrEqual(0);
+      expect(report.matches[0].right.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("report carries a schemaVersion + config echo with perf thresholds", async () => {
+      const report = await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [{ method: "GET", path: "/x" }],
+        perfDeltaMs: 100,
+        fetcher: (async () => new Response("", { status: 200 })) as typeof fetch,
+      });
+      expect(report.schemaVersion).toBe(1);
+      expect(report.config.perfDeltaMs).toBe(100);
+      expect(report.config.checkBody).toBe(true);
+    });
+  });
+
   it("--no-check-body equivalent: checkBody=false skips body hashing", async () => {
     const fetcher = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();

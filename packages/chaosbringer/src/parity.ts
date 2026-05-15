@@ -126,7 +126,19 @@ export interface ParityMismatch extends ParityProbe {
   bodyDiff?: BodyDiffResult;
 }
 
+/**
+ * Bumped when the report shape changes in a non-backwards-compatible
+ * way. Downstream consumers (dashboards, CI scripts, the agent loop)
+ * can reject reports of an unexpected version rather than silently
+ * mis-reading a renamed field. Additive changes (new optional fields,
+ * new `MismatchKind` values) do NOT bump this — they're behind
+ * opt-in flags.
+ */
+export const PARITY_REPORT_SCHEMA_VERSION = 1;
+
 export interface ParityReport {
+  /** Stable integer. See `PARITY_REPORT_SCHEMA_VERSION`. */
+  schemaVersion: number;
   left: string;
   right: string;
   pathsChecked: number;
@@ -558,6 +570,7 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
   }
 
   return {
+    schemaVersion: PARITY_REPORT_SCHEMA_VERSION,
     left: opts.left,
     right: opts.right,
     pathsChecked: opts.paths.length,

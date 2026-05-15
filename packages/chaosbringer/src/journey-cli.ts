@@ -33,6 +33,10 @@ Options:
   --output <file>       Write the full report (JSON) to this path
   --check-headers <list>  Compare named headers per step (comma-separated)
   --no-check-body       Skip body comparison (defaults to on for journeys)
+  --perf-delta-ms <n>   Flag a "perf" mismatch when right is more than
+                        N ms slower than left on any step. Single-sample.
+  --perf-ratio <n>      Flag a "perf" mismatch when right > left * N.
+                        Composes with --perf-delta-ms via OR.
   --stop-on-mismatch    Stop at the first divergence (later steps depend
                         on earlier ones succeeding; no point continuing
                         a broken flow)
@@ -80,6 +84,8 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
       output: { type: "string" },
       "check-headers": { type: "string" },
       "no-check-body": { type: "boolean", default: false },
+      "perf-delta-ms": { type: "string" },
+      "perf-ratio": { type: "string" },
       "stop-on-mismatch": { type: "boolean", default: false },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
@@ -114,6 +120,8 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
     timeoutMs: values.timeout ? parseInt(values.timeout, 10) : undefined,
     checkBody: !values["no-check-body"],
     checkHeaders,
+    perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
+    perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
     stopOnMismatch: values["stop-on-mismatch"],
   });
 
@@ -148,6 +156,14 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
         const summary = summariseBodyDiff(m.bodyDiff);
         const head = `${prefix}  BODY   left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
         console.log(summary ? `${head}\n         ${summary}` : head);
+      } else if (kind === "perf") {
+        const l = m.left.durationMs ?? 0;
+        const r = m.right.durationMs ?? 0;
+        const delta = r - l;
+        const ratio = l > 0 ? r / l : 0;
+        console.log(
+          `${prefix}  PERF   left=${l.toFixed(0)}ms  right=${r.toFixed(0)}ms  Δ=${delta.toFixed(0)}ms (×${ratio.toFixed(2)})`,
+        );
       } else if (kind === "failure") {
         const leftMsg = m.left.error ?? `status ${m.left.status}`;
         const rightMsg = m.right.error ?? `status ${m.right.status}`;

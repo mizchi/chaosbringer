@@ -51,6 +51,31 @@ function makeFetcher(handlers: Record<string, () => Response | Promise<Response>
 }
 
 describe("runParity", () => {
+  it("report carries a schemaVersion + config echo so consumers can validate", async () => {
+    const fetcher = makeFetcher({
+      "http://l/x": () => new Response("", { status: 200 }),
+      "http://r/x": () => new Response("", { status: 200 }),
+    });
+    const report = await runParity({
+      left: "http://l",
+      right: "http://r",
+      paths: ["x"],
+      checkBody: true,
+      checkHeaders: ["content-type"],
+      perfDeltaMs: 50,
+      fetcher,
+    });
+    expect(report.schemaVersion).toBe(1);
+    expect(report.config).toEqual({
+      checkBody: true,
+      checkHeaders: ["content-type"],
+      checkExceptions: false,
+      followRedirects: false,
+      timeoutMs: 10000,
+      perfDeltaMs: 50,
+    });
+  });
+
   it("classifies matching paths as match (no mismatch)", async () => {
     const fetcher = makeFetcher({
       "http://left/foo": () => new Response("", { status: 200 }),
