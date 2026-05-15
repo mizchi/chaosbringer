@@ -24,7 +24,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+import { ChaosCrawler, COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./crawler.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";
@@ -38,55 +38,35 @@ import { visualRegression } from "./visual.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
+//
+// Each entry lazy-imports its handler so a `chaosbringer --help` invocation
+// doesn't pay the cost of compiling every subcommand. The handler is
+// expected to set `process.exitCode` on a non-fatal failure; thrown errors
+// are surfaced with the subcommand name and an exit code of 1. Legacy
+// handlers (minimize / flake / shard) call `process.exit` directly inside
+// themselves and never return, so the final `process.exit` here is only
+// reached by the newer handlers that opt into exitCode-based signalling.
+const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void>>> = {
+  minimize: () => import("./minimize.js").then((m) => m.runMinimizeCli),
+  flake: () => import("./flake.js").then((m) => m.runFlakeCli),
+  shard: () => import("./shard.js").then((m) => m.runShardCli),
+  recipes: () => import("./recipes/cli.js").then((m) => m.runRecipesCli),
+  load: () => import("./recipes/load-cli.js").then((m) => m.runLoadCli),
+  diff: () => import("./diff-cli.js").then((m) => m.runDiffCli),
+  "cluster-artifacts": () =>
+    import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
+  parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
+};
+
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
-if (subcommand === "minimize") {
-  const { runMinimizeCli } = await import("./minimize.js");
+if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   try {
-    await runMinimizeCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("minimize failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "flake") {
-  const { runFlakeCli } = await import("./flake.js");
-  try {
-    await runFlakeCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("flake failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "shard") {
-  const { runShardCli } = await import("./shard.js");
-  try {
-    await runShardCli(process.argv.slice(3));
-    process.exit(0);
-  } catch (err) {
-    console.error("shard failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "recipes") {
-  const { runRecipesCli } = await import("./recipes/cli.js");
-  try {
-    await runRecipesCli(process.argv.slice(3));
+    const run = await SUBCOMMANDS[subcommand]();
+    await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
-    console.error("recipes failed:", err instanceof Error ? err.message : err);
-    process.exit(1);
-  }
-}
-if (subcommand === "load") {
-  const { runLoadCli } = await import("./recipes/load-cli.js");
-  try {
-    await runLoadCli(process.argv.slice(3));
-    process.exit(process.exitCode ?? 0);
-  } catch (err) {
-    console.error("load failed:", err instanceof Error ? err.message : err);
+    console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
@@ -107,6 +87,7 @@ const { values, positionals } = parseArgs({
     exclude: { type: "string", multiple: true },
     "ignore-error": { type: "string", multiple: true },
     "ignore-analytics": { type: "boolean", default: false },
+    "ignore-preset": { type: "string", multiple: true },
     spa: { type: "string", multiple: true },
     "log-file": { type: "string" },
     "log-level": { type: "string" },
@@ -125,6 +106,8 @@ const { values, positionals } = parseArgs({
     "visual-diff-dir": { type: "string" },
     "visual-update": { type: "boolean", default: false },
     "failure-artifacts": { type: "string" },
+    "cluster-artifacts": { type: "boolean", default: false },
+    "cluster-min-count": { type: "string" },
     "failure-max": { type: "string" },
     "trace-out": { type: "string" },
     "trace-replay": { type: "string" },
@@ -169,6 +152,8 @@ OPTIONS:
   --ignore-analytics    Ignore common analytics script errors (googletagmanager,
                         google-analytics, hotjar, clarity, segment, amplitude,
                         cloudflareinsights, facebook.net, and net::ERR_FAILED)
+  --ignore-preset <p>   Apply a named ignore-error preset (can be repeated; comma-separated).
+                        Known: analytics, maps, media-embeds, pdf-orb, iframe-sandbox
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
   --log-level <level>   Log level: debug, info, warn, error (default: info)
@@ -188,6 +173,8 @@ OPTIONS:
   --visual-update       Overwrite baselines with current screenshots (for intentional UI updates)
   --failure-artifacts <dir>  Write a bundle (screenshot + html + errors + trace + repro.sh) per failing page
   --failure-max <n>     Cap the number of failure bundles per run (default: unlimited)
+  --cluster-artifacts   After the crawl, emit one representative bundle per error cluster in <failure-artifacts>/clusters/
+  --cluster-min-count <n>  Skip clusters with count below n when --cluster-artifacts is set
   --trace-out <path>    Write a JSONL trace of visits + actions for replay / minimize
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
@@ -241,6 +228,15 @@ if (!baseUrl) {
 const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
 if (values["ignore-analytics"]) {
   ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
+}
+for (const presetSpec of values["ignore-preset"] ?? []) {
+  try {
+    ignoreErrorPatterns.push(...resolveIgnorePresets(presetSpec));
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : err}`);
+    console.error(`Tip: --ignore-preset accepts comma-separated names. Known: ${Object.keys(IGNORE_PRESETS).join(", ")}`);
+    process.exit(1);
+  }
 }
 
 // Validate log level
@@ -483,6 +479,27 @@ async function main() {
       if (heatmapOut) {
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
         if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+      }
+    }
+
+    if (values["cluster-artifacts"]) {
+      const failureDir = values["failure-artifacts"];
+      if (!failureDir) {
+        console.error(
+          "--cluster-artifacts requires --failure-artifacts <dir> (it copies from the per-page bundles)",
+        );
+        process.exit(1);
+      }
+      const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
+      const minCount = values["cluster-min-count"]
+        ? parseInt(values["cluster-min-count"], 10)
+        : undefined;
+      const results = writeClusterArtifacts(report, {
+        bundleDir: failureDir,
+        minCount,
+      });
+      if (!isQuiet) {
+        console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
       }
     }
 

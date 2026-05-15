@@ -14,15 +14,38 @@ import {
   attrsToHeaderEntries,
   resolveMetadataPrefix,
   serverFaults,
+  type AbortStyle,
   type ServerFaultConfig,
 } from "../server-faults.js";
+import { slowStream, truncateStream } from "../stream-transforms.js";
+
+/**
+ * Error thrown by `honoMiddleware` when an abort fault wins.
+ *
+ * Hono targets Node, Bun, Workers, Deno, etc. — there is no portable
+ * "destroy the socket" call we can make from the middleware. Throwing a
+ * tagged error is the only adapter-agnostic option: Workers' `fetch()`
+ * propagates the throw as a connection error, while Node-based Hono users
+ * can install an `app.onError` handler that recognises this error and
+ * calls `c.env.incoming.socket.destroy()` for a real TCP teardown.
+ */
+export class ServerFaultsAbortError extends Error {
+  readonly abortStyle: AbortStyle;
+  constructor(abortStyle: AbortStyle) {
+    super("server-faults: synthetic abort");
+    this.name = "ServerFaultsAbortError";
+    this.abortStyle = abortStyle;
+  }
+}
 
 export interface HonoLikeContext {
   req: { raw: Request };
-  // c.res is always populated in real Hono (lazy getter that synthesizes a
-  // Response if none was set). The optional marker here is for structurally-
-  // typed test mocks that omit it on the no-fault path.
-  res?: { headers: Headers };
+  // In real Hono `c.res` is a getter/setter backed by a lazily-synthesized
+  // Response. The optional marker is for structurally-typed test mocks that
+  // omit it on the no-fault path; the union form accepts both a full
+  // `Response` (real Hono / the `partial` verdict needs to set a new one)
+  // and a minimal `{ headers }` stand-in (existing annotate tests).
+  res?: Response | { headers: Headers };
 }
 interface HonoLikeNext {
   (): Promise<unknown>;
@@ -39,6 +62,14 @@ export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
       return;
     }
     if (verdict.kind === "synthetic") return verdict.response;
+    if (verdict.kind === "abort") {
+      // No portable socket teardown across Hono's runtime targets — throw a
+      // tagged error and let either the runtime (Workers / Bun) treat it as
+      // a connection error, or a Node-host's onError handler call
+      // `c.env.incoming.socket.destroy()` if a real TCP-level abort is
+      // required. Metadata headers cannot be delivered on this path.
+      throw new ServerFaultsAbortError(verdict.abortStyle);
+    }
     if (verdict.kind === "annotate") {
       // Real handler runs, then stamp headers. Mutating `c.res.headers` after
       // the handler returns relies on Hono's live `Headers` object — if a
@@ -52,7 +83,88 @@ export function honoMiddleware(cfg: ServerFaultConfig): HonoLikeMiddleware {
       }
       return;
     }
+    if (verdict.kind === "partial") {
+      // Real handler runs, then we wrap its response body in a truncating
+      // stream. The bytes-after-N truncation matches real upstream cuts
+      // (OOM, pod evict). `Content-Length` is stripped because the
+      // declared length no longer matches the bytes actually delivered —
+      // leaving it intact would make standards-compliant clients hang
+      // waiting for the missing bytes, masking the failure mode we want
+      // to expose.
+      await next();
+      const current = c.res;
+      if (!isFullResponse(current)) return;
+      if (current.body === null) {
+        // Null-body statuses (204 / 205 / 304) have nothing to truncate.
+        // The Response constructor also forbids passing a body for them,
+        // so attempting to wrap would throw. Stamp metadata headers on
+        // the existing Response (if enabled) and leave the body alone.
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            current.headers.set(name, value);
+          }
+        }
+        return;
+      }
+      const truncated = truncateStream(current.body, verdict.afterBytes);
+      const headers = new Headers(current.headers);
+      headers.delete("content-length");
+      if (metadataPrefix) {
+        for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+          headers.set(name, value);
+        }
+      }
+      c.res = new Response(truncated, {
+        status: current.status,
+        statusText: current.statusText,
+        headers,
+      });
+      return;
+    }
+    if (verdict.kind === "slowStream") {
+      // Real handler runs; we then wrap its body in a per-chunk delay
+      // stream. Headers leave immediately (matching the real-world
+      // "fast start, slow body" pattern), so `metadataHeader` round-
+      // trips fine.
+      await next();
+      const current = c.res;
+      if (!isFullResponse(current)) return;
+      if (current.body === null) {
+        if (metadataPrefix) {
+          for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+            current.headers.set(name, value);
+          }
+        }
+        return;
+      }
+      const slowed = slowStream(current.body, {
+        chunkDelayMs: verdict.chunkDelayMs,
+        chunkSize: verdict.chunkSize,
+      });
+      const headers = new Headers(current.headers);
+      // When chunkSize is set the consumer sees fixed-size chunks, but the
+      // total length is unchanged, so Content-Length stays valid. When
+      // chunkSize is omitted, source chunking is preserved end-to-end.
+      // Either way we do not need to strip Content-Length.
+      if (metadataPrefix) {
+        for (const [name, value] of attrsToHeaderEntries(verdict.attrs, metadataPrefix)) {
+          headers.set(name, value);
+        }
+      }
+      c.res = new Response(slowed, {
+        status: current.status,
+        statusText: current.statusText,
+        headers,
+      });
+      return;
+    }
     const _exhaustive: never = verdict;
     void _exhaustive;
   };
+}
+
+function isFullResponse(r: Response | { headers: Headers } | undefined): r is Response {
+  // Discriminate via the `body` property: real Response always has it
+  // (possibly null), the `{ headers }` test-mock shape does not.
+  return !!r && "body" in r;
 }

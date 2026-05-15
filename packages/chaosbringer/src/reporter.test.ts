@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync, rmSync } from "node:fs";
 import { formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
 
@@ -241,6 +241,20 @@ describe("saveReport", () => {
       expect(parsed.baseUrl).toBe("http://localhost:3000");
     } finally {
       if (existsSync(path)) unlinkSync(path);
+    }
+  });
+
+  it("creates missing parent directories before writing", () => {
+    const rootDir = join(tmpdir(), `chaos-test-mkdir-${Date.now()}`);
+    const path = join(rootDir, "nested", "deep", "report.json");
+    try {
+      const report = makeReport({ pagesVisited: 3 });
+      saveReport(report, path);
+      expect(existsSync(path)).toBe(true);
+      const parsed = JSON.parse(readFileSync(path, "utf-8"));
+      expect(parsed.pagesVisited).toBe(3);
+    } finally {
+      if (existsSync(rootDir)) rmSync(rootDir, { recursive: true, force: true });
     }
   });
 });

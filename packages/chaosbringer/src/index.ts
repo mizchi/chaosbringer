@@ -6,7 +6,7 @@
  */
 
 // Core
-export { ChaosCrawler, COMMON_IGNORE_PATTERNS, validateOptions } from "./crawler.js";
+export { ChaosCrawler, COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets, validateOptions } from "./crawler.js";
 export { formatReport, formatCompactReport, saveReport, printReport, getExitCode, type ExitCodeOptions } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
@@ -39,6 +39,20 @@ export {
 } from "./lifecycle-faults.js";
 export { clusterErrors, fingerprintError, type ErrorCluster } from "./clusters.js";
 export { diffReports, loadBaseline, hasRegressions } from "./diff.js";
+export {
+  writeClusterArtifacts,
+  type WriteClusterArtifactsOptions,
+  type ClusterArtifactResult,
+} from "./cluster-artifacts.js";
+export {
+  runParity,
+  type MismatchKind,
+  type ParityMismatch,
+  type ParityProbe,
+  type ParityReport,
+  type RunParityOptions,
+  type SideResult,
+} from "./parity.js";
 export { checkPerformanceBudget } from "./budget.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {

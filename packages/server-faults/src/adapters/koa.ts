@@ -7,16 +7,22 @@
  */
 
 import {
+  assertAdapterSupportsConfig,
   attrsToHeaderEntries,
   resolveMetadataPrefix,
   serverFaults,
   type ServerFaultConfig,
 } from "../server-faults.js";
 
+interface KoaLikeSocket {
+  destroy(err?: Error): void;
+  end?: () => void;
+}
 interface KoaLikeRequest {
   method?: string;
   url?: string;
   headers: Record<string, string | string[] | undefined>;
+  socket?: KoaLikeSocket;
 }
 interface KoaLikeContext {
   req: KoaLikeRequest;
@@ -46,6 +52,7 @@ function toWebRequest(req: KoaLikeRequest): Request {
 export function koaMiddleware(
   cfg: ServerFaultConfig,
 ): (ctx: KoaLikeContext, next: KoaLikeNext) => Promise<void> {
+  assertAdapterSupportsConfig(cfg, "koa");
   const fault = serverFaults(cfg);
   const metadataPrefix = resolveMetadataPrefix(cfg.metadataHeader);
   return async (ctx, next) => {
@@ -61,6 +68,26 @@ export function koaMiddleware(
       });
       ctx.body = await verdict.response.json();
       return;
+    }
+    if (verdict.kind === "abort") {
+      // See express adapter — same socket-level teardown contract. Koa's
+      // ctx.req is the raw Node IncomingMessage, so `req.socket` is the same
+      // object as in the Express case.
+      const socket = ctx.req.socket;
+      if (verdict.abortStyle === "reset") {
+        socket?.destroy(new Error("server-faults: synthetic abort"));
+      } else if (socket?.end) {
+        socket.end();
+      } else {
+        socket?.destroy();
+      }
+      return;
+    }
+    if (verdict.kind === "partial" || verdict.kind === "slowStream") {
+      // Unreachable: assertAdapterSupportsConfig() refuses construction
+      // when these are enabled. Kept so exhaustive narrowing catches
+      // any future verdict additions at compile time.
+      throw new Error(`server-faults: unexpected ${verdict.kind} verdict on koa adapter`);
     }
     if (verdict.kind === "annotate") {
       // Stamp BEFORE next() — Koa's ctx.set just wraps res.setHeader, which

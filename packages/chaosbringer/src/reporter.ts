@@ -2,7 +2,8 @@
  * Report generation and formatting utilities
  */
 
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { CrawlReport, PageResult } from "./types.js";
 
 export function formatReport(report: CrawlReport): string {
@@ -291,6 +292,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
 }
 
 export function saveReport(report: CrawlReport, path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(report, null, 2));
 }
 
