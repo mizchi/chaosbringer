@@ -68,6 +68,13 @@ export const BUG_LEDGER = [
       "v1 and v2 return byte-identical HTML; v2's bundle.js (served from /static/bundle.js) throws an uncaught ReferenceError on load. Invisible to status/body/header parity.",
     catcher: "chaosbringer parity --check-exceptions",
   },
+  {
+    id: "BUG-7",
+    where: "POST /api/todos then GET /api/todos",
+    symptom:
+      "v2's POST returns 201 with an identical-shaped JSON response, but silently no-ops the write. A subsequent GET shows an empty list on v2 / one item on v1. Single-shot probes (parity --check-body on either path alone) can't see it.",
+    catcher: "chaosbringer journey",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -195,6 +202,29 @@ function apiCache(): string {
 app.get("/api/users", (c) => {
   c.header("cache-control", apiCache());
   return c.json(USERS);
+});
+
+// BUG-7: v1's POST persists, v2's POST returns success and discards.
+// Status + body shape are identical on the write step — only the
+// follow-up read (different state) surfaces the divergence.
+interface Todo {
+  id: number;
+  title: string;
+}
+const TODOS: Todo[] = [];
+let nextTodoId = 1;
+
+app.post("/api/todos", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { title?: string };
+  const created: Todo = { id: nextTodoId++, title: body.title ?? "untitled" };
+  if (VARIANT !== "v2") TODOS.push(created);
+  c.header("cache-control", apiCache());
+  return c.json(created, 201);
+});
+
+app.get("/api/todos", (c) => {
+  c.header("cache-control", apiCache());
+  return c.json(TODOS);
 });
 
 app.get("/api/users/:id", (c) => {

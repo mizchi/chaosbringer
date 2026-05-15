@@ -28,7 +28,7 @@ const PORT_V2 = 5002;
 const REPORTS = "reports";
 const ARTIFACTS = "artifacts";
 
-const mode = (process.argv[2] ?? "all") as "all" | "parity" | "chaos";
+const mode = (process.argv[2] ?? "all") as "all" | "parity" | "chaos" | "journey";
 
 async function waitForHealth(port: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -96,6 +96,22 @@ async function main(): Promise<void> {
         "--check-headers",
         "content-type,cache-control",
         "--check-exceptions",
+      ]);
+      if (code !== 0) exitCode = 1;
+    }
+
+    if (mode === "all" || mode === "parity" || mode === "journey") {
+      console.log("\n=== journey: write-then-read ===");
+      const code = await runCli([
+        "journey",
+        "--left",
+        `http://127.0.0.1:${PORT_V1}`,
+        "--right",
+        `http://127.0.0.1:${PORT_V2}`,
+        "--steps",
+        "journey-todos.json",
+        "--output",
+        `${REPORTS}/journey-todos.json`,
       ]);
       if (code !== 0) exitCode = 1;
     }
