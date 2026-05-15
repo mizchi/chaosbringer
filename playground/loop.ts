@@ -9,26 +9,57 @@
  * having to manage processes.
  *
  * Usage:
- *   tsx loop.ts             # full pass (parity + chaos:v1 + chaos:v2 + diff)
- *   tsx loop.ts parity      # only parity
- *   tsx loop.ts chaos       # only chaos crawls + diff
+ *   tsx loop.ts                          # full pass
+ *   tsx loop.ts parity                   # only parity
+ *   tsx loop.ts chaos                    # only chaos crawls + diff
+ *   tsx loop.ts --expect-mismatches 10   # CI gate: exit 0 iff count==10
  *
  * Exit code:
- *   0 — nothing the loop detected (no parity mismatches, no new clusters)
- *   1 — at least one tool reported a deviation. Look in reports/ and
- *       artifacts/clusters/ for evidence.
+ *   0 — nothing the loop detected (no parity mismatches, no new
+ *       clusters); OR `--expect-mismatches N` was supplied and the
+ *       observed mismatch count matched N exactly (the CI baseline
+ *       upheld).
+ *   1 — at least one tool reported a deviation (default mode) OR
+ *       the observed mismatch count did not match `--expect-mismatches`.
+ *       Look in reports/ and artifacts/clusters/ for evidence.
+ *   2 — bad CLI usage (invalid flag value).
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
+import { parseArgs } from "node:util";
 
 const PORT_V1 = 5001;
 const PORT_V2 = 5002;
 const REPORTS = "reports";
 const ARTIFACTS = "artifacts";
 
-const mode = (process.argv[2] ?? "all") as "all" | "parity" | "chaos" | "journey";
+const { values, positionals } = parseArgs({
+  args: process.argv.slice(2),
+  options: {
+    "expect-mismatches": { type: "string" },
+  },
+  allowPositionals: true,
+});
+
+const mode = (positionals[0] ?? "all") as "all" | "parity" | "chaos" | "journey";
+// `--expect-mismatches N` flips the exit-code semantics: a successful
+// CI run is one where the playground catches *exactly* N mismatches
+// (the seeded baseline), not zero. Without the flag the loop behaves
+// as before — exit 1 on any deviation, useful for local "did I break
+// detection" runs.
+let expectMismatches: number | null = null;
+if (values["expect-mismatches"] !== undefined) {
+  const n = parseInt(values["expect-mismatches"], 10);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(
+      `loop: --expect-mismatches must be a non-negative integer (got ${values["expect-mismatches"]})`,
+    );
+    process.exit(2);
+  }
+  expectMismatches = n;
+}
 
 async function waitForHealth(port: number, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -96,11 +127,21 @@ async function main(): Promise<void> {
         "--check-headers",
         "content-type,cache-control",
         "--check-exceptions",
-        // Generous budget — single-sample wall-clock has jitter even
-        // for fast localhost loops. The seeded BUG-9 sleeps 120ms,
-        // well above this floor.
+        // Single-sample wall-clock on a loaded CI runner is too noisy
+        // for a hard-pass gate. Use N-sample median: p95 of 5 samples
+        // is just the max (nearest-rank: ceil(0.95*5)-1 = 4), which on
+        // a contended runner is the noisiest possible choice. Median
+        // of 5 takes the 3rd-fastest sample — trims a cold-start blip
+        // on either end. BUG-9's v2-side 120ms sleep is consistent
+        // across samples so its median is still well above the 50ms
+        // threshold, while a one-off jitter spike on an unrelated path
+        // can no longer trip a false positive.
         "--perf-delta-ms",
         "50",
+        "--perf-samples",
+        "5",
+        "--perf-percentile",
+        "median",
       ]);
       if (code !== 0) exitCode = 1;
     }
@@ -166,18 +207,44 @@ async function main(): Promise<void> {
     // Give them a moment so the process group is gone before exit.
     await sleep(200);
   }
-  printSummary();
+  const summary = printSummary();
+  // `--expect-mismatches` mode flips the exit code: success means the
+  // playground caught exactly the expected number of seeded bugs. A
+  // regression that drops detection (count too low) or one that adds
+  // false positives (count too high) both fail the gate.
+  if (expectMismatches !== null) {
+    if (summary.mismatches === expectMismatches) {
+      console.log(
+        `\n[OK] expected ${expectMismatches} mismatch(es), got ${summary.mismatches}`,
+      );
+      process.exit(0);
+    } else {
+      console.log(
+        `\n[FAIL] expected ${expectMismatches} mismatch(es), got ${summary.mismatches}`,
+      );
+      process.exit(1);
+    }
+  }
   process.exit(exitCode);
+}
+
+interface SummaryCounts {
+  /** Number of distinct mismatch probes (one entry per path/step pair). */
+  mismatches: number;
+  /** Sum of all `kinds[]` firings across all probes — strictly >= mismatches. */
+  kindOccurrences: number;
 }
 
 /**
  * Read every JSON report under `reports/` and tally up mismatches by
  * `MismatchKind`. Prints a table at the end of the loop so an
  * operator (or sub-agent) sees the overall shape at a glance —
- * useful as the CI gate's "did this run get worse" signal.
+ * useful as the CI gate's "did this run get worse" signal. Returns
+ * the count so `--expect-mismatches` can gate on it without re-reading
+ * the files.
  */
-function printSummary(): void {
-  if (!existsSync(REPORTS)) return;
+function printSummary(): SummaryCounts {
+  if (!existsSync(REPORTS)) return { mismatches: 0, kindOccurrences: 0 };
   type ReportShape = {
     mismatches?: Array<{ kinds?: string[]; path?: string; label?: string }>;
   };
@@ -200,9 +267,11 @@ function printSummary(): void {
       for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1);
     }
   }
+  let kindOccurrences = 0;
+  for (const n of counts.values()) kindOccurrences += n;
   if (counts.size === 0) {
     console.log("\n=== summary === no mismatches");
-    return;
+    return { mismatches: 0, kindOccurrences: 0 };
   }
   console.log("\n=== summary ===");
   // Stable order: by precedence-ish then alphabetical.
@@ -213,7 +282,13 @@ function printSummary(): void {
   for (const k of sortedKinds) {
     console.log(`  ${k.padEnd(10)} ${counts.get(k)}`);
   }
-  console.log(`  ${"TOTAL".padEnd(10)} ${detail.length} finding(s) across ${detail.length} kind-occurrences`);
+  // Two numbers, not one: a header+body bug on the same path is 1
+  // mismatch but 2 kind-occurrences. The original printout used
+  // detail.length for both — wrong, and hid that distinction.
+  console.log(
+    `  ${"TOTAL".padEnd(10)} ${detail.length} mismatch(es) across ${kindOccurrences} kind-occurrence(s)`,
+  );
+  return { mismatches: detail.length, kindOccurrences };
 }
 
 main().catch((err) => {

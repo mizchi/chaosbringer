@@ -1,0 +1,76 @@
+name: playground-dogfood
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Spawns both v1/v2 server variants, runs the full parity + journey
+# + chaos sweep against them, and asserts the mismatch count matches
+# the seeded baseline (BUG_LEDGER). A regression that breaks any of
+# the detectors fails this gate even when the other test suite stays
+# green — those tests can't see end-to-end signal drift between two
+# live runtimes.
+
+env:
+  # Total mismatch probes the loop should detect across the seeded
+  # BUG_LEDGER. Adjust when adding or removing seeded bugs, OR when a
+  # new detector starts catching a bug that was previously
+  # out-of-scope. A CI failure here means either:
+  #   (a) detection regressed — investigate before merging, or
+  #   (b) the BUG_LEDGER changed — update this number.
+  EXPECTED_MISMATCHES: 10
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build chaosbringer
+        run: pnpm -F chaosbringer build
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system deps only (cache hit path)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run dogfood loop with seeded-baseline assertion
+        working-directory: playground
+        run: pnpm exec tsx loop.ts --expect-mismatches ${{ env.EXPECTED_MISMATCHES }}
+
+      - name: Upload loop reports + artifacts
+        # `if: always()` so the artifacts are available even when the
+        # assertion fails — the reports/ + artifacts/ trees are what
+        # the maintainer (or a follow-up agent) needs to diagnose the
+        # regression. Without this, a CI failure leaves nothing to
+        # debug from.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-reports
+          path: |
+            playground/reports/
+            playground/artifacts/
+          if-no-files-found: ignore

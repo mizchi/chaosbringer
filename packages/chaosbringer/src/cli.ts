@@ -31,7 +31,8 @@ import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
@@ -478,6 +479,7 @@ async function main() {
       }
       const heatmapOut = values["heatmap-out"];
       if (heatmapOut) {
+        mkdirSync(dirname(heatmapOut), { recursive: true });
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
         if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
       }
@@ -510,6 +512,7 @@ async function main() {
     }
 
     if (values.junit) {
+      mkdirSync(dirname(values.junit), { recursive: true });
       writeFileSync(values.junit, buildJunitXml(report));
       if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
     }

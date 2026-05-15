@@ -7,7 +7,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { summariseBodyDiff } from "./body-diff.js";
-import { runParity } from "./parity.js";
+import { type PerfPercentile, runParity } from "./parity.js";
+
+const PERF_PERCENTILES: readonly PerfPercentile[] = ["min", "median", "p95", "p99"];
 
 const HELP = `Usage: chaosbringer parity --left <url> --right <url> --paths <file> [options]
 
@@ -49,10 +51,23 @@ Options:
                      browser binary available.
   --perf-delta-ms <n>  Flag a "perf" mismatch when right is more than
                      N ms slower than left. Single-sample wall clock —
-                     noisy; set well above your jitter floor.
+                     noisy; set well above your jitter floor (or pair
+                     with --perf-samples for percentile-based gating).
   --perf-ratio <n>   Flag a "perf" mismatch when right > left * N.
                      Composes with --perf-delta-ms via OR.
-  --timeout <ms>     Per-request timeout. Default 10000.
+  --perf-samples <n> Number of serial fetches per side per path. Default
+                     1 (single-sample). With N>1 the perf threshold runs
+                     against the configured percentile of N samples
+                     instead of a single noisy wall-clock reading. Each
+                     sample is timed independently; the first captures
+                     status/headers/body and later samples contribute
+                     timing only. Worst-case wall-clock per side per
+                     path is N * --timeout.
+  --perf-percentile <p>
+                     Which percentile to compare when --perf-samples>1.
+                     One of min, median, p95, p99. Default p95 (SLO
+                     standard). Ignored when --perf-samples=1.
+  --timeout <ms>     Per-request timeout, applied per sample. Default 10000.
   --help             Show this help
 
 Exit code is 1 when any mismatch is found, 0 when both sides agree on
@@ -93,6 +108,8 @@ export async function runParityCli(argv: string[]): Promise<void> {
       "check-exceptions": { type: "boolean", default: false },
       "perf-delta-ms": { type: "string" },
       "perf-ratio": { type: "string" },
+      "perf-samples": { type: "string" },
+      "perf-percentile": { type: "string" },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -120,6 +137,29 @@ export async function runParityCli(argv: string[]): Promise<void> {
     .map((h) => h.trim())
     .filter((h) => h.length > 0);
 
+  let perfSamples: number | undefined;
+  if (values["perf-samples"] !== undefined) {
+    const n = parseInt(values["perf-samples"], 10);
+    if (!Number.isFinite(n) || n < 1) {
+      console.error(`parity: --perf-samples must be a positive integer (got ${values["perf-samples"]})`);
+      process.exitCode = 1;
+      return;
+    }
+    perfSamples = n;
+  }
+  let perfPercentile: PerfPercentile | undefined;
+  if (values["perf-percentile"] !== undefined) {
+    const p = values["perf-percentile"];
+    if (!(PERF_PERCENTILES as readonly string[]).includes(p)) {
+      console.error(
+        `parity: --perf-percentile must be one of ${PERF_PERCENTILES.join(", ")} (got ${p})`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    perfPercentile = p as PerfPercentile;
+  }
+
   const report = await runParity({
     left: values.left,
     right: values.right,
@@ -130,6 +170,8 @@ export async function runParityCli(argv: string[]): Promise<void> {
     checkExceptions: values["check-exceptions"],
     perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
     perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
+    perfSamples,
+    perfPercentile,
     timeoutMs,
   });
 
@@ -171,12 +213,20 @@ export async function runParityCli(argv: string[]): Promise<void> {
           `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
         );
       } else if (kind === "perf") {
-        const l = m.left.durationMs ?? 0;
-        const r = m.right.durationMs ?? 0;
+        // When N-sample mode is on, show the configured percentile
+        // (the value the threshold actually compared) — otherwise the
+        // printed numbers wouldn't explain why the mismatch fired.
+        // Fall back to first-sample `durationMs` for single-sample mode.
+        const pct = report.config.perfPercentile;
+        const lStats = m.left.perfStats;
+        const rStats = m.right.perfStats;
+        const l = pct && lStats ? lStats[pct] : (m.left.durationMs ?? 0);
+        const r = pct && rStats ? rStats[pct] : (m.right.durationMs ?? 0);
         const delta = r - l;
         const ratio = l > 0 ? r / l : 0;
+        const tag = pct && lStats && rStats ? ` ${pct} of ${lStats.samples}/${rStats.samples}` : "";
         console.log(
-          `  PERF   ${m.path}  left=${l.toFixed(0)}ms  right=${r.toFixed(0)}ms  Δ=${delta.toFixed(0)}ms (×${ratio.toFixed(2)})`,
+          `  PERF   ${m.path}  left=${l.toFixed(0)}ms  right=${r.toFixed(0)}ms  Δ=${delta.toFixed(0)}ms (×${ratio.toFixed(2)})${tag}`,
         );
       } else if (kind === "failure") {
         const leftMsg = m.left.error ?? `status ${m.left.status}`;
