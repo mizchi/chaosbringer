@@ -82,6 +82,13 @@ export const BUG_LEDGER = [
       "Both variants return matching 201 + id on POST. v1's GET by id returns the original title; v2's GET by id returns the title uppercased. Needs capture+template — single-shot parity can't hit the right id without knowing it in advance.",
     catcher: "chaosbringer journey (with capture: body.id → {{todoId}})",
   },
+  {
+    id: "BUG-9",
+    where: "GET /api/users",
+    symptom:
+      "v2 sleeps 120ms before responding (a regression that doesn't move status / body / headers — only latency). Invisible to every existing parity check.",
+    catcher: "chaosbringer parity --perf-delta-ms",
+  },
 ] as const;
 
 // ─── server-faults config from env ────────────────────────────────────────
@@ -206,7 +213,9 @@ function apiCache(): string {
   return VARIANT === "v2" ? "no-store" : "max-age=60";
 }
 
-app.get("/api/users", (c) => {
+app.get("/api/users", async (c) => {
+  // BUG-9: v2 adds latency that doesn't move any other dimension.
+  if (VARIANT === "v2") await new Promise((r) => setTimeout(r, 120));
   c.header("cache-control", apiCache());
   return c.json(USERS);
 });

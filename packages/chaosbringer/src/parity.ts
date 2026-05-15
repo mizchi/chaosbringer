@@ -40,7 +40,14 @@ export type MismatchKind =
    * mismatches. The bug class that's invisible to HTTP-layer probes.
    * Only fires when `checkExceptions` is enabled.
    */
-  | "exception";
+  | "exception"
+  /**
+   * Right was slower than left by more than the configured budget.
+   * Single-sample wall-clock — noisy by nature, so the threshold
+   * (`perfDeltaMs` and/or `perfRatio`) must be set explicitly. Pair
+   * with N-sample sweeping at the call site if you need percentiles.
+   */
+  | "perf";
 
 export interface SideResult {
   /** Final status. `null` when the fetch threw before getting a response. */
@@ -82,6 +89,13 @@ export interface SideResult {
    * deliberately ignored — chaosbringer's crawler does the same.
    */
   consoleErrors?: string[];
+  /**
+   * Wall-clock duration of the fetch, in milliseconds. Populated on
+   * every successful probe (free — we already have the start time
+   * before fetch). `undefined` when the probe failed before
+   * timing could be meaningful (DNS error, connection refused).
+   */
+  durationMs?: number;
 }
 
 export interface ParityProbe {
@@ -173,6 +187,23 @@ export interface RunParityOptions {
    * so consumers that don't opt in do not pay the install cost.
    */
   checkExceptions?: boolean;
+  /**
+   * Flag a `perf` mismatch when `right.durationMs - left.durationMs`
+   * exceeds this many milliseconds. Off when unset / 0. Single-sample
+   * wall-clock is noisy by nature — set the budget well above your
+   * jitter floor, or run multiple sweeps and check the percentile
+   * yourself. We don't ship N-sampling here because the right N is
+   * caller-specific.
+   */
+  perfDeltaMs?: number;
+  /**
+   * Flag a `perf` mismatch when `right.durationMs > left.durationMs * ratio`.
+   * Off when unset / 0 or when either side's duration is 0 (avoids
+   * divide-by-zero noise on instantly-cached responses). Composes with
+   * `perfDeltaMs` via OR — either threshold tripping fires the
+   * mismatch.
+   */
+  perfRatio?: number;
   /** Override fetch for testing. */
   fetcher?: typeof fetch;
   /**
@@ -291,6 +322,10 @@ async function probeSide(
   const url = joinBase(base, path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  // Wall-clock timer wraps the full fetch including body read (when
+  // `checkBody` is on) — a slow-body side should NOT look faster than
+  // a fast-body one just because we stopped measuring at headers.
+  const startedAt = performance.now();
   try {
     const resp = await opts.fetcher(url, {
       redirect: opts.followRedirects ? "follow" : "manual",
@@ -319,6 +354,7 @@ async function probeSide(
       result.bodyHash = createHash("sha256").update(bytes).digest("hex");
       bodyText = new TextDecoder().decode(bytes);
     }
+    result.durationMs = performance.now() - startedAt;
     return { result, bodyText };
   } catch (err) {
     return {
@@ -333,6 +369,11 @@ async function probeSide(
   }
 }
 
+interface ClassifyOptions {
+  perfDeltaMs?: number;
+  perfRatio?: number;
+}
+
 /**
  * Detect every mismatch kind applicable to a (left, right) probe pair.
  * Returns the kinds in precedence order so `kinds[0]` is the primary
@@ -342,10 +383,14 @@ async function probeSide(
  * Failure / status / redirect are still exclusive at the top of the
  * chain: a connection-level or status-level difference means the
  * downstream body/header inspection is comparing apples to oranges.
- * Once those pass, header / body / exception can ALL fire and each
- * gets reported.
+ * Once those pass, header / body / exception / perf can ALL fire and
+ * each gets reported.
  */
-function classify(left: SideResult, right: SideResult): MismatchKind[] {
+function classify(
+  left: SideResult,
+  right: SideResult,
+  opts: ClassifyOptions = {},
+): MismatchKind[] {
   const leftFailed = left.status === null;
   const rightFailed = right.status === null;
   if (leftFailed !== rightFailed) return ["failure"];
@@ -395,6 +440,21 @@ function classify(left: SideResult, right: SideResult): MismatchKind[] {
       }
     }
     if (differs) kinds.push("exception");
+  }
+  // Perf comparison is OR-of-thresholds: either passing fires the
+  // mismatch. Skipped silently when either side has no duration
+  // (probe failed before timing was meaningful) or when no threshold
+  // is configured — leaves single-sample latency noise off by default.
+  if (
+    typeof left.durationMs === "number" &&
+    typeof right.durationMs === "number" &&
+    ((opts.perfDeltaMs && opts.perfDeltaMs > 0 && right.durationMs - left.durationMs > opts.perfDeltaMs) ||
+      (opts.perfRatio &&
+        opts.perfRatio > 0 &&
+        left.durationMs > 0 &&
+        right.durationMs > left.durationMs * opts.perfRatio))
+  ) {
+    kinds.push("perf");
   }
   return kinds;
 }
@@ -458,7 +518,10 @@ export async function runParity(opts: RunParityOptions): Promise<ParityReport> {
       }
 
       const probe: ParityProbe = { path, left, right };
-      const kinds = classify(left, right);
+      const kinds = classify(left, right, {
+        perfDeltaMs: opts.perfDeltaMs,
+        perfRatio: opts.perfRatio,
+      });
       if (kinds.length > 0) {
         const m: ParityMismatch = { ...probe, kinds };
         // Localise body drift to specific JSON paths when both sides

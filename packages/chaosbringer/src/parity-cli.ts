@@ -47,6 +47,11 @@ Options:
                      identical. Slow — one browser visit per side per
                      path. Requires \`playwright\` installed and a
                      browser binary available.
+  --perf-delta-ms <n>  Flag a "perf" mismatch when right is more than
+                     N ms slower than left. Single-sample wall clock —
+                     noisy; set well above your jitter floor.
+  --perf-ratio <n>   Flag a "perf" mismatch when right > left * N.
+                     Composes with --perf-delta-ms via OR.
   --timeout <ms>     Per-request timeout. Default 10000.
   --help             Show this help
 
@@ -86,6 +91,8 @@ export async function runParityCli(argv: string[]): Promise<void> {
       "check-body": { type: "boolean", default: false },
       "check-headers": { type: "string" },
       "check-exceptions": { type: "boolean", default: false },
+      "perf-delta-ms": { type: "string" },
+      "perf-ratio": { type: "string" },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -121,6 +128,8 @@ export async function runParityCli(argv: string[]): Promise<void> {
     checkBody: values["check-body"],
     checkHeaders,
     checkExceptions: values["check-exceptions"],
+    perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
+    perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
     timeoutMs,
   });
 
@@ -160,6 +169,14 @@ export async function runParityCli(argv: string[]): Promise<void> {
         const sample = (m.right.pageErrors ?? m.right.consoleErrors ?? m.left.pageErrors ?? m.left.consoleErrors ?? [])[0];
         console.log(
           `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
+        );
+      } else if (kind === "perf") {
+        const l = m.left.durationMs ?? 0;
+        const r = m.right.durationMs ?? 0;
+        const delta = r - l;
+        const ratio = l > 0 ? r / l : 0;
+        console.log(
+          `  PERF   ${m.path}  left=${l.toFixed(0)}ms  right=${r.toFixed(0)}ms  Δ=${delta.toFixed(0)}ms (×${ratio.toFixed(2)})`,
         );
       } else if (kind === "failure") {
         const leftMsg = m.left.error ?? `status ${m.left.status}`;

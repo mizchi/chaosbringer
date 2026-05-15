@@ -96,6 +96,11 @@ async function main(): Promise<void> {
         "--check-headers",
         "content-type,cache-control",
         "--check-exceptions",
+        // Generous budget — single-sample wall-clock has jitter even
+        // for fast localhost loops. The seeded BUG-9 sleeps 120ms,
+        // well above this floor.
+        "--perf-delta-ms",
+        "50",
       ]);
       if (code !== 0) exitCode = 1;
     }

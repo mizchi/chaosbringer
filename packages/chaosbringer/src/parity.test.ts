@@ -540,6 +540,134 @@ describe("runParity", () => {
     });
   });
 
+  describe("perf threshold", () => {
+    /**
+     * Mock fetcher that takes a fixed time to resolve per URL. We
+     * spin a real `setTimeout` (not fake timers) because parity's
+     * timing is wall-clock — Date.now / performance.now under
+     * fake timers wouldn't advance, defeating the test.
+     */
+    function makeTimedFetcher(timings: Record<string, number>): typeof fetch {
+      return (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const ms = timings[url] ?? 0;
+        if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+    }
+
+    it("flags a perf mismatch when right is slower than left by more than the delta budget", async () => {
+      const fetcher = makeTimedFetcher({
+        "http://left/x": 5,
+        "http://right/x": 80,
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        perfDeltaMs: 30,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(1);
+      expect(report.mismatches[0].kinds).toContain("perf");
+      expect(report.mismatches[0].left.durationMs).toBeLessThan(
+        report.mismatches[0].right.durationMs!,
+      );
+    });
+
+    it("does not flag perf when the delta is below the budget", async () => {
+      const fetcher = makeTimedFetcher({
+        "http://left/x": 5,
+        "http://right/x": 10,
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        perfDeltaMs: 50,
+        fetcher,
+      });
+      expect(report.mismatches).toHaveLength(0);
+    });
+
+    it("perfRatio fires independently of perfDeltaMs", async () => {
+      const fetcher = makeTimedFetcher({
+        "http://left/x": 30,
+        "http://right/x": 120,
+      });
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        perfRatio: 3.0,
+        fetcher,
+      });
+      expect(report.mismatches[0]?.kinds).toContain("perf");
+    });
+
+    it("perfRatio skips when left.durationMs is 0 (avoid divide-by-zero on instant responses)", async () => {
+      // Synthesize a 0-duration left: handler resolves immediately
+      // without await. Right takes longer. Ratio would be Infinity;
+      // the code must skip rather than report bogus drift.
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("left")) return new Response("ok", { status: 200 });
+        await new Promise((r) => setTimeout(r, 20));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        perfRatio: 2.0, // would fire on any non-zero right if left=0
+        fetcher,
+      });
+      // Depending on timing left might be 0 or ~0.1ms. Either way the
+      // ratio check must NOT fire on a 0/near-0 baseline. We accept
+      // either 0 or 1 mismatches but assert: if a mismatch fires,
+      // it must have a sensible numerator.
+      if (report.mismatches.length > 0) {
+        expect(report.mismatches[0].left.durationMs).toBeGreaterThan(0);
+      }
+    });
+
+    it("populates durationMs on every probe (even when perf isn't checked)", async () => {
+      const fetcher = (async () => new Response("ok", { status: 200 })) as typeof fetch;
+      const report = await runParity({
+        left: "http://l",
+        right: "http://r",
+        paths: ["x"],
+        fetcher,
+      });
+      expect(report.matches[0].left.durationMs).toBeGreaterThanOrEqual(0);
+      expect(report.matches[0].right.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("perf mismatch coexists with body / header on the same probe", async () => {
+      const fetcher = (async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("left")) {
+          return new Response("a", { status: 200, headers: { "cache-control": "max-age=60" } });
+        }
+        await new Promise((r) => setTimeout(r, 50));
+        return new Response("b", { status: 200, headers: { "cache-control": "no-store" } });
+      }) as typeof fetch;
+      const report = await runParity({
+        left: "http://left",
+        right: "http://right",
+        paths: ["x"],
+        checkBody: true,
+        checkHeaders: ["cache-control"],
+        perfDeltaMs: 20,
+        fetcher,
+      });
+      // All three kinds fire on the same probe.
+      expect(report.mismatches[0].kinds).toEqual(
+        expect.arrayContaining(["header", "body", "perf"]),
+      );
+    });
+  });
+
   describe("multi-kind reporting (overlapping bugs on one path)", () => {
     it("reports BOTH header and body kinds when both differ", async () => {
       // The bug that motivated this: with single-kind reporting, a
