@@ -1,0 +1,9 @@
+{
+  "_comment": "Demonstrates BUG-10: tenant isolation breach on v2. Alice and Bob each have their own session (driven by per-actor cookie jar). Alice creates a 'secret' doc. Bob lists his own docs. On v1 Bob sees nothing; on v2 Bob sees Alice's secret because v2 ignores the session cookie. The mismatch fires on the bob-lists step.",
+  "steps": [
+    { "method": "POST", "path": "/api/session", "body": { "user": "alice" }, "actor": "alice", "label": "alice-login" },
+    { "method": "POST", "path": "/api/docs", "body": { "title": "alice-secret" }, "actor": "alice", "label": "alice-creates" },
+    { "method": "POST", "path": "/api/session", "body": { "user": "bob" }, "actor": "bob", "label": "bob-login" },
+    { "method": "GET", "path": "/api/docs", "actor": "bob", "label": "bob-lists" }
+  ]
+}

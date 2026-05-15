@@ -6,6 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { summariseBodyDiff } from "./body-diff.js";
 import { runParity } from "./parity.js";
 
 const HELP = `Usage: chaosbringer parity --left <url> --right <url> --paths <file> [options]
@@ -28,6 +29,29 @@ Options:
                      final status. Default is manual (compare the 3xx
                      status + Location directly, the more sensitive
                      mode for routing-bug detection).
+  --check-body       Also compare response body bytes (SHA-256 hash).
+                     Off by default — adds a full body read per side
+                     per path. Required to catch silent schema drift
+                     where two endpoints agree on status but differ on
+                     payload (e.g. a JSON field dropped on one side).
+  --check-headers <list>
+                     Compare the named response headers (comma-separated,
+                     case-insensitive). e.g. --check-headers content-type,cache-control
+                     Catches policy drift like one side dropping
+                     cache-control or returning a different CORS origin.
+                     Reported before body drift.
+  --check-exceptions Visit each path in a real browser (Chromium) and
+                     compare uncaught JS errors + console.error
+                     between sides. Catches React hydration mismatches
+                     and other runtime-only bugs where HTTP looks
+                     identical. Slow — one browser visit per side per
+                     path. Requires \`playwright\` installed and a
+                     browser binary available.
+  --perf-delta-ms <n>  Flag a "perf" mismatch when right is more than
+                     N ms slower than left. Single-sample wall clock —
+                     noisy; set well above your jitter floor.
+  --perf-ratio <n>   Flag a "perf" mismatch when right > left * N.
+                     Composes with --perf-delta-ms via OR.
   --timeout <ms>     Per-request timeout. Default 10000.
   --help             Show this help
 
@@ -42,10 +66,17 @@ Examples:
 
 function readPaths(file: string): string[] {
   const text = readFileSync(file, "utf-8");
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  return (
+    text
+      .split(/\r?\n/)
+      // Strip inline `#` comments first — the unescaped `#` would later be
+      // parsed as a URL fragment, silently dropping everything after it and
+      // letting accidentally-correct results mask the parse failure. Doing
+      // this before the empty-line filter keeps comment-only lines from
+      // surviving as a stray empty path.
+      .map((line) => line.replace(/(^|\s)#.*$/, "").trim())
+      .filter((line) => line.length > 0)
+  );
 }
 
 export async function runParityCli(argv: string[]): Promise<void> {
@@ -57,6 +88,11 @@ export async function runParityCli(argv: string[]): Promise<void> {
       paths: { type: "string" },
       output: { type: "string" },
       "follow-redirects": { type: "boolean", default: false },
+      "check-body": { type: "boolean", default: false },
+      "check-headers": { type: "string" },
+      "check-exceptions": { type: "boolean", default: false },
+      "perf-delta-ms": { type: "string" },
+      "perf-ratio": { type: "string" },
       timeout: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -79,11 +115,21 @@ export async function runParityCli(argv: string[]): Promise<void> {
     return;
   }
 
+  const checkHeaders = values["check-headers"]
+    ?.split(",")
+    .map((h) => h.trim())
+    .filter((h) => h.length > 0);
+
   const report = await runParity({
     left: values.left,
     right: values.right,
     paths,
     followRedirects: values["follow-redirects"],
+    checkBody: values["check-body"],
+    checkHeaders,
+    checkExceptions: values["check-exceptions"],
+    perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
+    perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
     timeoutMs,
   });
 
@@ -94,14 +140,49 @@ export async function runParityCli(argv: string[]): Promise<void> {
 
   console.log(`Checked ${report.pathsChecked} path(s): ${report.matches.length} match, ${report.mismatches.length} mismatch.`);
   for (const m of report.mismatches) {
-    if (m.kind === "status") {
-      console.log(`  STATUS ${m.path}  left=${m.left.status}  right=${m.right.status}`);
-    } else if (m.kind === "redirect") {
-      console.log(`  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`);
-    } else {
-      const leftMsg = m.left.error ?? `status ${m.left.status}`;
-      const rightMsg = m.right.error ?? `status ${m.right.status}`;
-      console.log(`  FAIL   ${m.path}  left=${leftMsg}  right=${rightMsg}`);
+    // Print every detected kind for this probe, not just the primary —
+    // a header drift can mask a body drift if we only show the first.
+    for (const kind of m.kinds) {
+      if (kind === "status") {
+        console.log(`  STATUS ${m.path}  left=${m.left.status}  right=${m.right.status}`);
+      } else if (kind === "redirect") {
+        console.log(
+          `  REDIR  ${m.path}  left→${m.left.location ?? "(none)"}  right→${m.right.location ?? "(none)"}`,
+        );
+      } else if (kind === "body") {
+        const summary = summariseBodyDiff(m.bodyDiff);
+        const head = `  BODY   ${m.path}  left=${m.left.bodyLength}B (${m.left.bodyHash?.slice(0, 8)}…)  right=${m.right.bodyLength}B (${m.right.bodyHash?.slice(0, 8)}…)`;
+        console.log(summary ? `${head}\n         ${summary}` : head);
+      } else if (kind === "header") {
+        const diffs: string[] = [];
+        const left = m.left.headers ?? {};
+        const right = m.right.headers ?? {};
+        for (const name of Object.keys(left)) {
+          if (left[name] !== right[name]) {
+            diffs.push(`${name}: left=${left[name] ?? "(none)"} right=${right[name] ?? "(none)"}`);
+          }
+        }
+        console.log(`  HEADER ${m.path}  ${diffs.join(" | ")}`);
+      } else if (kind === "exception") {
+        const leftCount = (m.left.pageErrors?.length ?? 0) + (m.left.consoleErrors?.length ?? 0);
+        const rightCount = (m.right.pageErrors?.length ?? 0) + (m.right.consoleErrors?.length ?? 0);
+        const sample = (m.right.pageErrors ?? m.right.consoleErrors ?? m.left.pageErrors ?? m.left.consoleErrors ?? [])[0];
+        console.log(
+          `  EXC    ${m.path}  left=${leftCount} err  right=${rightCount} err  e.g. "${sample ?? "(none)"}"`,
+        );
+      } else if (kind === "perf") {
+        const l = m.left.durationMs ?? 0;
+        const r = m.right.durationMs ?? 0;
+        const delta = r - l;
+        const ratio = l > 0 ? r / l : 0;
+        console.log(
+          `  PERF   ${m.path}  left=${l.toFixed(0)}ms  right=${r.toFixed(0)}ms  Δ=${delta.toFixed(0)}ms (×${ratio.toFixed(2)})`,
+        );
+      } else if (kind === "failure") {
+        const leftMsg = m.left.error ?? `status ${m.left.status}`;
+        const rightMsg = m.right.error ?? `status ${m.right.status}`;
+        console.log(`  FAIL   ${m.path}  left=${leftMsg}  right=${rightMsg}`);
+      }
     }
   }
 

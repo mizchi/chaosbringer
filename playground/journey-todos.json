@@ -1,0 +1,7 @@
+{
+  "_comment": "Demonstrates BUG-7: silent write drop on v2 when the title is prefixed with 'drop:'. Step 0 (POST) returns 201 on both sides; Step 1 (GET list) diverges because v2 didn't persist. Single-shot parity on either path alone would miss this.",
+  "steps": [
+    { "method": "POST", "path": "/api/todos", "body": { "title": "drop: groceries" }, "label": "create-todo" },
+    { "method": "GET", "path": "/api/todos", "label": "list-after-create" }
+  ]
+}

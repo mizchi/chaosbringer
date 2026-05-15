@@ -1,0 +1,4 @@
+reports/
+artifacts/
+node_modules/
+*.log

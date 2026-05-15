@@ -1,0 +1,29 @@
+{
+  "name": "@mizchi/chaosbringer-playground",
+  "private": true,
+  "type": "module",
+  "description": "Dogfooding playground: two Hono variants (v1/v2) with intentional divergences + server-faults wired for every fault kind. Drives the sub-agent improvement loop.",
+  "scripts": {
+    "dev:v1": "VARIANT=v1 PORT=5001 tsx server.ts",
+    "dev:v2": "VARIANT=v2 PORT=5002 tsx server.ts",
+    "dev:both": "concurrently -k -n v1,v2 -c blue,magenta 'pnpm dev:v1' 'pnpm dev:v2'",
+    "chaos:v1": "chaosbringer --url http://127.0.0.1:5001 --seed 42 --max-pages 8 --max-actions 2 --output reports/v1.json --failure-artifacts artifacts/v1 --cluster-artifacts --ignore-preset analytics --compact",
+    "chaos:v2": "chaosbringer --url http://127.0.0.1:5002 --seed 42 --max-pages 8 --max-actions 2 --output reports/v2.json --failure-artifacts artifacts/v2 --cluster-artifacts --ignore-preset analytics --compact",
+    "chaos:diff": "chaosbringer diff reports/v1.json reports/v2.json",
+    "chaos:parity": "chaosbringer parity --left http://127.0.0.1:5001 --right http://127.0.0.1:5002 --paths paths.txt --output reports/parity.json",
+    "loop": "tsx loop.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@mizchi/server-faults": "workspace:*",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "concurrently": "^9.0.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
