@@ -269,6 +269,10 @@ describe("writeClusterArtifacts", () => {
     const [result] = writeClusterArtifacts(report, { bundleDir: dir });
     const dirName = result.bundlePath.split("/").pop()!;
     expect(dirName).not.toMatch(/[\\/"<>'`\s]/);
+    // `|` is also forbidden — GitHub `actions/upload-artifact@v4`
+    // rejects it, so the chaos cluster bundles can no longer carry
+    // the `<type>|<fingerprint>` separator into the dirname.
+    expect(dirName).not.toMatch(/\|/);
     // The original key is preserved in info.json for downstream tools.
     const info = JSON.parse(readFileSync(join(result.bundlePath, "info.json"), "utf-8"));
     expect(info.clusterKey).toBe('console|a/b "c" foo<bar>');

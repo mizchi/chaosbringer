@@ -104,11 +104,17 @@ function buildUrlIndex(bundleDir: string): Map<string, string> {
  * them aggressively. The original key is preserved in the bundle's
  * `info.json`, so downstream tools that need the exact key still have
  * it.
+ *
+ * `|` is also stripped even though Linux/macOS accept it: GitHub
+ * `actions/upload-artifact@v4` rejects paths containing `" : < > | * ?
+ * \r \n`, so a cluster bundle named `console|...` fails the upload
+ * step and silently kills the workflow even when the underlying
+ * crawl/parity assertions all passed.
  */
 function sanitizeClusterKey(key: string): string {
   return (
     key
-      .replace(/[^A-Za-z0-9._|-]+/g, "_")
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
       .replace(/_+/g, "_")
       .replace(/^_|_$/g, "")
       .slice(0, 80) || "cluster"
