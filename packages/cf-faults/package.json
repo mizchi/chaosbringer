@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/cf-faults",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cloudflare Workers-specific chaos injection: KV namespaces and Service Bindings.",
   "license": "MIT",
   "author": "mizchi",
