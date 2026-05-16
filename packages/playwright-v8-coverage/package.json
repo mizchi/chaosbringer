@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/playwright-v8-coverage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "V8 precise-coverage collector for Playwright (CDP Profiler.takePreciseCoverage) with novelty-scoring helpers. Extracted from chaosbringer.",
   "license": "MIT",
   "author": "mizchi",
