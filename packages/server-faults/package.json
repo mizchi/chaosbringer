@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/server-faults",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request/Response.",
   "license": "MIT",
   "author": "mizchi",
