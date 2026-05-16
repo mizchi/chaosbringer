@@ -13,6 +13,7 @@ Chaos testing toolkit for web apps. A Playwright-based crawler injects faults at
 | **Page lifecycle / runtime** | [`chaosbringer`](packages/chaosbringer) `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](packages/server-faults) | Inside the server process, before the handler runs | "Do the server's OTel traces / metrics show the fault, and does the handler degrade gracefully" |
 | **Cloudflare bindings** | [`@mizchi/cf-faults`](packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
+| **AWS (via kumo)** | [`@mizchi/aws-faults`](packages/aws-faults) + [`kumo-chaos-patch`](kumo-chaos-patch) | DynamoDB / S3 / SQS / Lambda etc. inside a [kumo](https://github.com/sivchari/kumo) emulator (runtime `/kumo/chaos/*` endpoints) | "Can our service — or our AI on-call — recover from a DDB throttling storm while it's still being injected" |
 
 **Common confusion:** `faults.status(500, …)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` *and* run both layers together. See [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md).
 
@@ -25,6 +26,7 @@ Chaos testing toolkit for web apps. A Playwright-based crawler injects faults at
 | [`@mizchi/playwright-faults`](packages/playwright-faults) | Playwright fault-injection primitives (network route, page lifecycle, JS runtime monkey-patch) — extracted from chaosbringer for direct Playwright Test use |
 | [`@mizchi/playwright-v8-coverage`](packages/playwright-v8-coverage) | V8 precise-coverage collector for Playwright (CDP `Profiler.takePreciseCoverage`) with novelty-scoring helpers |
 | [`@mizchi/cf-faults`](packages/cf-faults) | Cloudflare Worker binding wrappers (KV / Service Binding) for chaos injection |
+| [`@mizchi/aws-faults`](packages/aws-faults) | Runtime AWS fault injection for [kumo](https://github.com/sivchari/kumo) (DDB throttle storms, S3 eventual consistency, etc.) + drill SDK for AI recovery rehearsal. Companion Go patch lives in [`kumo-chaos-patch/`](kumo-chaos-patch). |
 
 ## 30-second tour
 
@@ -89,6 +91,7 @@ Longer-form "what does this feature do and why" docs:
 - [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
+- [`docs/recipes/aws-chaos-rehearsal.md`](docs/recipes/aws-chaos-rehearsal.md) — AI recovery rehearsal on top of [kumo](https://github.com/sivchari/kumo) (PR #667 latency baseline + runtime `/kumo/chaos/*` rules). See [`examples/aws-chaos-rehearsal/`](examples/aws-chaos-rehearsal/) for the end-to-end demo.
 
 ## Examples
 
