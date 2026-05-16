@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.9.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.9.0...chaosbringer-v0.9.0) (2026-05-16)
+
+
+### Features
+
+* **advisor:** CLI cost / call summary in formatReport + formatCompactReport ([#47](https://github.com/mizchi/chaosbringer/issues/47)) ([6bcb035](https://github.com/mizchi/chaosbringer/commit/6bcb035776d66384854da958d6ca710407f39523))
+* **advisor:** redactReasoning flag for confidential UIs ([#45](https://github.com/mizchi/chaosbringer/issues/45)) ([001e4a1](https://github.com/mizchi/chaosbringer/commit/001e4a1b80aa4e14875923ab9bb9560416474dd0))
+* **advisor:** screenshotMode config (viewport | fullPage) ([#46](https://github.com/mizchi/chaosbringer/issues/46)) ([5932a53](https://github.com/mizchi/chaosbringer/commit/5932a538259add28618c07a54432a0f7ac8c6568))
+* AI-driven recipe layer + scenarioLoad + OWASP auth attacks ([#97](https://github.com/mizchi/chaosbringer/issues/97)) ([72ce951](https://github.com/mizchi/chaosbringer/commit/72ce951de8d202b9c52232f49cb0c7786f12ace0))
+* **chaosbringer:** add chaos({ setup }) pre-run hook for state seeding ([2432558](https://github.com/mizchi/chaosbringer/commit/24325580e2dcf25f17101767fcf4ad17d80ea30b))
+* **chaosbringer:** add ChaosRemoteServer option type (no behaviour yet) ([62b19bc](https://github.com/mizchi/chaosbringer/commit/62b19bcf9559f286871e4273274f29db64f29b5a))
+* **chaosbringer:** collect server-fault events from response headers per page ([31b3bc0](https://github.com/mizchi/chaosbringer/commit/31b3bc0fdd30c1c5460c8e6fcde8460349131973))
+* **chaosbringer:** inject W3C traceparent for OTel correlation ([a76a485](https://github.com/mizchi/chaosbringer/commit/a76a48523afdab28f77250fad0ce1b68e85deddc))
+* **chaosbringer:** named fault profiles for shared operator knowledge ([bb1f7dc](https://github.com/mizchi/chaosbringer/commit/bb1f7dc3b563a313098eb5825ceb1bbdb15af153))
+* **chaosbringer:** parse x-chaos-fault-* response headers into events ([214b9a3](https://github.com/mizchi/chaosbringer/commit/214b9a379b7ac0cb3fcbaad0ceaf3c23beacc22b))
+* **chaosbringer:** per-page + per-action server-fault correlation ([#56](https://github.com/mizchi/chaosbringer/issues/56) Phase 2) ([#79](https://github.com/mizchi/chaosbringer/issues/79)) ([7c3d7f9](https://github.com/mizchi/chaosbringer/commit/7c3d7f96aace1f6b23f7c6af914d726a28f69951))
+* **chaosbringer:** surface server fault events on CrawlReport.serverFaults ([0f39f97](https://github.com/mizchi/chaosbringer/commit/0f39f97a73134ea9c305684874b991864a80d807))
+* extract @mizchi/playwright-faults (network / lifecycle / runtime) ([#51](https://github.com/mizchi/chaosbringer/issues/51)) ([b642aa5](https://github.com/mizchi/chaosbringer/commit/b642aa5cb0f677519f712f0a7a41e438857ebaca))
+* extract V8 coverage primitives to @mizchi/playwright-v8-coverage ([#50](https://github.com/mizchi/chaosbringer/issues/50)) ([80a7d20](https://github.com/mizchi/chaosbringer/commit/80a7d2026a9887fb6815c045de9026fcf154f8d2))
+* replay fidelity tracking — surface trace UI drift ([#48](https://github.com/mizchi/chaosbringer/issues/48)) ([5017733](https://github.com/mizchi/chaosbringer/commit/50177332c0d0f022a7a98f38da6b697195674d9f))
+
+
+### Bug Fixes
+
+* **chaosbringer:** alias ServerFaultEvent.attrs to ServerFaultEventAttrs + drop redundant cast ([54231c0](https://github.com/mizchi/chaosbringer/commit/54231c0ebf6f55aef00483405fe0108efc2158ec))
+* **chaosbringer:** align serverFaults field style + drop redundant shape test ([d2cb30a](https://github.com/mizchi/chaosbringer/commit/d2cb30af6776f593eec85a5f7b0c875fead0ff01))
+* **chaosbringer:** derive ServerFaultKind from as-const tuple + prefix-isolation test ([1bf0b43](https://github.com/mizchi/chaosbringer/commit/1bf0b43a693beef4b33f6686727f8aa6e153a3a7))
+* **chaosbringer:** drop `|` from cluster bundle dirnames + simplify playground CI diagnostics ([#106](https://github.com/mizchi/chaosbringer/issues/106)) ([2bc9133](https://github.com/mizchi/chaosbringer/commit/2bc9133e4703a04d263cf8b2fb24347390d65dec))
+* **chaosbringer:** validate options before invoking the setup hook ([e51606b](https://github.com/mizchi/chaosbringer/commit/e51606bdc9a7fb69f2c7a64eccad79e732d66ead))
+* **publish:** use pnpm publish to rewrite workspace:^ deps + bump 0.8.1 ([#85](https://github.com/mizchi/chaosbringer/issues/85)) ([980e00a](https://github.com/mizchi/chaosbringer/commit/980e00a2384581a04ff24a377bf9d49dc1af2a57))
+
 ## [0.9.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.8.1...chaosbringer-v0.9.0) (2026-05-15)
 
 
