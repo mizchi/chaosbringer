@@ -1,12 +1,13 @@
 /**
- * Target app: Hono service backed by DynamoDB + Kinesis + S3 via kumo.
+ * Target app: Hono service backed by DynamoDB + Kinesis + S3 + STS via kumo.
  *
- * POST /orders writes:
+ * POST /orders does:
+ *   0. STS GetCallerIdentity — "tenant tier check" (control-plane call)
  *   1. DDB row (orders table)            — source of truth
  *   2. Kinesis audit event (orders-audit) — invisible buffered dependency
  *   3. S3 receipt object (receipts/{id}) — large-object write path
- * All three synchronous on the customer path. Each is in scope of a
- * different real-incident drill.
+ * All four synchronous on the customer path. Each is in scope of a
+ * different real-incident drill (2021 / 2015 / 2020 / 2017 respectively).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -14,6 +15,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
 
@@ -45,10 +47,20 @@ const s3 = new S3Client({
   forcePathStyle: true,
 });
 
+const sts = new STSClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+});
+
 const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
+  // Multi-tenant tier check via STS. Yes, calling STS on every customer
+  // request is a control-plane dependency on the hot path — this is the
+  // pattern that bit a lot of customers during the 2021 us-east-1 outage.
+  await sts.send(new GetCallerIdentityCommand({}));
   // Primary write to DDB.
   await doc.send(
     new PutCommand({
