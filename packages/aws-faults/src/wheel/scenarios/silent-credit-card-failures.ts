@@ -116,7 +116,11 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
       checkedKumoChaosStats(2),
       readTargetSource(2),
       statedHypothesis(2),
-      rereadPageBoard(2, 2),
+      // rereadPageBoard removed after 5/5 runs across 2 scenarios failed it
+      // (eval4 + eval5 writeups). When agents can query /kumo/chaos/stats
+      // directly, page-board re-reads become confirmatory not decisive. The
+      // criterion penalized efficient diagnosis. Kept the primitive in the
+      // library for scenarios where pages are the only signal channel.
       didNotAddRetries(3),
       minimalCodeChange(3, 2),
       recoveredSlo(3),
