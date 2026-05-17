@@ -12,7 +12,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
@@ -53,6 +53,8 @@ const sts = new STSClient({
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
 });
 
+const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
+
 const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
@@ -61,6 +63,12 @@ async function writeOrder(): Promise<{ id: string }> {
   // request is a control-plane dependency on the hot path — this is the
   // pattern that bit a lot of customers during the 2021 us-east-1 outage.
   await sts.send(new GetCallerIdentityCommand({}));
+  // Tier config lookup. Reads a single hot key on every customer request
+  // with NO local cache — the classic cache-stampede setup. Production
+  // would put a TTL cache in front of this; we do not.
+  await doc.send(
+    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+  );
   // Primary write to DDB.
   await doc.send(
     new PutCommand({

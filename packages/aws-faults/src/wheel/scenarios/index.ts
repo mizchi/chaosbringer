@@ -16,6 +16,15 @@ export type { MisleadingChaosOptions } from "./misleading-chaos.ts";
 export { controlPlaneDegraded } from "./control-plane-degraded.ts";
 export type { ControlPlaneDegradedOptions } from "./control-plane-degraded.ts";
 
+export { quotaSaturated } from "./quota-saturated.ts";
+export type { QuotaSaturatedOptions } from "./quota-saturated.ts";
+
+export { ddbDnsRace } from "./ddb-dns-race.ts";
+export type { DDBDNSRaceOptions } from "./ddb-dns-race.ts";
+
+export { tierLookupStampede } from "./tier-lookup-stampede.ts";
+export type { TierLookupStampedeOptions } from "./tier-lookup-stampede.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -32,6 +41,9 @@ import { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
 import { ddbThrottleWarmup } from "./ddb-throttle-warmup.ts";
 import { misleadingChaos } from "./misleading-chaos.ts";
 import { controlPlaneDegraded } from "./control-plane-degraded.ts";
+import { quotaSaturated } from "./quota-saturated.ts";
+import { ddbDnsRace } from "./ddb-dns-race.ts";
+import { tierLookupStampede } from "./tier-lookup-stampede.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -44,6 +56,9 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "checkout-receipts-stalled", factory: checkoutReceiptsStalled },
   { id: "misleading-chaos", factory: misleadingChaos },
   { id: "control-plane-degraded", factory: controlPlaneDegraded },
+  { id: "quota-saturated", factory: quotaSaturated },
+  { id: "ddb-dns-race", factory: ddbDnsRace },
+  { id: "tier-lookup-stampede", factory: tierLookupStampede },
 ];
 
 /**
