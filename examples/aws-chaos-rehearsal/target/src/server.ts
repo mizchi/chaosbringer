@@ -26,8 +26,33 @@ const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  maxAttempts: 8,
 });
 const doc = DynamoDBDocumentClient.from(ddb);
+
+// Retry wrapper for throttling/transient errors on the customer path.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 6): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const name = err?.name || err?.Code || err?.code || "";
+      const retryable =
+        name === "ProvisionedThroughputExceededException" ||
+        name === "ThrottlingException" ||
+        name === "TooManyRequestsException" ||
+        err?.$retryable?.throttling === true ||
+        err?.$metadata?.httpStatusCode === 429 ||
+        err?.$metadata?.httpStatusCode === 503;
+      if (!retryable) throw err;
+      const backoff = Math.min(50 * 2 ** i, 400) + Math.floor(Math.random() * 25);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  throw lastErr;
+}
 
 const kinesis = new KinesisClient({
   endpoint: ENDPOINT,
@@ -50,31 +75,37 @@ const app = new Hono();
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
   // Primary write to DDB.
-  await doc.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: { id, ts: Date.now(), amount: 1 },
-    }),
+  await withRetry(() =>
+    doc.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { id, ts: Date.now(), amount: 1 },
+      }),
+    ),
   );
   // Audit event to Kinesis — synchronous on the customer path.
   // If Kinesis is slow / failing, the customer sees this latency directly.
-  await kinesis.send(
-    new PutRecordCommand({
-      StreamName: STREAM,
-      Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
-      PartitionKey: id,
-    }),
+  await withRetry(() =>
+    kinesis.send(
+      new PutRecordCommand({
+        StreamName: STREAM,
+        Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
+        PartitionKey: id,
+      }),
+    ),
   );
   // Receipt object to S3 — also synchronous. Large-object write path
   // that is the typical victim of S3 503 SlowDown bursts during
   // hot-prefix incidents.
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: `receipts/${id}.json`,
-      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
-      ContentType: "application/json",
-    }),
+  await withRetry(() =>
+    s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: `receipts/${id}.json`,
+        Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
+        ContentType: "application/json",
+      }),
+    ),
   );
   return { id };
 }
