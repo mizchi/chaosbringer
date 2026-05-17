@@ -131,6 +131,17 @@ export async function runScenario(opts: RunScenarioOptions): Promise<ScenarioRep
     }
   }
 
+  // Snapshot kumo chaos state so chaosRulesPreserved can detect cheating.
+  let postRunChaosSnapshot: {
+    rules: { id: string }[];
+    stats: { ruleId: string; matched: number; skipped: number }[];
+  } | undefined;
+  try {
+    postRunChaosSnapshot = (await opts.chaos.listRules()) as typeof postRunChaosSnapshot;
+  } catch {
+    // best-effort
+  }
+
   // Score.
   const report = scoreScenario({
     transcript,
@@ -139,6 +150,7 @@ export async function runScenario(opts: RunScenarioOptions): Promise<ScenarioRep
     scenario: opts.scenario,
     postRunProbes,
     journalContents,
+    postRunChaosSnapshot,
   });
 
   // Persist artifacts.

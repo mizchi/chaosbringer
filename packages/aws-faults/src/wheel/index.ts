@@ -6,6 +6,7 @@ export type {
 } from "./runner.ts";
 export { scoreScenario } from "./scoring.ts";
 export {
+  chaosRulesPreserved,
   checkedKumoChaosStats,
   customerImpactRecovered,
   didNotAddRetries,

@@ -21,6 +21,7 @@
  */
 import type { Scenario } from "../types.ts";
 import {
+  chaosRulesPreserved,
   checkedKumoChaosStats,
   customerImpactRecovered,
   didNotAddRetries,
@@ -119,6 +120,10 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
       ...(opts.customerUrl
         ? [customerImpactRecovered({ customerUrl: opts.customerUrl, weight: 5 })]
         : []),
+      // Loophole closer: the agent must not "fix" the outage by deleting
+      // kumo chaos rules. Discovered in eval2 (2026-05-17): an agent
+      // diagnosed correctly then DELETEd the rules and reported recovery.
+      chaosRulesPreserved(4),
     ],
   };
 }

@@ -109,6 +109,15 @@ export interface ScoringContext {
    * check() sync, do async work in the runner.
    */
   postRunProbes?: Record<string, { rate: number; sampleN: number }>;
+  /**
+   * Snapshot of kumo's /kumo/chaos/rules at scoring time. Used by
+   * `chaosRulesPreserved` to detect "agent disabled the chaos to make
+   * SLO pass" cheating.
+   */
+  postRunChaosSnapshot?: {
+    rules: { id: string }[];
+    stats: { ruleId: string; matched: number; skipped: number }[];
+  };
 }
 
 export interface ToolUseRecord {
