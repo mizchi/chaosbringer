@@ -95,6 +95,20 @@ describe("scoreScenario", () => {
     expect(c.check(ctx("added a circuit breaker, no retry changes"))).toBe(true);
   });
 
+  it("`didNotAddRetries` ignores root-cause description before Mitigation header", async () => {
+    // Eval-4 case: agent describes the BUG ("deploy set maxAttempts=8")
+    // in the root-cause section then applies CORRECT mitigation
+    // ("maxAttempts: 1"). The old version FAIL'd because the regex saw
+    // the "8". Section detection only scans after "Mitigation:" header.
+    const { didNotAddRetries } = await import("./scoring.ts");
+    const c = didNotAddRetries();
+    const transcript =
+      "Root cause: previous deploy set maxAttempts=8 + 10-attempt app-level loop. " +
+      "**Mitigation:** SDK maxAttempts: 1 (no internal retries). App-level 3 attempts max, " +
+      "backoff 1200-1800ms (deliberately longer than feedback window).";
+    expect(c.check({ scenario: makeScenario(), drillReport: makeReport(true), transcript, toolUses: [] })).toBe(true);
+  });
+
   it("red-herring detection respects negation in the same sentence", () => {
     const scenario = makeScenario({
       redHerrings: [{ hypothesis: "blamed SQS", matchKeyword: "sqs.*cause" }],

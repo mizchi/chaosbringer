@@ -68,21 +68,47 @@ export function recoveredSlo(weight = 5): RubricCriterion {
   };
 }
 
-/** Did the agent avoid adding MORE retries (the 2015 DDB anti-pattern)? */
+/**
+ * Did the agent avoid adding MORE retries (the 2015 DDB anti-pattern)?
+ *
+ * Reads the agent's MITIGATION section only, when one is identifiable.
+ * Otherwise falls back to the whole transcript. The eval-4 case showed
+ * the previous version FAIL'd because the agent described the upstream
+ * deploy's bad config ("set maxAttempts=8") in the root-cause section,
+ * even though their own mitigation was `maxAttempts: 1` + 3 retries.
+ *
+ * Section detection looks for the common headers used by agent
+ * post-incident reports: "Mitigation", "Fix", "Applied", "Resolution".
+ */
 export function didNotAddRetries(weight = 3): RubricCriterion {
-  // Match common retry-config knobs with values in the "many" range (>= 5).
-  // Tolerant of `maxAttempts: 8`, `maxAttempts = 8`, `maxAttempts to 8`,
-  // `attempts < 10`, `retries=6`, and bare "10 attempts" / "6 retries".
-  // Brittleness lesson from eval3 (2026-05-17): the agent wrote "maxAttempts
-  // to 8" and the old `\b:\s*` regex missed it.
   const KNOB = /\b(max[\s_-]?attempts|retry[\s_-]?attempts|retries|max[\s_-]?retries|retry[\s_-]?count)\b[^.\n]{0,30}?\b([5-9]|[1-9]\d+)\b/i;
   const PHRASE = /\b([5-9]|[1-9]\d+)\s+(attempts?|retries|retry)\b/i;
+  // 0-2 asterisks on each side (markdown bold optional). The leading
+  // `\*\*?` was a bug — that required at least one `*`, and most agents
+  // write "Mitigation:" without markdown.
+  const SECTION = /\*{0,2}(mitigation|fix|applied|resolution|what i did)\*{0,2}[:\s]/i;
   return {
     id: "no-extra-retries",
-    description: "Did not increase SDK retry attempts (anti-pattern for retry-storm incidents)",
+    description: "Did not increase SDK retry attempts in the mitigation",
     weight,
-    failHint: "Added more retries. This makes retry-storm-driven outages worse, not better.",
+    failHint:
+      "Mitigation added more retries. This makes retry-storm-driven outages worse, not better.",
     check: ({ transcript, journalContents }) => {
+      const hasMitigationSection = SECTION.test(transcript);
+      const slice = (t: string) => {
+        const m = SECTION.exec(t);
+        return m ? t.slice(m.index) : t;
+      };
+      // If the transcript has a clear Mitigation header, scan ONLY that
+      // region of the transcript. Trust the agent's structured summary
+      // over the journal, which mixes diagnosis ("Cause: maxAttempts=8")
+      // with action ("Plan: revert to maxAttempts=1") under the same
+      // chronological format.
+      if (hasMitigationSection) {
+        const region = slice(transcript);
+        return !(KNOB.test(region) || PHRASE.test(region));
+      }
+      // Fallback: no clear mitigation section — scan everything.
       const texts = [transcript, ...(journalContents ?? [])];
       return !texts.some((t) => KNOB.test(t) || PHRASE.test(t));
     },

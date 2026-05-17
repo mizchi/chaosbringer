@@ -15,21 +15,40 @@ const client = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
-  maxAttempts: 4,
+  maxAttempts: 1,
 });
 const doc = DynamoDBDocumentClient.from(client);
 
 const app = new Hono();
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// App-level retry with long jittered backoff (>= feedback window 1s)
+// to let throttle probability decay between attempts. Total attempts kept small.
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  await doc.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: { id, ts: Date.now(), amount: 1 },
-    }),
-  );
-  return { id };
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      await doc.send(
+        new PutCommand({
+          TableName: TABLE,
+          Item: { id, ts: Date.now(), amount: 1 },
+        }),
+      );
+      return { id };
+    } catch (err) {
+      lastErr = err;
+      if (attempt === maxAttempts - 1) break;
+      // Long backoff: 1.2-1.8s, exceeds feedback windowMs=1000.
+      const delay = 1200 + Math.random() * 600;
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
 }
 
 app.post("/health", async (c) => {

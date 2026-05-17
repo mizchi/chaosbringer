@@ -60,9 +60,11 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
       "On-call paged. SLO breach in 10 minutes. Recent deploy 12 minutes ago.",
     drill,
     groundTruth:
-      "The DDB metadata service is overloaded; PutItem on the orders table is throttling at ~55%. " +
-      "The 'recent deploy' is real but unrelated to this incident. SQS and CloudWatch are also " +
-      "experiencing cascaded errors, but they are downstream symptoms, not the cause.",
+      "The DDB metadata service is overloaded; PutItem on the orders table is throttling at ~55% " +
+      "(amplifying under load via feedback). With feedback-aware chaos, the 'recent deploy' is " +
+      "RELEVANT: a deploy that introduced unbounded retries would amplify the retry storm. " +
+      "Agents that diagnose 'previous deploy added retries → feedback amplifies' are correct. " +
+      "SQS and CloudWatch cascades are downstream symptoms, not the cause.",
     pages: [
       {
         atSec: 12,
@@ -84,9 +86,13 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
       },
     ],
     redHerrings: [
+      // With feedback-aware chaos, the recent deploy is no longer a red
+      // herring — a deploy that introduced bad retry config is part of
+      // the root cause. Removed in eval-4 cleanup. Rolling back blindly
+      // (without identifying the retry-storm link) would still be wrong:
       {
-        hypothesis: "Blamed the recent deploy",
-        matchKeyword: "(recent\\s+deploy|roll\\s*back|revert)",
+        hypothesis: "Rolled back the deploy without diagnosing retry storm",
+        matchKeyword: "(roll\\s*back|revert)\\s+(?!.*retry|.*storm|.*feedback)",
       },
       {
         hypothesis: "Blamed CloudWatch latency",
