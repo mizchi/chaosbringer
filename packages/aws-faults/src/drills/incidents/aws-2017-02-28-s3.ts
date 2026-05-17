@@ -132,6 +132,7 @@ export function aws_2017_02_28_s3(opts: AWS20170228Options): Drill {
 
   return {
     id: "aws-2017-02-28-s3",
+    peakPhaseIndex: 0, // "index-down-all-ops-fail" is the worst phase.
     name: "AWS 2017-02-28 S3 us-east-1 (index subsystem outage, asymmetric recovery)",
     description:
       "Replays the 2017 S3 us-east-1 incident: 3-phase asymmetric outage where reads recover before writes. EBS snapshots cascade.",

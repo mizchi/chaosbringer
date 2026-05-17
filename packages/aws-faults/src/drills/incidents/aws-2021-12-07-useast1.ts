@@ -160,6 +160,7 @@ export function aws_2021_12_07_useast1(opts: AWS20211207Options): Drill {
 
   return {
     id: "aws-2021-12-07-useast1",
+    peakPhaseIndex: 1, // "partial-recovery-sts-still-down" has the highest STS error rate.
     name: "AWS 2021-12-07 us-east-1 (control-plane / network-device congestion, 7h)",
     description:
       "Replays the 2021 us-east-1 outage: STS/EC2/IAM/Route53 control-plane impaired, data plane fine. Clients failed to back off, amplifying.",

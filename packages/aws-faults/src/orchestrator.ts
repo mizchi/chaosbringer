@@ -50,6 +50,14 @@ export interface Drill {
    * peak → partial recovery → tail. See `drills/incidents/` for examples.
    */
   phases?: Phase[];
+  /**
+   * Index of the "peak" phase within `phases`. Used by tools like the
+   * eval-prepare CLI to install the right rules for a static-impact
+   * eval. Defaults to 0; drills where the worst phase isn't first
+   * should set this explicitly (e.g. DDB peak is at index 1, after
+   * the onset ramp-up).
+   */
+  peakPhaseIndex?: number;
   /** One probe = one synthetic user request. Should NOT throw on app errors. */
   healthCheck: () => Promise<HealthCheckResult>;
   /** SLO the drill must restore before declaring recovery. */

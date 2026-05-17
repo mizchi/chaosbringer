@@ -185,6 +185,7 @@ export function aws_2015_09_20_dynamodb(opts: AWS20150920Options): Drill {
 
   return {
     id: "aws-2015-09-20-dynamodb",
+    peakPhaseIndex: 1, // "peak-55pct-errors" is index 1; index 0 is the onset ramp.
     name: "AWS 2015-09-20 DynamoDB us-east-1 (metadata service / retry storm)",
     description:
       "Replays the 2015 DynamoDB us-east-1 incident: 4-phase timeline with 55% error peak + cascading SQS/CloudWatch faults. Retries amplified the original outage.",

@@ -16,6 +16,8 @@ import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
@@ -47,17 +49,62 @@ const s3 = new S3Client({
 
 const app = new Hono();
 
+// Write-ahead log for S3 receipt writes. Receipts must not be lost
+// (downstream consumer sends emails from them), but they don't have
+// to be in S3 by the time we ack the customer. We durably stage to
+// disk first; a background worker drains to S3 with retries.
+const WAL_PATH = process.env.RECEIPT_WAL ?? "/tmp/receipt-wal.ndjson";
+if (!existsSync(dirname(WAL_PATH))) mkdirSync(dirname(WAL_PATH), { recursive: true });
+if (!existsSync(WAL_PATH)) writeFileSync(WAL_PATH, "");
+
+function walAppend(entry: { id: string; body: string }) {
+  appendFileSync(WAL_PATH, JSON.stringify(entry) + "\n");
+}
+
+async function drainWal() {
+  let lines: string[];
+  try {
+    lines = readFileSync(WAL_PATH, "utf8").split("\n").filter((l) => l.length > 0);
+  } catch {
+    return;
+  }
+  if (lines.length === 0) return;
+  const remaining: string[] = [];
+  for (const line of lines) {
+    let entry: { id: string; body: string };
+    try { entry = JSON.parse(line); } catch { continue; }
+    try {
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: BUCKET,
+          Key: `receipts/${entry.id}.json`,
+          Body: entry.body,
+          ContentType: "application/json",
+        }),
+      );
+    } catch {
+      remaining.push(line);
+    }
+  }
+  // Rewrite WAL with only undrained entries. Atomic-ish: write tmp then rename.
+  const tmp = WAL_PATH + ".tmp";
+  writeFileSync(tmp, remaining.length ? remaining.join("\n") + "\n" : "");
+  // Use rename via fs.renameSync
+  try { (require("node:fs") as typeof import("node:fs")).renameSync(tmp, WAL_PATH); } catch {}
+}
+
+setInterval(() => { drainWal().catch(() => {}); }, 1000);
+
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Primary write to DDB.
+  // Primary write to DDB — source of truth, must be synchronous.
   await doc.send(
     new PutCommand({
       TableName: TABLE,
       Item: { id, ts: Date.now(), amount: 1 },
     }),
   );
-  // Audit event to Kinesis — synchronous on the customer path.
-  // If Kinesis is slow / failing, the customer sees this latency directly.
+  // Audit event to Kinesis — regulatory; keep synchronous.
   await kinesis.send(
     new PutRecordCommand({
       StreamName: STREAM,
@@ -65,17 +112,10 @@ async function writeOrder(): Promise<{ id: string }> {
       PartitionKey: id,
     }),
   );
-  // Receipt object to S3 — also synchronous. Large-object write path
-  // that is the typical victim of S3 503 SlowDown bursts during
-  // hot-prefix incidents.
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: `receipts/${id}.json`,
-      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
-      ContentType: "application/json",
-    }),
-  );
+  // Receipt object: durable write-ahead log to disk, then background
+  // worker drains to S3. Receipt data is not lost on S3 outage.
+  const body = JSON.stringify({ id, ts: Date.now(), amount: 1 });
+  walAppend({ id, body });
   return { id };
 }
 

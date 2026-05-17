@@ -145,6 +145,7 @@ export function aws_2020_11_25_kinesis(opts: AWS20201125Options): Drill {
 
   return {
     id: "aws-2020-11-25-kinesis",
+    peakPhaseIndex: 1, // "thread-pool-exhausted" is index 1.
     name: "AWS 2020-11-25 Kinesis us-east-1 (thread-limit exhaustion, 17h)",
     description:
       "Replays the 2020 Kinesis us-east-1 incident: thread pool exhaustion on front-end fleet, Cognito and CloudWatch metrics cascade, very long slow-drain recovery.",

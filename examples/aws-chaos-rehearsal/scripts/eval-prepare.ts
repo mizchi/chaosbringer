@@ -103,8 +103,13 @@ await fetch(`${KUMO}/kumo/chaos/rules`, { method: "DELETE" }).catch(() => {});
 //    instead install the union of all phases' rules (the most-severe
 //    rule wins by id within the engine).
 const phases: Phase[] = scenario.drill.phases ?? [];
+// Use the drill's declared peakPhaseIndex if any (set per-drill since "peak"
+// is not always at the same position — DDB peak is index 1, S3 peak is
+// index 0). Defaults to 0; for simple-mode drills with no phases at all,
+// fall back to drill.rules.
+const peakIdx = scenario.drill.peakPhaseIndex ?? 0;
 const peakRules: Rule[] = phases.length > 0
-  ? phases[Math.min(1, phases.length - 1)]!.rules
+  ? (phases[Math.min(peakIdx, phases.length - 1)]?.rules ?? [])
   : (scenario.drill.rules ?? []);
 
 for (const rule of peakRules) {
