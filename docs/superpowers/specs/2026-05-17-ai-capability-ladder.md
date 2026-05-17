@@ -70,20 +70,83 @@ anti-pattern via `didNotAddRetries` but outcome agrees with the
 agent. To close: upgrade the chaos model so the wrong mitigation
 makes things tangibly worse.
 
-## Tier 4: Untested but designed for (next iteration)
+## Tier 4: Multi-cause diagnosis — REPRODUCIBLY SOLVED
 
-Scenarios we've designed but not yet built/run. These push toward
-where agents are expected to struggle.
+Scenarios where naive diagnosis is insufficient. As of compound-incident
+(2026-05-17), this tier turned out to be solvable.
 
-| Concept | What it tests |
+| Scenario | Best | Outcome | Why it was easier than expected |
+|---|---|---|---|
+| compound-incident | 100% (101s) | TWO independent issues (chaos + code bug). Both fixed in one shot. | The page text named both error codes; deploy-bot named the validation change; agent recognized "two error codes ≠ single cause" from the brief hint. |
+
+What we learned from compound-incident:
+- Brief hint about "two different error codes" is load-bearing. Without
+  it, the agent might fix only one.
+- The deploy-bot page at T+35s reinforced the code-bug signal.
+- Single-shot 101s with two distinct mitigations applied correctly
+  suggests agents handle 2-cause diagnosis well when each cause is
+  individually surface-discoverable.
+
+This implies: **multi-cause is not where the boundary lies**. Agents
+follow alert text + chaos stats + source reading + deploy-bot
+signals to find all the breadcrumbs the harness puts down.
+
+The real boundary is where breadcrumbs are absent or misleading.
+
+## Tier 5: Where the boundary probably lies (untested, expected hard)
+
+Scenarios we have NOT yet built. Each removes a breadcrumb agents
+rely on, or introduces a reflex anti-pattern.
+
+| Concept | Why it's expected to be hard |
 |---|---|
-| Compound incident (chaos + code bug) | Multi-cause diagnosis. Both must be fixed; either alone leaves SLO below threshold. |
-| Phase-shifting incident | Adaptability. Chaos changes mid-run; agent must re-diagnose. |
-| Capacity-choice scenario | Value reasoning. Single endpoint can't serve all customers; agent must implement priority shedding. |
-| Restart-causes-worse-failure | "Restart is not the answer" anti-pattern; restart loses warm caches. |
-| Data corruption requires repair | Stateful recovery; stop-bleeding ≠ recovery. Must repair existing bad data. |
-| Slow-burn cascade | Early-detection skill; chaos barely perceptible at first. |
-| Cardinality-aware | Chaos affects only a subset of customers (sharding/segmentation reasoning). |
+| **No-hints diagnosis** | Strip all alert / page / deploy-bot guidance. Agent gets only "checkout is slow" and must do full discovery. Tests whether agents over-rely on text breadcrumbs vs. independent investigation. |
+| **Restart-causes-worse-failure** | Target has a slow-warming cache. Restart costs 5s of downtime AND empties the cache. Chaos is mild (10% throttle, easily absorbed by retries). The reflex to "restart and see" actively makes things worse. Tests resistance to restart-as-default. |
+| **Capacity-choice / load-shedding** | Single endpoint can't both serve all traffic AND maintain SLO under chaos. Agent must implement priority-based shedding (premium vs free tier). Tests business reasoning, not just code reasoning. |
+| **Phase-shifting incident** | Chaos changes shape at T+60s. Agent fixes Phase A, then must re-diagnose for Phase B with different cause. Tests not committing to the first hypothesis. |
+| **Slow-burn cascade** | Chaos starts at 5% probability, scales to 50% over 90 seconds. Hard to detect early. By the time symptoms are obvious, the customer impact is severe. Tests early-detection skill (which our current scenarios don't reward). |
+| **Asymmetric customer impact** | Chaos affects only 20% of partition keys persistently. Agent must implement targeted mitigation, not blanket. Tests cardinality reasoning. |
+| **Stateful repair** | Chaos has already corrupted 200 DDB items. Agent must (a) stop bleeding (b) identify corrupted items (c) repair them. Tests stateful recovery, not just stop-bleeding. |
+| **False recovery** | Mitigation appears to work on burst probes but degrades under sustained load (e.g. SDK adaptive retry collapse). Tests sustained verification beyond initial confirmation. |
+
+## What we've observed about agent capability after compound-incident
+
+After 21 subagent runs across 10 scenarios:
+
+- **Multi-cause diagnosis works** when each cause has a breadcrumb
+  (chaos stats / page text / deploy-bot signal).
+- **Two distinct mitigations in one edit cycle is achievable** —
+  the compound-incident agent applied cache + bug-fix in ~100s.
+- **Brief hints are load-bearing but not solely sufficient** —
+  agents who only read the hint without verifying via source +
+  chaos stats produce worse mitigations.
+- **The "8 agent failure modes" list (Tier 3 fault-fidelity issues)
+  matters more than scenario complexity.** quota-saturated allows
+  retry-amplification to work because the chaos model is forgiving;
+  no amount of scenario complexity changes that.
+
+## What pushing further would require
+
+The Tier 5 list above. Specifically the easiest to build with high
+boundary-finding value:
+
+1. **No-hints diagnosis variant of an existing scenario** — same
+   chaos as e.g. silent-credit-card-failures, but the alert text says
+   only "customer impact elevated." See whether agents discover the
+   feedback configuration without being told.
+
+2. **Restart-causes-worse-failure** — needs a target with explicit
+   warmup cost (sleep 5s on first request after process restart).
+   Tests the most common LLM reflex (kill + restart) actively
+   penalized by the harness.
+
+3. **Phase-shifting via runScenario phases that mutate at fixed times** —
+   the orchestrator already supports phases; just need a scenario
+   where Phase 0 is "chaos type A" and Phase 1 (at T+60s) is "chaos
+   type B" with different mitigation.
+
+Each is small enough to build in one push. Any of them are likely
+to land in the 60-85% range based on how the lower tiers scored.
 
 ## What we've found WORKS for getting reliable evals
 

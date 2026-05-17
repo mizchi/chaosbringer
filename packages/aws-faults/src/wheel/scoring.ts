@@ -80,7 +80,7 @@ export function checkedKumoChaosStats(weight = 2): RubricCriterion {
  * etc.). Reduces false-FAILs from sparse journals.
  */
 export function readTargetSource(weight = 2): RubricCriterion {
-  const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|server\.ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis/i;
+  const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|getTierConfig|validatePayment|validateOrder|checkIdentity|server\.ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis|target\b.*\b(source|code)|on\s+every\s+request|hit\s+on\s+every|app\s+regression|code-level/i;
   return {
     id: "read-target-source",
     description: "Read the target app source before changing it",
@@ -175,7 +175,13 @@ export function minimalCodeChange(maxEditSites = 3, weight = 2): RubricCriterion
  * primary transcript, and any extra text files passed in `journalFiles`.
  */
 export function statedHypothesis(weight = 2): RubricCriterion {
-  const PAT = /\b(hypothesis|i think|likely|probably|the cause|root cause|because)\b/i;
+  // Accept the keyword "hypothesis" plus the markdown header forms agents
+  // use in post-incident summaries: "Root cause(s):", "Root causes:",
+  // "Cause:", numbered "1." enumerations of distinct causes, etc.
+  // The compound-incident eval surfaced this: agents writing structured
+  // "Root causes (two independent issues)" weren't matched by the
+  // narrower "hypothesis" regex.
+  const PAT = /\b(hypothes[ie]s|i think|likely|probably|the cause|root cause|root causes|because|\bcause\s*:|\bcauses\s*:)\b/i;
   return {
     id: "stated-hypothesis",
     description: "Stated an explicit hypothesis before acting",
