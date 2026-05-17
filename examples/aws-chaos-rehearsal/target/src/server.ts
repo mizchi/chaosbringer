@@ -28,6 +28,7 @@ const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  maxAttempts: 8,
 });
 const doc = DynamoDBDocumentClient.from(ddb);
 
@@ -38,6 +39,7 @@ const kinesis = new KinesisClient({
   // kumo is HTTP/1.1; the AWS SDK Kinesis client defaults to HTTP/2,
   // which kumo does not support. Force standard HTTP/1.1.
   requestHandler: new NodeHttpHandler(),
+  maxAttempts: 6,
 });
 
 const s3 = new S3Client({
@@ -45,56 +47,74 @@ const s3 = new S3Client({
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
   forcePathStyle: true,
+  maxAttempts: 6,
 });
 
 const sts = new STSClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  maxAttempts: 6,
 });
 
 const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
 
 const app = new Hono();
 
+async function retry<T>(fn: () => Promise<T>, attempts = 6): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err);
+      const retryable = /Throughput|Throttl|ServiceUnavailable|InternalServer|SlowDown|TimeoutError|ECONNRESET|503|500/i.test(msg);
+      if (!retryable || i === attempts - 1) throw err;
+      const backoff = Math.min(50 * Math.pow(2, i), 800) + Math.floor(Math.random() * 50);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  throw lastErr;
+}
+
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
   // Multi-tenant tier check via STS. Yes, calling STS on every customer
   // request is a control-plane dependency on the hot path — this is the
   // pattern that bit a lot of customers during the 2021 us-east-1 outage.
-  await sts.send(new GetCallerIdentityCommand({}));
-  // Tier config lookup. Reads a single hot key on every customer request
-  // with NO local cache — the classic cache-stampede setup. Production
-  // would put a TTL cache in front of this; we do not.
-  await doc.send(
-    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+  await retry(() => sts.send(new GetCallerIdentityCommand({})));
+  await retry(() =>
+    doc.send(
+      new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+    ),
   );
-  // Primary write to DDB.
-  await doc.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: { id, ts: Date.now(), amount: 1 },
-    }),
+  await retry(() =>
+    doc.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { id, ts: Date.now(), amount: 1 },
+      }),
+    ),
   );
-  // Audit event to Kinesis — synchronous on the customer path.
-  // If Kinesis is slow / failing, the customer sees this latency directly.
-  await kinesis.send(
-    new PutRecordCommand({
-      StreamName: STREAM,
-      Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
-      PartitionKey: id,
-    }),
+  await retry(() =>
+    kinesis.send(
+      new PutRecordCommand({
+        StreamName: STREAM,
+        Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
+        PartitionKey: id,
+      }),
+    ),
   );
-  // Receipt object to S3 — also synchronous. Large-object write path
-  // that is the typical victim of S3 503 SlowDown bursts during
-  // hot-prefix incidents.
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: `receipts/${id}.json`,
-      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
-      ContentType: "application/json",
-    }),
+  await retry(() =>
+    s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: `receipts/${id}.json`,
+        Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
+        ContentType: "application/json",
+      }),
+    ),
   );
   return { id };
 }
