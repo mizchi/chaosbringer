@@ -110,6 +110,30 @@ Three-phase flow:
 
 Chaos rules are cleared on exit regardless of outcome.
 
+## Incident replays
+
+Drills under `drills/incidents/` replay the SHAPE — onset → peak → cascade → tail — of real,
+publicly-postmortemed AWS outages. The shipped catalog:
+
+| Drill | Real incident | Lesson |
+|---|---|---|
+| `aws_2015_09_20_dynamodb` | DDB metadata-service overload, 55% error peak | More retries make a retry-storm worse |
+| `aws_2017_02_28_s3` | S3 index subsystem outage, ~4h17m | Asymmetric recovery: reads come back before writes |
+| `aws_2020_11_25_kinesis` | Kinesis thread-limit exhaustion, 17h | The user-visible failure (Cognito login) was downstream of an invisible buffered dependency |
+| `aws_2021_12_07_useast1` | us-east-1 network-device congestion, 7h | SDK default retry actively prevents the client back-off AWS needs to recover |
+
+```ts
+import { incidents } from "@mizchi/aws-faults/drills";
+
+const drill = incidents.aws_2015_09_20_dynamodb({
+  probeUrl: "http://localhost:3000/health",
+  durationMs: 90_000, // real outage was ~5h; this drill is 90s with same shape
+});
+```
+
+See [`docs/recipes/incident-replay.md`](../../docs/recipes/incident-replay.md) for the methodology
+on extracting a replay from a new post-mortem.
+
 ## See also
 
 - [`examples/aws-chaos-rehearsal/`](../../examples/aws-chaos-rehearsal) — end-to-end demo with a

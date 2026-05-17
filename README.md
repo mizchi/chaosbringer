@@ -92,6 +92,7 @@ Longer-form "what does this feature do and why" docs:
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
 - [`docs/recipes/aws-chaos-rehearsal.md`](docs/recipes/aws-chaos-rehearsal.md) — AI recovery rehearsal on top of [kumo](https://github.com/sivchari/kumo) (PR #667 latency baseline + runtime `/kumo/chaos/*` rules). See [`examples/aws-chaos-rehearsal/`](examples/aws-chaos-rehearsal/) for the end-to-end demo.
+- [`docs/recipes/incident-replay.md`](docs/recipes/incident-replay.md) — Drills that replay the time-shape of real AWS post-mortems (2015 DDB / 2017 S3 / 2020 Kinesis / 2021 us-east-1). Methodology for adding new replays.
 
 ## Examples
 

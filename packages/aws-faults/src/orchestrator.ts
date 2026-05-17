@@ -18,12 +18,38 @@ export interface AcceptanceCriteria {
   consecutiveGreen?: number;
 }
 
+/**
+ * A timed phase of a drill. The orchestrator installs `rules`, samples for
+ * `durationMs`, then moves to the next phase. After the last phase, rules
+ * stay installed during the recovery window — the AI must hold SLO at the
+ * lingering condition, not wait it out.
+ *
+ * To model a clean post-incident "back to normal" tail, end your phase list
+ * with a phase whose `rules: []` clears everything.
+ */
+export interface Phase {
+  /** Human label, used in onSample callbacks and the report. */
+  label: string;
+  /** How long this phase runs. */
+  durationMs: number;
+  /** Rules installed at the start of this phase (replaces previous phase's). */
+  rules: Rule[];
+}
+
 export interface Drill {
   id: string;
   name: string;
   description: string;
-  /** Rules to install via kumo /kumo/chaos/rules. */
-  rules: Rule[];
+  /**
+   * Simple-mode rules. Installed once, kept for the whole inject window.
+   * Mutually exclusive with `phases` — if both are set, `phases` wins.
+   */
+  rules?: Rule[];
+  /**
+   * Time-shaped phases. Reproduces the curve of a real incident: onset →
+   * peak → partial recovery → tail. See `drills/incidents/` for examples.
+   */
+  phases?: Phase[];
   /** One probe = one synthetic user request. Should NOT throw on app errors. */
   healthCheck: () => Promise<HealthCheckResult>;
   /** SLO the drill must restore before declaring recovery. */
@@ -41,14 +67,27 @@ export interface RunDrillOptions {
   intervalMs?: number;
   /** Max time we wait for recovery before declaring failure. */
   recoveryTimeoutMs?: number;
+  /**
+   * For simple-mode drills, how long the (single) inject phase lasts.
+   * Ignored for phased drills.
+   */
+  simpleInjectMs?: number;
   /** Stream observations live; default logs to stderr. */
-  onSample?: (phase: "baseline" | "injected" | "recovery", sample: HealthCheckResult) => void;
+  onSample?: (phase: string, sample: HealthCheckResult) => void;
+}
+
+export interface PhaseSamples {
+  label: string;
+  samples: HealthCheckResult[];
 }
 
 export interface DrillReport {
   drillId: string;
   passed: boolean;
   baseline: HealthCheckResult[];
+  /** Samples grouped by the phase active at the time. */
+  injectedByPhase: PhaseSamples[];
+  /** Flat list of inject samples; preserved for compatibility with prior shape. */
   injected: HealthCheckResult[];
   recovery: HealthCheckResult[];
   durationMs: number;
@@ -60,43 +99,45 @@ export interface DrillReport {
  * runDrill is the orchestrator entry point used both by the manual CLI and by
  * the AI rehearsal harness. The flow:
  *
- *   1. Gather baseline samples (no chaos installed)
- *   2. Install drill.rules via kumo runtime API
- *   3. Gather "injected" samples to confirm impact
- *   4. Yield to the caller (e.g. AI agent) and poll until acceptance met
- *      or recoveryTimeoutMs elapses
- *   5. Clear chaos rules and return the full sample log
+ *   1. Baseline (no chaos) for `baselineMs`
+ *   2. For each phase: install phase.rules, sample for phase.durationMs
+ *   3. Recovery: keep the LAST phase's rules active, poll until acceptance
+ *      met for `consecutiveGreen` samples or `recoveryTimeoutMs` elapses
+ *   4. Clear all rules on exit
  *
- * The function only injects + observes. It does NOT touch the target app —
- * recovery actions are up to the caller (a human, a script, or an AI agent).
+ * "Phases" are how incident replays model the real shape of an outage
+ * (onset → peak → partial recovery → tail). For ad-hoc drills, pass
+ * `drill.rules` instead of `drill.phases` and the orchestrator wraps them
+ * in a single phase whose duration is `simpleInjectMs` (default 5s).
  */
 export async function runDrill(opts: RunDrillOptions): Promise<DrillReport> {
   const baselineMs = opts.baselineMs ?? 5_000;
   const intervalMs = opts.intervalMs ?? 500;
+  const simpleInjectMs = opts.simpleInjectMs ?? 5_000;
   const recoveryTimeoutMs = opts.recoveryTimeoutMs ?? 120_000;
   const onSample = opts.onSample ?? defaultSampleLogger;
 
+  const phases = normalizePhases(opts.drill, simpleInjectMs);
+
   const start = Date.now();
   const baseline: HealthCheckResult[] = [];
-  const injected: HealthCheckResult[] = [];
+  const injectedByPhase: PhaseSamples[] = [];
   const recovery: HealthCheckResult[] = [];
 
   // Phase 1: baseline.
-  for (const sample of await sampleFor(opts.drill, baselineMs, intervalMs)) {
-    baseline.push(sample);
-    onSample("baseline", sample);
+  await runWindow("baseline", baselineMs, intervalMs, opts.drill, onSample, baseline);
+
+  // Phase 2..N: inject phases sequentially.
+  for (const phase of phases) {
+    await opts.chaos.installProfile(phase.rules);
+    const phaseSamples: HealthCheckResult[] = [];
+    await runWindow(phase.label, phase.durationMs, intervalMs, opts.drill, onSample, phaseSamples);
+    injectedByPhase.push({ label: phase.label, samples: phaseSamples });
   }
 
-  // Phase 2: install + confirm impact.
-  await opts.chaos.installProfile(opts.drill.rules);
-  for (const sample of await sampleFor(opts.drill, baselineMs, intervalMs)) {
-    injected.push(sample);
-    onSample("injected", sample);
-  }
-
-  // Phase 3: poll for recovery. We do NOT remove chaos rules here — the AI
-  // needs to recover while the underlying fault is still active (e.g. by
-  // adding retry budget, switching regions, bypassing the failing path).
+  // Phase N+1: recovery probing under the last-phase rules. We do NOT clear
+  // chaos rules here — the AI needs to recover while the underlying fault is
+  // still active. "Wait it out" is not a valid recovery strategy.
   let recovered = false;
   let consecutiveGreen = 0;
   const need = opts.drill.acceptance.consecutiveGreen ?? 3;
@@ -125,11 +166,37 @@ export async function runDrill(opts: RunDrillOptions): Promise<DrillReport> {
     drillId: opts.drill.id,
     passed: recovered,
     baseline,
-    injected,
+    injectedByPhase,
+    injected: injectedByPhase.flatMap((p) => p.samples),
     recovery,
     durationMs: Date.now() - start,
     recovered,
   };
+}
+
+function normalizePhases(d: Drill, simpleInjectMs: number): Phase[] {
+  if (d.phases && d.phases.length > 0) return d.phases;
+  if (d.rules && d.rules.length > 0) {
+    return [{ label: "injected", durationMs: simpleInjectMs, rules: d.rules }];
+  }
+  return [];
+}
+
+async function runWindow(
+  label: string,
+  totalMs: number,
+  intervalMs: number,
+  d: Drill,
+  onSample: (p: string, s: HealthCheckResult) => void,
+  sink: HealthCheckResult[],
+): Promise<void> {
+  const deadline = Date.now() + totalMs;
+  while (Date.now() < deadline) {
+    const s = await safeProbe(d);
+    sink.push(s);
+    onSample(label, s);
+    await sleep(intervalMs);
+  }
 }
 
 function meetsAcceptance(s: HealthCheckResult, a: AcceptanceCriteria): boolean {
@@ -137,16 +204,6 @@ function meetsAcceptance(s: HealthCheckResult, a: AcceptanceCriteria): boolean {
   if (a.p99Ms !== undefined && s.latencyMs > a.p99Ms) return false;
   if (a.errorRate !== undefined && s.errorRate > a.errorRate) return false;
   return true;
-}
-
-async function sampleFor(d: Drill, totalMs: number, intervalMs: number): Promise<HealthCheckResult[]> {
-  const out: HealthCheckResult[] = [];
-  const deadline = Date.now() + totalMs;
-  while (Date.now() < deadline) {
-    out.push(await safeProbe(d));
-    await sleep(intervalMs);
-  }
-  return out;
 }
 
 async function safeProbe(d: Drill): Promise<HealthCheckResult> {

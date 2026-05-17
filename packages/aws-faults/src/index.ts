@@ -6,6 +6,8 @@ export type {
   Drill,
   DrillReport,
   HealthCheckResult,
+  Phase,
+  PhaseSamples,
   RunDrillOptions,
 } from "./orchestrator.ts";
 export type {
