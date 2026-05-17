@@ -15,42 +15,21 @@ const client = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
-  maxAttempts: 8,
-  requestHandler: {
-    requestTimeout: 1500,
-    connectionTimeout: 500,
-  },
+  maxAttempts: 4,
 });
 const doc = DynamoDBDocumentClient.from(client);
 
 const app = new Hono();
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  const maxAttempts = 10;
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      await doc.send(
-        new PutCommand({
-          TableName: TABLE,
-          Item: { id, ts: Date.now(), amount: 1 },
-        }),
-      );
-      return { id };
-    } catch (err) {
-      lastErr = err;
-      // Fast retry on throttle/transient errors with bounded jittered backoff.
-      const base = Math.min(40 * Math.pow(2, attempt), 300);
-      const jitter = Math.random() * base;
-      await sleep(base + jitter);
-    }
-  }
-  throw lastErr;
+  await doc.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { id, ts: Date.now(), amount: 1 },
+    }),
+  );
+  return { id };
 }
 
 app.post("/health", async (c) => {
