@@ -134,6 +134,37 @@ const drill = incidents.aws_2015_09_20_dynamodb({
 See [`docs/recipes/incident-replay.md`](../../docs/recipes/incident-replay.md) for the methodology
 on extracting a replay from a new post-mortem.
 
+## Wheel of Misfortune
+
+Drills measure "did the chaos break the app." Scenarios measure "did the on-call agent recover
+methodically." See [`docs/recipes/wheel-of-misfortune.md`](../../docs/recipes/wheel-of-misfortune.md)
+for the full rationale. In short:
+
+```ts
+import { runScenario, scenarios } from "@mizchi/aws-faults/wheel";
+
+const scenario = scenarios.silentCreditCardFailures({
+  probeUrl: "http://localhost:3000/health",
+});
+
+const report = await runScenario({
+  chaos,
+  scenario,
+  workDir: "/tmp/wom-run-1",
+  driver: myAgentDriver, // bridges your agent to the runner
+});
+
+console.log(report.debrief);
+//   # Debrief: Credit card authorization rate dropping
+//   **Outcome:** RECOVERED
+//   **Score:** 75%
+//   ...rubric, red herrings followed, phase-by-phase SLO...
+```
+
+The scenario gives the agent a vague PagerDuty-style alert (no AWS service named), schedules
+follow-up pages mid-incident, and scores the transcript on process criteria like "investigated
+before editing" and "did not add more retries" — not just outcome.
+
 ## See also
 
 - [`examples/aws-chaos-rehearsal/`](../../examples/aws-chaos-rehearsal) — end-to-end demo with a
