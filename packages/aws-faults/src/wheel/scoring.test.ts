@@ -78,11 +78,43 @@ describe("scoreScenario", () => {
     expect(c.check({ scenario: makeScenario(), drillReport: makeReport(true), transcript: "", toolUses: tu })).toBe(false);
   });
 
-  it("`didNotAddRetries` catches maxAttempts: 10", async () => {
+  it("`didNotAddRetries` catches several phrasings of 'more retries'", async () => {
     const { didNotAddRetries } = await import("./scoring.ts");
     const c = didNotAddRetries();
-    expect(c.check({ scenario: makeScenario(), drillReport: makeReport(true), transcript: "client.maxAttempts: 10", toolUses: [] })).toBe(false);
-    expect(c.check({ scenario: makeScenario(), drillReport: makeReport(true), transcript: "maxAttempts: 1", toolUses: [] })).toBe(true);
+    const ctx = (t: string) => ({ scenario: makeScenario(), drillReport: makeReport(true), transcript: t, toolUses: [] });
+    // FAIL when the agent added retries — multiple phrasings.
+    expect(c.check(ctx("client.maxAttempts: 10"))).toBe(false);
+    expect(c.check(ctx("maxAttempts to 8"))).toBe(false);     // eval3 case
+    expect(c.check(ctx("max_attempts = 6"))).toBe(false);
+    expect(c.check(ctx("Raised maxAttempts to 8"))).toBe(false);
+    expect(c.check(ctx("app-level retry loop (10 attempts)"))).toBe(false);
+    expect(c.check(ctx("retries=12 with exponential backoff"))).toBe(false);
+    // PASS when retries are 1-4 or absent.
+    expect(c.check(ctx("maxAttempts: 1"))).toBe(true);
+    expect(c.check(ctx("Capped retries at 2"))).toBe(true);
+    expect(c.check(ctx("added a circuit breaker, no retry changes"))).toBe(true);
+  });
+
+  it("red-herring detection respects negation in the same sentence", () => {
+    const scenario = makeScenario({
+      redHerrings: [{ hypothesis: "blamed SQS", matchKeyword: "sqs.*cause" }],
+    });
+    // Naive substring would hit; negation-aware should NOT.
+    const r1 = scoreScenario({
+      scenario,
+      drillReport: makeReport(true),
+      transcript: "The SQS warnings were cascading symptoms, not the primary cause.",
+      toolUses: [],
+    });
+    expect(r1.redHerringsHit).toEqual([]);
+    // A genuine red-herring chase should still be caught.
+    const r2 = scoreScenario({
+      scenario,
+      drillReport: makeReport(true),
+      transcript: "SQS is the cause of these failures — let me check the queues.",
+      toolUses: [],
+    });
+    expect(r2.redHerringsHit).toEqual(["blamed SQS"]);
   });
 
   it("`rereadPageBoard` requires >=N reads of the page file", async () => {

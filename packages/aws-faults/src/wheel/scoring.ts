@@ -70,13 +70,22 @@ export function recoveredSlo(weight = 5): RubricCriterion {
 
 /** Did the agent avoid adding MORE retries (the 2015 DDB anti-pattern)? */
 export function didNotAddRetries(weight = 3): RubricCriterion {
+  // Match common retry-config knobs with values in the "many" range (>= 5).
+  // Tolerant of `maxAttempts: 8`, `maxAttempts = 8`, `maxAttempts to 8`,
+  // `attempts < 10`, `retries=6`, and bare "10 attempts" / "6 retries".
+  // Brittleness lesson from eval3 (2026-05-17): the agent wrote "maxAttempts
+  // to 8" and the old `\b:\s*` regex missed it.
+  const KNOB = /\b(max[\s_-]?attempts|retry[\s_-]?attempts|retries|max[\s_-]?retries|retry[\s_-]?count)\b[^.\n]{0,30}?\b([5-9]|[1-9]\d+)\b/i;
+  const PHRASE = /\b([5-9]|[1-9]\d+)\s+(attempts?|retries|retry)\b/i;
   return {
     id: "no-extra-retries",
     description: "Did not increase SDK retry attempts (anti-pattern for retry-storm incidents)",
     weight,
     failHint: "Added more retries. This makes retry-storm-driven outages worse, not better.",
-    check: ({ transcript }) =>
-      !/maxAttempts:\s*[5-9]\d*|maxAttempts:\s*1\d+|retryAttempts:\s*[5-9]\d*/i.test(transcript),
+    check: ({ transcript, journalContents }) => {
+      const texts = [transcript, ...(journalContents ?? [])];
+      return !texts.some((t) => KNOB.test(t) || PHRASE.test(t));
+    },
   };
 }
 
@@ -278,9 +287,16 @@ export function scoreScenario(ctx: ScoringContext): ScenarioReport {
 
   const redHerringsHit: string[] = [];
   for (const r of ctx.scenario.redHerrings ?? []) {
-    if (new RegExp(r.matchKeyword, "i").test(ctx.transcript)) {
-      redHerringsHit.push(r.hypothesis);
-    }
+    const re = new RegExp(r.matchKeyword, "i");
+    const m = re.exec(ctx.transcript);
+    if (!m) continue;
+    // Negation-aware: skip if the surrounding sentence explicitly rules
+    // OUT this hypothesis. Eval3 (2026-05-17) caught this: "SQS warnings
+    // were cascading symptoms, NOT the primary cause" matched "sqs.*cause"
+    // as a red-herring hit even though the agent was rejecting it.
+    const sentence = sentenceAround(ctx.transcript, m.index);
+    if (NEGATION.test(sentence)) continue;
+    redHerringsHit.push(r.hypothesis);
   }
 
   return {
@@ -295,6 +311,27 @@ export function scoreScenario(ctx: ScoringContext): ScenarioReport {
     toolUses: ctx.toolUses,
     debrief: renderDebrief({ ...ctx, criteria, score, redHerringsHit }),
   };
+}
+
+// Negation patterns we look for in the immediate sentence around a
+// red-herring match. Not exhaustive, but covers the common shapes
+// post-mortem-style writing uses to rule something out.
+const NEGATION = /\b(not|isn'?t|aren'?t|wasn'?t|weren'?t|cannot|can'?t|no[t]?\s+(the|a)\s+(cause|root|culprit)|cascading\s+(symptom|effect)|downstream|symptom\s+not|rule\s+out|ruled\s+out|unrelated)\b/i;
+
+function sentenceAround(text: string, index: number): string {
+  // Grab the sentence containing `index`. Splits on . ! ? \n.
+  const before = text.slice(0, index);
+  const startSplit = Math.max(
+    before.lastIndexOf("."),
+    before.lastIndexOf("!"),
+    before.lastIndexOf("?"),
+    before.lastIndexOf("\n"),
+  );
+  const start = startSplit === -1 ? 0 : startSplit + 1;
+  const after = text.slice(index);
+  const m = after.search(/[.!?\n]/);
+  const end = m === -1 ? text.length : index + m;
+  return text.slice(start, end);
 }
 
 interface DebriefInput extends ScoringContext {
