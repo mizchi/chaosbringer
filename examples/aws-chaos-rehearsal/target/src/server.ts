@@ -1,26 +1,26 @@
 /**
- * Target app: Hono service backed by DynamoDB + Kinesis-via-kumo.
+ * Target app: Hono service backed by DynamoDB + Kinesis + S3 via kumo.
  *
- * Writes orders via POST /orders (which writes a DDB row AND a Kinesis
- * audit event, synchronously). POST /health is the synthetic probe and
- * exercises the same path.
- *
- * The Kinesis audit publish was added so the morningRushCognito drill
- * (2020 us-east-1 replay) has something to bite. It's intentionally
- * synchronous and unbounded — exactly the "invisible hidden
- * dependency" pattern the 2020 incident exposed.
+ * POST /orders writes:
+ *   1. DDB row (orders table)            — source of truth
+ *   2. Kinesis audit event (orders-audit) — invisible buffered dependency
+ *   3. S3 receipt object (receipts/{id}) — large-object write path
+ * All three synchronous on the customer path. Each is in scope of a
+ * different real-incident drill.
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
 const STREAM = process.env.AUDIT_STREAM ?? "orders-audit";
+const BUCKET = process.env.RECEIPTS_BUCKET ?? "receipts";
 
 const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
@@ -38,32 +38,44 @@ const kinesis = new KinesisClient({
   requestHandler: new NodeHttpHandler(),
 });
 
+const s3 = new S3Client({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  forcePathStyle: true,
+});
+
 const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Primary write to DDB — still synchronous (source of truth).
+  // Primary write to DDB.
   await doc.send(
     new PutCommand({
       TableName: TABLE,
       Item: { id, ts: Date.now(), amount: 1 },
     }),
   );
-  // Audit event to Kinesis — detached from the customer path.
-  // Kinesis is a non-critical audit sink. If it is slow/failing we must
-  // not block or fail the customer. Fire-and-forget with a short timeout;
-  // swallow errors and surface them only in logs.
-  const auditPromise = kinesis.send(
+  // Audit event to Kinesis — synchronous on the customer path.
+  // If Kinesis is slow / failing, the customer sees this latency directly.
+  await kinesis.send(
     new PutRecordCommand({
       StreamName: STREAM,
       Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
       PartitionKey: id,
     }),
   );
-  // Attach a handler so unhandled rejections don't crash the process.
-  auditPromise.catch((err) => {
-    console.error(`audit publish failed for ${id}: ${String(err)}`);
-  });
+  // Receipt object to S3 — also synchronous. Large-object write path
+  // that is the typical victim of S3 503 SlowDown bursts during
+  // hot-prefix incidents.
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: `receipts/${id}.json`,
+      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
+      ContentType: "application/json",
+    }),
+  );
   return { id };
 }
 

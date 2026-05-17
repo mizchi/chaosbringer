@@ -4,10 +4,14 @@ export type { SilentCreditCardFailuresOptions } from "./silent-credit-card-failu
 export { morningRushCognito } from "./morning-rush-cognito.ts";
 export type { MorningRushCognitoOptions } from "./morning-rush-cognito.ts";
 
+export { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
+export type { CheckoutReceiptsStalledOptions } from "./checkout-receipts-stalled.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
   probeUrl: string;
+  customerUrl?: string;
   durationMs?: number;
 }
 export type ScenarioFactory = (opts: ScenarioFactoryOpts) => Scenario;
@@ -15,6 +19,7 @@ export type ScenarioFactory = (opts: ScenarioFactoryOpts) => Scenario;
 // Re-import for the catalog (avoids circular).
 import { silentCreditCardFailures } from "./silent-credit-card-failures.ts";
 import { morningRushCognito } from "./morning-rush-cognito.ts";
+import { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -23,6 +28,7 @@ import { morningRushCognito } from "./morning-rush-cognito.ts";
 export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "silent-credit-card-failures", factory: silentCreditCardFailures },
   { id: "morning-rush-cognito", factory: morningRushCognito },
+  { id: "checkout-receipts-stalled", factory: checkoutReceiptsStalled },
 ];
 
 /**
