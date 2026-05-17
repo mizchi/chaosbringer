@@ -38,6 +38,10 @@ The three doc surfaces:
 - **[Use recipes inside @playwright/test](./playwright-test-recipes.md)** — `recipesTest` / `withRecipes()` fixture: `runRecipe`, `harvestPageScenarios`, `investigate` inside a normal PW Test suite (issue #91).
 - **[Operate the recipe store from the CLI](./recipe-cli.md)** — `recipes diff`, `recipes lint`, `recipes repair`, and `chaosbringer load --base-url ...` for inventory, gating, and repair without writing TS.
 
+### AI on-call rehearsal (AWS chaos)
+
+- **[Run an AI on-call recovery drill](./aws-chaos-rehearsal-quickstart.md)** — `pnpm prepare <scenario>` → spawn agent → `pnpm score`. Five built-in scenarios reproducing 2015 DDB / 2017 S3 / 2020 Kinesis post-mortems plus an adversarial misleading-chaos test. The skill at `.claude/skills/aws-chaos-rehearsal/SKILL.md` packages this as a Claude Code skill.
+
 ### Security testing
 
 - **[Attack login / signup forms (OWASP-aligned)](./auth-attack-driver.md)** — `authAttackDriver` detects auth forms and runs five attack scenarios: weak-password acceptance, username enumeration, SQLi auth-bypass, reflected XSS, missing rate limiting. Findings carry OWASP / NIST references.
