@@ -39,6 +39,7 @@ export function morningRushCognito(opts: MorningRushCognitoOptions): Scenario {
 
   return {
     id: "morning-rush-cognito",
+    chaosModelVersion: "fixed-v1", // fixed probabilities are enough; no feedback
     title: "Login failures during morning peak (hidden Kinesis dependency)",
     initialAlert:
       "[P1] AuthGateway: login error rate 38%. p95 latency 4.2s (baseline 180ms). " +

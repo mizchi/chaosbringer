@@ -10,6 +10,9 @@ export type { CheckoutReceiptsStalledOptions } from "./checkout-receipts-stalled
 export { ddbThrottleWarmup } from "./ddb-throttle-warmup.ts";
 export type { DDBThrottleWarmupOptions } from "./ddb-throttle-warmup.ts";
 
+export { misleadingChaos } from "./misleading-chaos.ts";
+export type { MisleadingChaosOptions } from "./misleading-chaos.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -24,6 +27,7 @@ import { silentCreditCardFailures } from "./silent-credit-card-failures.ts";
 import { morningRushCognito } from "./morning-rush-cognito.ts";
 import { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
 import { ddbThrottleWarmup } from "./ddb-throttle-warmup.ts";
+import { misleadingChaos } from "./misleading-chaos.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -34,6 +38,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "silent-credit-card-failures", factory: silentCreditCardFailures },
   { id: "morning-rush-cognito", factory: morningRushCognito },
   { id: "checkout-receipts-stalled", factory: checkoutReceiptsStalled },
+  { id: "misleading-chaos", factory: misleadingChaos },
 ];
 
 /**

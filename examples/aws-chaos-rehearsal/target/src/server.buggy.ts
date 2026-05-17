@@ -38,8 +38,9 @@ const app = new Hono();
 // on 40% of requests with no upstream involvement. Removing or fixing
 // this is the actual recovery action.
 function validateOrder(): void {
-  // Bug fix: removed spurious random throw from recent deploy.
-  return;
+  if (Math.random() < 0.4) {
+    throw new Error("OrderValidationError: amount must be positive");
+  }
 }
 
 async function writeOrder(): Promise<{ id: string }> {

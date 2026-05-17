@@ -54,6 +54,7 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
 
   return {
     id: "silent-credit-card-failures",
+    chaosModelVersion: "feedback-v1", // groundTruth assumes feedback amplification
     title: "Credit card authorization rate dropping",
     initialAlert:
       "[P1] PaymentService: success rate dropped from 99.7% to 56% over the last 4 minutes. " +

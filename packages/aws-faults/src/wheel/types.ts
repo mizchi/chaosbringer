@@ -36,6 +36,29 @@ export interface Scenario {
   /** Short title shown in catalogs and debrief reports. */
   title: string;
   /**
+   * Which chaos-engine version the scenario's groundTruth + redHerrings
+   * assume. The runner asserts compatibility at startup and refuses to
+   * run if the live kumo doesn't expose required capabilities.
+   *
+   * Versions:
+   *   "fixed-v1":    fixed probability + fixed latency, no feedback
+   *   "feedback-v1": "fixed-v1" plus `Inject.feedback` load amplification
+   *
+   * Found in eval-4 + cli-sweep: changing the chaos model silently
+   * inverts what's a red herring. The recent deploy is a red herring
+   * under fixed-v1 but part of the root cause under feedback-v1. A
+   * scenario authored for one model should not silently be evaluated
+   * under the other.
+   */
+  chaosModelVersion?: "fixed-v1" | "feedback-v1";
+  /**
+   * Which target baseline to install. Defaults to "server.fragile.ts".
+   * Adversarial scenarios with target-side bugs use a separate baseline
+   * (e.g. "server.buggy.ts") so the bug isn't visible in the main
+   * fragile baseline.
+   */
+  baselineFile?: string;
+  /**
    * Initial alert text. Should be VAGUE — what a real PagerDuty notification
    * looks like, not a debugging brief. Avoid mentioning the underlying AWS
    * service unless that's literally what the customer-facing alert would say.

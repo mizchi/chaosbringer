@@ -48,6 +48,7 @@ export function ddbThrottleWarmup(opts: DDBThrottleWarmupOptions): Scenario {
 
   return {
     id: "ddb-throttle-warmup",
+    chaosModelVersion: "fixed-v1",
     title: "DDB throttling at moderate rate (warm-up)",
     initialAlert:
       "[P2] OrderService: error rate elevated at ~20% over the last 6 minutes. " +

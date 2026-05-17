@@ -49,6 +49,7 @@ export function checkoutReceiptsStalled(opts: CheckoutReceiptsStalledOptions): S
 
   return {
     id: "checkout-receipts-stalled",
+    chaosModelVersion: "fixed-v1",
     title: "Checkout latency spiking; receipts taking forever",
     initialAlert:
       "[P1] CheckoutService: p95 latency 6.3s (baseline 220ms). Success rate dropped to 71%. " +

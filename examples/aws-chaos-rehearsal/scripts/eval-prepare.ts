@@ -51,12 +51,54 @@ const scenario = factory({
   durationMs: 90_000,
 });
 
+// chaosModelVersion compat check. The scenario declares which model
+// its groundTruth + redHerrings were authored for. If the scenario
+// requires `feedback-v1`, probe kumo for the field's presence in a
+// test rule's response.
+if (scenario.chaosModelVersion === "feedback-v1") {
+  // Install a transient probe rule with feedback, then read it back.
+  const probeRule = {
+    id: "__model_compat_probe__",
+    enabled: true,
+    match: { service: "__nonexistent__" },
+    inject: {
+      kind: "awsError",
+      probability: 0,
+      awsError: { code: "X" },
+      feedback: { windowMs: 1000, threshold: 9999, probabilityStep: 0 },
+    },
+  };
+  try {
+    await fetch(`${KUMO}/kumo/chaos/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(probeRule),
+    });
+    const list = (await (await fetch(`${KUMO}/kumo/chaos/rules`)).json()) as {
+      rules: Array<{ id: string; inject: { feedback?: unknown } }>;
+    };
+    const got = list.rules.find((r) => r.id === probeRule.id);
+    await fetch(`${KUMO}/kumo/chaos/rules/${probeRule.id}`, { method: "DELETE" });
+    if (!got?.inject.feedback) {
+      console.error(
+        `[prepare] FATAL: scenario "${scenarioId}" requires chaosModelVersion=feedback-v1, ` +
+          `but the running kumo did not preserve the feedback field on rule POST. ` +
+          `Rebuild kumo from the latest kumo-chaos-patch (with the FeedbackSpec).`,
+      );
+      process.exit(2);
+    }
+  } catch (err) {
+    console.error(`[prepare] WARN: could not probe kumo for feedback support: ${err}`);
+  }
+}
+
 const workDir = `/tmp/wom-${runId}`;
 mkdirSync(workDir, { recursive: true });
 
-// 1. Reset target to fragile baseline.
-copyFileSync(join(HERE, "target/src/server.fragile.ts"), join(HERE, "target/src/server.ts"));
-console.error(`[prepare] target reset to fragile baseline`);
+// 1. Reset target to the scenario's baseline (default: fragile).
+const baselineFile = scenario.baselineFile ?? "server.fragile.ts";
+copyFileSync(join(HERE, "target/src", baselineFile), join(HERE, "target/src/server.ts"));
+console.error(`[prepare] target reset to baseline ${baselineFile}`);
 
 // 2. Restart the target tsx process (kill old, start new detached).
 try {
