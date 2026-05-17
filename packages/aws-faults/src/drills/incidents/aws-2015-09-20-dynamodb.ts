@@ -74,6 +74,19 @@ export function aws_2015_09_20_dynamodb(opts: AWS20150920Options): Drill {
               kind: "throttle",
               probability: 0.55,
               awsError: { code: "ProvisionedThroughputExceededException" },
+              // Retry-storm feedback (added 2026-05-17 v3.1): when match rate
+              // in the last 1s exceeds 20, each excess match raises throttle
+              // probability by 0.5% up to 95% cap. An agent that "fixes" the
+              // outage by adding more retries drives match rate up, which
+              // drives probability up — exactly the 2015 feedback loop. The
+              // mitigation that wins is one that REDUCES request rate (cap
+              // retries, circuit breaker, queue), not amplifies it.
+              feedback: {
+                windowMs: 1000,
+                threshold: 20,
+                probabilityStep: 0.005,
+                maxProbability: 0.95,
+              },
             },
           },
           // Without latency, SDK default retries absorb the 55% throttle
@@ -88,6 +101,14 @@ export function aws_2015_09_20_dynamodb(opts: AWS20150920Options): Drill {
               kind: "latency",
               probability: 1,
               latency: { p50Ms: 50, p95Ms: 500, p99Ms: 2000, maxMs: 5000 },
+              // Same feedback shape as the throttle rule, applied to latency:
+              // every excess match multiplies latency by 1.05 up to 5x.
+              feedback: {
+                windowMs: 1000,
+                threshold: 20,
+                latencyMultStep: 0.05,
+                maxLatencyMult: 5,
+              },
             },
           },
           // Cascade: SQS metadata also affected.

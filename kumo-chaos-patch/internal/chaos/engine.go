@@ -27,6 +27,42 @@ type ruleEntry struct {
 	matched   atomic.Int64
 	skipped   atomic.Int64
 	lastApply atomic.Pointer[time.Time]
+
+	// Sliding window of recent match timestamps. Used only when
+	// rule.Inject.Feedback is non-nil. Guarded by windowMu.
+	windowMu   sync.Mutex
+	windowHits []time.Time
+}
+
+// recentMatches returns the count of matches recorded inside the sliding
+// window's duration. Also opportunistically prunes expired entries.
+//
+// Called holding the engine RLock; takes windowMu exclusively for the
+// short duration of the prune. windowMu is not held across the rest of
+// Evaluate, so contention is minimal.
+func (e *ruleEntry) recentMatches(now time.Time, window time.Duration) int {
+	e.windowMu.Lock()
+	defer e.windowMu.Unlock()
+	cutoff := now.Add(-window)
+	// Drop expired entries from the front. windowHits is kept in append order
+	// (monotonic timestamps), so a linear scan suffices.
+	i := 0
+	for ; i < len(e.windowHits); i++ {
+		if e.windowHits[i].After(cutoff) {
+			break
+		}
+	}
+	if i > 0 {
+		e.windowHits = e.windowHits[i:]
+	}
+	return len(e.windowHits)
+}
+
+// recordHit appends a match timestamp to the sliding window.
+func (e *ruleEntry) recordHit(now time.Time) {
+	e.windowMu.Lock()
+	defer e.windowMu.Unlock()
+	e.windowHits = append(e.windowHits, now)
 }
 
 // NewEngine returns an Engine with no rules.
@@ -131,21 +167,52 @@ func (e *Engine) Evaluate(info *awsapi.RequestInfo) *Decision {
 		if !matchRule(&entry.rule.Match, &normalized) {
 			continue
 		}
+
+		// Compute effective probability + latency multiplier with optional
+		// load feedback. Feedback amplifies both based on the recent match
+		// rate over a sliding window.
+		now := time.Now()
+		effectiveProb := entry.rule.Inject.Probability
+		latencyMult := 1.0
+		if fb := entry.rule.Inject.Feedback; fb != nil {
+			recent := entry.recentMatches(now, fb.windowDuration())
+			excess := recent - fb.Threshold
+			if excess > 0 {
+				if fb.ProbabilityStep > 0 {
+					p := effectiveProb + fb.ProbabilityStep*float64(excess)
+					if p > fb.maxProbability() {
+						p = fb.maxProbability()
+					}
+					effectiveProb = p
+				}
+				if fb.LatencyMultStep > 0 {
+					m := 1 + fb.LatencyMultStep*float64(excess)
+					if m > fb.maxLatencyMult() {
+						m = fb.maxLatencyMult()
+					}
+					latencyMult = m
+				}
+			}
+		}
+
 		// Probability gate. 0 means "never" by convention (allows disabled-style),
 		// while 1 means "always". Anything in between rolls per-request.
-		if entry.rule.Inject.Probability < 1 {
-			if e.rng.Float64() >= entry.rule.Inject.Probability {
+		if effectiveProb < 1 {
+			if e.rng.Float64() >= effectiveProb {
 				entry.skipped.Add(1)
 				continue
 			}
 		}
 		entry.matched.Add(1)
-		now := time.Now()
 		entry.lastApply.Store(&now)
+		if entry.rule.Inject.Feedback != nil {
+			entry.recordHit(now)
+		}
 
 		dec := &Decision{RuleID: entry.rule.ID, Inject: entry.rule.Inject}
 		if entry.rule.Inject.Kind == InjectLatency && entry.rule.Inject.Latency != nil {
-			dec.Delay = entry.rule.Inject.Latency.DurationAt(e.rng.Float64())
+			base := entry.rule.Inject.Latency.DurationAt(e.rng.Float64())
+			dec.Delay = time.Duration(float64(base) * latencyMult)
 		}
 		return dec
 	}

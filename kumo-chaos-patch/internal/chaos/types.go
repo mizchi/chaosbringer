@@ -59,6 +59,56 @@ type Inject struct {
 	// AWSError holds the canonical error code; the responder picks the
 	// right protocol envelope based on the matched RequestInfo.Protocol.
 	AWSError *AWSErrorSpec `json:"awsError,omitempty"`
+
+	// Feedback enables load-amplification: as more requests match this
+	// rule per unit time, the effective probability and latency grow.
+	// Reproduces the 2015 DynamoDB metadata-overload feedback loop where
+	// retry storms made the backend slower, throwing more errors.
+	// Nil means no feedback (fixed probability + fixed latency profile).
+	Feedback *FeedbackSpec `json:"feedback,omitempty"`
+}
+
+// FeedbackSpec scales a rule's probability and latency by recent match rate.
+//
+// The engine keeps a per-rule sliding window of match timestamps. On each
+// evaluation, it counts matches in the last WindowMs. If that count exceeds
+// Threshold, the rule's effective probability is increased by
+// `ProbabilityStep * (count - Threshold)` (capped at MaxProbability), and
+// latency is multiplied by `1 + LatencyMultStep * (count - Threshold)`
+// (capped at MaxLatencyMult).
+//
+// Default values (when fields are zero): WindowMs=1000, MaxProbability=1.0,
+// MaxLatencyMult=10.0. Threshold and Steps default to 0 (no effect — the
+// caller must set at least one of ProbabilityStep / LatencyMultStep for
+// feedback to do anything).
+type FeedbackSpec struct {
+	WindowMs        int     `json:"windowMs,omitempty"`
+	Threshold       int     `json:"threshold,omitempty"`
+	ProbabilityStep float64 `json:"probabilityStep,omitempty"`
+	LatencyMultStep float64 `json:"latencyMultStep,omitempty"`
+	MaxProbability  float64 `json:"maxProbability,omitempty"`
+	MaxLatencyMult  float64 `json:"maxLatencyMult,omitempty"`
+}
+
+func (f *FeedbackSpec) windowDuration() time.Duration {
+	if f.WindowMs <= 0 {
+		return time.Second
+	}
+	return time.Duration(f.WindowMs) * time.Millisecond
+}
+
+func (f *FeedbackSpec) maxProbability() float64 {
+	if f.MaxProbability <= 0 {
+		return 1.0
+	}
+	return f.MaxProbability
+}
+
+func (f *FeedbackSpec) maxLatencyMult() float64 {
+	if f.MaxLatencyMult <= 0 {
+		return 10.0
+	}
+	return f.MaxLatencyMult
 }
 
 // InjectKind enumerates supported fault types.
