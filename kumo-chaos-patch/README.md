@@ -136,13 +136,36 @@ Returns `[{ ruleId, matched, skipped, lastApply }, ...]`. `matched` = rule won t
 ## Apply
 
 ```sh
-# from a kumo checkout
-cp -r /path/to/chaosbringer/kumo-chaos-patch/internal/chaos internal/
-cp /path/to/chaosbringer/kumo-chaos-patch/internal/server/chaos_*.go internal/server/
-# then apply the 3 in-place edits described above
-go build ./...
-go test ./internal/chaos/...
+# from your kumo fork checkout (with PR #667 merged)
+/path/to/chaosbringer/kumo-chaos-patch/apply.sh .
 ```
 
-A proper upstream PR would split these into one commit per concern; this layout is optimized for
-"read in one sitting and apply by hand to a fork."
+`apply.sh` is idempotent (re-run safe) and verifies the patch by running `go build ./...`
+and `go test ./internal/chaos/...` before exiting. It uses anchor-based inserts that
+tolerate gofmt's column alignment in struct fields.
+
+What it does:
+1. Copies `internal/chaos/*.go` and `internal/server/chaos_*.go` into your kumo tree
+2. Adds the chaos import + `Config.ChaosEnabled` + `Server.chaosEngine` field + `SetChaosEngine` wiring to `internal/server/server.go`
+3. Adds the chaos import + `Router.chaosEngine` field + `evaluateChaos` hook in `wrapHandler` to `internal/server/router.go`
+
+If any anchor is not found (e.g. PR #667 has diverged from the version this patch targets), the
+script aborts with a clear error instead of corrupting the file. To apply by hand instead, see
+the "Wiring into kumo" section above.
+
+## Verified against
+
+Tested end-to-end against `sivchari/kumo` at PR #667's head (latest as of 2026-05). Confirmed:
+
+- `apply.sh` is idempotent (re-runs are no-ops)
+- `go build ./...` and `go test ./internal/chaos/...` pass
+- Existing kumo server tests still pass
+- `POST /kumo/chaos/rules` installs a rule
+- A `DynamoDB.PutItem` request with that rule active returns:
+  ```
+  HTTP/1.1 400 Bad Request
+  Content-Type: application/x-amz-json-1.0
+  X-Amzn-Errortype: ProvisionedThroughputExceededException
+  {"__type":"com.amazonaws.dynamodb.v20120810#ProvisionedThroughputExceededException", ...}
+  ```
+  which the AWS SDK retry loop recognizes as a throttling error.
