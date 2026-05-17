@@ -22,17 +22,26 @@
 import type { Scenario } from "../types.ts";
 import {
   checkedKumoChaosStats,
+  customerImpactRecovered,
   didNotAddRetries,
   investigatedBeforeEditing,
   minimalCodeChange,
   readTargetSource,
   recoveredSlo,
+  rereadPageBoard,
   statedHypothesis,
 } from "../scoring.ts";
 import { aws_2015_09_20_dynamodb } from "../../drills/incidents/aws-2015-09-20-dynamodb.ts";
 
 export interface SilentCreditCardFailuresOptions {
   probeUrl: string;
+  /**
+   * Optional customer-facing endpoint, distinct from `probeUrl`. The
+   * scorer probes this post-run to detect "probe smoothed, customer
+   * still broken" — the anti-pattern surfaced in eval-2026-05-17.
+   * Recommended: the actual `/orders` write path.
+   */
+  customerUrl?: string;
   durationMs?: number;
 }
 
@@ -100,9 +109,16 @@ export function silentCreditCardFailures(opts: SilentCreditCardFailuresOptions):
       checkedKumoChaosStats(2),
       readTargetSource(2),
       statedHypothesis(2),
+      rereadPageBoard(2, 2),
       didNotAddRetries(3),
       minimalCodeChange(3, 2),
-      recoveredSlo(5),
+      recoveredSlo(3),
+      // Heavier than recoveredSlo: silencing the probe gives an easy
+      // recoveredSlo pass, but customer-impact will only pass if the
+      // mitigation actually preserved the write path.
+      ...(opts.customerUrl
+        ? [customerImpactRecovered({ customerUrl: opts.customerUrl, weight: 5 })]
+        : []),
     ],
   };
 }

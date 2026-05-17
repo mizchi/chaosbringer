@@ -7,11 +7,13 @@ export type {
 export { scoreScenario } from "./scoring.ts";
 export {
   checkedKumoChaosStats,
+  customerImpactRecovered,
   didNotAddRetries,
   investigatedBeforeEditing,
   minimalCodeChange,
   readTargetSource,
   recoveredSlo,
+  rereadPageBoard,
   statedHypothesis,
 } from "./scoring.ts";
 export type {

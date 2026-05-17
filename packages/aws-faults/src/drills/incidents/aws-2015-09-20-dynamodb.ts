@@ -76,6 +76,20 @@ export function aws_2015_09_20_dynamodb(opts: AWS20150920Options): Drill {
               awsError: { code: "ProvisionedThroughputExceededException" },
             },
           },
+          // Without latency, SDK default retries absorb the 55% throttle
+          // entirely and the customer never sees the failure. The real
+          // 2015 incident's customer-visible 55% came from throttling +
+          // slowed metadata responses. See docs/recipes/evaluation-2026-05-17.md.
+          {
+            id: "ddb-peak-tail-latency",
+            enabled: true,
+            match: { service: "dynamodb" },
+            inject: {
+              kind: "latency",
+              probability: 1,
+              latency: { p50Ms: 50, p95Ms: 500, p99Ms: 2000, maxMs: 5000 },
+            },
+          },
           // Cascade: SQS metadata also affected.
           {
             id: "sqs-cascade",

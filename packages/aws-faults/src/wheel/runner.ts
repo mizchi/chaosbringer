@@ -10,7 +10,7 @@
  * agent transcript when the agent stops. The example wires this up to the
  * Claude Agent SDK; tests use a fixture transcript.
  */
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { KumoChaos } from "../client.ts";
 import { runDrill } from "../orchestrator.ts";
@@ -41,6 +41,12 @@ export interface RunScenarioOptions {
   recoveryTimeoutMs?: number;
   /** Called for each drill sample, for live logging. */
   onSample?: (phase: string, ok: boolean) => void;
+  /**
+   * Optional list of journal files the agent wrote during the run. Contents
+   * are read post-run and passed to scoreScenario, which lets text-only
+   * rubric criteria (e.g. `statedHypothesis`) scan beyond the transcript.
+   */
+  journalFiles?: string[];
 }
 
 export interface AgentBriefing {
@@ -97,12 +103,42 @@ export async function runScenario(opts: RunScenarioOptions): Promise<ScenarioRep
   for (const t of pageTimers) clearTimeout(t);
   const { transcript, toolUses } = await agentHandle.finalize();
 
+  // Pre-scoring: any rubric criterion that exposes an async `__probe`
+  // hook (currently `customerImpactRecovered`) runs once here. Result
+  // is plumbed into `postRunProbes` keyed by criterion id, where the
+  // sync `check` can read it. Keeping check() sync is the design
+  // constraint that makes the rubric easy to test and re-score.
+  const postRunProbes: Record<string, { rate: number; sampleN: number }> = {};
+  for (const c of opts.scenario.rubric) {
+    const probe = (c as { __probe?: () => Promise<{ rate: number; sampleN: number }> }).__probe;
+    if (typeof probe === "function") {
+      try {
+        postRunProbes[c.id] = await probe();
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  // Read journal files (best-effort) so text-only rubric criteria can
+  // scan them in addition to the transcript.
+  const journalContents: string[] = [];
+  for (const path of opts.journalFiles ?? []) {
+    try {
+      journalContents.push(await readFile(path, "utf8"));
+    } catch {
+      // missing file is fine — agent might not have used journals
+    }
+  }
+
   // Score.
   const report = scoreScenario({
     transcript,
     toolUses,
     drillReport,
     scenario: opts.scenario,
+    postRunProbes,
+    journalContents,
   });
 
   // Persist artifacts.

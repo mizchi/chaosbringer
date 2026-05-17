@@ -92,15 +92,112 @@ export function minimalCodeChange(maxEditSites = 3, weight = 2): RubricCriterion
   };
 }
 
-/** Did the agent at any point form a verbal hypothesis about the root cause? */
+/**
+ * Did the agent at any point form a verbal hypothesis about the root cause?
+ *
+ * Some agents put their hypothesis in their final summary, others write it
+ * only to a journal/notes side-channel. The criterion scans both: the
+ * primary transcript, and any extra text files passed in `journalFiles`.
+ */
 export function statedHypothesis(weight = 2): RubricCriterion {
+  const PAT = /\b(hypothesis|i think|likely|probably|the cause|root cause|because)\b/i;
   return {
     id: "stated-hypothesis",
     description: "Stated an explicit hypothesis before acting",
     weight,
     failHint: "Acted without an explicit hypothesis.",
-    check: ({ transcript }) =>
-      /\b(hypothesis|i think|likely|probably|the cause|root cause|because)\b/i.test(transcript),
+    check: ({ transcript, journalContents }) => {
+      if (PAT.test(transcript)) return true;
+      for (const j of journalContents ?? []) {
+        if (PAT.test(j)) return true;
+      }
+      return false;
+    },
+  };
+}
+
+/**
+ * Did the agent re-read the on-call page board at least `minReads` times?
+ *
+ * Real PagerDuty / Slack alerts drip in over the course of an incident.
+ * An on-call who reads the page once and never again misses the second
+ * and third alerts — exactly the failure this scenario surfaced on the
+ * first eval (2026-05-17): the agent missed the customer-support page
+ * that would have flagged the silent-charge issue.
+ */
+export function rereadPageBoard(minReads = 2, weight = 2): RubricCriterion {
+  return {
+    id: "reread-page-board",
+    description: `Re-read the page board at least ${minReads} times during the run`,
+    weight,
+    failHint:
+      "Only read the page board once. Later pages contain new evidence — re-check periodically.",
+    check: ({ toolUses }) => {
+      const hits = toolUses.filter(
+        (t) =>
+          (t.name === "Read" || t.name === "Bash") &&
+          /oncall-pages\.txt/.test(t.input),
+      );
+      return hits.length >= minReads;
+    },
+  };
+}
+
+/**
+ * Did a SEPARATE customer-facing endpoint also recover?
+ *
+ * On-call anti-pattern: silence the probe (e.g. change /health to always
+ * return 200) without restoring customer reality. The default
+ * `recoveredSlo` only checks the in-band probe, which leaves this loophole
+ * open. This criterion probes a different endpoint (e.g. the actual
+ * customer write path) at scoring time.
+ *
+ * Synchronous probing inside the scorer is intentional: we want the
+ * verdict to be a fresh observation, not an assumption from the drill
+ * report. `sampleN` total requests, ≥ `acceptanceRate` succeed → PASS.
+ */
+export function customerImpactRecovered(opts: {
+  customerUrl: string;
+  method?: "GET" | "POST";
+  sampleN?: number;
+  acceptanceRate?: number;
+  timeoutMs?: number;
+  weight?: number;
+}): RubricCriterion & { __probe: () => Promise<{ rate: number; sampleN: number }> } {
+  const sampleN = opts.sampleN ?? 30;
+  const acceptanceRate = opts.acceptanceRate ?? 0.8;
+  const method = opts.method ?? "POST";
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const id = "customer-impact-recovered";
+  return {
+    id,
+    description: `Customer endpoint (${method} ${opts.customerUrl}) success ≥ ${(acceptanceRate * 100).toFixed(0)}%`,
+    weight: opts.weight ?? 5,
+    failHint:
+      "Probe is green but the customer-facing endpoint is still failing. " +
+      "Did the mitigation silence the probe without fixing the customer path?",
+    check: ({ postRunProbes }) => {
+      const r = postRunProbes?.[id];
+      return r !== undefined && r.rate >= acceptanceRate;
+    },
+    // Runner-only hook: customerImpactRecovered exposes an async probe the
+    // runner invokes after the drill ends. The result lands in
+    // `postRunProbes[id]` for the sync check above.
+    __probe: async () => {
+      let ok = 0;
+      for (let i = 0; i < sampleN; i++) {
+        try {
+          const res = await fetch(opts.customerUrl, {
+            method,
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          if (res.ok) ok++;
+        } catch {
+          // counted as failure
+        }
+      }
+      return { rate: ok / sampleN, sampleN };
+    },
   };
 }
 

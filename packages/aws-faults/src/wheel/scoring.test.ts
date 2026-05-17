@@ -85,6 +85,24 @@ describe("scoreScenario", () => {
     expect(c.check({ scenario: makeScenario(), drillReport: makeReport(true), transcript: "maxAttempts: 1", toolUses: [] })).toBe(true);
   });
 
+  it("`rereadPageBoard` requires >=N reads of the page file", async () => {
+    const { rereadPageBoard } = await import("./scoring.ts");
+    const c = rereadPageBoard(2);
+    const oneRead: ToolUseRecord[] = [{ name: "Read", input: "/tmp/wom/oncall-pages.txt", atSec: 1 }];
+    const twoReads: ToolUseRecord[] = [
+      { name: "Read", input: "/tmp/wom/oncall-pages.txt", atSec: 1 },
+      { name: "Bash", input: "cat /tmp/wom/oncall-pages.txt", atSec: 30 },
+    ];
+    const ctx = (tu: ToolUseRecord[]) => ({
+      scenario: makeScenario(),
+      drillReport: makeReport(true),
+      transcript: "",
+      toolUses: tu,
+    });
+    expect(c.check(ctx(oneRead))).toBe(false);
+    expect(c.check(ctx(twoReads))).toBe(true);
+  });
+
   it("renders a markdown debrief", () => {
     const scenario = makeScenario({
       title: "Scenario Foo",

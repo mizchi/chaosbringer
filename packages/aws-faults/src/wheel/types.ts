@@ -97,6 +97,18 @@ export interface ScoringContext {
   drillReport: DrillReport;
   /** Scenario the agent ran. */
   scenario: Scenario;
+  /**
+   * Optional pre-read journal-file contents. The runner reads any files
+   * referenced by scenario rubric criteria and stuffs them here so
+   * `RubricCriterion.check` can stay synchronous.
+   */
+  journalContents?: string[];
+  /**
+   * Optional post-run probe results (e.g. customerImpactRecovered's
+   * external-endpoint probe). Same rationale as journalContents: keep
+   * check() sync, do async work in the runner.
+   */
+  postRunProbes?: Record<string, { rate: number; sampleN: number }>;
 }
 
 export interface ToolUseRecord {

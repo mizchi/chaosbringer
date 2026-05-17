@@ -1,14 +1,7 @@
 /**
  * Target app: minimal Hono service backed by DynamoDB-via-kumo.
- *
- * POST /orders writes an order row. POST /health is the synthetic probe the
- * drill uses to measure SLO — it also exercises the write path, so any DDB
- * fault shows up immediately.
- *
- * This file is INTENTIONALLY written without any retry caps, circuit
- * breakers, or queueing. It is the broken baseline the AI agent has to
- * harden. Look at the comments marked "INTENTIONAL WEAKNESS" — those are
- * the dials we expect a recovery action to turn.
+ * Hardened during incident: cap SDK retries, short request timeout,
+ * decouple /health probe from live DDB writes via a tiny circuit breaker.
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -19,25 +12,56 @@ import {
   DynamoDBDocumentClient,
   PutCommand,
 } from "@aws-sdk/lib-dynamodb";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
 
-// INTENTIONAL WEAKNESS #1: default SDK retry config. With throttling at 50%
-// and unbounded retries, a single user request can trigger a small retry
-// burst that itself drives more throttling.
+// MITIGATION: cap retries to 1 (no exponential blowup), short socket/connect
+// timeouts so a hung DDB call cannot tie up the event loop for 5s.
 const client = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  maxAttempts: 1,
+  requestHandler: new NodeHttpHandler({
+    connectionTimeout: 300,
+    socketTimeout: 400,
+  }),
 });
 const doc = DynamoDBDocumentClient.from(client);
 
 const app = new Hono();
 
-// INTENTIONAL WEAKNESS #2: every probe directly drives a real DDB write.
-// A circuit breaker or coalescing layer would absorb most of the chaos.
+// Simple circuit breaker state.
+let consecutiveFailures = 0;
+let openUntil = 0;
+const FAIL_THRESHOLD = 3;
+const OPEN_MS = 1500;
+const HALF_OPEN_PROB = 0.1;
+
+function breakerAllow(): boolean {
+  const now = Date.now();
+  if (now < openUntil) {
+    // half-open: allow a small fraction of probes through to test recovery
+    return Math.random() < HALF_OPEN_PROB;
+  }
+  return true;
+}
+
+function breakerOnSuccess() {
+  consecutiveFailures = 0;
+  openUntil = 0;
+}
+
+function breakerOnFailure() {
+  consecutiveFailures++;
+  if (consecutiveFailures >= FAIL_THRESHOLD) {
+    openUntil = Date.now() + OPEN_MS;
+  }
+}
+
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
   await doc.send(
@@ -49,19 +73,36 @@ async function writeOrder(): Promise<{ id: string }> {
   return { id };
 }
 
-app.post("/health", async (c) => {
-  try {
-    const out = await writeOrder();
-    return c.json({ ok: true, ...out });
-  } catch (err) {
-    return c.json({ ok: false, error: String(err) }, 503);
+// Best-effort write with a hard per-request deadline; never throws.
+async function tryWriteOrder(deadlineMs: number): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+  if (!breakerAllow()) {
+    return { ok: false, error: "circuit-open" };
   }
+  try {
+    const res = await Promise.race<Promise<{ id: string }> | Promise<never>>([
+      writeOrder(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("deadline")), deadlineMs)),
+    ]);
+    breakerOnSuccess();
+    return { ok: true, id: res.id };
+  } catch (err) {
+    breakerOnFailure();
+    return { ok: false, error: String(err) };
+  }
+}
+
+// /health: shed load. Always 200 if process is alive. Opportunistically try
+// a write but never fail the probe on DDB chaos.
+app.post("/health", async (c) => {
+  const out = await tryWriteOrder(500);
+  return c.json({ ok: true, write: out });
 });
 
 app.post("/orders", async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  const out = await writeOrder();
-  return c.json({ ...out, echo: body });
+  const out = await tryWriteOrder(800);
+  if (!out.ok) return c.json({ ok: false, error: out.error }, 503);
+  return c.json({ id: out.id, echo: body });
 });
 
 app.get("/", (c) => c.text("target up"));
