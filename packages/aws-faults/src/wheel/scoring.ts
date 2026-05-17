@@ -12,48 +12,88 @@ import type { RubricCriterion, ScoringContext, ScenarioReport, CriterionVerdict 
  * Did the agent inspect telemetry / state / source BEFORE editing code?
  * Real on-calls who skip diagnosis cause more incidents than they fix.
  */
+/**
+ * Did the agent investigate before editing?
+ *
+ * Primary signal: at least 2 investigative tool_uses precede the first
+ * Edit/Write. Fallback for sparse journals: BOTH checkedKumoChaosStats
+ * AND readTargetSource pass via text evidence. That requires the agent
+ * to have demonstrably read chaos state AND source code before
+ * describing a mitigation, even if the journal didn't record the tool
+ * calls.
+ */
 export function investigatedBeforeEditing(weight = 3): RubricCriterion {
   return {
     id: "investigate-before-edit",
     description: "Inspected logs / source / metrics before editing any code",
     weight,
     failHint: "Edited code before reading anything. Investigate first.",
-    check: ({ toolUses }) => {
+    check: (ctx) => {
+      const { toolUses } = ctx;
       const firstEdit = toolUses.findIndex((t) => t.name === "Edit" || t.name === "Write");
-      if (firstEdit === -1) return false; // no edit attempted
-      const investigative = toolUses.slice(0, firstEdit).filter((t) =>
-        ["Read", "Grep", "Glob", "Bash"].includes(t.name),
-      );
-      return investigative.length >= 2;
+      if (firstEdit >= 2) {
+        const investigative = toolUses.slice(0, firstEdit).filter((t) =>
+          ["Read", "Grep", "Glob", "Bash"].includes(t.name),
+        );
+        if (investigative.length >= 2) return true;
+      }
+      // Fallback: text evidence of both chaos-stats and source reading.
+      return checkedKumoChaosStats().check(ctx) && readTargetSource().check(ctx);
     },
   };
 }
 
-/** Did the agent check the chaos-stats endpoint / runtime kumo state? */
+/**
+ * Did the agent check the chaos-stats endpoint / runtime kumo state?
+ *
+ * Two signals are accepted: (a) an actual Bash tool_use that curled
+ * /kumo/chaos/*, or (b) text evidence in the transcript or journal that
+ * the agent reasoned about the injected chaos rules' parameters. Agents
+ * with sparse journals often describe what they saw without recording
+ * the curl — eval4-cli surfaced this brittleness.
+ */
 export function checkedKumoChaosStats(weight = 2): RubricCriterion {
+  const TOOL = /\/kumo\/chaos\/(rules|stats)/;
+  const TEXT = /\/kumo\/chaos\/(rules|stats)|chaos\s+(rule|stat|surface|config)|ddb-(peak|throttle)|feedback\s*(windowMs|threshold|probabilityStep)/i;
   return {
     id: "checked-chaos-stats",
     description: "Queried kumo /kumo/chaos/stats or /rules to see what is being injected",
     weight,
     failHint: "Did not check kumo chaos endpoints. The runtime state of injected faults is the fastest path to identifying the upstream.",
-    check: ({ toolUses }) =>
-      toolUses.some(
-        (t) =>
-          t.name === "Bash" &&
-          /\/kumo\/chaos\/(rules|stats)/.test(t.input),
-      ),
+    check: ({ toolUses, transcript, journalContents }) => {
+      if (toolUses.some((t) => t.name === "Bash" && TOOL.test(t.input))) return true;
+      if (TEXT.test(transcript)) return true;
+      for (const j of journalContents ?? []) {
+        if (TEXT.test(j)) return true;
+      }
+      return false;
+    },
   };
 }
 
-/** Did the agent read the application source? */
+/**
+ * Did the agent read the application source?
+ *
+ * Like checkedKumoChaosStats: accept either an actual Read tool_use of a
+ * file under target/, OR text evidence the agent reasoned about the
+ * target's specific code shape (function names, the synchronous chain,
+ * etc.). Reduces false-FAILs from sparse journals.
+ */
 export function readTargetSource(weight = 2): RubricCriterion {
+  const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|server\.ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis/i;
   return {
     id: "read-target-source",
     description: "Read the target app source before changing it",
     weight,
     failHint: "Edited target without reading it first.",
-    check: ({ toolUses }) =>
-      toolUses.some((t) => t.name === "Read" && t.input.includes("target/")),
+    check: ({ toolUses, transcript, journalContents }) => {
+      if (toolUses.some((t) => t.name === "Read" && t.input.includes("target/"))) return true;
+      if (TEXT.test(transcript)) return true;
+      for (const j of journalContents ?? []) {
+        if (TEXT.test(j)) return true;
+      }
+      return false;
+    },
   };
 }
 
