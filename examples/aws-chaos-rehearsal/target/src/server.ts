@@ -26,6 +26,11 @@ const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  // Mitigation for ddb-throttle-storm: SDK adaptive retries with higher
+  // max attempts so transient ProvisionedThroughputExceededException
+  // (a retryable throttle) does not surface on the customer path.
+  maxAttempts: 8,
+  retryMode: "adaptive",
 });
 const doc = DynamoDBDocumentClient.from(ddb);
 
