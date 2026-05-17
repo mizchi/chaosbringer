@@ -55,6 +55,36 @@ const sts = new STSClient({
 
 const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
 
+// In-process TTL cache + single-flight for tier-config lookups.
+// Mitigates cache-stampede + feedback throttle on the tier-config GetItem.
+const TIER_TTL_MS = 30_000;
+const tierCache = new Map<string, { value: any; expires: number }>();
+const tierInflight = new Map<string, Promise<any>>();
+async function getTier(tenant: string): Promise<any> {
+  const now = Date.now();
+  const hit = tierCache.get(tenant);
+  if (hit && hit.expires > now) return hit.value;
+  const inflight = tierInflight.get(tenant);
+  if (inflight) return inflight;
+  const p = (async () => {
+    try {
+      const out = await doc.send(
+        new GetCommand({ TableName: TIER_TABLE, Key: { tenant } }),
+      );
+      tierCache.set(tenant, { value: out, expires: Date.now() + TIER_TTL_MS });
+      return out;
+    } catch (err) {
+      // Serve stale on error if we have it.
+      if (hit) return hit.value;
+      throw err;
+    } finally {
+      tierInflight.delete(tenant);
+    }
+  })();
+  tierInflight.set(tenant, p);
+  return p;
+}
+
 const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
@@ -66,9 +96,7 @@ async function writeOrder(): Promise<{ id: string }> {
   // Tier config lookup. Reads a single hot key on every customer request
   // with NO local cache — the classic cache-stampede setup. Production
   // would put a TTL cache in front of this; we do not.
-  await doc.send(
-    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
-  );
+  await getTier("default");
   // Primary write to DDB.
   await doc.send(
     new PutCommand({
