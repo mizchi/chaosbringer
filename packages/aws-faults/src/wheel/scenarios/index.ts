@@ -7,6 +7,9 @@ export type { MorningRushCognitoOptions } from "./morning-rush-cognito.ts";
 export { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
 export type { CheckoutReceiptsStalledOptions } from "./checkout-receipts-stalled.ts";
 
+export { ddbThrottleWarmup } from "./ddb-throttle-warmup.ts";
+export type { DDBThrottleWarmupOptions } from "./ddb-throttle-warmup.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -20,12 +23,14 @@ export type ScenarioFactory = (opts: ScenarioFactoryOpts) => Scenario;
 import { silentCreditCardFailures } from "./silent-credit-card-failures.ts";
 import { morningRushCognito } from "./morning-rush-cognito.ts";
 import { checkoutReceiptsStalled } from "./checkout-receipts-stalled.ts";
+import { ddbThrottleWarmup } from "./ddb-throttle-warmup.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
  * `pickScenario()` spins the wheel.
  */
 export const catalog: { id: string; factory: ScenarioFactory }[] = [
+  { id: "ddb-throttle-warmup", factory: ddbThrottleWarmup },
   { id: "silent-credit-card-failures", factory: silentCreditCardFailures },
   { id: "morning-rush-cognito", factory: morningRushCognito },
   { id: "checkout-receipts-stalled", factory: checkoutReceiptsStalled },
