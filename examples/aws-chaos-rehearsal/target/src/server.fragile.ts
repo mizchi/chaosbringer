@@ -15,39 +15,8 @@ const client = new DynamoDBClient({
   endpoint: ENDPOINT,
   region: "us-east-1",
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
-  maxAttempts: 8,
-  retryMode: "adaptive",
 });
 const doc = DynamoDBDocumentClient.from(client);
-
-async function writeOrderWithRetry(): Promise<{ id: string }> {
-  const id = randomUUID();
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    try {
-      await doc.send(
-        new PutCommand({
-          TableName: TABLE,
-          Item: { id, ts: Date.now(), amount: 1 },
-        }),
-      );
-      return { id };
-    } catch (err) {
-      lastErr = err;
-      const name = (err as { name?: string })?.name ?? "";
-      const retryable =
-        name === "ProvisionedThroughputExceededException" ||
-        name === "ThrottlingException" ||
-        name === "ServiceUnavailableException" ||
-        name === "InternalServerError" ||
-        name === "TimeoutError";
-      if (!retryable) throw err;
-      const backoff = Math.min(50 * Math.pow(2, attempt), 400) + Math.random() * 50;
-      await new Promise((r) => setTimeout(r, backoff));
-    }
-  }
-  throw lastErr;
-}
 
 const app = new Hono();
 
@@ -64,7 +33,7 @@ async function writeOrder(): Promise<{ id: string }> {
 
 app.post("/health", async (c) => {
   try {
-    const out = await writeOrderWithRetry();
+    const out = await writeOrder();
     return c.json({ ok: true, ...out });
   } catch (err) {
     return c.json({ ok: false, error: String(err) }, 503);
@@ -74,7 +43,7 @@ app.post("/health", async (c) => {
 app.post("/orders", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   try {
-    const out = await writeOrderWithRetry();
+    const out = await writeOrder();
     return c.json({ ...out, echo: body });
   } catch (err) {
     return c.json({ ok: false, error: String(err) }, 503);
