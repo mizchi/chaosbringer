@@ -57,10 +57,9 @@ const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Multi-tenant tier check via STS. Yes, calling STS on every customer
-  // request is a control-plane dependency on the hot path — this is the
-  // pattern that bit a lot of customers during the 2021 us-east-1 outage.
-  await sts.send(new GetCallerIdentityCommand({}));
+  // MITIGATION: STS GetCallerIdentity removed from hot path during
+  // us-east-1 control-plane incident (sts-peak ThrottlingException).
+  // Tenant tier check is non-critical; skip it during degradation.
   // Primary write to DDB.
   await doc.send(
     new PutCommand({
