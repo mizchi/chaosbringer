@@ -45,22 +45,36 @@ const doc = DynamoDBDocumentClient.from(ddb);
 
 const app = new Hono();
 
-// Bug #1: validatePayment introduced by a recent deploy. Throws on
-// ~25% of requests with no upstream cause. Detectable only by reading
-// the source — chaos stats won't show this.
+// Bug #1 FIXED: removed bogus PaymentValidationError throw (regression).
 function validatePayment(): void {
-  if (Math.random() < 0.25) {
-    throw new Error("PaymentValidationError: card.cvv parity mismatch");
+  // intentionally no-op; previous random throw was a regression bug
+}
+
+// Bug #2 FIX: in-memory TTL cache for tier-config to avoid hammering the
+// throttled DDB partition.
+let tierCache: { value: unknown; expires: number } | null = null;
+const TIER_TTL_MS = 30_000;
+
+async function getTierConfig(): Promise<unknown> {
+  const now = Date.now();
+  if (tierCache && tierCache.expires > now) return tierCache.value;
+  try {
+    const res = await doc.send(
+      new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+    );
+    tierCache = { value: res?.Item ?? {}, expires: now + TIER_TTL_MS };
+    return tierCache.value;
+  } catch (err) {
+    // Serve stale on throttle; only fail closed if no prior value
+    if (tierCache) return tierCache.value;
+    throw err;
   }
 }
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  validatePayment(); // <- the code-level bug
-  // tier-config GetItem on every request, no cache (the chaos target)
-  await doc.send(
-    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
-  );
+  validatePayment();
+  await getTierConfig();
   await doc.send(
     new PutCommand({
       TableName: TABLE,
