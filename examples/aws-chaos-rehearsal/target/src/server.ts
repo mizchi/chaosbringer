@@ -42,22 +42,28 @@ const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Primary write to DDB.
+  // Primary write to DDB — still synchronous (source of truth).
   await doc.send(
     new PutCommand({
       TableName: TABLE,
       Item: { id, ts: Date.now(), amount: 1 },
     }),
   );
-  // Audit event to Kinesis — synchronous on the customer path.
-  // If Kinesis is slow / failing, the customer sees this latency directly.
-  await kinesis.send(
+  // Audit event to Kinesis — detached from the customer path.
+  // Kinesis is a non-critical audit sink. If it is slow/failing we must
+  // not block or fail the customer. Fire-and-forget with a short timeout;
+  // swallow errors and surface them only in logs.
+  const auditPromise = kinesis.send(
     new PutRecordCommand({
       StreamName: STREAM,
       Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
       PartitionKey: id,
     }),
   );
+  // Attach a handler so unhandled rejections don't crash the process.
+  auditPromise.catch((err) => {
+    console.error(`audit publish failed for ${id}: ${String(err)}`);
+  });
   return { id };
 }
 
