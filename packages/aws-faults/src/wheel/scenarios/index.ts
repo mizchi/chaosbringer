@@ -28,6 +28,12 @@ export type { TierLookupStampedeOptions } from "./tier-lookup-stampede.ts";
 export { compoundIncident } from "./compound-incident.ts";
 export type { CompoundIncidentOptions } from "./compound-incident.ts";
 
+export { restartTrap } from "./restart-trap.ts";
+export type { RestartTrapOptions } from "./restart-trap.ts";
+
+export { noHintsStorm } from "./no-hints-storm.ts";
+export type { NoHintsStormOptions } from "./no-hints-storm.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -48,6 +54,8 @@ import { quotaSaturated } from "./quota-saturated.ts";
 import { ddbDnsRace } from "./ddb-dns-race.ts";
 import { tierLookupStampede } from "./tier-lookup-stampede.ts";
 import { compoundIncident } from "./compound-incident.ts";
+import { restartTrap } from "./restart-trap.ts";
+import { noHintsStorm } from "./no-hints-storm.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -64,6 +72,8 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "ddb-dns-race", factory: ddbDnsRace },
   { id: "tier-lookup-stampede", factory: tierLookupStampede },
   { id: "compound-incident", factory: compoundIncident },
+  { id: "restart-trap", factory: restartTrap },
+  { id: "no-hints-storm", factory: noHintsStorm },
 ];
 
 /**
