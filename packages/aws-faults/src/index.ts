@@ -6,6 +6,8 @@ export {
   runWithTrace,
 } from "./trace-propagate.ts";
 export type { RehearsalTarget, TargetEnv, TargetFactory } from "./target-sdk.ts";
+export { loadPgChaosConfig, pgChaosStats, wrapPool } from "./pg-chaos.ts";
+export type { PgChaosConfig, PgChaosFault, PoolExhaustionFault } from "./pg-chaos.ts";
 export type { KumoChaos, KumoChaosOptions } from "./client.ts";
 export { runDrill } from "./orchestrator.ts";
 export type {

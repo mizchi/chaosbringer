@@ -49,6 +49,9 @@ export type { ClientTimeoutMisconfigOptions } from "./client-timeout-misconfig.t
 export { multiServiceCascade } from "./multi-service-cascade.ts";
 export type { MultiServiceCascadeOptions } from "./multi-service-cascade.ts";
 
+export { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
+export type { PgPoolExhaustionOptions } from "./pg-pool-exhaustion.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -76,6 +79,7 @@ import { silentDataLoss } from "./silent-data-loss.ts";
 import { credentialsRevoked } from "./credentials-revoked.ts";
 import { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
 import { multiServiceCascade } from "./multi-service-cascade.ts";
+import { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -99,6 +103,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "credentials-revoked", factory: credentialsRevoked },
   { id: "client-timeout-misconfig", factory: clientTimeoutMisconfig },
   { id: "multi-service-cascade", factory: multiServiceCascade },
+  { id: "pg-pool-exhaustion", factory: pgPoolExhaustion },
 ];
 
 /**
