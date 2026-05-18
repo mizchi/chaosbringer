@@ -9,7 +9,8 @@
     "rehearsal": "tsx scripts/run-ai-rehearsal.ts",
     "wheel": "tsx scripts/run-wheel-of-misfortune.ts",
     "prepare": "tsx scripts/eval-prepare.ts",
-    "score": "tsx scripts/eval-score.ts"
+    "score": "tsx scripts/eval-score.ts",
+    "benchmark-rubric": "tsx scripts/benchmark-rubric.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.700.0",

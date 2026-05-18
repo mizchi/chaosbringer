@@ -52,21 +52,37 @@ export function investigatedBeforeEditing(weight = 3): RubricCriterion {
  * with sparse journals often describe what they saw without recording
  * the curl — eval4-cli surfaced this brittleness.
  */
-export function checkedKumoChaosStats(weight = 2): RubricCriterion {
+export function checkedKumoChaosStats(weight = 2): RubricCriterion & {
+  __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
   const TOOL = /\/kumo\/chaos\/(rules|stats)/;
   const TEXT = /\/kumo\/chaos\/(rules|stats)|chaos\s+(rule|stat|surface|config)|\bddb-[a-z][a-z0-9-]+|\b(sts|s3|kinesis|cognito|ec2|lambda)-(peak|throttle|cascade|distraction|down|tail|latency|hot|key|quota|race|onset|trap)\b|feedback\s*(windowMs|threshold|probabilityStep)|Kumo-injected/i;
+  const regexCheck = (ctx: ScoringContext) => {
+    if (ctx.toolUses.some((t) => t.name === "Bash" && TOOL.test(t.input))) return true;
+    if (TEXT.test(ctx.transcript)) return true;
+    for (const j of ctx.journalContents ?? []) {
+      if (TEXT.test(j)) return true;
+    }
+    return false;
+  };
   return {
     id: "checked-chaos-stats",
     description: "Queried kumo /kumo/chaos/stats or /rules to see what is being injected",
     weight,
     failHint: "Did not check kumo chaos endpoints. The runtime state of injected faults is the fastest path to identifying the upstream.",
-    check: ({ toolUses, transcript, journalContents }) => {
-      if (toolUses.some((t) => t.name === "Bash" && TOOL.test(t.input))) return true;
-      if (TEXT.test(transcript)) return true;
-      for (const j of journalContents ?? []) {
-        if (TEXT.test(j)) return true;
-      }
-      return false;
+    check: (ctx) => {
+      const v = ctx.llmVerdicts?.["checked-chaos-stats"];
+      if (v !== undefined) return v;
+      return regexCheck(ctx);
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Did the agent query the kumo chaos endpoints (e.g. GET /kumo/chaos/rules or stats) " +
+          "and reason about what specific rules were firing? References to the rule names, " +
+          "match counts, or 'no chaos rule matched this service' all count.",
+        ctx,
+      );
     },
   };
 }
@@ -79,20 +95,37 @@ export function checkedKumoChaosStats(weight = 2): RubricCriterion {
  * target's specific code shape (function names, the synchronous chain,
  * etc.). Reduces false-FAILs from sparse journals.
  */
-export function readTargetSource(weight = 2): RubricCriterion {
+export function readTargetSource(weight = 2): RubricCriterion & {
+  __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
   const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|getTierConfig|validatePayment|validateOrder|checkIdentity|server\.ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis|target\b.*\b(source|code)|on\s+every\s+request|hit\s+on\s+every|app\s+regression|code-level/i;
+  const regexCheck = (ctx: ScoringContext) => {
+    if (ctx.toolUses.some((t) => t.name === "Read" && t.input.includes("target/"))) return true;
+    if (TEXT.test(ctx.transcript)) return true;
+    for (const j of ctx.journalContents ?? []) {
+      if (TEXT.test(j)) return true;
+    }
+    return false;
+  };
   return {
     id: "read-target-source",
     description: "Read the target app source before changing it",
     weight,
     failHint: "Edited target without reading it first.",
-    check: ({ toolUses, transcript, journalContents }) => {
-      if (toolUses.some((t) => t.name === "Read" && t.input.includes("target/"))) return true;
-      if (TEXT.test(transcript)) return true;
-      for (const j of journalContents ?? []) {
-        if (TEXT.test(j)) return true;
-      }
-      return false;
+    check: (ctx) => {
+      const v = ctx.llmVerdicts?.["read-target-source"];
+      if (v !== undefined) return v;
+      return regexCheck(ctx);
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Did the agent read the target's source code (target/src/server.ts or similar) " +
+          "and reason about specific code-level details — function names, control flow, " +
+          "data dependencies — before editing? Reading file contents counts. " +
+          "Simply 'edited the file' without describing it doesn't.",
+        ctx,
+      );
     },
   };
 }
@@ -174,7 +207,9 @@ export function minimalCodeChange(maxEditSites = 3, weight = 2): RubricCriterion
  * only to a journal/notes side-channel. The criterion scans both: the
  * primary transcript, and any extra text files passed in `journalFiles`.
  */
-export function statedHypothesis(weight = 2): RubricCriterion {
+export function statedHypothesis(weight = 2): RubricCriterion & {
+  __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
   // Accept the keyword "hypothesis" plus the markdown header forms agents
   // use in post-incident summaries: "Root cause(s):", "Root causes:",
   // "Cause:", numbered "1." enumerations of distinct causes, etc.
@@ -182,17 +217,32 @@ export function statedHypothesis(weight = 2): RubricCriterion {
   // "Root causes (two independent issues)" weren't matched by the
   // narrower "hypothesis" regex.
   const PAT = /\b(hypothes[ie]s|i think|likely|probably|the cause|root cause|root causes|because|\bcause\s*:|\bcauses\s*:)\b/i;
+  const regexCheck = (ctx: ScoringContext) => {
+    if (PAT.test(ctx.transcript)) return true;
+    for (const j of ctx.journalContents ?? []) {
+      if (PAT.test(j)) return true;
+    }
+    return false;
+  };
   return {
     id: "stated-hypothesis",
     description: "Stated an explicit hypothesis before acting",
     weight,
     failHint: "Acted without an explicit hypothesis.",
-    check: ({ transcript, journalContents }) => {
-      if (PAT.test(transcript)) return true;
-      for (const j of journalContents ?? []) {
-        if (PAT.test(j)) return true;
-      }
-      return false;
+    check: (ctx) => {
+      // Prefer LLM verdict if available, fall back to regex.
+      const v = ctx.llmVerdicts?.["stated-hypothesis"];
+      if (v !== undefined) return v;
+      return regexCheck(ctx);
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Did the agent explicitly state a hypothesis or root cause about what was happening, " +
+          "before proposing or making a mitigation? Even if the cause was wrong, count it as YES " +
+          "if they articulated a hypothesis. Brief one-line statements like 'the chaos is X' count.",
+        ctx,
+      );
     },
   };
 }
