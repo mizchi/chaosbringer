@@ -67,6 +67,25 @@ pnpm prepare <scenario-id> <run-id>
   regulatory; durability constraint disqualifies fire-and-forget.
 - `misleading-chaos` — adversarial. Chaos rules are pure distraction;
   real bug is in target source.
+- `control-plane-degraded` — 2021 us-east-1. STS hot-path dependency;
+  agent must remove the gratuitous call.
+- `quota-saturated` — soft-quota vs throttling distinction. Tests
+  whether the agent recognizes per-account limits (synthetic).
+- `ddb-dns-race` — 2025 DDB DNS-race replay. Connection-level errors,
+  not application-level; mitigation is deadlines + circuit breaker.
+- `tier-lookup-stampede` — cache stampede on tier-config GetItem.
+  First scenario where the right answer is ADDING code (cache).
+- `compound-incident` — Tier 4. Two independent issues simultaneously;
+  both must be fixed.
+- `restart-trap` — Tier 5. Reflex resistance test; the right answer
+  is "do nothing." Penalizes restart-and-see behavior.
+- `no-hints-storm` — Tier 5. Same chaos as silent-credit-card but with
+  zero diagnostic breadcrumbs in the brief.
+- `duplicate-orders` — Tier 6. State correctness: probe is green but
+  /dup-check shows accumulating ghosts. Idempotency-violation fix.
+- `silent-data-loss` — Tier 7. Byzantine fault: upstream returns
+  200 OK without persisting. Mitigation is read-after-write
+  verification with ConsistentRead.
 
 `<run-id>` is anything unique per run (e.g. `run-1`, `2026-05-17-1`).
 

@@ -36,13 +36,22 @@ pnpm prepare silent-credit-card-failures my-run-1
 
 Available scenarios:
 
-| id | Replays | Lesson |
+| id | Tier | Lesson |
 |---|---|---|
-| `ddb-throttle-warmup` | (simple) | calibration / smoke test |
-| `silent-credit-card-failures` | 2015 DDB | retry storms amplify under feedback |
-| `morning-rush-cognito` | 2020 Kinesis | hidden upstream dependency |
-| `checkout-receipts-stalled` | 2017 S3 | durability constraint disqualifies fire-and-forget |
-| `misleading-chaos` | adversarial | chaos isn't always the cause |
+| `ddb-throttle-warmup` | calibration | simple smoke test |
+| `silent-credit-card-failures` | 1 (2015 DDB) | retry storms amplify under feedback |
+| `morning-rush-cognito` | 1 (2020 Kinesis) | hidden upstream dependency |
+| `checkout-receipts-stalled` | 1 (2017 S3) | durability disqualifies fire-and-forget |
+| `misleading-chaos` | 5 (adversarial) | chaos isn't always the cause |
+| `control-plane-degraded` | 1 (2021 us-east-1) | STS hot-path dependency |
+| `quota-saturated` | 3 | soft-quota vs throttling distinction |
+| `ddb-dns-race` | 2 (2025 DDB) | connection-level error shape |
+| `tier-lookup-stampede` | 1 | ADD a cache (rare pattern) |
+| `compound-incident` | 4 | two independent issues, both must be fixed |
+| `restart-trap` | 5 | reflex resistance — "do nothing" can be right |
+| `no-hints-storm` | 5 | discovery without alert breadcrumbs |
+| `duplicate-orders` | 6 | state correctness — probe ≠ recovery |
+| `silent-data-loss` | 7 | Byzantine fault — upstream lies |
 
 Spawn an agent (Claude Code Agent tool / Claude Agent SDK / `claude -p`)
 with the printed brief as prompt. The brief tells the agent to journal
