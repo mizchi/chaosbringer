@@ -35,6 +35,7 @@ import { serve } from "@hono/node-server";
 import { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { honoTraceContext, loadPgChaosConfig, pgChaosStats, wrapPool } from "@mizchi/aws-faults";
+import { mountUI } from "./ui.ts";
 
 const PG_HOST = process.env.PGHOST ?? "localhost";
 const PG_PORT = Number(process.env.PGPORT ?? 5432);
@@ -127,6 +128,8 @@ app.get("/pg-chaos/stats", (c) => {
     },
   });
 });
+
+mountUI(app);
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {

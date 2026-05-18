@@ -69,7 +69,34 @@ export interface ReplicaLagFault {
   lagMs?: number;
 }
 
-export type PgChaosFault = PoolExhaustionFault | ReplicaLagFault;
+/**
+ * Adds uniform latency to matched queries. Models the vacuum-lock /
+ * busy-table / missing-index patterns where SQL execution is just
+ * slow without errors. Differs from pool-exhaustion: a slow query
+ * doesn't necessarily hold its connection longer than its own
+ * runtime, so the pool can still cycle as long as enough connections
+ * exist. Differs from replica-lag: rows ARE returned, just slowly.
+ *
+ * Real-world analogs: a table mid-VACUUM, a query missing an index,
+ * lock contention on a hot row. The mitigation vocabulary is
+ * statement_timeout, query-killer sweeps, or fixing the offending
+ * query path (add index, batch reads).
+ */
+export interface SlowQueryFault {
+  kind: "slow-query";
+  /** Probability a matched query trips the slowdown. */
+  probability: number;
+  /** Milliseconds to sleep before delegating to the real Pool. Default 2000. */
+  latencyMs?: number;
+  /**
+   * Optional regex matched against SQL — set to e.g. "^\\s*UPDATE"
+   * to only slow writes (the vacuum-lock pattern). Defaults to
+   * matching everything.
+   */
+  matchSql?: string;
+}
+
+export type PgChaosFault = PoolExhaustionFault | ReplicaLagFault | SlowQueryFault;
 
 export interface PgChaosConfig {
   faults: PgChaosFault[];
@@ -90,6 +117,8 @@ export function wrapPool(pool: Pool, config: PgChaosConfig): Pool {
     queries: 0,
     /** Number of SELECTs that were forced to return 0 rows by replica-lag. */
     lagHidden: 0,
+    /** Number of queries that hit slow-query latency injection. */
+    slowed: 0,
   };
 
   /**
@@ -123,6 +152,15 @@ export function wrapPool(pool: Pool, config: PgChaosConfig): Pool {
   function pickReplicaLagFault(): ReplicaLagFault | null {
     for (const f of config.faults) {
       if (f.kind !== "replica-lag") continue;
+      if (Math.random() < f.probability) return f;
+    }
+    return null;
+  }
+
+  function pickSlowQueryFault(sql: string): SlowQueryFault | null {
+    for (const f of config.faults) {
+      if (f.kind !== "slow-query") continue;
+      if (f.matchSql && !new RegExp(f.matchSql, "i").test(sql)) continue;
       if (Math.random() < f.probability) return f;
     }
     return null;
@@ -179,6 +217,15 @@ export function wrapPool(pool: Pool, config: PgChaosConfig): Pool {
       }
     }
 
+    // Slow-query path: uniform latency before delegating. Distinct
+    // from pool-exhaustion (we don't pre-acquire a client) and from
+    // replica-lag (the query still runs and returns its real rows).
+    const slowFault = pickSlowQueryFault(sql);
+    if (slowFault) {
+      stats.slowed++;
+      await new Promise((r) => setTimeout(r, slowFault.latencyMs ?? 2000));
+    }
+
     const result = (await originalQuery(text as string, values)) as QueryResult<QueryResultRow>;
 
     // After running an INSERT, remember the id for replica-lag.
@@ -222,9 +269,9 @@ export function loadPgChaosConfig(envVar = "PG_CHAOS_CONFIG"): PgChaosConfig | n
  */
 export function pgChaosStats(
   pool: Pool,
-): { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number } | null {
+): { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number; slowed: number } | null {
   const s = (pool as Pool & {
-    __chaosStats?: { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number };
+    __chaosStats?: { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number; slowed: number };
   }).__chaosStats;
   return s ?? null;
 }
