@@ -38,6 +38,7 @@ import {
   recoveredSlo,
   statedHypothesis,
 } from "../scoring.ts";
+import { restartCost, timeToRecovery } from "../scoring-trace.ts";
 import { mildThrottle } from "../../drills/mild-throttle.ts";
 
 export interface RestartTrapOptions {
@@ -114,6 +115,9 @@ export function restartTrap(opts: RestartTrapOptions): Scenario {
       chaosRulesPreserved(4),
       // Heaviest weight (5): the lesson of this scenario.
       avoidedUnnecessaryRestart(0, 5),
+      // Catch the restart-induced dip in the actual probe trace,
+      // not just by counting restart events.
+      restartCost({ maxBreachSec: 3, lowThreshold: 0.5, weight: 4 }),
     ],
   };
 }

@@ -86,6 +86,11 @@ const scenario = factory({
 // the probe log.
 const drillReport: DrillReport = synthesizeDrillReport(workDir, customerProbe);
 
+// Read the raw probe trace so trace-derived criteria (restartCost,
+// timeToRecovery) can evaluate.
+const probesPath = join(workDir, "probes.log");
+const probeTrace = existsSync(probesPath) ? readFileSync(probesPath, "utf8") : undefined;
+
 // Iterate over all rubric criteria; any with a __probe callback runs at
 // scoring time. customer-impact-recovered already ran above; skip it.
 const postRunProbes: Record<string, { rate: number; sampleN: number }> = {
@@ -103,6 +108,39 @@ for (const c of scenario.rubric) {
   }
 }
 
+// LLM-judged criteria — run in parallel for speed (small calls, ≤50 tokens).
+const llmVerdicts: Record<string, boolean> = {};
+const judgeCtx = {
+  scenario,
+  drillReport,
+  transcript,
+  toolUses,
+  journalContents,
+  postRunProbes,
+  probeTrace,
+};
+const judgePromises: Array<Promise<void>> = [];
+for (const c of scenario.rubric) {
+  const judge = (c as { __llmJudge?: (ctx: typeof judgeCtx) => Promise<boolean | undefined> }).__llmJudge;
+  if (typeof judge === "function") {
+    judgePromises.push(
+      judge(judgeCtx).then((v) => {
+        if (v !== undefined) llmVerdicts[c.id] = v;
+      }).catch((err) => {
+        console.error(`[score] llm-judge ${c.id} failed: ${err}`);
+      }),
+    );
+  }
+}
+if (judgePromises.length > 0) {
+  if (process.env.ANTHROPIC_API_KEY) {
+    console.error(`[score] dispatching ${judgePromises.length} LLM judge call(s)...`);
+  } else {
+    console.error(`[score] ${judgePromises.length} LLM judge(s) registered but no ANTHROPIC_API_KEY — using regex fallback`);
+  }
+  await Promise.all(judgePromises);
+}
+
 const report = scoreScenario({
   scenario,
   drillReport,
@@ -111,6 +149,8 @@ const report = scoreScenario({
   journalContents,
   postRunProbes,
   postRunChaosSnapshot: chaosSnapshot,
+  probeTrace,
+  llmVerdicts,
 });
 
 writeFileSync(join(workDir, "debrief.md"), report.debrief);

@@ -141,6 +141,19 @@ export interface ScoringContext {
     rules: { id: string }[];
     stats: { ruleId: string; matched: number; skipped: number }[];
   };
+  /**
+   * Raw probe-loop samples in `T h=NNN o=NNN` per-line format. Used by
+   * synchronous, trace-derived rubric primitives like `restartCost` and
+   * `timeToRecovery`. The runner reads `probes.log` from the run dir
+   * and passes the trimmed content here.
+   */
+  probeTrace?: string;
+  /**
+   * Optional pre-computed LLM verdicts, keyed by criterion id. Populated
+   * by the runner when ANTHROPIC_API_KEY is set; lets the synchronous
+   * `check` use a smarter signal than regex without making `check` async.
+   */
+  llmVerdicts?: Record<string, boolean>;
 }
 
 export interface ToolUseRecord {

@@ -5,6 +5,15 @@ export type {
   RunScenarioOptions,
 } from "./runner.ts";
 export { scoreScenario } from "./scoring.ts";
+export { restartCost, timeToRecovery } from "./scoring-trace.ts";
+export {
+  llmJudge,
+  llmJudged,
+  llmStatedHypothesis,
+  llmReadTargetSource,
+  llmCheckedKumoChaosStats,
+} from "./scoring-llm.ts";
+export type { LLMJudgeConfig } from "./scoring-llm.ts";
 export {
   avoidedUnnecessaryRestart,
   chaosRulesPreserved,
