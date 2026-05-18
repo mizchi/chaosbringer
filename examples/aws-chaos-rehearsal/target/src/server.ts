@@ -1,27 +1,28 @@
 /**
- * Target for the silent-data-loss scenario (Byzantine faults).
+ * Target app: Hono service backed by DynamoDB + Kinesis + S3 + STS via kumo.
  *
- * Same shape as server.fragile.ts but adds an in-process counter of
- * "writes the target THINKS succeeded" plus a /verify endpoint that
- * cross-checks that count against the actual DDB row count (Scan).
- *
- * Under a silent-success chaos rule on PutItem, kumo returns 200 OK
- * without invoking the real handler. The target sees success and
- * increments writesAcked++. /verify shows writesAcked > ddbRowCount —
- * the Byzantine signal.
- *
- * The customer-facing /orders endpoint returns 200 with the new id,
- * so customers think their order was placed. The probe shows healthy.
- * Only /verify catches the data loss.
+ * POST /orders does:
+ *   0. STS GetCallerIdentity — "tenant tier check" (control-plane call)
+ *   1. DDB row (orders table)            — source of truth
+ *   2. Kinesis audit event (orders-audit) — invisible buffered dependency
+ *   3. S3 receipt object (receipts/{id}) — large-object write path
+ * All four synchronous on the customer path. Each is in scope of a
+ * different real-incident drill (2021 / 2015 / 2020 / 2017 respectively).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
+const STREAM = process.env.AUDIT_STREAM ?? "orders-audit";
+const BUCKET = process.env.RECEIPTS_BUCKET ?? "receipts";
 
 const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
@@ -30,33 +31,72 @@ const ddb = new DynamoDBClient({
 });
 const doc = DynamoDBDocumentClient.from(ddb);
 
-// Local telemetry for /verify.
-let writesAcked = 0;
+const kinesis = new KinesisClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  // kumo is HTTP/1.1; the AWS SDK Kinesis client defaults to HTTP/2,
+  // which kumo does not support. Force standard HTTP/1.1.
+  requestHandler: new NodeHttpHandler(),
+});
+
+const s3 = new S3Client({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  forcePathStyle: true,
+});
+
+const sts = new STSClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+});
+
+const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
 
 const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  const item = { id, ts: Date.now(), amount: 1 };
-  const MAX_ATTEMPTS = 5;
-  let lastErr: unknown = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      await doc.send(new PutCommand({ TableName: TABLE, Item: item }));
-      // Read-after-write verification to defeat byzantine silent-success.
-      const got = await doc.send(
-        new GetCommand({ TableName: TABLE, Key: { id }, ConsistentRead: true }),
-      );
-      if (got.Item && (got.Item as { id?: string }).id === id) {
-        writesAcked++;
-        return { id };
-      }
-      lastErr = new Error(`byzantine: put acked but item missing (attempt ${attempt})`);
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr ?? new Error("writeOrder failed");
+  // Multi-tenant tier check via STS. Yes, calling STS on every customer
+  // request is a control-plane dependency on the hot path — this is the
+  // pattern that bit a lot of customers during the 2021 us-east-1 outage.
+  await sts.send(new GetCallerIdentityCommand({}));
+  // Tier config lookup. Reads a single hot key on every customer request
+  // with NO local cache — the classic cache-stampede setup. Production
+  // would put a TTL cache in front of this; we do not.
+  await doc.send(
+    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+  );
+  // Primary write to DDB.
+  await doc.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { id, ts: Date.now(), amount: 1 },
+    }),
+  );
+  // Audit event to Kinesis — synchronous on the customer path.
+  // If Kinesis is slow / failing, the customer sees this latency directly.
+  await kinesis.send(
+    new PutRecordCommand({
+      StreamName: STREAM,
+      Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
+      PartitionKey: id,
+    }),
+  );
+  // Receipt object to S3 — also synchronous. Large-object write path
+  // that is the typical victim of S3 503 SlowDown bursts during
+  // hot-prefix incidents.
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: `receipts/${id}.json`,
+      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
+      ContentType: "application/json",
+    }),
+  );
+  return { id };
 }
 
 app.post("/health", async (c) => {
@@ -78,24 +118,9 @@ app.post("/orders", async (c) => {
   }
 });
 
-// Cross-check endpoint. Counts actual DDB rows via Scan and reports
-// the gap between writes-acked and rows-actually-persisted. If chaos
-// is honest (real success or real failure), gap == 0. If chaos is
-// Byzantine (silent-success), gap > 0.
-app.get("/verify", async (c) => {
-  try {
-    const res = await ddb.send(new ScanCommand({ TableName: TABLE, Select: "COUNT" }));
-    const ddbCount = res.Count ?? 0;
-    const lost = Math.max(0, writesAcked - ddbCount);
-    return c.json({ writesAcked, ddbCount, lost });
-  } catch (err) {
-    return c.json({ writesAcked, error: String(err) }, 503);
-  }
-});
-
-app.get("/", (c) => c.text("target up (silent-loss baseline)"));
+app.get("/", (c) => c.text("target up"));
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {
-  console.error(`target (silent-loss) listening on http://localhost:${info.port}`);
+  console.error(`target listening on http://localhost:${info.port} -> kumo at ${ENDPOINT}`);
 });

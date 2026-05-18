@@ -24,6 +24,7 @@ export {
   minimalCodeChange,
   noNewDuplicates,
   noSilentDataLoss,
+  recognizedAsUnrecoverable,
   readTargetSource,
   recoveredSlo,
   rereadPageBoard,

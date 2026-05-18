@@ -40,6 +40,9 @@ export type { DuplicateOrdersOptions } from "./duplicate-orders.ts";
 export { silentDataLoss } from "./silent-data-loss.ts";
 export type { SilentDataLossOptions } from "./silent-data-loss.ts";
 
+export { credentialsRevoked } from "./credentials-revoked.ts";
+export type { CredentialsRevokedOptions } from "./credentials-revoked.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -64,6 +67,7 @@ import { restartTrap } from "./restart-trap.ts";
 import { noHintsStorm } from "./no-hints-storm.ts";
 import { duplicateOrders } from "./duplicate-orders.ts";
 import { silentDataLoss } from "./silent-data-loss.ts";
+import { credentialsRevoked } from "./credentials-revoked.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -84,6 +88,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "no-hints-storm", factory: noHintsStorm },
   { id: "duplicate-orders", factory: duplicateOrders },
   { id: "silent-data-loss", factory: silentDataLoss },
+  { id: "credentials-revoked", factory: credentialsRevoked },
 ];
 
 /**

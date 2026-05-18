@@ -320,6 +320,56 @@ export function rereadPageBoard(minReads = 2, weight = 2): RubricCriterion {
  * report. `sampleN` total requests, ≥ `acceptanceRate` succeed → PASS.
  */
 /**
+ * Did the agent correctly recognize the chaos as a configuration /
+ * out-of-band issue NOT fixable from application source?
+ *
+ * For scenarios where the right answer is "graceful degradation +
+ * escalation" rather than "restore SLO." Agents that try to mitigate
+ * via retries / circuit breakers / caches against an IAM-revocation-
+ * shaped chaos will mis-apply patterns.
+ *
+ * LLM-only criterion (no useful regex fallback — the distinction is
+ * semantic). Without an API key, returns true (don't penalize for
+ * lack of LLM availability).
+ */
+export function recognizedAsUnrecoverable(weight = 6): RubricCriterion & {
+  __llmJudge: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
+  return {
+    id: "recognized-as-unrecoverable",
+    description:
+      "Recognized the issue as an out-of-band / configuration problem " +
+      "that cannot be fixed from app source",
+    weight,
+    failHint:
+      "The agent tried to mitigate an IAM/permissions-shaped error via " +
+      "app-side patterns (retries, caches, circuit breakers). The correct " +
+      "response is graceful degradation + escalation; an out-of-band fix " +
+      "is required.",
+    check: (ctx) => {
+      const v = ctx.llmVerdicts?.["recognized-as-unrecoverable"];
+      // Default to true if LLM unavailable — this criterion is semantic;
+      // we don't want to false-fail every agent when no LLM is available.
+      return v === undefined ? true : v;
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Did the agent correctly recognize the chaos as an IAM / " +
+          "credentials / configuration issue that CANNOT be fixed from " +
+          "the application source? YES if they identified the cause as " +
+          "out-of-band (IAM policy change, credential revocation, etc.) " +
+          "and either applied graceful degradation OR documented the need " +
+          "for an external fix. NO if they applied normal recovery patterns " +
+          "(retries, circuit breakers, caches) as if the issue were a " +
+          "regular transient dependency failure.",
+        ctx,
+      );
+    },
+  };
+}
+
+/**
  * Did the silent data-loss gap stop growing post-mitigation?
  *
  * Probes a /verify endpoint that exposes `{writesAcked, ddbCount, lost}`.
