@@ -118,8 +118,48 @@ const customerProbe =
   (await probeCustomerViaJourney(scenarioId)) ?? (await probeCustomerViaCurl());
 const chaosSnapshot = (await (await fetch("http://localhost:4566/kumo/chaos/rules")).json()) as {
   rules: { id: string }[];
-  stats: { ruleId: string; matched: number; skipped: number }[];
+  stats: { ruleId: string; matched: number; skipped: number; recentTraces?: string[] }[];
 };
+
+// #115 phase 3: pull the target-side trace-log (every SPA iteration's
+// trace + outcome) and join with kumo's per-rule recentTraces. The
+// result is "iteration N (trace T) outcome=X hit rules [...]" — the
+// per-trace forensics the agent or reviewer needs to attribute
+// individual customer-journey failures to specific chaos rules.
+interface TraceLogEntry {
+  traceparent: string;
+  outcome: string;
+  atMs: number;
+}
+interface JoinedTrace {
+  traceparent: string;
+  outcome: string;
+  atMs: number;
+  hitRules: string[];
+}
+async function fetchTraceLog(): Promise<TraceLogEntry[]> {
+  try {
+    const r = await fetch("http://localhost:3000/__trace", { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return [];
+    const j = (await r.json()) as { entries?: TraceLogEntry[] };
+    return Array.isArray(j.entries) ? j.entries : [];
+  } catch {
+    return [];
+  }
+}
+const traceLog = await fetchTraceLog();
+const ruleByTrace = new Map<string, string[]>();
+for (const s of chaosSnapshot.stats) {
+  for (const t of s.recentTraces ?? []) {
+    const cur = ruleByTrace.get(t) ?? [];
+    cur.push(s.ruleId);
+    ruleByTrace.set(t, cur);
+  }
+}
+const joinedTraces: JoinedTrace[] = traceLog.map((e) => ({
+  ...e,
+  hitRules: ruleByTrace.get(e.traceparent) ?? [],
+}));
 
 const scenario = factory({
   probeUrl: "http://localhost:3000/health",
@@ -211,6 +251,17 @@ const report = scoreScenario({
   llmVerdicts,
 });
 
+// Per-trace forensics summary (#115 phase 3). Counts how many
+// iterations of each outcome hit at least one chaos rule. Empty when
+// the target didn't mount /__trace (e.g. variants from earlier
+// scenarios that predate the trace-log).
+const outcomeCounts: Record<string, { total: number; hitChaos: number }> = {};
+for (const t of joinedTraces) {
+  const e = (outcomeCounts[t.outcome] ??= { total: 0, hitChaos: 0 });
+  e.total++;
+  if (t.hitRules.length > 0) e.hitChaos++;
+}
+
 writeFileSync(join(workDir, "debrief.md"), report.debrief);
 writeFileSync(
   join(workDir, "report.json"),
@@ -224,6 +275,8 @@ writeFileSync(
       redHerringsHit: report.redHerringsHit,
       customerProbe,
       chaosStats: chaosSnapshot.stats,
+      traceLog: joinedTraces,
+      traceOutcomes: outcomeCounts,
     },
     null,
     2,
@@ -239,6 +292,15 @@ console.log(
 if (customerProbe.mode === "journey") {
   for (const r of customerProbe.perRecipe) {
     console.log(`  - ${r.name}: ${r.ok} ok / ${r.fail} fail`);
+  }
+}
+if (joinedTraces.length > 0) {
+  console.log(
+    `Trace forensics: ${joinedTraces.length} iterations recorded, ` +
+      `${joinedTraces.filter((t) => t.hitRules.length > 0).length} hit chaos`,
+  );
+  for (const [outcome, c] of Object.entries(outcomeCounts)) {
+    console.log(`  - ${outcome}: ${c.total} (${c.hitChaos} hit chaos)`);
   }
 }
 console.log(`Artifacts: ${workDir}/{debrief.md,report.json}`);

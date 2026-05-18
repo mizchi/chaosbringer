@@ -61,6 +61,19 @@ const HTML = `<!doctype html>
     return "00-" + hex.slice(0, 32) + "-" + hex.slice(32, 48) + "-01";
   }
 
+  // Record the iteration's trace+outcome to the target-side
+  // trace-log so the scoring step can join chaosbringer journey
+  // results with kumo's per-rule trace ring buffer (#115 phase 3).
+  // Fire-and-forget — the journey's pass/fail is decided by the
+  // status element, not by the trace-log POST.
+  function recordTrace(traceparent, outcome) {
+    fetch("/__trace", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ traceparent, outcome, atMs: Date.now() }),
+    }).catch(() => {});
+  }
+
   $place.addEventListener("click", async () => {
     const traceparent = genTraceparent();
     log("traceparent=" + traceparent);
@@ -71,6 +84,7 @@ const HTML = `<!doctype html>
       if (!res.ok) {
         setStatus("error", "Place failed: HTTP " + res.status);
         log("POST /orders failed: " + res.status);
+        recordTrace(traceparent, "place-failed");
         return;
       }
       const { id } = await res.json();
@@ -88,19 +102,23 @@ const HTML = `<!doctype html>
       if (verify.status === 404) {
         setStatus("missing", "Order " + id + " MISSING from store");
         log("verify: 404 — order not found");
+        recordTrace(traceparent, "verify-missing");
         return;
       }
       if (!verify.ok) {
         const body = await verify.text().catch(() => "");
         setStatus("missing", "Verify failed: HTTP " + verify.status + " — " + body.slice(0, 200));
         log("verify: " + verify.status + " " + body.slice(0, 200));
+        recordTrace(traceparent, "verify-failed");
         return;
       }
       setStatus("found", "Order " + id + " confirmed");
       log("verify: ok");
+      recordTrace(traceparent, "found");
     } catch (err) {
       setStatus("error", "Network error: " + err);
       log("error: " + err);
+      recordTrace(traceparent, "network-error");
     } finally {
       $place.disabled = false;
     }
@@ -111,11 +129,50 @@ const HTML = `<!doctype html>
 </html>`;
 
 /**
- * Mount the SPA on the given Hono app. The route handler for `GET /`
- * previously returned a "target up" text; this overrides it with the
- * journey-driving HTML. Variants that don't want the SPA simply skip
- * calling this.
+ * Per-iteration trace+outcome log (#115 phase 3). The SPA POSTs
+ * each click's traceparent + outcome here so the scoring step can
+ * join chaosbringer journey results with kumo's per-rule trace ring
+ * buffer.
+ *
+ * Each entry is kept in process memory. The log is bounded to the
+ * most recent N entries to avoid unbounded growth across long runs;
+ * scoring reads it once at the end and the target restarts between
+ * scenarios anyway.
+ */
+interface TraceEntry {
+  traceparent: string;
+  outcome: "found" | "verify-missing" | "verify-failed" | "place-failed" | "network-error" | string;
+  atMs: number;
+}
+const TRACE_LOG_MAX = 500;
+const traceLog: TraceEntry[] = [];
+
+/**
+ * Mount the SPA + /__trace observability on the given Hono app.
+ * The /__trace endpoints are kept under the harness-reserved
+ * `/__` prefix so they don't collide with scenario-specific
+ * application routes.
  */
 export function mountUI(app: Hono): void {
   app.get("/", (c) => c.html(HTML));
+  app.post("/__trace", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as TraceEntry | null;
+    if (!body || typeof body.traceparent !== "string") {
+      return c.json({ error: "bad body" }, 400);
+    }
+    traceLog.push({
+      traceparent: body.traceparent,
+      outcome: body.outcome ?? "unknown",
+      atMs: Number(body.atMs ?? Date.now()),
+    });
+    if (traceLog.length > TRACE_LOG_MAX) {
+      traceLog.splice(0, traceLog.length - TRACE_LOG_MAX);
+    }
+    return c.json({ ok: true, n: traceLog.length });
+  });
+  app.get("/__trace", (c) => c.json({ entries: traceLog }));
+  app.delete("/__trace", (c) => {
+    traceLog.length = 0;
+    return c.json({ ok: true });
+  });
 }
