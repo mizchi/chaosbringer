@@ -47,7 +47,29 @@ export interface PoolExhaustionFault {
   matchSql?: string;
 }
 
-export type PgChaosFault = PoolExhaustionFault;
+/**
+ * Simulates replica-lag: a SELECT against a primary key that was
+ * INSERTed in the last `lagMs` returns 0 rows. Reproduces the
+ * read-after-write inconsistency you get when reading from a lagging
+ * read replica. Mitigation in real systems: prefer-primary for
+ * reads-after-writes, INSERT ... RETURNING, or short waits with
+ * retry.
+ *
+ * Implementation note: we track recently-inserted ids in a sliding
+ * window per call to wrapPool. Detection of "is this SELECT for a
+ * recently-INSERTed id" is heuristic — we look for `INSERT INTO X
+ * ... ($id, ...)` and `SELECT ... WHERE id = $1` patterns. Custom
+ * SQL shapes can pass `matchSql` to narrow scope.
+ */
+export interface ReplicaLagFault {
+  kind: "replica-lag";
+  /** Probability a matched SELECT trips the lag. */
+  probability: number;
+  /** How long an INSERTed row stays "invisible" to SELECT. Default 1500ms. */
+  lagMs?: number;
+}
+
+export type PgChaosFault = PoolExhaustionFault | ReplicaLagFault;
 
 export interface PgChaosConfig {
   faults: PgChaosFault[];
@@ -62,12 +84,45 @@ const DEFAULT_HOLD_MS = 60_000;
  * pg consumer but enough for typical orders-style write paths.
  */
 export function wrapPool(pool: Pool, config: PgChaosConfig): Pool {
-  const stats = { stuckActive: 0, stuckTotal: 0, queries: 0 };
+  const stats = {
+    stuckActive: 0,
+    stuckTotal: 0,
+    queries: 0,
+    /** Number of SELECTs that were forced to return 0 rows by replica-lag. */
+    lagHidden: 0,
+  };
 
-  function pickFault(sql: string): PoolExhaustionFault | null {
+  /**
+   * Sliding window of recently-INSERTed primary-key values, with
+   * their insert timestamps. Used by replica-lag detection to know
+   * which ids should be "invisible" to immediate SELECTs.
+   */
+  const recentInserts = new Map<string, number>();
+  function pruneRecentInserts(now: number) {
+    // Bound the window to the largest configured lagMs so we don't
+    // leak memory across long runs.
+    const maxLag = config.faults
+      .filter((f): f is ReplicaLagFault => f.kind === "replica-lag")
+      .reduce((m, f) => Math.max(m, f.lagMs ?? 1500), 0);
+    if (maxLag === 0) return;
+    const cutoff = now - maxLag;
+    for (const [k, t] of recentInserts) {
+      if (t < cutoff) recentInserts.delete(k);
+    }
+  }
+
+  function pickPoolExhaustionFault(sql: string): PoolExhaustionFault | null {
     for (const f of config.faults) {
       if (f.kind !== "pool-exhaustion") continue;
       if (f.matchSql && !new RegExp(f.matchSql, "i").test(sql)) continue;
+      if (Math.random() < f.probability) return f;
+    }
+    return null;
+  }
+
+  function pickReplicaLagFault(): ReplicaLagFault | null {
+    for (const f of config.faults) {
+      if (f.kind !== "replica-lag") continue;
       if (Math.random() < f.probability) return f;
     }
     return null;
@@ -85,31 +140,55 @@ export function wrapPool(pool: Pool, config: PgChaosConfig): Pool {
   ): Promise<QueryResult<QueryResultRow>> {
     stats.queries++;
     const sql = typeof text === "string" ? text : text.text;
-    const fault = pickFault(sql);
-    if (fault) {
-      // Hold a client for holdMs before letting the real query proceed.
-      // The client is released at the end — but by then many other
-      // requests have queued on pool.connect().
-      const hold = fault.holdMs ?? DEFAULT_HOLD_MS;
+    const values = (Array.isArray(valuesOrCb) ? valuesOrCb : undefined) as unknown[] | undefined;
+    const now = Date.now();
+    pruneRecentInserts(now);
+
+    // Pool-exhaustion fault path.
+    const poolFault = pickPoolExhaustionFault(sql);
+    if (poolFault) {
+      const hold = poolFault.holdMs ?? DEFAULT_HOLD_MS;
       stats.stuckActive++;
       stats.stuckTotal++;
       const client = await pool.connect();
       try {
         await new Promise((r) => setTimeout(r, hold));
-        // Now actually run the user's query on the held client.
-        const result = await client.query(
-          text as string,
-          valuesOrCb as unknown[] | undefined,
-        );
+        const result = await client.query(text as string, values);
         return result as QueryResult<QueryResultRow>;
       } finally {
         client.release();
         stats.stuckActive--;
       }
     }
-    return originalQuery(text as string, valuesOrCb as unknown[] | undefined) as Promise<
-      QueryResult<QueryResultRow>
-    >;
+
+    // Replica-lag path: intercept SELECT-by-id where the id was just
+    // INSERTed. Return an empty result set as if the read replica
+    // hasn't caught up yet.
+    const isInsert = /^\s*INSERT\s+INTO/i.test(sql);
+    const selectIdMatch = sql.match(/^\s*SELECT.+\bWHERE\s+id\s*=\s*\$(\d+)/i);
+    if (selectIdMatch && values && values.length > 0) {
+      const idIdx = Number(selectIdMatch[1]) - 1;
+      const id = values[idIdx];
+      if (typeof id === "string" && recentInserts.has(id)) {
+        // The row IS recent. Decide whether this query trips the lag.
+        const lagFault = pickReplicaLagFault();
+        if (lagFault) {
+          stats.lagHidden++;
+          return { rows: [], rowCount: 0, command: "SELECT", oid: 0, fields: [] } as QueryResult<QueryResultRow>;
+        }
+      }
+    }
+
+    const result = (await originalQuery(text as string, values)) as QueryResult<QueryResultRow>;
+
+    // After running an INSERT, remember the id for replica-lag.
+    if (isInsert && values && values.length > 0) {
+      const id = values[0];
+      if (typeof id === "string") {
+        recentInserts.set(id, now);
+      }
+    }
+    return result;
   }) as Pool["query"];
 
   // Expose stats via a tag on the pool — the target can mount these on
@@ -141,8 +220,12 @@ export function loadPgChaosConfig(envVar = "PG_CHAOS_CONFIG"): PgChaosConfig | n
  * the agent uses to confirm the chaos exists. Returns null if the
  * pool wasn't wrapped (i.e. no chaos).
  */
-export function pgChaosStats(pool: Pool): { queries: number; stuckActive: number; stuckTotal: number } | null {
-  const s = (pool as Pool & { __chaosStats?: { queries: number; stuckActive: number; stuckTotal: number } }).__chaosStats;
+export function pgChaosStats(
+  pool: Pool,
+): { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number } | null {
+  const s = (pool as Pool & {
+    __chaosStats?: { queries: number; stuckActive: number; stuckTotal: number; lagHidden: number };
+  }).__chaosStats;
   return s ?? null;
 }
 

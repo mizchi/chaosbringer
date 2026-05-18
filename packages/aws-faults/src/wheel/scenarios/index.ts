@@ -52,6 +52,12 @@ export type { MultiServiceCascadeOptions } from "./multi-service-cascade.ts";
 export { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
 export type { PgPoolExhaustionOptions } from "./pg-pool-exhaustion.ts";
 
+export { pgReplicaLag } from "./pg-replica-lag.ts";
+export type { PgReplicaLagOptions } from "./pg-replica-lag.ts";
+
+export { networkRstIdempotency } from "./network-rst-idempotency.ts";
+export type { NetworkRstIdempotencyOptions } from "./network-rst-idempotency.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -80,6 +86,8 @@ import { credentialsRevoked } from "./credentials-revoked.ts";
 import { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
 import { multiServiceCascade } from "./multi-service-cascade.ts";
 import { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
+import { pgReplicaLag } from "./pg-replica-lag.ts";
+import { networkRstIdempotency } from "./network-rst-idempotency.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -104,6 +112,8 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "client-timeout-misconfig", factory: clientTimeoutMisconfig },
   { id: "multi-service-cascade", factory: multiServiceCascade },
   { id: "pg-pool-exhaustion", factory: pgPoolExhaustion },
+  { id: "pg-replica-lag", factory: pgReplicaLag },
+  { id: "network-rst-idempotency", factory: networkRstIdempotency },
 ];
 
 /**
