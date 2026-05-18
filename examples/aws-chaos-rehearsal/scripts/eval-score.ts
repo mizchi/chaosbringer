@@ -86,13 +86,30 @@ const scenario = factory({
 // the probe log.
 const drillReport: DrillReport = synthesizeDrillReport(workDir, customerProbe);
 
+// Iterate over all rubric criteria; any with a __probe callback runs at
+// scoring time. customer-impact-recovered already ran above; skip it.
+const postRunProbes: Record<string, { rate: number; sampleN: number }> = {
+  "customer-impact-recovered": customerProbe,
+};
+for (const c of scenario.rubric) {
+  if (c.id === "customer-impact-recovered") continue;
+  const probe = (c as { __probe?: () => Promise<{ rate: number; sampleN: number }> }).__probe;
+  if (typeof probe === "function") {
+    try {
+      postRunProbes[c.id] = await probe();
+    } catch (err) {
+      console.error(`[score] probe ${c.id} failed: ${err}`);
+    }
+  }
+}
+
 const report = scoreScenario({
   scenario,
   drillReport,
   transcript,
   toolUses,
   journalContents,
-  postRunProbes: { "customer-impact-recovered": customerProbe },
+  postRunProbes,
   postRunChaosSnapshot: chaosSnapshot,
 });
 

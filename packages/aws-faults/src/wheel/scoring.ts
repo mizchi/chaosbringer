@@ -54,7 +54,7 @@ export function investigatedBeforeEditing(weight = 3): RubricCriterion {
  */
 export function checkedKumoChaosStats(weight = 2): RubricCriterion {
   const TOOL = /\/kumo\/chaos\/(rules|stats)/;
-  const TEXT = /\/kumo\/chaos\/(rules|stats)|chaos\s+(rule|stat|surface|config)|ddb-(peak|throttle)|feedback\s*(windowMs|threshold|probabilityStep)/i;
+  const TEXT = /\/kumo\/chaos\/(rules|stats)|chaos\s+(rule|stat|surface|config)|\bddb-[a-z][a-z0-9-]+|\b(sts|s3|kinesis|cognito|ec2|lambda)-(peak|throttle|cascade|distraction|down|tail|latency|hot|key|quota|race|onset|trap)\b|feedback\s*(windowMs|threshold|probabilityStep)|Kumo-injected/i;
   return {
     id: "checked-chaos-stats",
     description: "Queried kumo /kumo/chaos/stats or /rules to see what is being injected",
@@ -267,17 +267,30 @@ export function noNewDuplicates(opts: { dupCheckUrl: string; weight?: number }):
       return r !== undefined && r.rate === 1;
     },
     __probe: async () => {
-      // Sample twice with a 2s gap. If ghost count grew, FAIL.
+      // Sample 6 times over 10s. The /dup-check metric mixes persistent
+      // ghosts (real bug) with transient in-flight requests (one new id
+      // sent each time a writeOrder is in progress; the probe loop runs
+      // ~3 requests/sec so 0-6 transient ghosts at any moment).
+      //
+      // PASS criterion: the ghost gap is BOUNDED (doesn't trend upward
+      // beyond the in-flight ceiling). FAIL: trend grows steadily,
+      // meaning persistent ghosts are accumulating.
       try {
-        const r1 = (await (await fetch(opts.dupCheckUrl, { signal: AbortSignal.timeout(5000) })).json()) as {
-          ghosts: number;
-        };
-        await new Promise((r) => setTimeout(r, 2000));
-        const r2 = (await (await fetch(opts.dupCheckUrl, { signal: AbortSignal.timeout(5000) })).json()) as {
-          ghosts: number;
-        };
-        const grew = r2.ghosts > r1.ghosts;
-        return { rate: grew ? 0 : 1, sampleN: 2 };
+        const samples: number[] = [];
+        for (let i = 0; i < 6; i++) {
+          const r = (await (await fetch(opts.dupCheckUrl, { signal: AbortSignal.timeout(5000) })).json()) as {
+            ghosts: number;
+          };
+          samples.push(r.ghosts);
+          if (i < 5) await new Promise((rr) => setTimeout(rr, 2000));
+        }
+        // Compute the trend: last 3 mean vs first 3 mean.
+        const firstMean = (samples[0]! + samples[1]! + samples[2]!) / 3;
+        const lastMean = (samples[3]! + samples[4]! + samples[5]!) / 3;
+        // Tolerance: a real bug accumulates many ghosts per second;
+        // transient in-flight is bounded by concurrency (~10).
+        const grewBeyondTransient = lastMean > firstMean + 10;
+        return { rate: grewBeyondTransient ? 0 : 1, sampleN: 6 };
       } catch {
         return { rate: 0, sampleN: 0 };
       }
