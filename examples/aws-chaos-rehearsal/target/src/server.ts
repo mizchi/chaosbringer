@@ -68,14 +68,15 @@ const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   let lastErr: unknown;
+  const id = randomUUID(); // FIX: one id per writeOrder; retries are idempotent
+  const ts = Date.now();
   for (let attempt = 0; attempt < 5; attempt++) {
-    const id = randomUUID(); // BUG: new id per attempt (idempotency violation)
     sentIds.add(id);
     try {
       await doc.send(
         new PutCommand({
           TableName: TABLE,
-          Item: { id, ts: Date.now(), amount: 1 },
+          Item: { id, ts, amount: 1 },
         }),
       );
       returnedIds.add(id);
