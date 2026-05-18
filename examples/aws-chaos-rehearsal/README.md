@@ -1,37 +1,48 @@
 # aws-chaos-rehearsal
 
-End-to-end demo of the AI recovery rehearsal flow:
+End-to-end demo of the AI recovery rehearsal flow. 22 scenarios across
+9 capability tiers, three storage protocols, three fault layers.
 
-1. Boot a patched [kumo](https://github.com/sivchari/kumo) with `/kumo/chaos/*` runtime endpoints + the
-   #667 latency baseline (`kumo/latency-baseline.json`).
-2. Boot a deliberately-fragile Hono target that writes orders to DynamoDB-via-kumo
-   (`target/src/server.ts` — search for "INTENTIONAL WEAKNESS").
-3. Run a drill (currently: `ddbThrottleStorm`) that installs runtime chaos rules.
-4. Hand the broken environment to a Claude Agent SDK session and watch whether SLO recovers
-   while chaos is still being injected.
+**For the canonical run-it-yourself guide see
+[`docs/cookbook/aws-chaos-rehearsal-quickstart.md`](../../docs/cookbook/aws-chaos-rehearsal-quickstart.md).**
+This README is the in-tree reference; the quickstart is the
+copy-pastable getting-started doc.
+
+## Quick start
+
+```sh
+# From the chaosbringer workspace root.
+pnpm install
+./examples/aws-chaos-rehearsal/scripts/bootstrap.sh   # idempotent, ~15s
+
+cd examples/aws-chaos-rehearsal
+pnpm prepare silent-data-loss my-run-1
+# → prints the agent brief; paste into your model or use a sweep driver
+pnpm score silent-data-loss my-run-1
+```
+
+For cross-agent comparison:
+```sh
+pnpm sweep --driver "bash scripts/drivers/claude-code-driver.sh" \
+           --scenarios silent-data-loss,duplicate-orders \
+           --driver-label claude-opus-4-7
+```
 
 ## Prerequisites
 
-You need a `kumo` binary with the `/kumo/chaos/*` runtime endpoints. The boot script checks for
-`/kumo/chaos/rules` at startup and aborts if it's missing — without that endpoint, drills have no
-runtime control surface.
+`bootstrap.sh` handles all of these if it can. Manual:
 
-The chaos surface is now merged into `mizchi/kumo` main, so the setup is a normal Go build:
+- **Node 22+** with `pnpm`
+- **Go 1.21+** to build kumo (cloned from `mizchi/kumo` main)
+- **PostgreSQL 14+** for the pg-* scenarios (skippable with `--no-postgres`)
+- **Playwright + Chromium** for journey-based customer probe
+- An agent / model — Claude Code CLI, OpenAI, your own — see
+  [scripts/drivers/README.md](scripts/drivers/README.md)
 
-```sh
-git clone https://github.com/mizchi/kumo.git
-cd kumo && go build -o /usr/local/bin/kumo ./cmd/kumo
-```
-
-> **Note on upstream.** We aim to follow `sivchari/kumo` once the chaos endpoints land there. Until
-> then, the `mizchi/kumo` fork is the canonical source, and the standalone patch in
-> [`../../kumo-chaos-patch/`](../../kumo-chaos-patch) is kept as a fallback for users on a different
-> kumo base. When upstream catches up, we'll switch this back to `sivchari/kumo` and retire the
-> patch directory.
-
-You also need:
-- `pnpm install` in the chaosbringer workspace root
-- `ANTHROPIC_API_KEY` exported (for the AI rehearsal script)
+> **kumo upstream.** Chaos endpoints live in `mizchi/kumo` main and
+> will be upstreamed to `sivchari/kumo` when ready. Until then the
+> standalone patch at [`../../kumo-chaos-patch/`](../../kumo-chaos-patch)
+> is the fallback for non-mizchi bases.
 
 ## Run a drill manually (no AI)
 
