@@ -17,8 +17,9 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
+import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
@@ -83,7 +84,23 @@ app.get("/verify", async (c) => {
   }
 });
 
-app.get("/", (c) => c.text("target up (silent-loss baseline)"));
+// Single-item read used by the journey-based customer probe. After
+// POST /orders, the SPA fetches /orders/:id to confirm the write
+// actually landed. Under a silentSuccess chaos rule this returns 404
+// because the row was never inserted — that's the journey-level
+// catch for silent data loss.
+app.get("/orders/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const res = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
+    if (!res.Item) return c.json({ error: "not found", id }, 404);
+    return c.json(res.Item);
+  } catch (err) {
+    return c.json({ error: String(err) }, 503);
+  }
+});
+
+mountUI(app);
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {

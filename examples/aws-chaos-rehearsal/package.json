@@ -21,10 +21,12 @@
     "@aws-sdk/lib-dynamodb": "^3.700.0",
     "@hono/node-server": "^1.13.0",
     "@mizchi/aws-faults": "workspace:*",
+    "chaosbringer": "workspace:*",
     "hono": "^4.7.0"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "playwright": "^1.52.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }

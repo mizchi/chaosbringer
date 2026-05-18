@@ -66,13 +66,29 @@ out" — a real mitigation must absorb the fault.
 examples/aws-chaos-rehearsal/
 ├── target/
 │   └── src/server.ts        # Hono app, intentionally fragile
+│   └── src/ui.ts            # minimal SPA so chaosbringer journeys have something to drive
 ├── kumo/
 │   └── latency-baseline.json  # #667 startup latency profile
+├── recipes/                 # chaosbringer customer-impact journeys (per-scenario)
+│   └── silent-data-loss/    # the journey catches Byzantine writes the curl probe misses
 └── scripts/
     ├── _boot.ts             # spawn kumo + target, wait ready
     ├── run-drill.ts         # manual drill (no AI)
     └── run-ai-rehearsal.ts  # full loop with Claude Agent SDK
 ```
+
+### Customer-impact probe (issue #114)
+
+`eval-score.ts` measures customer impact two ways:
+
+- **Journey** (preferred) — if `recipes/<scenario-id>/` exists, runs N
+  virtual users through verified chaosbringer recipes against the
+  target's SPA. Catches silent-data-loss / duplicate-write / stale-read
+  failures that the curl probe is blind to.
+- **Curl** (fallback) — `POST /orders × 30`. Used when a scenario
+  has no recipe library yet.
+
+Mode appears in `report.json.customerProbe.mode` and the scoring stdout.
 
 ## What this is and isn't
 

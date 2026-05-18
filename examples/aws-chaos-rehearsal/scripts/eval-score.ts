@@ -12,12 +12,14 @@
  * Hits the live kumo for chaos snapshot, hits /orders for customer impact.
  * Writes debrief.md + report.json into the run dir.
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { scenarios } from "../../../packages/aws-faults/src/wheel/index.ts";
 import { scoreScenario } from "../../../packages/aws-faults/src/wheel/scoring.ts";
 import type { ToolUseRecord } from "../../../packages/aws-faults/src/wheel/types.ts";
 import type { DrillReport } from "../../../packages/aws-faults/src/orchestrator.ts";
+import { RecipeStore, scenarioLoadFromStore } from "chaosbringer";
 
 const scenarioId = process.argv[2];
 const runId = process.argv[3];
@@ -52,7 +54,50 @@ const toolUses: ToolUseRecord[] = existsSync(toolUsesPath)
   : inferToolUsesFromJournal(journalContents[0]!);
 
 // Hit the live env for ground-truth state at scoring time.
-async function probeCustomer() {
+//
+// Two probe modes, in priority order:
+//   (1) chaosbringer journey-based probe — used when a recipe library
+//       exists at recipes/<scenarioId>/. Runs N virtual users through a
+//       verified journey (e.g. place order, then verify the order is
+//       actually readable). Catches silent-data-loss, duplicate-write,
+//       and stale-read failures that the curl probe is blind to.
+//   (2) Legacy curl probe — POST /orders × 30. Used when no recipe
+//       library is present for the scenario. Returns success rate only.
+async function probeCustomerViaJourney(scenarioId: string) {
+  const recipesDir = resolve(import.meta.dirname, "..", "recipes", scenarioId);
+  if (!existsSync(recipesDir)) return null;
+  // Copy the source recipes to a tmp dir so the RecipeStore's stats
+  // updates (every replay records success/fail) don't mutate the
+  // committed files.
+  const ephemeralDir = mkdtempSync(join(tmpdir(), `wom-recipes-${scenarioId}-`));
+  cpSync(recipesDir, ephemeralDir, { recursive: true });
+  try {
+    const store = new RecipeStore({ localDir: ephemeralDir, globalDir: false, silent: true });
+    if (store.verified().length === 0) return null;
+    const result = await scenarioLoadFromStore({
+      baseUrl: "http://localhost:3000",
+      store,
+      workers: 2,
+      duration: "20s",
+      maxIterationsPerWorker: 5,
+      headless: true,
+    });
+    const succeeded = result.recipes.reduce((s, r) => s + r.succeeded, 0);
+    const total = result.recipes.reduce((s, r) => s + r.fired, 0);
+    const rate = total === 0 ? 0 : succeeded / total;
+    return {
+      rate,
+      sampleN: total,
+      mode: "journey" as const,
+      perRecipe: result.recipes.map((r) => ({ name: r.name, ok: r.succeeded, fail: r.failed })),
+    };
+  } catch (err) {
+    console.error(`[score] journey probe failed: ${err} — falling back to curl`);
+    return null;
+  }
+}
+
+async function probeCustomerViaCurl() {
   let ok = 0;
   const n = 30;
   for (let i = 0; i < n; i++) {
@@ -66,10 +111,11 @@ async function probeCustomer() {
       /* fail */
     }
   }
-  return { rate: ok / n, sampleN: n };
+  return { rate: ok / n, sampleN: n, mode: "curl" as const };
 }
 
-const customerProbe = await probeCustomer();
+const customerProbe =
+  (await probeCustomerViaJourney(scenarioId)) ?? (await probeCustomerViaCurl());
 const chaosSnapshot = (await (await fetch("http://localhost:4566/kumo/chaos/rules")).json()) as {
   rules: { id: string }[];
   stats: { ruleId: string; matched: number; skipped: number }[];
@@ -187,7 +233,14 @@ writeFileSync(
 console.log(report.debrief);
 console.log();
 console.log(`Score: ${(report.score * 100).toFixed(0)}%`);
-console.log(`Customer impact (post-run, 30 samples): ${(customerProbe.rate * 100).toFixed(0)}%`);
+console.log(
+  `Customer impact (post-run, ${customerProbe.sampleN} samples, mode=${customerProbe.mode}): ${(customerProbe.rate * 100).toFixed(0)}%`,
+);
+if (customerProbe.mode === "journey") {
+  for (const r of customerProbe.perRecipe) {
+    console.log(`  - ${r.name}: ${r.ok} ok / ${r.fail} fail`);
+  }
+}
 console.log(`Artifacts: ${workDir}/{debrief.md,report.json}`);
 
 function inferToolUsesFromJournal(journal: string): ToolUseRecord[] {

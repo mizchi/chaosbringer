@@ -31,6 +31,9 @@ importers:
       '@mizchi/aws-faults':
         specifier: workspace:*
         version: link:../../packages/aws-faults
+      chaosbringer:
+        specifier: workspace:*
+        version: link:../../packages/chaosbringer
       hono:
         specifier: ^4.7.0
         version: 4.12.17
@@ -38,6 +41,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.1.0
         version: 0.1.77(zod@3.22.3)
+      playwright:
+        specifier: ^1.52.0
+        version: 1.59.1
       tsx:
         specifier: ^4.19.0
         version: 4.21.0

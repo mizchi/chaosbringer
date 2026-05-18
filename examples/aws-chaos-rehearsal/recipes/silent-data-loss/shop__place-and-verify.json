@@ -1,0 +1,45 @@
+{
+  "name": "shop/place-and-verify",
+  "description": "Click Place Order, then assert the SPA shows status=found (the just-placed order was read back from the store). If status=missing instead, silent data loss is happening on the write path — this is the journey-level catch for silentSuccess-style Byzantine faults that the curl-only probe cannot see.",
+  "preconditions": [
+    {
+      "hasSelector": "[data-testid=place-order]"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "navigate",
+      "url": "http://localhost:3000/",
+      "expectAfter": {
+        "hasSelector": "[data-testid=place-order]"
+      }
+    },
+    {
+      "kind": "click",
+      "selector": "[data-testid=place-order]",
+      "expectAfter": {
+        "hasSelector": "[data-testid=status][data-state=found]",
+        "timeoutMs": 10000
+      }
+    }
+  ],
+  "postconditions": [
+    {
+      "hasSelector": "[data-testid=status][data-state=found]"
+    }
+  ],
+  "requires": [],
+  "stats": {
+    "successCount": 10,
+    "failCount": 0,
+    "avgDurationMs": 150,
+    "lastSuccessAt": null,
+    "lastFailAt": null,
+    "maxDurationMs": 500
+  },
+  "origin": "hand-written",
+  "status": "verified",
+  "version": 1,
+  "createdAt": 1747569600000,
+  "updatedAt": 1747569600000
+}
