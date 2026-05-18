@@ -24,6 +24,7 @@ export {
   minimalCodeChange,
   noNewDuplicates,
   noSilentDataLoss,
+  productionQuality,
   recognizedAsUnrecoverable,
   readTargetSource,
   recoveredSlo,

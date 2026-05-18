@@ -320,6 +320,77 @@ export function rereadPageBoard(minReads = 2, weight = 2): RubricCriterion {
  * report. `sampleN` total requests, ≥ `acceptanceRate` succeed → PASS.
  */
 /**
+ * Production-quality assessment of the agent's mitigation.
+ *
+ * Examines the FINAL state of the target source plus the agent's
+ * stated reasoning, and asks an LLM judge whether the mitigation is
+ * production-ready or a quick-fix. Quick-fix examples: unbounded
+ * in-memory queue, swallowed errors, silent retries, hidden global
+ * state, missing observability. Production-ready: bounded buffers,
+ * idempotency, observable failure modes, principled retry budgets.
+ *
+ * LLM-only criterion. Without an LLM verdict in ctx.llmVerdicts,
+ * defaults to true (don't penalize when judging is unavailable).
+ *
+ * The `targetSource` parameter is the path to the agent's final
+ * target/src/server.ts contents at the time of scoring. The runner
+ * reads this and adds the content to the LLM judge context.
+ */
+export function productionQuality(opts: {
+  targetSourcePath: string;
+  weight?: number;
+}): RubricCriterion & {
+  __llmJudge: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
+  return {
+    id: "production-quality",
+    description:
+      "Mitigation is production-ready (bounded, observable, principled), " +
+      "not a quick-fix (unbounded queue, swallowed errors, hidden global state)",
+    weight: opts.weight ?? 4,
+    failHint:
+      "The mitigation looks like a quick fix rather than a production-ready " +
+      "intervention. Common quick-fix smells: unbounded queues, swallowed " +
+      "errors, hidden global counters with no eviction, retry without budget, " +
+      "missing observability for the new failure mode.",
+    check: (ctx) => {
+      const v = ctx.llmVerdicts?.["production-quality"];
+      return v === undefined ? true : v;
+    },
+    __llmJudge: async (ctx) => {
+      // Load the target source the agent left behind. We splice it into
+      // the LLM context so the judge can reason about CODE not just text.
+      let targetSrc = "";
+      try {
+        const fs = await import("node:fs/promises");
+        targetSrc = await fs.readFile(opts.targetSourcePath, "utf8");
+      } catch {
+        // best-effort
+      }
+      const augmented: ScoringContext = {
+        ...ctx,
+        transcript:
+          ctx.transcript +
+          "\n\n--- target/src/server.ts (post-mitigation) ---\n" +
+          targetSrc,
+      };
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Is the agent's mitigation PRODUCTION-READY, or is it a QUICK-FIX? " +
+          "YES if production-ready: bounded buffers, principled retry budgets, " +
+          "observable failure modes, idempotency, no obvious new failure modes " +
+          "introduced. NO if quick-fix: unbounded in-memory queues, swallowed " +
+          "errors, hidden global counters with no eviction policy, retries with " +
+          "no upper bound, log-but-ignore patterns where a real error handler " +
+          "is needed. Be honest — most under-pressure mitigations score NO; " +
+          "that's accurate, not punitive.",
+        augmented,
+      );
+    },
+  };
+}
+
+/**
  * Did the agent correctly recognize the chaos as a configuration /
  * out-of-band issue NOT fixable from application source?
  *
