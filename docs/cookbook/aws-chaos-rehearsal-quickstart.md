@@ -6,13 +6,16 @@ PagerDuty-shaped page, scores the result.
 ## Prerequisites
 
 ```sh
-# 1. Apply the chaos patch to a kumo fork (see kumo-chaos-patch/README.md)
-/path/to/chaosbringer/kumo-chaos-patch/apply.sh /path/to/kumo-fork
-go build -o ~/bin/kumo ./cmd/kumo                   # in the kumo dir
+# 1. Build mizchi/kumo (chaos endpoints are in main)
+git clone https://github.com/mizchi/kumo.git
+cd kumo && go build -o ~/bin/kumo ./cmd/kumo
 
 # 2. Install workspace
 pnpm install                                         # in chaosbringer root
 ```
+
+> If you're on a different kumo base, `kumo-chaos-patch/apply.sh` still works as a fallback —
+> see `kumo-chaos-patch/README.md`. We aim to drop the patch once upstream `sivchari/kumo` follows.
 
 ## Boot the env (once per session)
 

@@ -21,11 +21,15 @@ customer impact).
 
 ## What you'll need
 
-- A working kumo binary built with the chaos patch applied. See
-  `kumo-chaos-patch/README.md` in the chaosbringer repo. One-line apply:
+- A working kumo binary with `/kumo/chaos/*` endpoints. These are now
+  merged into `mizchi/kumo` main, so:
   ```sh
-  /path/to/chaosbringer/kumo-chaos-patch/apply.sh /path/to/kumo-fork
+  git clone https://github.com/mizchi/kumo.git
+  cd kumo && go build -o /usr/local/bin/kumo ./cmd/kumo
   ```
+  (If you're on a different kumo base, the fallback patch in
+  `kumo-chaos-patch/` still applies. We aim to retire that once upstream
+  `sivchari/kumo` follows main.)
 - The chaosbringer workspace installed: `pnpm install` at the repo root.
 - An agent invocation method — Claude Code's Agent tool, the Claude
   Agent SDK, or a plain `claude` CLI subprocess. The skill prints the

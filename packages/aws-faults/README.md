@@ -2,8 +2,10 @@
 
 Runtime AWS fault injection for [kumo](https://github.com/sivchari/kumo) + a drill SDK for AI recovery rehearsal.
 
-Pairs with the Go-side patch in [`kumo-chaos-patch/`](../../kumo-chaos-patch) that adds `/kumo/chaos/*`
-admin endpoints to kumo. With the patch applied, this package gives you:
+The Go-side `/kumo/chaos/*` admin endpoints now live in [`mizchi/kumo`](https://github.com/mizchi/kumo)
+main — just `git clone && go build ./cmd/kumo`. (The standalone patch in
+[`kumo-chaos-patch/`](../../kumo-chaos-patch) is retained as a fallback until upstream
+`sivchari/kumo` follows.) With a chaos-enabled kumo running, this package gives you:
 
 1. A thin TypeScript client (`kumoChaos`) that talks to those endpoints.
 2. A drill SDK (`runDrill`) that injects, observes, and waits for recovery.

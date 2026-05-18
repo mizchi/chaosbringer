@@ -1,5 +1,12 @@
 # kumo-chaos-patch
 
+> **Status (2026-05): merged into [`mizchi/kumo`](https://github.com/mizchi/kumo) main.** If you're
+> using `mizchi/kumo`, you do NOT need this patch — `go build ./cmd/kumo` already produces a binary
+> with `/kumo/chaos/*` enabled. This directory is retained as a fallback for users on a different
+> kumo base (e.g. upstream `sivchari/kumo`), and as the source of truth for the changes we'll
+> propose upstream. **TODO: when upstream `sivchari/kumo` follows main, delete this directory and
+> point everything at upstream.**
+
 Additive Go patch for [sivchari/kumo](https://github.com/sivchari/kumo) that adds runtime-mutable
 chaos endpoints (`/kumo/chaos/*`). Designed to layer on top of [PR #667 (latency emulator)](https://github.com/sivchari/kumo/pull/667) without colliding with it.
 

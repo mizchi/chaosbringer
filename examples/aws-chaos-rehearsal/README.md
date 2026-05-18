@@ -12,17 +12,22 @@ End-to-end demo of the AI recovery rehearsal flow:
 
 ## Prerequisites
 
-You need a `kumo` binary built **with the patch in `../../kumo-chaos-patch` applied**. The boot
-script checks for the `/kumo/chaos/rules` endpoint at startup and aborts if it's missing — without
-that endpoint, drills have no runtime control surface.
+You need a `kumo` binary with the `/kumo/chaos/*` runtime endpoints. The boot script checks for
+`/kumo/chaos/rules` at startup and aborts if it's missing — without that endpoint, drills have no
+runtime control surface.
+
+The chaos surface is now merged into `mizchi/kumo` main, so the setup is a normal Go build:
 
 ```sh
-# in a kumo fork checkout
-cp -r path/to/chaosbringer/kumo-chaos-patch/internal/chaos internal/
-cp path/to/chaosbringer/kumo-chaos-patch/internal/server/chaos_*.go internal/server/
-# apply the 3 in-place edits documented in kumo-chaos-patch/README.md
-go build -o /usr/local/bin/kumo ./cmd/kumo
+git clone https://github.com/mizchi/kumo.git
+cd kumo && go build -o /usr/local/bin/kumo ./cmd/kumo
 ```
+
+> **Note on upstream.** We aim to follow `sivchari/kumo` once the chaos endpoints land there. Until
+> then, the `mizchi/kumo` fork is the canonical source, and the standalone patch in
+> [`../../kumo-chaos-patch/`](../../kumo-chaos-patch) is kept as a fallback for users on a different
+> kumo base. When upstream catches up, we'll switch this back to `sivchari/kumo` and retire the
+> patch directory.
 
 You also need:
 - `pnpm install` in the chaosbringer workspace root
