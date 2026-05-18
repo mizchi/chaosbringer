@@ -1,0 +1,17 @@
+{
+  "name": "shop/place-and-verify",
+  "description": "Click Place Order, then assert status=found. The slow-write scenario's POST /orders may take ~4s; the recipe's expectAfter timeoutMs (15s) gives the journey enough budget that the place itself succeeds, but customer-perceived latency is the failure signal — and any retry-loop mitigation amplifies the wait past the recipe's tolerance.",
+  "preconditions": [{ "hasSelector": "[data-testid=place-order]" }],
+  "steps": [
+    { "kind": "navigate", "url": "http://localhost:3000/", "expectAfter": { "hasSelector": "[data-testid=place-order]" } },
+    { "kind": "click", "selector": "[data-testid=place-order]", "expectAfter": { "hasSelector": "[data-testid=status][data-state=found]", "timeoutMs": 15000 } }
+  ],
+  "postconditions": [{ "hasSelector": "[data-testid=status][data-state=found]" }],
+  "requires": [],
+  "stats": { "successCount": 10, "failCount": 0, "avgDurationMs": 200, "lastSuccessAt": null, "lastFailAt": null, "maxDurationMs": 500 },
+  "origin": "hand-written",
+  "status": "verified",
+  "version": 1,
+  "createdAt": 1747569600000,
+  "updatedAt": 1747569600000
+}

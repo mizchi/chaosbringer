@@ -58,6 +58,9 @@ export type { PgReplicaLagOptions } from "./pg-replica-lag.ts";
 export { networkRstIdempotency } from "./network-rst-idempotency.ts";
 export type { NetworkRstIdempotencyOptions } from "./network-rst-idempotency.ts";
 
+export { pgSlowWrites } from "./pg-slow-writes.ts";
+export type { PgSlowWritesOptions } from "./pg-slow-writes.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -88,6 +91,7 @@ import { multiServiceCascade } from "./multi-service-cascade.ts";
 import { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
 import { pgReplicaLag } from "./pg-replica-lag.ts";
 import { networkRstIdempotency } from "./network-rst-idempotency.ts";
+import { pgSlowWrites } from "./pg-slow-writes.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -114,6 +118,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "pg-pool-exhaustion", factory: pgPoolExhaustion },
   { id: "pg-replica-lag", factory: pgReplicaLag },
   { id: "network-rst-idempotency", factory: networkRstIdempotency },
+  { id: "pg-slow-writes", factory: pgSlowWrites },
 ];
 
 /**
