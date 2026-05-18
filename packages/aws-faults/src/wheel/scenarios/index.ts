@@ -43,6 +43,9 @@ export type { SilentDataLossOptions } from "./silent-data-loss.ts";
 export { credentialsRevoked } from "./credentials-revoked.ts";
 export type { CredentialsRevokedOptions } from "./credentials-revoked.ts";
 
+export { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
+export type { ClientTimeoutMisconfigOptions } from "./client-timeout-misconfig.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -68,6 +71,7 @@ import { noHintsStorm } from "./no-hints-storm.ts";
 import { duplicateOrders } from "./duplicate-orders.ts";
 import { silentDataLoss } from "./silent-data-loss.ts";
 import { credentialsRevoked } from "./credentials-revoked.ts";
+import { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -89,6 +93,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "duplicate-orders", factory: duplicateOrders },
   { id: "silent-data-loss", factory: silentDataLoss },
   { id: "credentials-revoked", factory: credentialsRevoked },
+  { id: "client-timeout-misconfig", factory: clientTimeoutMisconfig },
 ];
 
 /**
