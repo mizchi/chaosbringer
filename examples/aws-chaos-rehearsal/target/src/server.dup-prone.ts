@@ -41,6 +41,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
 import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
@@ -60,12 +61,14 @@ const ddb = new DynamoDBClient({
   }),
 });
 const doc = DynamoDBDocumentClient.from(ddb);
+attachTracePropagation(ddb);
 
 // Telemetry for /dup-check.
 const sentIds = new Set<string>();
 const returnedIds = new Set<string>();
 
 const app = new Hono();
+app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
   let lastErr: unknown;

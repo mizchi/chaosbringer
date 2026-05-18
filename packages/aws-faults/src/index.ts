@@ -1,4 +1,10 @@
 export { kumoChaos, KumoChaosError } from "./client.ts";
+export {
+  attachTracePropagation,
+  currentTrace,
+  honoTraceContext,
+  runWithTrace,
+} from "./trace-propagate.ts";
 export type { KumoChaos, KumoChaosOptions } from "./client.ts";
 export { runDrill } from "./orchestrator.ts";
 export type {

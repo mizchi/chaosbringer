@@ -22,6 +22,11 @@ type Engine struct {
 	rng     *rand.Rand
 }
 
+// traceRingCap caps RecordTrace's per-rule ring buffer. 50 is enough
+// for journey-level correlation (typical journey runs <50 iterations)
+// without unbounded memory growth under sustained load.
+const traceRingCap = 50
+
 type ruleEntry struct {
 	rule      Rule
 	matched   atomic.Int64
@@ -32,6 +37,37 @@ type ruleEntry struct {
 	// rule.Inject.Feedback is non-nil. Guarded by windowMu.
 	windowMu   sync.Mutex
 	windowHits []time.Time
+
+	// Bounded ring buffer of recent traceparent headers seen on
+	// requests this rule matched. Guarded by tracesMu.
+	tracesMu     sync.Mutex
+	recentTraces []string
+}
+
+// recordTrace appends a traceparent to the ring buffer, dropping the
+// oldest entry when capped. Empty traces are skipped.
+func (e *ruleEntry) recordTrace(trace string) {
+	if trace == "" {
+		return
+	}
+	e.tracesMu.Lock()
+	defer e.tracesMu.Unlock()
+	e.recentTraces = append(e.recentTraces, trace)
+	if len(e.recentTraces) > traceRingCap {
+		e.recentTraces = e.recentTraces[len(e.recentTraces)-traceRingCap:]
+	}
+}
+
+// snapshotTraces returns a copy of the current ring buffer.
+func (e *ruleEntry) snapshotTraces() []string {
+	e.tracesMu.Lock()
+	defer e.tracesMu.Unlock()
+	if len(e.recentTraces) == 0 {
+		return nil
+	}
+	out := make([]string, len(e.recentTraces))
+	copy(out, e.recentTraces)
+	return out
 }
 
 // recentMatches returns the count of matches recorded inside the sliding
@@ -128,9 +164,10 @@ func (e *Engine) Snapshot() Snapshot {
 	for i := range e.rules {
 		out.Rules[i] = e.rules[i].rule
 		s := Stats{
-			RuleID:  e.rules[i].rule.ID,
-			Matched: e.rules[i].matched.Load(),
-			Skipped: e.rules[i].skipped.Load(),
+			RuleID:       e.rules[i].rule.ID,
+			Matched:      e.rules[i].matched.Load(),
+			Skipped:      e.rules[i].skipped.Load(),
+			RecentTraces: e.rules[i].snapshotTraces(),
 		}
 		if last := e.rules[i].lastApply.Load(); last != nil {
 			s.LastApply = last.UTC().Format(time.RFC3339)
@@ -138,6 +175,25 @@ func (e *Engine) Snapshot() Snapshot {
 		out.Stats[i] = s
 	}
 	return out
+}
+
+// RecordTrace appends a traceparent value to the named rule's ring
+// buffer. Intended for the wire layer to call after Evaluate returns
+// a non-nil decision so per-trace stats and chaos-rule matches can be
+// joined post-run. No-op if the rule was deleted between Evaluate and
+// RecordTrace (drill teardown races); no-op for empty trace strings.
+func (e *Engine) RecordTrace(ruleID, trace string) {
+	if trace == "" {
+		return
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for i := range e.rules {
+		if e.rules[i].rule.ID == ruleID {
+			e.rules[i].recordTrace(trace)
+			return
+		}
+	}
 }
 
 // Evaluate returns the first matching decision for info, or nil for pass-through.

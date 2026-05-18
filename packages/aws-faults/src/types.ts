@@ -74,6 +74,14 @@ export interface RuleStats {
   ruleId: string;
   matched: number;
   skipped: number;
+  /**
+   * Length-capped ring buffer of W3C `traceparent` (or `X-Kumo-Trace`)
+   * values seen on requests this rule matched. Populated by kumo when
+   * the wire layer is forwarding the inbound trace header. Used by the
+   * scoring step to join per-iteration journey traces with which chaos
+   * rules fired.
+   */
+  recentTraces?: string[];
   lastApply?: string;
 }
 

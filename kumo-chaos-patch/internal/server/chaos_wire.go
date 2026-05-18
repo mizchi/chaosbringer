@@ -51,6 +51,18 @@ func (r *Router) evaluateChaos(info *requestInfo, w http.ResponseWriter, req *ht
 		return false
 	}
 
+	// Record the request's trace identifier against the matched rule so a
+	// scoring step can join "which trace hit which rule." Prefers the W3C
+	// `traceparent` header; falls back to `X-Kumo-Trace` for callers that
+	// don't speak full W3C. Empty values are ignored upstream.
+	traceHeader := req.Header.Get("traceparent")
+	if traceHeader == "" {
+		traceHeader = req.Header.Get("X-Kumo-Trace")
+	}
+	if traceHeader != "" {
+		r.chaosEngine.RecordTrace(dec.RuleID, traceHeader)
+	}
+
 	switch dec.Inject.Kind {
 	case chaos.InjectLatency:
 		if dec.Delay > 0 {

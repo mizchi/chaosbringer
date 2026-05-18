@@ -153,6 +153,13 @@ type Stats struct {
 	Matched   int64  `json:"matched"`             // matched + probability won
 	Skipped   int64  `json:"skipped"`             // matched but probability lost
 	LastApply string `json:"lastApply,omitempty"` // RFC3339
+	// RecentTraces is a length-capped ring buffer of W3C traceparent
+	// header values (or any X-Kumo-Trace value) seen on requests this
+	// rule matched. Lets a scoring step join the chaosbringer journey's
+	// per-iteration trace IDs with which chaos rules actually fired.
+	// Population requires the wire layer to forward the inbound trace
+	// header; without that, this stays empty.
+	RecentTraces []string `json:"recentTraces,omitempty"`
 }
 
 // Snapshot is the response shape for GET /kumo/chaos/rules.

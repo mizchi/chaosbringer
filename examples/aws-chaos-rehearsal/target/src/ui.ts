@@ -54,11 +54,20 @@ const HTML = `<!doctype html>
     $log.textContent += line + "\\n";
   }
 
+  function genTraceparent() {
+    const buf = new Uint8Array(24);
+    crypto.getRandomValues(buf);
+    const hex = Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+    return "00-" + hex.slice(0, 32) + "-" + hex.slice(32, 48) + "-01";
+  }
+
   $place.addEventListener("click", async () => {
+    const traceparent = genTraceparent();
+    log("traceparent=" + traceparent);
     setStatus("placed", "Placing order…");
     $place.disabled = true;
     try {
-      const res = await fetch("/orders", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const res = await fetch("/orders", { method: "POST", headers: { "content-type": "application/json", "traceparent": traceparent }, body: "{}" });
       if (!res.ok) {
         setStatus("error", "Place failed: HTTP " + res.status);
         log("POST /orders failed: " + res.status);
@@ -75,7 +84,7 @@ const HTML = `<!doctype html>
       //   - fragile:     200 only if the S3 receipt for :id exists
       // Any non-200 means the customer-visible journey failed,
       // even if POST /orders returned 200.
-      const verify = await fetch("/verify/" + encodeURIComponent(id), { method: "GET" });
+      const verify = await fetch("/verify/" + encodeURIComponent(id), { method: "GET", headers: { "traceparent": traceparent } });
       if (verify.status === 404) {
         setStatus("missing", "Order " + id + " MISSING from store");
         log("verify: 404 — order not found");

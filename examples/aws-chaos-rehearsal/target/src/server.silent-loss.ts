@@ -19,6 +19,7 @@ import { serve } from "@hono/node-server";
 import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
+import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
 import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
@@ -30,11 +31,17 @@ const ddb = new DynamoDBClient({
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
 });
 const doc = DynamoDBDocumentClient.from(ddb);
+// Propagate the inbound request's traceparent on every outgoing DDB
+// call so kumo can record which trace hit which chaos rule.
+attachTracePropagation(ddb);
 
 // Local telemetry for /verify.
 let writesAcked = 0;
 
 const app = new Hono();
+// Stash the inbound traceparent in ALS for the duration of each
+// request so the SDK middleware can read it.
+app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();

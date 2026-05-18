@@ -18,6 +18,7 @@ import { S3Client, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
 import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
@@ -56,7 +57,15 @@ const sts = new STSClient({
 
 const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
 
+// Propagate the inbound request's traceparent on every outgoing AWS
+// call so kumo can record which trace hit which chaos rule. Wired on
+// every SDK client this target uses.
+for (const client of [ddb, kinesis, s3, sts]) {
+  attachTracePropagation(client);
+}
+
 const app = new Hono();
+app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
