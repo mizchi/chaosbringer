@@ -1,5 +1,8 @@
 chaos-report.json
 *.log
+# Replay fixtures (issue #117) check in their captured probes.log so CI
+# can reproduce the score deterministically without a live env.
+!examples/aws-chaos-rehearsal/fixtures/**/*.log
 node_modules/
 dist/
 .flaker/
