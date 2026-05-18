@@ -37,6 +37,9 @@ export type { NoHintsStormOptions } from "./no-hints-storm.ts";
 export { duplicateOrders } from "./duplicate-orders.ts";
 export type { DuplicateOrdersOptions } from "./duplicate-orders.ts";
 
+export { silentDataLoss } from "./silent-data-loss.ts";
+export type { SilentDataLossOptions } from "./silent-data-loss.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -60,6 +63,7 @@ import { compoundIncident } from "./compound-incident.ts";
 import { restartTrap } from "./restart-trap.ts";
 import { noHintsStorm } from "./no-hints-storm.ts";
 import { duplicateOrders } from "./duplicate-orders.ts";
+import { silentDataLoss } from "./silent-data-loss.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -79,6 +83,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "restart-trap", factory: restartTrap },
   { id: "no-hints-storm", factory: noHintsStorm },
   { id: "duplicate-orders", factory: duplicateOrders },
+  { id: "silent-data-loss", factory: silentDataLoss },
 ];
 
 /**

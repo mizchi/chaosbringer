@@ -97,6 +97,39 @@ func jsonErrorType(service, code string) string {
 	return code
 }
 
+// WriteSilentSuccess emits a protocol-correct, content-empty success
+// response for the matched AWS request. Used by Byzantine chaos rules
+// that return "ok" without invoking the real handler — the call looks
+// successful but no data is actually persisted.
+//
+// We do NOT try to construct a fully-populated response body. For
+// PutItem / PutRecord / PutObject etc. the SDK is happy with an empty
+// 200; for read-shaped commands (GetItem / Query / Scan / GetObject)
+// the SDK accepts an empty 200 and surfaces it as "not found" or
+// "empty result," which is itself a Byzantine pattern (the caller
+// gets back a valid response that doesn't match reality).
+func WriteSilentSuccess(w http.ResponseWriter, info *awsapi.RequestInfo) {
+	switch info.Protocol {
+	case "json", "cbor":
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	case "query":
+		w.Header().Set("Content-Type", "text/xml")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w,
+			`<?xml version="1.0"?><Response><ResponseMetadata><RequestId>kumo-byzantine</RequestId></ResponseMetadata></Response>`,
+		)
+	case "rest":
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}
+}
+
 func escapeXML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")

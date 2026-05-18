@@ -91,6 +91,16 @@ func (r *Router) evaluateChaos(info *requestInfo, w http.ResponseWriter, req *ht
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		return true
+
+	case chaos.InjectSilentSuccess:
+		// Byzantine fault: the simulated AWS service returns a
+		// protocol-correct success response WITHOUT invoking the
+		// actual handler. PutItem-shaped calls write nothing;
+		// PutRecord-shaped calls drop the message; etc. The client
+		// has no way to detect this from the response alone — it
+		// looks like a normal 200 OK.
+		chaos.WriteSilentSuccess(w, &info.RequestInfo)
+		return true
 	}
 	return false
 }

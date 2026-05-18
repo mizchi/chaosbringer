@@ -3,7 +3,7 @@
 // client view. If kumo changes the shape, this file changes too; we do not
 // abstract here because drift detection is easier with a 1:1 mapping.
 
-export type InjectKind = "latency" | "disconnect" | "awsError" | "throttle";
+export type InjectKind = "latency" | "disconnect" | "awsError" | "throttle" | "silentSuccess";
 
 export interface Match {
   service?: string;

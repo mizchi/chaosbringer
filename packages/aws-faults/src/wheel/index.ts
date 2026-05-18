@@ -23,6 +23,7 @@ export {
   investigatedBeforeEditing,
   minimalCodeChange,
   noNewDuplicates,
+  noSilentDataLoss,
   readTargetSource,
   recoveredSlo,
   rereadPageBoard,

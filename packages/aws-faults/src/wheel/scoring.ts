@@ -320,6 +320,57 @@ export function rereadPageBoard(minReads = 2, weight = 2): RubricCriterion {
  * report. `sampleN` total requests, ≥ `acceptanceRate` succeed → PASS.
  */
 /**
+ * Did the silent data-loss gap stop growing post-mitigation?
+ *
+ * Probes a /verify endpoint that exposes `{writesAcked, ddbCount, lost}`.
+ * Under Byzantine silent-success chaos, lost > 0 and grows as more
+ * Put calls are silently swallowed. The agent must mitigate by
+ * either: detecting the loss (e.g. read-after-write verification),
+ * routing around the lying dependency, or implementing reconciliation
+ * so the lost writes are detected and replayed.
+ *
+ * PASS criterion: lost count is stable post-mitigation (within
+ * tolerance for in-flight writes).
+ */
+export function noSilentDataLoss(opts: { verifyUrl: string; weight?: number }): RubricCriterion & {
+  __probe: () => Promise<{ rate: number; sampleN: number }>;
+} {
+  return {
+    id: "no-silent-data-loss",
+    description: `Silent-loss gap stopped growing (${opts.verifyUrl})`,
+    weight: opts.weight ?? 7,
+    failHint:
+      "/verify still shows new silent-loss accumulating. The target is still " +
+      "believing kumo's lying success responses. Implement read-after-write " +
+      "verification, or move off the Byzantine path entirely.",
+    check: ({ postRunProbes }) => {
+      const r = postRunProbes?.["no-silent-data-loss"];
+      return r !== undefined && r.rate === 1;
+    },
+    __probe: async () => {
+      try {
+        const samples: number[] = [];
+        for (let i = 0; i < 6; i++) {
+          const r = (await (await fetch(opts.verifyUrl, { signal: AbortSignal.timeout(8000) })).json()) as {
+            lost: number;
+          };
+          samples.push(r.lost);
+          if (i < 5) await new Promise((rr) => setTimeout(rr, 2000));
+        }
+        const firstMean = (samples[0]! + samples[1]! + samples[2]!) / 3;
+        const lastMean = (samples[3]! + samples[4]! + samples[5]!) / 3;
+        // Tolerance: any persistent lying chaos keeps adding to lost
+        // faster than transient in-flight (which is at most ~10).
+        const grewBeyondTransient = lastMean > firstMean + 10;
+        return { rate: grewBeyondTransient ? 0 : 1, sampleN: 6 };
+      } catch {
+        return { rate: 0, sampleN: 0 };
+      }
+    },
+  };
+}
+
+/**
  * Did the agent stop new ghost rows from accumulating in the target's
  * dup-check telemetry?
  *

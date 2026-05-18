@@ -17,7 +17,7 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
@@ -37,26 +37,16 @@ const app = new Hono();
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  const item = { id, ts: Date.now(), amount: 1 };
-  const MAX_ATTEMPTS = 5;
-  let lastErr: unknown = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      await doc.send(new PutCommand({ TableName: TABLE, Item: item }));
-      // Read-after-write verification to defeat byzantine silent-success.
-      const got = await doc.send(
-        new GetCommand({ TableName: TABLE, Key: { id }, ConsistentRead: true }),
-      );
-      if (got.Item && (got.Item as { id?: string }).id === id) {
-        writesAcked++;
-        return { id };
-      }
-      lastErr = new Error(`byzantine: put acked but item missing (attempt ${attempt})`);
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr ?? new Error("writeOrder failed");
+  await doc.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { id, ts: Date.now(), amount: 1 },
+    }),
+  );
+  // The client got a 200 response. Increment the "writes we believe
+  // succeeded" counter.
+  writesAcked++;
+  return { id };
 }
 
 app.post("/health", async (c) => {

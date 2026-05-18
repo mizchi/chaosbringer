@@ -115,10 +115,11 @@ func (f *FeedbackSpec) maxLatencyMult() float64 {
 type InjectKind string
 
 const (
-	InjectLatency    InjectKind = "latency"
-	InjectDisconnect InjectKind = "disconnect"
-	InjectAWSError   InjectKind = "awsError"
-	InjectThrottle   InjectKind = "throttle"
+	InjectLatency       InjectKind = "latency"
+	InjectDisconnect    InjectKind = "disconnect"
+	InjectAWSError      InjectKind = "awsError"
+	InjectThrottle      InjectKind = "throttle"
+	InjectSilentSuccess InjectKind = "silentSuccess"
 )
 
 // DisconnectSpec describes a connection tear-down.
@@ -182,6 +183,11 @@ func (r *Rule) validate() error {
 		if r.Inject.AWSError == nil || r.Inject.AWSError.Code == "" {
 			return errInjectRequired
 		}
+	case InjectSilentSuccess:
+		// Byzantine: no payload required — returns a protocol-default
+		// success response with empty body. The simulated AWS service
+		// says "ok" but the real handler is never invoked, so any data
+		// the call was supposed to persist quietly vanishes.
 	default:
 		return errUnknownInjectKind
 	}
