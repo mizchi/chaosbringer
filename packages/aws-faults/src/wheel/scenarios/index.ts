@@ -61,6 +61,9 @@ export type { NetworkRstIdempotencyOptions } from "./network-rst-idempotency.ts"
 export { pgSlowWrites } from "./pg-slow-writes.ts";
 export type { PgSlowWritesOptions } from "./pg-slow-writes.ts";
 
+export { dnsStorm } from "./dns-storm.ts";
+export type { DnsStormOptions } from "./dns-storm.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -92,6 +95,7 @@ import { pgPoolExhaustion } from "./pg-pool-exhaustion.ts";
 import { pgReplicaLag } from "./pg-replica-lag.ts";
 import { networkRstIdempotency } from "./network-rst-idempotency.ts";
 import { pgSlowWrites } from "./pg-slow-writes.ts";
+import { dnsStorm } from "./dns-storm.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -119,6 +123,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "pg-replica-lag", factory: pgReplicaLag },
   { id: "network-rst-idempotency", factory: networkRstIdempotency },
   { id: "pg-slow-writes", factory: pgSlowWrites },
+  { id: "dns-storm", factory: dnsStorm },
 ];
 
 /**
