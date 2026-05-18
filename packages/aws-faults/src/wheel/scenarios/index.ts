@@ -46,6 +46,9 @@ export type { CredentialsRevokedOptions } from "./credentials-revoked.ts";
 export { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
 export type { ClientTimeoutMisconfigOptions } from "./client-timeout-misconfig.ts";
 
+export { multiServiceCascade } from "./multi-service-cascade.ts";
+export type { MultiServiceCascadeOptions } from "./multi-service-cascade.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -72,6 +75,7 @@ import { duplicateOrders } from "./duplicate-orders.ts";
 import { silentDataLoss } from "./silent-data-loss.ts";
 import { credentialsRevoked } from "./credentials-revoked.ts";
 import { clientTimeoutMisconfig } from "./client-timeout-misconfig.ts";
+import { multiServiceCascade } from "./multi-service-cascade.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -94,6 +98,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "silent-data-loss", factory: silentDataLoss },
   { id: "credentials-revoked", factory: credentialsRevoked },
   { id: "client-timeout-misconfig", factory: clientTimeoutMisconfig },
+  { id: "multi-service-cascade", factory: multiServiceCascade },
 ];
 
 /**
