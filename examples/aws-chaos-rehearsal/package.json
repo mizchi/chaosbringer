@@ -12,6 +12,7 @@
     "score": "tsx scripts/eval-score.ts",
     "report": "tsx scripts/eval-report.ts",
     "replay": "tsx scripts/eval-replay.ts",
+    "sweep": "tsx scripts/eval-sweep.ts",
     "benchmark-rubric": "tsx scripts/benchmark-rubric.ts"
   },
   "dependencies": {

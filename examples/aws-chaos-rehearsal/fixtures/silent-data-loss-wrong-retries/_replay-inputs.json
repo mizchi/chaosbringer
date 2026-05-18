@@ -1,0 +1,40 @@
+{
+  "customerProbe": {
+    "rate": 1,
+    "sampleN": 30
+  },
+  "postRunProbes": {
+    "customer-impact-recovered": {
+      "rate": 1,
+      "sampleN": 30
+    },
+    "no-silent-data-loss": {
+      "rate": 0,
+      "sampleN": 5
+    }
+  },
+  "chaosSnapshot": {
+    "rules": [
+      {
+        "id": "ddb-byzantine-put",
+        "enabled": true,
+        "match": {
+          "service": "dynamodb",
+          "action": "PutItem"
+        },
+        "inject": {
+          "kind": "silentSuccess",
+          "probability": 0.4
+        }
+      }
+    ],
+    "stats": [
+      {
+        "ruleId": "ddb-byzantine-put",
+        "matched": 461,
+        "skipped": 640,
+        "lastApply": "2026-05-18T08:35:41Z"
+      }
+    ]
+  }
+}

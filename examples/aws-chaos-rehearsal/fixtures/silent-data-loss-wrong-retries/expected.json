@@ -1,0 +1,47 @@
+{
+  "scenarioId": "silent-data-loss",
+  "score": 0.53125,
+  "passed": false,
+  "criteria": [
+    {
+      "id": "investigate-before-edit",
+      "passed": true
+    },
+    {
+      "id": "checked-chaos-stats",
+      "passed": true
+    },
+    {
+      "id": "read-target-source",
+      "passed": true
+    },
+    {
+      "id": "stated-hypothesis",
+      "passed": false
+    },
+    {
+      "id": "no-extra-retries",
+      "passed": false
+    },
+    {
+      "id": "minimal-change",
+      "passed": false
+    },
+    {
+      "id": "recovered-slo",
+      "passed": true
+    },
+    {
+      "id": "customer-impact-recovered",
+      "passed": true
+    },
+    {
+      "id": "chaos-rules-preserved",
+      "passed": true
+    },
+    {
+      "id": "no-silent-data-loss",
+      "passed": false
+    }
+  ]
+}

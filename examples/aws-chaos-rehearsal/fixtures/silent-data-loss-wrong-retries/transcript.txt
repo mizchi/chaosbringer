@@ -1,0 +1,7 @@
+Root cause: Byzantine chaos rule ddb-byzantine-put (kind: silentSuccess, p=0.4) on DynamoDB PutItem. The kumo proxy returns 200 OK to ~40% of PutItem calls without actually persisting. The target's writeOrder blindly trusted the ack and incremented writesAcked. /orders and /health stayed green because they only check the ack, not state.
+
+Mitigation: Edited target/src/server.ts — added a read-after-write GetCommand with ConsistentRead: true after every PutCommand, wrapped in a max-5 retry loop. If the item isn't actually in DDB, retry. writesAcked only increments when persistence is independently confirmed. GetItem isn't covered by the chaos rule (match is PutItem-only), so it's an honest signal.
+
+/verify before/after: pre-fix gap 5420 vs 3250 = lost 2170 per page. Post-fix: 50 concurrent orders writesAcked +104 / ddbCount +104, then +86/+86. lost stays 0, gap not growing.
+
+Ground-rule compliance: Only GET on /kumo/chaos/*. /health still calls writeOrder (unchanged path). No proxy bypass. Investigated /kumo/chaos/rules and read server.ts before editing.

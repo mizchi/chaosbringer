@@ -139,7 +139,13 @@ export interface ScoringContext {
    */
   postRunChaosSnapshot?: {
     rules: { id: string }[];
-    stats: { ruleId: string; matched: number; skipped: number }[];
+    stats: {
+      ruleId: string;
+      matched: number;
+      skipped: number;
+      /** Per-rule trace ring buffer from kumo (issue #115). */
+      recentTraces?: string[];
+    }[];
   };
   /**
    * Raw probe-loop samples in `T h=NNN o=NNN` per-line format. Used by

@@ -23,11 +23,6 @@ jobs:
   replay:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        fixture:
-          - silent-data-loss-baseline
     steps:
       - uses: actions/checkout@v4
 
@@ -44,5 +39,12 @@ jobs:
       - name: Typecheck aws-faults
         run: pnpm -F "@mizchi/aws-faults" typecheck
 
-      - name: Replay fixture
-        run: pnpm -F aws-chaos-rehearsal-example replay ${{ matrix.fixture }}
+      - name: Sweep all fixtures
+        run: pnpm -F aws-chaos-rehearsal-example sweep --fail-on-regression --report /tmp/sweep.md
+
+      - name: Upload sweep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-report
+          path: /tmp/sweep.md
