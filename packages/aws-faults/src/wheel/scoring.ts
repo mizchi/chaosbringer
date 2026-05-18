@@ -238,6 +238,54 @@ export function rereadPageBoard(minReads = 2, weight = 2): RubricCriterion {
  * report. `sampleN` total requests, ≥ `acceptanceRate` succeed → PASS.
  */
 /**
+ * Did the agent stop new ghost rows from accumulating in the target's
+ * dup-check telemetry?
+ *
+ * Probes a target endpoint that reports `ghosts` count. The runner
+ * samples it twice: once before agent action (during the chaos), and
+ * once after recovery. The criterion PASSES if ghosts stopped growing
+ * between the two samples — i.e., the agent's mitigation halted the
+ * duplication source.
+ *
+ * Designed for Tier 6 stateful-repair scenarios where outcome (probe)
+ * passes but state correctness fails.
+ */
+export function noNewDuplicates(opts: { dupCheckUrl: string; weight?: number }): RubricCriterion & {
+  __probe: () => Promise<{ rate: number; sampleN: number }>;
+} {
+  return {
+    id: "no-new-duplicates",
+    description: `Ghost duplicates stopped growing post-mitigation (${opts.dupCheckUrl})`,
+    weight: opts.weight ?? 5,
+    failHint:
+      "/dup-check still shows new ghosts accumulating after the agent's mitigation. " +
+      "The retry path is still generating duplicate rows. Fix idempotency at the source.",
+    check: ({ postRunProbes }) => {
+      const r = postRunProbes?.["no-new-duplicates"];
+      // rate < 1 means new ghosts appeared in the post-window check.
+      // Encode "no new ghosts" as rate = 1; "new ghosts" as rate = 0.
+      return r !== undefined && r.rate === 1;
+    },
+    __probe: async () => {
+      // Sample twice with a 2s gap. If ghost count grew, FAIL.
+      try {
+        const r1 = (await (await fetch(opts.dupCheckUrl, { signal: AbortSignal.timeout(5000) })).json()) as {
+          ghosts: number;
+        };
+        await new Promise((r) => setTimeout(r, 2000));
+        const r2 = (await (await fetch(opts.dupCheckUrl, { signal: AbortSignal.timeout(5000) })).json()) as {
+          ghosts: number;
+        };
+        const grew = r2.ghosts > r1.ghosts;
+        return { rate: grew ? 0 : 1, sampleN: 2 };
+      } catch {
+        return { rate: 0, sampleN: 0 };
+      }
+    },
+  };
+}
+
+/**
  * Did the agent avoid performing UNNECESSARY restarts?
  *
  * Counts restart events in tool_uses (Bash matching pkill / nohup tsx).

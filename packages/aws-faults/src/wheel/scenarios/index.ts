@@ -34,6 +34,9 @@ export type { RestartTrapOptions } from "./restart-trap.ts";
 export { noHintsStorm } from "./no-hints-storm.ts";
 export type { NoHintsStormOptions } from "./no-hints-storm.ts";
 
+export { duplicateOrders } from "./duplicate-orders.ts";
+export type { DuplicateOrdersOptions } from "./duplicate-orders.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -56,6 +59,7 @@ import { tierLookupStampede } from "./tier-lookup-stampede.ts";
 import { compoundIncident } from "./compound-incident.ts";
 import { restartTrap } from "./restart-trap.ts";
 import { noHintsStorm } from "./no-hints-storm.ts";
+import { duplicateOrders } from "./duplicate-orders.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -74,6 +78,7 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "compound-incident", factory: compoundIncident },
   { id: "restart-trap", factory: restartTrap },
   { id: "no-hints-storm", factory: noHintsStorm },
+  { id: "duplicate-orders", factory: duplicateOrders },
 ];
 
 /**

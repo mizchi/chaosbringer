@@ -13,6 +13,7 @@ export {
   didNotAddRetries,
   investigatedBeforeEditing,
   minimalCodeChange,
+  noNewDuplicates,
   readTargetSource,
   recoveredSlo,
   rereadPageBoard,
