@@ -21,16 +21,29 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, copyFileSync, existsSync, appendFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { scenarios } from "../../../packages/aws-faults/src/wheel/index.ts";
 import type { Rule, Phase } from "../../../packages/aws-faults/src/index.ts";
+import type { RehearsalTarget, TargetFactory } from "@mizchi/aws-faults";
 
 const HERE = resolve(import.meta.dirname, "..");
 const KUMO = "http://localhost:4566";
+// Default base for the target. User-supplied factories pick their own
+// port via env.port; for the bundled honoReferenceTarget this matches
+// the actual customer/probe URLs.
 const PROBE = "http://localhost:3000";
 
 const scenarioId = process.argv[2];
 const runId = process.argv[3] ?? `${scenarioId}-${Date.now().toString(36)}`;
+// Wire-your-own-target (issue #118): users can point --target at any
+// module that default-exports a TargetFactory. Defaults to the bundled
+// honoReferenceTarget. Picked up from argv[4]+ so positional args 2/3
+// keep working unchanged.
+let targetModule = resolve(HERE, "target/src/target-factory.ts");
+for (const a of process.argv.slice(4)) {
+  if (a.startsWith("--target=")) targetModule = resolve(a.slice("--target=".length));
+}
 
 if (!scenarioId) {
   console.error("usage: pnpm prepare <scenario-id> [<run-id>]");
@@ -96,44 +109,49 @@ const workDir = `/tmp/wom-${runId}`;
 mkdirSync(workDir, { recursive: true });
 
 // 1. Reset target to the scenario's baseline (default: fragile).
+//
+// The baseline-swap is bundled-Hono-specific (it picks which server.*.ts
+// file is currently the "active" target/src/server.ts). User-supplied
+// targets won't have variants — they should leave scenario.baselineFile
+// undefined in their custom Scenario. We only do the copy if the file
+// exists, so out-of-tree targets skip this step cleanly.
 const baselineFile = scenario.baselineFile ?? "server.fragile.ts";
-copyFileSync(join(HERE, "target/src", baselineFile), join(HERE, "target/src/server.ts"));
-console.error(`[prepare] target reset to baseline ${baselineFile}`);
+const baselineSrc = join(HERE, "target/src", baselineFile);
+const baselineDst = join(HERE, "target/src/server.ts");
+if (existsSync(baselineSrc) && existsSync(baselineDst)) {
+  copyFileSync(baselineSrc, baselineDst);
+  console.error(`[prepare] target reset to baseline ${baselineFile}`);
+}
 
-// 2. Restart the target tsx process (kill old, start new detached).
+// 2. Boot the target via the TargetFactory.
+//
+// pkill is harness-level cleanup for the bundled target (factories may
+// have left an old child around). User-supplied factories should
+// idempotently kill prior instances inside their own boot().
 try {
   spawn("pkill", ["-f", "tsx target/src/server.ts"]);
 } catch {
-  // pkill returns non-zero when no match; ignore
+  /* pkill returns non-zero when no match; ignore */
 }
 await sleep(500);
-const target = spawn("npx", ["tsx", "target/src/server.ts"], {
-  cwd: HERE,
-  detached: true,
-  stdio: ["ignore", "ignore", "ignore"],
-});
-target.unref();
-console.error(`[prepare] target spawned (pid ${target.pid})`);
 
-// Wait for target to bind.
-let ready = false;
-for (let i = 0; i < 30; i++) {
-  try {
-    const res = await fetch(`${PROBE}/`, { signal: AbortSignal.timeout(1500) });
-    if (res.ok) {
-      ready = true;
-      break;
-    }
-  } catch {
-    // not yet
-  }
-  await sleep(500);
-}
-if (!ready) {
-  console.error(`[prepare] target did not become ready in 15s`);
+const targetModuleExports = (await import(pathToFileURL(targetModule).href)) as {
+  default?: TargetFactory;
+  honoReferenceTarget?: TargetFactory;
+};
+const targetFactory: TargetFactory | undefined =
+  targetModuleExports.default ?? targetModuleExports.honoReferenceTarget;
+if (typeof targetFactory !== "function") {
+  console.error(`[prepare] no default-exported TargetFactory in ${targetModule}`);
   process.exit(1);
 }
-console.error(`[prepare] target ready`);
+const target: RehearsalTarget = targetFactory({
+  awsEndpointUrl: KUMO,
+  port: 3000,
+});
+console.error(`[prepare] booting target from ${targetModule}`);
+await target.boot();
+console.error(`[prepare] target ready at ${target.customerUrl}`);
 
 // 3. Clear any existing chaos rules.
 await fetch(`${KUMO}/kumo/chaos/rules`, { method: "DELETE" }).catch(() => {});
@@ -203,8 +221,8 @@ const probeScript = `
 START=${startEpoch}
 for i in $(seq 1 1200); do
   T=$(($(date +%s) - $START))
-  HC=$(curl -s -X POST ${PROBE}/health -m 10 -o /dev/null -w "%{http_code}")
-  OC=$(curl -s -X POST ${PROBE}/orders -m 10 -o /dev/null -w "%{http_code}")
+  HC=$(curl -s -X POST ${target.probeUrl} -m 10 -o /dev/null -w "%{http_code}")
+  OC=$(curl -s -X POST ${target.customerUrl} -m 10 -o /dev/null -w "%{http_code}")
   echo "$T h=$HC o=$OC" >> ${probesLog}
   sleep 0.3
 done
@@ -233,8 +251,8 @@ function renderBrief(opts: { initialAlert: string; workDir: string; pagesFile: s
     `- Shell access (Bash, Read, Edit, Grep, Glob).`,
     `- Page board: ${opts.pagesFile} — RE-READ every 20-30s. New alerts arrive over time.`,
     `- Target app source: ${join(HERE, "target/src/server.ts")} (running as tsx, find with \`ps aux | grep tsx\`). Logs at /tmp/target.log.`,
-    `- Customer endpoint:  POST ${PROBE}/orders  ← MUST reach ≥80% success sustained.`,
-    `- Probe endpoint:     POST ${PROBE}/health  ← drives a write through the same path.`,
+    `- Customer endpoint:  POST ${target.customerUrl}  ← MUST reach ≥80% success sustained.`,
+    `- Probe endpoint:     POST ${target.probeUrl}  ← drives a write through the same path.`,
     `- Simulated AWS Health Dashboard:  http://localhost:4567  ← READ-ONLY view.`,
     `    - GET http://localhost:4567/kumo/chaos/rules`,
     `    - GET http://localhost:4567/kumo/chaos/stats`,

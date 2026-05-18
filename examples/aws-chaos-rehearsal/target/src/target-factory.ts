@@ -22,7 +22,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import type { RehearsalTarget, TargetEnv, TargetFactory } from "@mizchi/aws-faults";
 
-export const honoReferenceTarget: TargetFactory = (env: TargetEnv): RehearsalTarget => {
+const honoReferenceTarget: TargetFactory = (env: TargetEnv): RehearsalTarget => {
   const port = env.port ?? 3000;
   let child: ChildProcess | undefined;
   const logBuf: string[] = [];
@@ -108,3 +108,6 @@ async function waitFor(url: string, timeoutMs: number): Promise<void> {
   }
   throw new Error(`target did not become ready at ${url} within ${timeoutMs}ms`);
 }
+
+export default honoReferenceTarget;
+export { honoReferenceTarget };

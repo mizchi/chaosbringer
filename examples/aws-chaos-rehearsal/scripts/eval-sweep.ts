@@ -36,6 +36,10 @@ if (!existsSync(fixturesDir)) {
 
 let reportPath: string | undefined;
 let failOnRegression = false;
+let driverCmd: string | undefined;
+let driverLabel: string | undefined;
+let scenarioList: string[] = [];
+let driverTimeoutSec = 600;
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i]!;
   if (a === "--report" && process.argv[i + 1]) {
@@ -44,8 +48,29 @@ for (let i = 2; i < process.argv.length; i++) {
     failOnRegression = true;
   } else if (a.startsWith("--report=")) {
     reportPath = a.slice("--report=".length);
+  } else if (a === "--driver" && process.argv[i + 1]) {
+    driverCmd = process.argv[++i];
+  } else if (a.startsWith("--driver=")) {
+    driverCmd = a.slice("--driver=".length);
+  } else if (a === "--driver-label" && process.argv[i + 1]) {
+    driverLabel = process.argv[++i];
+  } else if (a.startsWith("--driver-label=")) {
+    driverLabel = a.slice("--driver-label=".length);
+  } else if (a === "--scenarios" && process.argv[i + 1]) {
+    scenarioList = process.argv[++i]!.split(",").map((s) => s.trim()).filter(Boolean);
+  } else if (a.startsWith("--scenarios=")) {
+    scenarioList = a.slice("--scenarios=".length).split(",").map((s) => s.trim()).filter(Boolean);
+  } else if (a.startsWith("--driver-timeout=")) {
+    driverTimeoutSec = Number(a.slice("--driver-timeout=".length));
   }
 }
+
+const liveMode = driverCmd !== undefined && scenarioList.length > 0;
+if (driverCmd !== undefined && scenarioList.length === 0) {
+  console.error("usage: --driver requires --scenarios <list>");
+  process.exit(64);
+}
+const effectiveDriverLabel = driverLabel ?? (driverCmd ? "live" : undefined);
 
 const fixtures = readdirSync(fixturesDir).filter((d) => {
   const p = join(fixturesDir, d);
@@ -99,44 +124,129 @@ function parseFixtureName(name: string): { scenario: string; agent: string } {
 }
 
 const rows: Row[] = [];
-for (const fixture of fixtures.sort()) {
-  const expectedPath = join(fixturesDir, fixture, "expected.json");
-  const expected = JSON.parse(readFileSync(expectedPath, "utf8")) as {
-    scenarioId: string;
-    score: number;
-  };
-  const { agent } = parseFixtureName(fixture);
-  const r = spawnSync("pnpm", ["replay", fixture], {
-    encoding: "utf8",
-    cwd: resolve(import.meta.dirname, ".."),
-  });
-  if (r.status !== 0) {
-    // Parse the actual score out of stdout if present, otherwise null.
+
+if (!liveMode) {
+  // Fixture-replay mode (phase 1): walk fixtures/, replay each.
+  for (const fixture of fixtures.sort()) {
+    const expectedPath = join(fixturesDir, fixture, "expected.json");
+    const expected = JSON.parse(readFileSync(expectedPath, "utf8")) as {
+      scenarioId: string;
+      score: number;
+    };
+    const { agent } = parseFixtureName(fixture);
+    const r = spawnSync("pnpm", ["replay", fixture], {
+      encoding: "utf8",
+      cwd: resolve(import.meta.dirname, ".."),
+    });
+    if (r.status !== 0) {
+      const m = r.stdout?.match(/actual:\s+([\d.]+)%/);
+      const actual = m ? Number(m[1]) / 100 : null;
+      rows.push({
+        fixture,
+        scenario: expected.scenarioId,
+        agent,
+        expectedScore: expected.score,
+        actualScore: actual,
+        drift: actual !== null ? actual - expected.score : null,
+        status: "regression",
+        detail: extractDriftDetail(r.stdout ?? r.stderr ?? ""),
+      });
+      continue;
+    }
     const m = r.stdout?.match(/actual:\s+([\d.]+)%/);
-    const actual = m ? Number(m[1]) / 100 : null;
+    const actual = m ? Number(m[1]) / 100 : expected.score;
     rows.push({
       fixture,
       scenario: expected.scenarioId,
       agent,
       expectedScore: expected.score,
       actualScore: actual,
-      drift: actual !== null ? actual - expected.score : null,
-      status: "regression",
-      detail: extractDriftDetail(r.stdout ?? r.stderr ?? ""),
+      drift: actual - expected.score,
+      status: "ok",
     });
-    continue;
   }
-  const m = r.stdout?.match(/actual:\s+([\d.]+)%/);
-  const actual = m ? Number(m[1]) / 100 : expected.score;
-  rows.push({
-    fixture,
-    scenario: expected.scenarioId,
-    agent,
-    expectedScore: expected.score,
-    actualScore: actual,
-    drift: actual - expected.score,
-    status: "ok",
-  });
+} else {
+  // Live-driver mode (phase 2): for each scenario, run prepare -> driver
+  // -> score. The driver subprocess receives:
+  //   - WOM_SCENARIO_ID  scenario being run
+  //   - WOM_RUN_ID       chosen run identifier
+  //   - WOM_WORKDIR      /tmp/wom-<runid>
+  //   - WOM_BRIEF_PATH   file containing the brief (prepare's stdout)
+  // and MUST write journal.md to WOM_WORKDIR before exiting. After the
+  // driver exits (or times out), sweep runs score and captures the result.
+  const here = resolve(import.meta.dirname, "..");
+  for (const scenario of scenarioList) {
+    const runId = `${scenario}-${effectiveDriverLabel}-${Date.now().toString(36)}`;
+    const workDir = `/tmp/wom-${runId}`;
+
+    const prep = spawnSync("pnpm", ["prepare", scenario, runId], {
+      encoding: "utf8",
+      cwd: here,
+      timeout: 60_000,
+    });
+    if (prep.status !== 0) {
+      rows.push({
+        fixture: `${scenario}-${effectiveDriverLabel}`,
+        scenario,
+        agent: effectiveDriverLabel!,
+        expectedScore: 0,
+        actualScore: null,
+        drift: null,
+        status: "error",
+        detail: `prepare failed: ${(prep.stderr ?? "").trim().slice(0, 200)}`,
+      });
+      continue;
+    }
+    const briefPath = `${workDir}/agent-brief.txt`;
+    writeFileSync(briefPath, prep.stdout ?? "");
+
+    const drv = spawnSync("bash", ["-lc", driverCmd!], {
+      encoding: "utf8",
+      cwd: here,
+      timeout: driverTimeoutSec * 1000,
+      env: {
+        ...process.env,
+        WOM_SCENARIO_ID: scenario,
+        WOM_RUN_ID: runId,
+        WOM_WORKDIR: workDir,
+        WOM_BRIEF_PATH: briefPath,
+      },
+    });
+    if (drv.status !== 0 || !existsSync(join(workDir, "journal.md"))) {
+      rows.push({
+        fixture: `${scenario}-${effectiveDriverLabel}`,
+        scenario,
+        agent: effectiveDriverLabel!,
+        expectedScore: 0,
+        actualScore: null,
+        drift: null,
+        status: "error",
+        detail:
+          drv.status !== 0
+            ? `driver exit ${drv.status}: ${(drv.stderr ?? "").trim().slice(0, 200)}`
+            : "driver completed but no journal.md was written",
+      });
+      continue;
+    }
+
+    const sc = spawnSync("pnpm", ["score", scenario, runId], {
+      encoding: "utf8",
+      cwd: here,
+      timeout: 5 * 60 * 1000,
+    });
+    const scoreMatch = sc.stdout?.match(/^Score:\s+([\d.]+)%/m);
+    const actualScore = scoreMatch ? Number(scoreMatch[1]) / 100 : null;
+    rows.push({
+      fixture: `${scenario}-${effectiveDriverLabel}`,
+      scenario,
+      agent: effectiveDriverLabel!,
+      expectedScore: 0, // live runs have no per-row expected — pin at sweep level if needed
+      actualScore,
+      drift: null,
+      status: sc.status === 0 ? "ok" : "error",
+      detail: sc.status === 0 ? undefined : `score exit ${sc.status}`,
+    });
+  }
 }
 
 const lines: string[] = [];
@@ -162,7 +272,8 @@ for (const [scenario, group] of [...byScenario.entries()].sort()) {
   lines.push("| Agent / fixture | Expected | Actual | Drift | Status |");
   lines.push("|---|---|---|---|---|");
   for (const row of group.sort((a, b) => (b.actualScore ?? 0) - (a.actualScore ?? 0))) {
-    const expected = (row.expectedScore * 100).toFixed(1) + "%";
+    // Live-mode rows have no checked-in expected — show "—" instead of "0%".
+    const expected = row.expectedScore > 0 ? (row.expectedScore * 100).toFixed(1) + "%" : "—";
     const actual = row.actualScore !== null ? (row.actualScore * 100).toFixed(1) + "%" : "—";
     const drift =
       row.drift !== null
