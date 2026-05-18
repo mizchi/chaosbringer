@@ -108,8 +108,20 @@ for (const c of scenario.rubric) {
   }
 }
 
-// LLM-judged criteria — run in parallel for speed (small calls, ≤50 tokens).
+// LLM-judged criteria — pre-load verdicts from disk if present
+// (populated either by a previous LLM-judge run or manually for scenarios
+// where the judge ran out-of-band, like a subagent-as-judge for
+// recognized-as-unrecoverable).
 const llmVerdicts: Record<string, boolean> = {};
+const verdictsPath = join(workDir, "llm-verdicts.json");
+if (existsSync(verdictsPath)) {
+  try {
+    Object.assign(llmVerdicts, JSON.parse(readFileSync(verdictsPath, "utf8")));
+    console.error(`[score] pre-loaded ${Object.keys(llmVerdicts).length} llm verdicts from ${verdictsPath}`);
+  } catch (err) {
+    console.error(`[score] failed to load ${verdictsPath}: ${err}`);
+  }
+}
 const judgeCtx = {
   scenario,
   drillReport,
