@@ -797,5 +797,26 @@ function renderDebrief(d: DebriefInput): string {
   }
   const rOk = d.drillReport.recovery.filter((s) => s.ok).length;
   lines.push(`- **recovery**: ${rOk}/${d.drillReport.recovery.length} OK`);
+
+  // Trace-correlation section (issue #115). When kumo's wire layer
+  // forwarded the inbound traceparent, the chaos snapshot's stats
+  // include the trace IDs that hit each rule. Surface a compact view
+  // so a reader (human or LLM-judge) can see "rule X actually fired
+  // on these journey traces" without spelunking report.json.
+  const rulesWithTraces = (d.postRunChaosSnapshot?.stats ?? []).filter(
+    (s) => (s.recentTraces?.length ?? 0) > 0,
+  );
+  if (rulesWithTraces.length > 0) {
+    lines.push("");
+    lines.push("## Chaos rule activity (by trace)");
+    for (const s of rulesWithTraces) {
+      const traces = s.recentTraces ?? [];
+      const distinct = new Set(traces).size;
+      lines.push(
+        `- **${s.ruleId}**: ${s.matched} matches across ${distinct} distinct trace${distinct === 1 ? "" : "s"}` +
+          (traces.length > 0 ? ` (sample: \`${traces[0]?.slice(0, 40)}…\`)` : ""),
+      );
+    }
+  }
   return lines.join("\n");
 }
