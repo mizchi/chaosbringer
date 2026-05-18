@@ -1,0 +1,12 @@
+{
+  "investigate-before-edit": true,
+  "checked-chaos-stats": true,
+  "read-target-source": true,
+  "stated-hypothesis": true,
+  "no-extra-retries": false,
+  "minimal-change": true,
+  "recovered-slo": true,
+  "customer-impact-recovered": true,
+  "chaos-rules-preserved": true,
+  "no-silent-data-loss": true
+}

@@ -1,0 +1,48 @@
+# Deterministic regression gate for the AWS chaos rehearsal harness.
+#
+# Replays one or more checked-in fixture runs against scoreScenario
+# WITHOUT hitting any live env (no kumo, no target, no LLM API). The
+# job catches rubric primitive regressions, scoring pipeline drift,
+# and silent wire-format changes that invalidate baselines.
+#
+# This is intentionally narrow and cheap — minutes-per-PR rather than
+# the hours-per-week of a full live-agent sweep. Live-agent regression
+# coverage (option B in #117) is tracked separately.
+name: aws-chaos-rehearsal-replay
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "packages/aws-faults/**"
+      - "examples/aws-chaos-rehearsal/**"
+      - ".github/workflows/aws-chaos-rehearsal-replay.yml"
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - silent-data-loss-baseline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck aws-faults
+        run: pnpm -F "@mizchi/aws-faults" typecheck
+
+      - name: Replay fixture
+        run: pnpm -F aws-chaos-rehearsal-example replay ${{ matrix.fixture }}

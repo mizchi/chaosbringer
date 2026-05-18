@@ -90,6 +90,23 @@ examples/aws-chaos-rehearsal/
 
 Mode appears in `report.json.customerProbe.mode` and the scoring stdout.
 
+### Replay-based regression gate (issue #117)
+
+Checked-in fixture runs under `fixtures/<name>/` let CI catch rubric
+regressions without hitting any live env:
+
+```sh
+pnpm replay silent-data-loss-baseline
+pnpm replay silent-data-loss-baseline --tolerance=0.05
+```
+
+Each fixture contains `journal.md`, `probes.log`, `_replay-inputs.json`
+(captured customer probe + chaos snapshot), `llm-verdicts.json`
+(pre-recorded judge outcomes so the replay is offline), and
+`expected.json`. The CI workflow at
+`.github/workflows/aws-chaos-rehearsal-replay.yml` runs these on
+every PR that touches `packages/aws-faults/` or this example.
+
 ## What this is and isn't
 
 **Is**: a rehearsal harness. The point is to measure whether an AI can take a real, running,

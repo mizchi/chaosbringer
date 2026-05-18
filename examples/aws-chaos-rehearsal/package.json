@@ -11,6 +11,7 @@
     "prepare": "tsx scripts/eval-prepare.ts",
     "score": "tsx scripts/eval-score.ts",
     "report": "tsx scripts/eval-report.ts",
+    "replay": "tsx scripts/eval-replay.ts",
     "benchmark-rubric": "tsx scripts/benchmark-rubric.ts"
   },
   "dependencies": {
