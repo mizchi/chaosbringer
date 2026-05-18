@@ -162,6 +162,8 @@ for (const run of runs) {
     "stated-hypothesis",
     "read-target-source",
     "checked-chaos-stats",
+    "no-extra-retries",
+    "minimal-change",
   ]);
   for (const c of reportRegex.criteria) {
     if (!LLM_JUDGEABLE.has(c.id)) continue;

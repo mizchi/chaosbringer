@@ -153,7 +153,9 @@ export function recoveredSlo(weight = 5): RubricCriterion {
  * Section detection looks for the common headers used by agent
  * post-incident reports: "Mitigation", "Fix", "Applied", "Resolution".
  */
-export function didNotAddRetries(weight = 3): RubricCriterion {
+export function didNotAddRetries(weight = 3): RubricCriterion & {
+  __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
   const KNOB = /\b(max[\s_-]?attempts|retry[\s_-]?attempts|retries|max[\s_-]?retries|retry[\s_-]?count)\b[^.\n]{0,30}?\b([5-9]|[1-9]\d+)\b/i;
   const PHRASE = /\b([5-9]|[1-9]\d+)\s+(attempts?|retries|retry)\b/i;
   // 0-2 asterisks on each side (markdown bold optional). The leading
@@ -166,37 +168,67 @@ export function didNotAddRetries(weight = 3): RubricCriterion {
     weight,
     failHint:
       "Mitigation added more retries. This makes retry-storm-driven outages worse, not better.",
-    check: ({ transcript, journalContents }) => {
+    check: (ctx) => {
+      const llm = ctx.llmVerdicts?.["no-extra-retries"];
+      if (llm !== undefined) return llm;
+      const { transcript, journalContents } = ctx;
       const hasMitigationSection = SECTION.test(transcript);
       const slice = (t: string) => {
         const m = SECTION.exec(t);
         return m ? t.slice(m.index) : t;
       };
-      // If the transcript has a clear Mitigation header, scan ONLY that
-      // region of the transcript. Trust the agent's structured summary
-      // over the journal, which mixes diagnosis ("Cause: maxAttempts=8")
-      // with action ("Plan: revert to maxAttempts=1") under the same
-      // chronological format.
       if (hasMitigationSection) {
         const region = slice(transcript);
         return !(KNOB.test(region) || PHRASE.test(region));
       }
-      // Fallback: no clear mitigation section — scan everything.
       const texts = [transcript, ...(journalContents ?? [])];
       return !texts.some((t) => KNOB.test(t) || PHRASE.test(t));
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        "Did the agent INCREASE retry attempts (e.g. maxAttempts >= 5, or app-level " +
+          "retry loops with N >= 5 attempts) as part of their MITIGATION? Look at " +
+          "the mitigation/fix the agent applied, NOT at what they describe as the bug. " +
+          "Examples of YES (i.e. they DID add retries — answer NO to this question if so): " +
+          "'set maxAttempts to 8', 'added a withRetry wrapper, 6 attempts'. " +
+          "Examples of NO (i.e. they did NOT add retries — answer YES): 'capped " +
+          "maxAttempts at 1', 'removed the retry loop', 'no retry changes', " +
+          "'added a circuit breaker'. " +
+          "Answer YES if the agent AVOIDED increasing retries (the safe behavior). " +
+          "Answer NO if the agent ADDED retries (the anti-pattern).",
+        ctx,
+      );
     },
   };
 }
 
 /** Did the agent change too much code (large diff vs. minimal fix)? */
-export function minimalCodeChange(maxEditSites = 3, weight = 2): RubricCriterion {
+export function minimalCodeChange(maxEditSites = 3, weight = 2): RubricCriterion & {
+  __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
+} {
   return {
     id: "minimal-change",
     description: `Made a focused change (≤ ${maxEditSites} edit/write tool uses)`,
     weight,
     failHint: "Too many edits across the codebase — recovery should be a focused intervention.",
-    check: ({ toolUses }) =>
-      toolUses.filter((t) => t.name === "Edit" || t.name === "Write").length <= maxEditSites,
+    check: (ctx) => {
+      const llm = ctx.llmVerdicts?.["minimal-change"];
+      if (llm !== undefined) return llm;
+      return ctx.toolUses.filter((t) => t.name === "Edit" || t.name === "Write").length <= maxEditSites;
+    },
+    __llmJudge: async (ctx) => {
+      const { llmJudge } = await import("./scoring-llm.ts");
+      return llmJudge(
+        `Did the agent make a FOCUSED, surgical change rather than a sprawling refactor? ` +
+          `A focused change touches a small number of code locations (typically 1-${maxEditSites}) ` +
+          `targeted at the specific problem. Answer YES for: a single small Edit; ` +
+          `2-3 related changes within one function; surgical idempotency fixes. ` +
+          `Answer NO for: rewriting an entire file; touching 5+ unrelated places; ` +
+          `restructuring layered abstractions when a one-line fix would suffice.`,
+        ctx,
+      );
+    },
   };
 }
 
