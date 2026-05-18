@@ -84,12 +84,12 @@ app.get("/verify", async (c) => {
   }
 });
 
-// Single-item read used by the journey-based customer probe. After
-// POST /orders, the SPA fetches /orders/:id to confirm the write
-// actually landed. Under a silentSuccess chaos rule this returns 404
-// because the row was never inserted — that's the journey-level
-// catch for silent data loss.
-app.get("/orders/:id", async (c) => {
+// Per-order verify used by the journey-based customer probe. After
+// POST /orders, the SPA fetches /verify/:id to confirm the write
+// actually landed. Under a silentSuccess chaos rule on PutItem the
+// GetItem returns Item==undefined and we 404 — that's the journey-
+// level catch for silent data loss.
+app.get("/verify/:id", async (c) => {
   const id = c.req.param("id");
   try {
     const res = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));

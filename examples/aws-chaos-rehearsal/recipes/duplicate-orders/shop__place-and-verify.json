@@ -1,0 +1,45 @@
+{
+  "name": "shop/place-and-verify",
+  "description": "Click Place Order, then assert status=found. The variant's /verify/:id endpoint returns 503 if the session has accumulated any ghost rows (timeout-then-retry duplicate writes); once one ghost lands, every subsequent journey iteration fails. This is the journey-level catch for the idempotency-violation pattern that POST /orders alone cannot expose (the customer sees one id, the accounting team eventually sees N rows).",
+  "preconditions": [
+    {
+      "hasSelector": "[data-testid=place-order]"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "navigate",
+      "url": "http://localhost:3000/",
+      "expectAfter": {
+        "hasSelector": "[data-testid=place-order]"
+      }
+    },
+    {
+      "kind": "click",
+      "selector": "[data-testid=place-order]",
+      "expectAfter": {
+        "hasSelector": "[data-testid=status][data-state=found]",
+        "timeoutMs": 15000
+      }
+    }
+  ],
+  "postconditions": [
+    {
+      "hasSelector": "[data-testid=status][data-state=found]"
+    }
+  ],
+  "requires": [],
+  "stats": {
+    "successCount": 10,
+    "failCount": 0,
+    "avgDurationMs": 200,
+    "lastSuccessAt": null,
+    "lastFailAt": null,
+    "maxDurationMs": 500
+  },
+  "origin": "hand-written",
+  "status": "verified",
+  "version": 1,
+  "createdAt": 1747569600000,
+  "updatedAt": 1747569600000
+}

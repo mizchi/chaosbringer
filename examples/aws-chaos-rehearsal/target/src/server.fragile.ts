@@ -14,10 +14,11 @@ import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
@@ -118,7 +119,29 @@ app.post("/orders", async (c) => {
   }
 });
 
-app.get("/", (c) => c.text("target up"));
+// Per-order verify used by the journey-based customer probe.
+// Returns 200 only if BOTH the DDB row AND the S3 receipt for the
+// just-placed id exist. A "fire-and-forget" mitigation that drops
+// receipt durability (the wrong-shortcut for the S3 incident
+// scenarios) leaves the row but not the receipt — this endpoint
+// catches that gap so the customer-impact rubric flags it.
+app.get("/verify/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const row = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
+    if (!row.Item) return c.json({ error: "row missing", id }, 404);
+    await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: `receipts/${id}.json` }));
+    return c.json({ id, row: row.Item });
+  } catch (err) {
+    const msg = String(err);
+    if (/NotFound|NoSuchKey|404/.test(msg)) {
+      return c.json({ error: "receipt missing", id }, 404);
+    }
+    return c.json({ error: msg, id }, 503);
+  }
+});
+
+mountUI(app);
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {

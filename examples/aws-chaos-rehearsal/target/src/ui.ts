@@ -68,21 +68,26 @@ const HTML = `<!doctype html>
       log("placed id=" + id);
       setStatus("placed", "Placed id=" + id + ". Verifying…");
 
-      // Verify the write actually landed. The /orders/:id endpoint
-      // does a fresh read from the backing store; if it returns 404
-      // we've caught a silent-data-loss-style failure.
-      const verify = await fetch("/orders/" + encodeURIComponent(id), { method: "GET" });
+      // Verify the write actually landed AND the variant-specific
+      // session invariant still holds. /verify/:id is per-variant:
+      //   - silent-loss: 200 only if the id row exists in DDB
+      //   - dup-prone:   200 only if ghosts == 0 across the session
+      //   - fragile:     200 only if the S3 receipt for :id exists
+      // Any non-200 means the customer-visible journey failed,
+      // even if POST /orders returned 200.
+      const verify = await fetch("/verify/" + encodeURIComponent(id), { method: "GET" });
       if (verify.status === 404) {
-        setStatus("missing", "Order " + id + " MISSING from store (silent loss)");
+        setStatus("missing", "Order " + id + " MISSING from store");
         log("verify: 404 — order not found");
         return;
       }
       if (!verify.ok) {
-        setStatus("error", "Verify failed: HTTP " + verify.status);
-        log("verify: " + verify.status);
+        const body = await verify.text().catch(() => "");
+        setStatus("missing", "Verify failed: HTTP " + verify.status + " — " + body.slice(0, 200));
+        log("verify: " + verify.status + " " + body.slice(0, 200));
         return;
       }
-      setStatus("found", "Order " + id + " confirmed in store");
+      setStatus("found", "Order " + id + " confirmed");
       log("verify: ok");
     } catch (err) {
       setStatus("error", "Network error: " + err);

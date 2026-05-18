@@ -38,9 +38,10 @@
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
@@ -125,7 +126,29 @@ app.get("/dup-check", (c) => {
   });
 });
 
-app.get("/", (c) => c.text("target up (dup-prone)"));
+// Per-order verify used by the journey-based customer probe.
+// Returns 200 only if BOTH (a) the just-placed id exists in DDB
+// AND (b) the session-wide ghost count is still 0. As soon as a
+// retry-induced ghost row lands anywhere in the session, every
+// subsequent journey iteration fails — which is the customer-visible
+// signal "your last orders may have been double-billed" that the
+// curl-only probe is blind to.
+app.get("/verify/:id", async (c) => {
+  const id = c.req.param("id");
+  const ghosts = [...sentIds].filter((g) => !returnedIds.has(g)).length;
+  if (ghosts > 0) {
+    return c.json({ error: "duplicate writes detected", ghosts, id }, 503);
+  }
+  try {
+    const res = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
+    if (!res.Item) return c.json({ error: "not found", id }, 404);
+    return c.json(res.Item);
+  } catch (err) {
+    return c.json({ error: String(err) }, 503);
+  }
+});
+
+mountUI(app);
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {
