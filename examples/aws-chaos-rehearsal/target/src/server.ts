@@ -1,88 +1,71 @@
 /**
- * Target variant for the cache-stampede-on-expiry scenario.
+ * Target variant for the disk-full scenario.
  *
- * Has an in-process tier-config cache with a 5-second TTL. When TTL
- * expires, the FIRST request that misses goes to DDB; if DDB is slow
- * (kumo applies p99=3s latency to GetItem on tier-config), MORE
- * concurrent requests miss while the first is still in flight. They
- * ALL hit DDB. Customer p99 explodes; DDB sees a burst of GetItems
- * every TTL boundary.
- *
- * The fix is the singleflight / coalesce pattern: dedupe concurrent
- * misses by sharing one in-flight Promise per cache key. This is
- * different from tier-lookup-stampede (which is "ADD a cache" with
- * no cache present at all); here a cache exists but its expiry
- * behavior is wrong.
+ * Logs each request to /tmp/wom-orders-log.jsonl via fs.appendFileSync
+ * on the customer path. Log volume is unbounded — no rotation, no
+ * filtering. A "disk monitor" checks the log file size before each
+ * write and returns 503 if it's exceeded a hardcoded cap (simulating
+ * a real ENOSPC at OS level without filling actual disk).
  *
  * Correct mitigations:
- *   1. Singleflight: in-flight misses share one Promise per key.
- *   2. Probabilistic early refresh (XFetch).
- *   3. Soft + hard TTL: serve stale-but-recent on miss, refresh in
- *      the background.
+ *   - Log rotation: truncate or rotate at a size threshold.
+ *   - Drop verbose logging from the customer path entirely.
+ *   - Move logs off the customer path (async batching, remote sink).
  *
  * Wrong directions:
- *   - Raise pool size (the pool isn't the bottleneck; the upstream is).
- *   - Disable cache (kills latency-amortization on hit too).
- *   - Bump kumo latency-rule chaos in target source (cheating).
+ *   - Bump the cap (delays the problem).
+ *   - Retry on 503 (writes can't succeed; cap is full).
+ *   - Look at kumo / DDB (not the cause).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { appendFileSync, statSync, existsSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
 import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
-const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
+const LOG_PATH = process.env.LOG_PATH ?? "/tmp/wom-orders-log.jsonl";
+// INTENTIONAL: hardcoded cap simulates a real ENOSPC threshold. In
+// production this is the size of the disk partition; here it's
+// 512KB so the scenario fires quickly. ~3KB per log entry,
+// ~170 requests to fill it.
+const LOG_CAP_BYTES = 512 * 1024;
+
+// Clear log on boot so the scenario starts at a known state.
+if (existsSync(LOG_PATH)) {
+  try { unlinkSync(LOG_PATH); } catch { /* best-effort */ }
+}
 
 const ddb = new DynamoDBClient({ endpoint: ENDPOINT, region: "us-east-1", credentials: { accessKeyId: "test", secretAccessKey: "test" } });
 const doc = DynamoDBDocumentClient.from(ddb);
 attachTracePropagation(ddb);
 
-// INTENTIONAL WEAKNESS: cache with TTL but no singleflight.
-// Every miss kicks off its own GetItem; under upstream latency,
-// concurrent misses stampede.
-const TIER_TTL_MS = 5_000;
-let tierCache: { value: unknown; expiresAt: number } | null = null;
-let cacheStats = { hits: 0, misses: 0, inflight: 0, stampedeBursts: 0, coalesced: 0 };
-// Singleflight: share a single in-flight Promise across concurrent misses.
-let tierInflight: Promise<unknown> | null = null;
+function diskUsage(): number {
+  if (!existsSync(LOG_PATH)) return 0;
+  try { return statSync(LOG_PATH).size; } catch { return 0; }
+}
 
-async function getTier(): Promise<unknown> {
-  const now = Date.now();
-  if (tierCache && tierCache.expiresAt > now) {
-    cacheStats.hits++;
-    return tierCache.value;
-  }
-  if (tierInflight) {
-    cacheStats.coalesced++;
-    return tierInflight;
-  }
-  cacheStats.misses++;
-  if (cacheStats.inflight > 0) cacheStats.stampedeBursts++;
-  cacheStats.inflight++;
-  tierInflight = (async () => {
-    try {
-      const res = await doc.send(new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }));
-      tierCache = { value: res.Item ?? { tenant: "default" }, expiresAt: Date.now() + TIER_TTL_MS };
-      return tierCache.value;
-    } finally {
-      cacheStats.inflight--;
-      tierInflight = null;
-    }
-  })();
-  return tierInflight;
+function logRequest(line: object) {
+  // INTENTIONAL: verbose log with redundant fields. ~3KB per entry.
+  const padded = { ...line, padding: "x".repeat(2500) };
+  appendFileSync(LOG_PATH, JSON.stringify(padded) + "\n");
 }
 
 const app = new Hono();
 app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
+  if (diskUsage() >= LOG_CAP_BYTES) {
+    throw new Error(`ENOSPC: log volume cap (${LOG_CAP_BYTES} bytes) exceeded`);
+  }
   const id = randomUUID();
-  await getTier();
+  logRequest({ event: "order_received", id, ts: Date.now(), payload: { amount: 1 } });
   await doc.send(new PutCommand({ TableName: TABLE, Item: { id, ts: Date.now(), amount: 1 } }));
+  logRequest({ event: "order_persisted", id, ts: Date.now() });
   return { id };
 }
 
@@ -90,8 +73,8 @@ app.post("/health", async (c) => { try { const o = await writeOrder(); return c.
 app.post("/orders", async (c) => { const b = await c.req.json().catch(() => ({})); try { const o = await writeOrder(); return c.json({ ...o, echo: b }); } catch (e) { return c.json({ ok: false, error: String(e) }, 503); } });
 app.get("/verify/:id", async (c) => { const id = c.req.param("id"); try { const r = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } })); return r.Item ? c.json(r.Item) : c.json({ error: "not found", id }, 404); } catch (e) { return c.json({ error: String(e) }, 503); } });
 
-app.get("/__cache", (c) => c.json({ ttlMs: TIER_TTL_MS, ...cacheStats, currentlyInflight: cacheStats.inflight }));
+app.get("/__disk", (c) => c.json({ logPath: LOG_PATH, sizeBytes: diskUsage(), capBytes: LOG_CAP_BYTES, fullness: diskUsage() / LOG_CAP_BYTES }));
 
 mountUI(app);
 const port = Number(process.env.PORT ?? 3000);
-serve({ fetch: app.fetch, port }, (i) => console.error(`target (cache-stampede) :${i.port}. tier cache TTL=${TIER_TTL_MS}ms, no singleflight. /__cache for observability.`));
+serve({ fetch: app.fetch, port }, (i) => console.error(`target (disk-full) :${i.port}. log volume cap ${LOG_CAP_BYTES} bytes; logs to ${LOG_PATH}. /__disk for observability.`));
