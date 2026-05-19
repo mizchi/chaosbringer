@@ -46,7 +46,9 @@ attachTracePropagation(ddb);
 // concurrent misses stampede.
 const TIER_TTL_MS = 5_000;
 let tierCache: { value: unknown; expiresAt: number } | null = null;
-let cacheStats = { hits: 0, misses: 0, inflight: 0, stampedeBursts: 0 };
+let cacheStats = { hits: 0, misses: 0, inflight: 0, stampedeBursts: 0, coalesced: 0 };
+// Singleflight: share a single in-flight Promise across concurrent misses.
+let tierInflight: Promise<unknown> | null = null;
 
 async function getTier(): Promise<unknown> {
   const now = Date.now();
@@ -54,16 +56,24 @@ async function getTier(): Promise<unknown> {
     cacheStats.hits++;
     return tierCache.value;
   }
+  if (tierInflight) {
+    cacheStats.coalesced++;
+    return tierInflight;
+  }
   cacheStats.misses++;
   if (cacheStats.inflight > 0) cacheStats.stampedeBursts++;
   cacheStats.inflight++;
-  try {
-    const res = await doc.send(new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }));
-    tierCache = { value: res.Item ?? { tenant: "default" }, expiresAt: Date.now() + TIER_TTL_MS };
-    return tierCache.value;
-  } finally {
-    cacheStats.inflight--;
-  }
+  tierInflight = (async () => {
+    try {
+      const res = await doc.send(new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }));
+      tierCache = { value: res.Item ?? { tenant: "default" }, expiresAt: Date.now() + TIER_TTL_MS };
+      return tierCache.value;
+    } finally {
+      cacheStats.inflight--;
+      tierInflight = null;
+    }
+  })();
+  return tierInflight;
 }
 
 const app = new Hono();
