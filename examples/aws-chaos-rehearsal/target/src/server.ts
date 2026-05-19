@@ -1,115 +1,126 @@
 /**
- * Target variant for the pgbouncer-overload scenario.
+ * Target app: Hono service backed by DynamoDB + Kinesis + S3 + STS via kumo.
  *
- * Models a pgbouncer-style shared connection multiplexer in front
- * of a generous local pg Pool. The local Pool has max=20 (plenty);
- * the SHARED bouncer (an in-process semaphore) caps total
- * concurrent queries at 3. Concurrent traffic queues on the
- * semaphore — pool.waitingCount stays at 0 (the bouncer never lets
- * enough through to saturate the pool), pool.idleCount stays high.
- * The customer sees high p99 but the pool looks healthy.
- *
- * Different from pg-pool-exhaustion: there the LOCAL pool is the
- * bottleneck. Here the local pool is fine; the bottleneck is the
- * SHARED resource upstream of it. The diagnostic giveaway is
- * pool.waitingCount=0 / pool.idleCount=high while customer p99
- * explodes.
- *
- * Correct mitigations:
- *   - Raise the bouncer's concurrency cap (production: bouncer
- *     max_client_conn / default_pool_size).
- *   - Add a backend (sharding / replica fanout).
- *   - Drop the bouncer entirely if the database can handle direct
- *     connections.
- *
- * Wrong directions:
- *   - Raise pool.max (local pool isn't the bottleneck).
- *   - SDK retries (each retry queues on the same semaphore).
- *   - Look at kumo (irrelevant).
+ * POST /orders does:
+ *   0. STS GetCallerIdentity — "tenant tier check" (control-plane call)
+ *   1. DDB row (orders table)            — source of truth
+ *   2. Kinesis audit event (orders-audit) — invisible buffered dependency
+ *   3. S3 receipt object (receipts/{id}) — large-object write path
+ * All four synchronous on the customer path. Each is in scope of a
+ * different real-incident drill (2021 / 2015 / 2020 / 2017 respectively).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { Pool } from "pg";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
-import { honoTraceContext, loadPgChaosConfig, pgChaosStats, wrapPool } from "@mizchi/aws-faults";
-import { mountUI } from "./ui.ts";
 
-const pool = new Pool({
-  host: process.env.PGHOST ?? "localhost",
-  port: Number(process.env.PGPORT ?? 5432),
-  user: process.env.PGUSER ?? "chaos",
-  password: process.env.PGPASSWORD ?? "chaos",
-  database: process.env.PGDATABASE ?? "rehearsal",
-  max: 20,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
+const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
+const TABLE = process.env.ORDERS_TABLE ?? "orders";
+const STREAM = process.env.AUDIT_STREAM ?? "orders-audit";
+const BUCKET = process.env.RECEIPTS_BUCKET ?? "receipts";
+
+const ddb = new DynamoDBClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+});
+const doc = DynamoDBDocumentClient.from(ddb);
+
+const kinesis = new KinesisClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  // kumo is HTTP/1.1; the AWS SDK Kinesis client defaults to HTTP/2,
+  // which kumo does not support. Force standard HTTP/1.1.
+  requestHandler: new NodeHttpHandler(),
 });
 
-// pg-chaos optional — leaving room for layered tests; default is empty.
-const chaos = loadPgChaosConfig();
-if (chaos) wrapPool(pool, chaos);
+const s3 = new S3Client({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+  forcePathStyle: true,
+});
 
-// INTENTIONAL WEAKNESS: shared semaphore caps total concurrent
-// queries at 3 — simulating a pgbouncer-style multiplexer with
-// max_client_conn=3. The local pool has max=20 (plenty); customer
-// queries serialize on the semaphore long before they reach the
-// pool. pool.waitingCount stays at 0 because the semaphore never
-// lets enough through to saturate the pool. pool.idleCount stays
-// HIGH for the same reason. The classic "local pool looks fine
-// but customer p99 is wrecked" shape.
-const BOUNCER_MAX = 20;
-let bouncerActive = 0;
-let bouncerQueue: (() => void)[] = [];
-let stats = { acquired: 0, peakWait: 0, totalWaitMs: 0 };
+const sts = new STSClient({
+  endpoint: ENDPOINT,
+  region: "us-east-1",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+});
 
-async function withBouncer<T>(fn: () => Promise<T>): Promise<T> {
-  if (bouncerActive >= BOUNCER_MAX) {
-    const t0 = Date.now();
-    await new Promise<void>((r) => bouncerQueue.push(r));
-    stats.totalWaitMs += Date.now() - t0;
-  }
-  bouncerActive++;
-  stats.acquired++;
-  if (bouncerQueue.length > stats.peakWait) stats.peakWait = bouncerQueue.length;
-  try {
-    return await fn();
-  } finally {
-    bouncerActive--;
-    const next = bouncerQueue.shift();
-    if (next) next();
-  }
-}
+const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
 
 const app = new Hono();
-app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Every query goes through the bouncer FIRST, then the pool.
-  // INTENTIONAL: per-query latency (simulated business logic /
-  // index-scan / batched op) makes the bouncer cap bite. The two
-  // queries are sequential inside the same bouncer slot so the
-  // slot is held for the full duration.
-  await withBouncer(async () => {
-    await pool.query("SELECT pg_sleep(0.5)");
-    await pool.query("INSERT INTO orders (id, ts, amount) VALUES ($1, $2, $3)", [id, Date.now(), 1]);
-  });
+  // Multi-tenant tier check via STS. Yes, calling STS on every customer
+  // request is a control-plane dependency on the hot path — this is the
+  // pattern that bit a lot of customers during the 2021 us-east-1 outage.
+  await sts.send(new GetCallerIdentityCommand({}));
+  // Tier config lookup. Reads a single hot key on every customer request
+  // with NO local cache — the classic cache-stampede setup. Production
+  // would put a TTL cache in front of this; we do not.
+  await doc.send(
+    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
+  );
+  // Primary write to DDB.
+  await doc.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { id, ts: Date.now(), amount: 1 },
+    }),
+  );
+  // Audit event to Kinesis — synchronous on the customer path.
+  // If Kinesis is slow / failing, the customer sees this latency directly.
+  await kinesis.send(
+    new PutRecordCommand({
+      StreamName: STREAM,
+      Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
+      PartitionKey: id,
+    }),
+  );
+  // Receipt object to S3 — also synchronous. Large-object write path
+  // that is the typical victim of S3 503 SlowDown bursts during
+  // hot-prefix incidents.
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: `receipts/${id}.json`,
+      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
+      ContentType: "application/json",
+    }),
+  );
   return { id };
 }
 
-app.post("/health", async (c) => { try { const o = await writeOrder(); return c.json({ ok: true, ...o }); } catch (e) { return c.json({ ok: false, error: String(e) }, 503); } });
-app.post("/orders", async (c) => { const b = await c.req.json().catch(() => ({})); try { const o = await writeOrder(); return c.json({ ...o, echo: b }); } catch (e) { return c.json({ ok: false, error: String(e) }, 503); } });
-app.get("/verify/:id", async (c) => { const id = c.req.param("id"); try { const r = await withBouncer(() => pool.query("SELECT id, ts, amount FROM orders WHERE id = $1", [id])); return r.rows.length === 0 ? c.json({ error: "not found", id }, 404) : c.json(r.rows[0]); } catch (e) { return c.json({ error: String(e) }, 503); } });
+app.post("/health", async (c) => {
+  try {
+    const out = await writeOrder();
+    return c.json({ ok: true, ...out });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) }, 503);
+  }
+});
 
-// Observability: bouncer stats + native pool stats side by side.
-// The agent should see "bouncer maxed at 3 / queue depth high"
-// while "pool waitingCount=0 / idleCount=high" — the smoking gun.
-app.get("/__bouncer", (c) => c.json({
-  bouncer: { active: bouncerActive, queued: bouncerQueue.length, max: BOUNCER_MAX, ...stats },
-  pool: { totalCount: pool.totalCount, idleCount: pool.idleCount, waitingCount: pool.waitingCount },
-  chaos: pgChaosStats(pool),
-}));
+app.post("/orders", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    const out = await writeOrder();
+    return c.json({ ...out, echo: body });
+  } catch (err) {
+    return c.json({ ok: false, error: String(err) }, 503);
+  }
+});
 
-mountUI(app);
+app.get("/", (c) => c.text("target up"));
+
 const port = Number(process.env.PORT ?? 3000);
-serve({ fetch: app.fetch, port }, (i) => console.error(`target (pg-shared-bouncer) :${i.port}. bouncer max=${BOUNCER_MAX}, pool max=20. /__bouncer for observability.`));
+serve({ fetch: app.fetch, port }, (info) => {
+  console.error(`target listening on http://localhost:${info.port} -> kumo at ${ENDPOINT}`);
+});
