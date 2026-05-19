@@ -32,7 +32,7 @@ const TABLE = process.env.ORDERS_TABLE ?? "orders";
 // INTENTIONAL WEAKNESS: a debug-session leftover. The skew shifts
 // every Date.now() call by 30 seconds. Combined with a strict 5-
 // second tolerance on the staleness check, every request fails.
-const CLOCK_SKEW_MS = 30_000;
+const CLOCK_SKEW_MS = 0;
 function localNow(): number { return Date.now() + CLOCK_SKEW_MS; }
 const TOLERANCE_MS = 5_000;
 
