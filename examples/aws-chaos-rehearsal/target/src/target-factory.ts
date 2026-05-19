@@ -19,6 +19,7 @@
  * default). Out of scope here: a variant arg.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { RehearsalTarget, TargetEnv, TargetFactory } from "@mizchi/aws-faults";
 
@@ -45,7 +46,13 @@ const honoReferenceTarget: TargetFactory = (env: TargetEnv): RehearsalTarget => 
 
   async function boot(): Promise<void> {
     if (child) throw new Error("already booted");
-    child = spawn("npx", ["tsx", resolve(root, "server.ts")], {
+    // Spawn server.live.ts when present (eval-prepare's variant
+    // landing pad, gitignored per #121) — otherwise fall back to
+    // the committed baseline server.ts.
+    const liveSrc = resolve(root, "server.live.ts");
+    const baselineSrc = resolve(root, "server.ts");
+    const src = existsSync(liveSrc) ? liveSrc : baselineSrc;
+    child = spawn("npx", ["tsx", src], {
       env: {
         ...process.env,
         AWS_ENDPOINT_URL: env.awsEndpointUrl,

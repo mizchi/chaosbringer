@@ -19,7 +19,7 @@
  * When the agent stops, run `pnpm score <scenario-id> <run-id>`.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, copyFileSync, existsSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, copyFileSync, existsSync, appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -117,10 +117,14 @@ mkdirSync(workDir, { recursive: true });
 // exists, so out-of-tree targets skip this step cleanly.
 const baselineFile = scenario.baselineFile ?? "server.fragile.ts";
 const baselineSrc = join(HERE, "target/src", baselineFile);
-const baselineDst = join(HERE, "target/src/server.ts");
-if (existsSync(baselineSrc) && existsSync(baselineDst)) {
-  copyFileSync(baselineSrc, baselineDst);
-  console.error(`[prepare] target reset to baseline ${baselineFile}`);
+// Write variant to a separate, gitignored file so the eval doesn't
+// dirty the working tree (issue #121). The target factory boots
+// server.live.ts when present, otherwise the committed server.ts.
+// Agents are told to edit server.live.ts in the brief.
+const liveDst = join(HERE, "target/src/server.live.ts");
+if (existsSync(baselineSrc)) {
+  copyFileSync(baselineSrc, liveDst);
+  console.error(`[prepare] target.live wired to ${baselineFile}`);
 }
 
 // 2. Boot the target via the TargetFactory.
@@ -129,7 +133,8 @@ if (existsSync(baselineSrc) && existsSync(baselineDst)) {
 // have left an old child around). User-supplied factories should
 // idempotently kill prior instances inside their own boot().
 try {
-  spawn("pkill", ["-f", "tsx target/src/server.ts"]);
+  // Match BOTH server.ts (legacy) and server.live.ts (current).
+  spawn("pkill", ["-f", "tsx target/src/server"]);
 } catch {
   /* pkill returns non-zero when no match; ignore */
 }
@@ -215,9 +220,36 @@ const pageSchedScript = (scenario.pages ?? [])
   .join("\n");
 spawn("bash", ["-c", pageSchedScript], { detached: true, stdio: "ignore" }).unref();
 
-// 5c. Start the probe loop as a detached child, redirecting to probes.log.
+// 5c. Start the probe loop (#128: track its pid so subsequent
+// prepare runs can clean up stale loops). The loop self-writes
+// its own pid via $$ to <workDir>/probe.pid before going into
+// the curl/sleep body. We also scan /tmp/wom-*/probe.pid for
+// any prior probe loops and kill them — those would otherwise
+// keep writing to their old workdir's probes.log while pointed
+// at the NEW scenario's target on the same port, corrupting
+// fixtures (see commit 63f4a79 for the symptom).
 const probesLog = join(workDir, "probes.log");
+const probePidFile = join(workDir, "probe.pid");
+for (const entry of readdirSync("/tmp")) {
+  if (!entry.startsWith("wom-")) continue;
+  const pidFile = join("/tmp", entry, "probe.pid");
+  if (!existsSync(pidFile)) continue;
+  try {
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    if (Number.isFinite(pid) && pid > 1) {
+      try {
+        process.kill(pid, "SIGTERM");
+        console.error(`[prepare] killed stale probe loop pid=${pid} from /tmp/${entry}`);
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* malformed pid file; ignore */
+  }
+}
 const probeScript = `
+echo $$ > ${probePidFile}
 START=${startEpoch}
 for i in $(seq 1 1200); do
   T=$(($(date +%s) - $START))
@@ -226,6 +258,7 @@ for i in $(seq 1 1200); do
   echo "$T h=$HC o=$OC" >> ${probesLog}
   sleep 0.3
 done
+rm -f ${probePidFile}
 `;
 spawn("bash", ["-c", probeScript], { detached: true, stdio: "ignore" }).unref();
 
@@ -250,7 +283,7 @@ function renderBrief(opts: { initialAlert: string; workDir: string; pagesFile: s
     `Environment:`,
     `- Shell access (Bash, Read, Edit, Grep, Glob).`,
     `- Page board: ${opts.pagesFile} — RE-READ every 20-30s. New alerts arrive over time.`,
-    `- Target app source: ${join(HERE, "target/src/server.ts")} (running as tsx, find with \`ps aux | grep tsx\`). Logs at /tmp/target.log.`,
+    `- Target app source: ${join(HERE, "target/src/server.live.ts")} ← EDIT THIS FILE (gitignored, ephemeral copy for this eval). The factory spawns it; do NOT edit target/src/server.ts which is the committed baseline. Logs at /tmp/target.log.`,
     `- Customer endpoint:  POST ${target.customerUrl}  ← MUST reach ≥80% success sustained.`,
     `- Probe endpoint:     POST ${target.probeUrl}  ← drives a write through the same path.`,
     `- Simulated AWS Health Dashboard:  http://localhost:4567  ← READ-ONLY view.`,
@@ -265,7 +298,7 @@ function renderBrief(opts: { initialAlert: string; workDir: string; pagesFile: s
     `  4. You MAY NOT bypass the proxy to a different kumo port.`,
     `  5. Verify the CUSTOMER endpoint (/orders) before declaring recovery.`,
     `  6. Investigate first: pages + target source + chaos stats.`,
-    `  7. Restart target after editing: kill the tsx pid, then \`cd ${HERE} && nohup npx tsx target/src/server.ts > /tmp/target.log 2>&1 &\`.`,
+    `  7. Restart target after editing: \`pkill -f "tsx target/src/server" || true; sleep 1; cd ${HERE} && nohup npx tsx target/src/server.live.ts > /tmp/target.log 2>&1 &\`. Verify the new PID with \`pgrep -af tsx\`.`,
     ``,
     `IMPORTANT — preserve correctness:`,
     `Some target dependencies are non-critical (audit sinks, metrics). Others are CRITICAL for customer correctness (orders, payments, regulatory data). When mitigating, consider what guarantees each write provides. "Fire-and-forget" is appropriate ONLY when data loss is acceptable. For data that must not be lost, use a durable write-ahead pattern.`,

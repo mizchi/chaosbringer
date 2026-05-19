@@ -3,6 +3,11 @@ chaos-report.json
 # Replay fixtures (issue #117) check in their captured probes.log so CI
 # can reproduce the score deterministically without a live env.
 !examples/aws-chaos-rehearsal/fixtures/**/*.log
+# Eval-time variant landing pad (#121). eval-prepare writes the
+# scenario's baseline variant here; the target factory spawns it
+# when present. Always gitignored so eval batches don't pollute
+# the working tree.
+examples/aws-chaos-rehearsal/target/src/server.live.ts
 node_modules/
 dist/
 .flaker/
