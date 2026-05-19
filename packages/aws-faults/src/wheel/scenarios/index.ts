@@ -70,6 +70,21 @@ export type { MemoryLeakGradualOptions } from "./memory-leak-gradual.ts";
 export { regexBacktrackDos } from "./regex-backtrack-dos.ts";
 export type { RegexBacktrackDosOptions } from "./regex-backtrack-dos.ts";
 
+export { cacheStampedeExpiry } from "./cache-stampede-expiry.ts";
+export type { CacheStampedeExpiryOptions } from "./cache-stampede-expiry.ts";
+
+export { diskFull } from "./disk-full.ts";
+export type { DiskFullOptions } from "./disk-full.ts";
+
+export { clockSkewRejection } from "./clock-skew-rejection.ts";
+export type { ClockSkewRejectionOptions } from "./clock-skew-rejection.ts";
+
+export { schemaMismatch } from "./schema-mismatch.ts";
+export type { SchemaMismatchOptions } from "./schema-mismatch.ts";
+
+export { pgBouncerOverload } from "./pg-bouncer-overload.ts";
+export type { PgBouncerOverloadOptions } from "./pg-bouncer-overload.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -104,6 +119,11 @@ import { pgSlowWrites } from "./pg-slow-writes.ts";
 import { dnsStorm } from "./dns-storm.ts";
 import { memoryLeakGradual } from "./memory-leak-gradual.ts";
 import { regexBacktrackDos } from "./regex-backtrack-dos.ts";
+import { cacheStampedeExpiry } from "./cache-stampede-expiry.ts";
+import { diskFull } from "./disk-full.ts";
+import { clockSkewRejection } from "./clock-skew-rejection.ts";
+import { schemaMismatch } from "./schema-mismatch.ts";
+import { pgBouncerOverload } from "./pg-bouncer-overload.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -134,6 +154,11 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "dns-storm", factory: dnsStorm },
   { id: "memory-leak-gradual", factory: memoryLeakGradual },
   { id: "regex-backtrack-dos", factory: regexBacktrackDos },
+  { id: "cache-stampede-expiry", factory: cacheStampedeExpiry },
+  { id: "disk-full", factory: diskFull },
+  { id: "clock-skew-rejection", factory: clockSkewRejection },
+  { id: "schema-mismatch", factory: schemaMismatch },
+  { id: "pg-bouncer-overload", factory: pgBouncerOverload },
 ];
 
 /**
