@@ -1,41 +1,36 @@
 /**
- * Target variant for the clock-skew-rejection scenario.
+ * Target variant for the schema-mismatch scenario.
  *
- * The target compares its local Date.now() to a "trusted time
- * service" (a small in-process pretend-NTP at /__time-truth that
- * returns Date.now() WITHOUT skew). Local Date.now() is wrapped
- * with a CLOCK_SKEW_MS offset that a previous debugging session
- * left in source. Every /orders request rejects if |local - truth|
- * > 5_000ms — and the skew is 30s, so every request rejects.
+ * Models a rolling-deploy gone wrong: two write paths are active.
+ * 50% of POST /orders go through the v1 write (Item: {id, ts,
+ * amount}) and 50% through v2 (Item: {id, ts, amount, version: 2,
+ * checksum}). The /verify/:id path expects v2 (`version` field
+ * must equal 2 and `checksum` must match). v1 rows show up as
+ * 404 from /verify even though they ARE in DDB.
  *
- * The fix the agent should reach:
- *   - Remove the CLOCK_SKEW_MS shift (it's a leftover from a
- *     debug session, not load-bearing).
- *   - OR widen the tolerance (5s is too tight for a real
- *     production check).
- *   - OR remove the check entirely if it isn't required by the
- *     business rule.
+ * In a real deploy this looks like: half your nodes are running
+ * old code, half new; the new schema isn't backwards-compatible;
+ * the reader (older or newer; could be either side) breaks.
  *
- * Diagnostic surface: /__clock returns local vs truth + skew.
+ * Correct mitigations:
+ *   - Read-path backward-compat shim: accept v1 OR v2 in /verify.
+ *   - Rollback to the v1 writer (uniform schema, lose v2 fields).
+ *   - Finish the migration (uniform v2, backfill v1 rows).
+ *
+ * Wrong directions:
+ *   - SDK retries (rows don't change shape on retry).
+ *   - Pool tuning / kumo inspection (not the cause).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
 import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
-
-// INTENTIONAL WEAKNESS: a debug-session leftover. The skew shifts
-// every Date.now() call by 30 seconds. Combined with a strict 5-
-// second tolerance on the staleness check, every request fails.
-const CLOCK_SKEW_MS = 0;
-function localNow(): number { return Date.now() + CLOCK_SKEW_MS; }
-const TOLERANCE_MS = 5_000;
-
 const ddb = new DynamoDBClient({ endpoint: ENDPOINT, region: "us-east-1", credentials: { accessKeyId: "test", secretAccessKey: "test" } });
 const doc = DynamoDBDocumentClient.from(ddb);
 attachTracePropagation(ddb);
@@ -43,32 +38,53 @@ attachTracePropagation(ddb);
 const app = new Hono();
 app.use("*", honoTraceContext);
 
-// "Trusted" time, not skewed. The agent can compare this to the
-// app's view via /__clock.
-app.get("/__time-truth", (c) => c.json({ trustedMs: Date.now() }));
+function checksum(id: string, ts: number, amount: number): string {
+  return createHash("sha256").update(`${id}:${ts}:${amount}`).digest("hex").slice(0, 16);
+}
 
-async function writeOrder(): Promise<{ id: string }> {
-  // Compare local to truth before accepting. Rejects when too far.
-  const truth = Date.now();
-  if (Math.abs(localNow() - truth) > TOLERANCE_MS) {
-    throw new Error(`clock-skew rejection: local=${localNow()} truth=${truth} diff=${Math.abs(localNow() - truth)}ms tolerance=${TOLERANCE_MS}ms`);
-  }
+// INTENTIONAL WEAKNESS: 50/50 split between v1 and v2 schemas.
+// Imagine half your nodes still run old code.
+let stats = { v1Writes: 0, v2Writes: 0, v1Reads404: 0, v2Reads200: 0 };
+async function writeOrder(): Promise<{ id: string; schemaVersion: number }> {
   const id = randomUUID();
-  await doc.send(new PutCommand({ TableName: TABLE, Item: { id, ts: localNow(), amount: 1 } }));
-  return { id };
+  const ts = Date.now();
+  const useV2 = Math.random() < 0.5;
+  if (useV2) {
+    stats.v2Writes++;
+    await doc.send(new PutCommand({ TableName: TABLE, Item: { id, ts, amount: 1, version: 2, checksum: checksum(id, ts, 1) } }));
+    return { id, schemaVersion: 2 };
+  } else {
+    stats.v1Writes++;
+    await doc.send(new PutCommand({ TableName: TABLE, Item: { id, ts, amount: 1 } }));
+    return { id, schemaVersion: 1 };
+  }
 }
 
 app.post("/health", async (c) => { try { const o = await writeOrder(); return c.json({ ok: true, ...o }); } catch (e) { return c.json({ ok: false, error: String(e) }, 503); } });
 app.post("/orders", async (c) => { const b = await c.req.json().catch(() => ({})); try { const o = await writeOrder(); return c.json({ ...o, echo: b }); } catch (e) { return c.json({ ok: false, error: String(e) }, 503); } });
-app.get("/verify/:id", async (c) => { const id = c.req.param("id"); try { const r = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } })); return r.Item ? c.json(r.Item) : c.json({ error: "not found", id }, 404); } catch (e) { return c.json({ error: String(e) }, 503); } });
 
-// Side-by-side observability the agent needs.
-app.get("/__clock", (c) => {
-  const truth = Date.now();
-  const local = localNow();
-  return c.json({ localMs: local, trustedMs: truth, skewMs: local - truth, toleranceMs: TOLERANCE_MS });
+// INTENTIONAL: verify only accepts v2. v1 rows look "missing"
+// from the customer's perspective.
+app.get("/verify/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const r = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
+    if (!r.Item) return c.json({ error: "not found", id }, 404);
+    const row = r.Item as { id: string; ts: number; amount: number; version?: number; checksum?: string };
+    if (row.version !== 2) {
+      stats.v1Reads404++;
+      return c.json({ error: "schema mismatch — row is not v2", id, foundVersion: row.version ?? "(none)" }, 404);
+    }
+    if (row.checksum !== checksum(row.id, row.ts, row.amount)) {
+      return c.json({ error: "checksum mismatch", id }, 400);
+    }
+    stats.v2Reads200++;
+    return c.json(row);
+  } catch (e) { return c.json({ error: String(e) }, 503); }
 });
+
+app.get("/__schema-stats", (c) => c.json(stats));
 
 mountUI(app);
 const port = Number(process.env.PORT ?? 3000);
-serve({ fetch: app.fetch, port }, (i) => console.error(`target (clock-skew) :${i.port}. CLOCK_SKEW_MS=${CLOCK_SKEW_MS}, tolerance=${TOLERANCE_MS}. /__clock for observability.`));
+serve({ fetch: app.fetch, port }, (i) => console.error(`target (schema-mismatch) :${i.port}. v1/v2 50:50 writes; /verify only accepts v2. /__schema-stats for observability.`));
