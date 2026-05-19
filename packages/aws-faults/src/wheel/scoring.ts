@@ -56,7 +56,10 @@ export function checkedKumoChaosStats(weight = 2): RubricCriterion & {
   __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
 } {
   const TOOL = /\/kumo\/chaos\/(rules|stats)/;
-  const TEXT = /\/kumo\/chaos\/(rules|stats)|chaos\s+(rule|stat|surface|config)|\bddb-[a-z][a-z0-9-]+|\b(sts|s3|kinesis|cognito|ec2|lambda)-(peak|throttle|cascade|distraction|down|tail|latency|hot|key|quota|race|onset|trap)\b|feedback\s*(windowMs|threshold|probabilityStep)|Kumo-injected/i;
+  // Loosened in 2026-05-19 #124 audit: also accept "kumo /chaos/...",
+  // "kumo's chaos", and bare "/kumo/chaos" / "kumo chaos" phrasings
+  // that agents commonly write when summarizing what they inspected.
+  const TEXT = /\/kumo\/chaos\/(rules|stats)|\bkumo[\s'/]+\/?chaos\b|chaos\s+(rule|stat|surface|config)|\bddb-[a-z][a-z0-9-]+|\b(sts|s3|kinesis|cognito|ec2|lambda)-(peak|throttle|cascade|distraction|down|tail|latency|hot|key|quota|race|onset|trap)\b|feedback\s*(windowMs|threshold|probabilityStep)|Kumo-injected/i;
   const regexCheck = (ctx: ScoringContext) => {
     if (ctx.toolUses.some((t) => t.name === "Bash" && TOOL.test(t.input))) return true;
     if (TEXT.test(ctx.transcript)) return true;
@@ -98,7 +101,13 @@ export function checkedKumoChaosStats(weight = 2): RubricCriterion & {
 export function readTargetSource(weight = 2): RubricCriterion & {
   __llmJudge?: (ctx: ScoringContext) => Promise<boolean | undefined>;
 } {
-  const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|getTierConfig|validatePayment|validateOrder|checkIdentity|server\.ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis|target\b.*\b(source|code)|on\s+every\s+request|hit\s+on\s+every|app\s+regression|code-level/i;
+  // Loosened in 2026-05-19 #124 audit: also accept server.live.ts (the
+  // eval-time variant landing pad from #121), and named identifiers
+  // from the catalog's variants. An agent that names a specific
+  // function/constant in their journal — e.g. NOTE_VALIDATION_REGEX,
+  // CLOCK_SKEW_MS, BOUNCER_MAX, recentRequests, logRequest — could
+  // only have learned those by reading the source.
+  const TEXT = /\btarget\/src|writeOrder|tryWriteOrder|getTierConfig|validatePayment|validateOrder|checkIdentity|server\.(?:live\.)?ts|synchronous(?:ly)?\s+(?:on\s+)?(?:the\s+)?(customer|customer-path|hot)|ddb\s*->\s*kinesis|writes\s+(?:to\s+)?DDB\s+(?:and|then)\s+Kinesis|target\b.*\b(source|code)|on\s+every\s+request|hit\s+on\s+every|app\s+regression|code-level|NOTE_VALIDATION_REGEX|CLOCK_SKEW_MS|BOUNCER_MAX|recentRequests|logRequest|getTier\b|wrapPool|withBouncer|writeOrder|TIER_TTL_MS|LOG_CAP_BYTES/i;
   const regexCheck = (ctx: ScoringContext) => {
     if (ctx.toolUses.some((t) => t.name === "Read" && t.input.includes("target/"))) return true;
     if (TEXT.test(ctx.transcript)) return true;
