@@ -64,6 +64,12 @@ export type { PgSlowWritesOptions } from "./pg-slow-writes.ts";
 export { dnsStorm } from "./dns-storm.ts";
 export type { DnsStormOptions } from "./dns-storm.ts";
 
+export { memoryLeakGradual } from "./memory-leak-gradual.ts";
+export type { MemoryLeakGradualOptions } from "./memory-leak-gradual.ts";
+
+export { regexBacktrackDos } from "./regex-backtrack-dos.ts";
+export type { RegexBacktrackDosOptions } from "./regex-backtrack-dos.ts";
+
 import type { Scenario } from "../types.ts";
 
 export interface ScenarioFactoryOpts {
@@ -96,6 +102,8 @@ import { pgReplicaLag } from "./pg-replica-lag.ts";
 import { networkRstIdempotency } from "./network-rst-idempotency.ts";
 import { pgSlowWrites } from "./pg-slow-writes.ts";
 import { dnsStorm } from "./dns-storm.ts";
+import { memoryLeakGradual } from "./memory-leak-gradual.ts";
+import { regexBacktrackDos } from "./regex-backtrack-dos.ts";
 
 /**
  * Catalog of all built-in scenarios. Order intentional: easiest first.
@@ -124,6 +132,8 @@ export const catalog: { id: string; factory: ScenarioFactory }[] = [
   { id: "network-rst-idempotency", factory: networkRstIdempotency },
   { id: "pg-slow-writes", factory: pgSlowWrites },
   { id: "dns-storm", factory: dnsStorm },
+  { id: "memory-leak-gradual", factory: memoryLeakGradual },
+  { id: "regex-backtrack-dos", factory: regexBacktrackDos },
 ];
 
 /**
