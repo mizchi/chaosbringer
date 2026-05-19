@@ -49,10 +49,11 @@ function diskUsage(): number {
   try { return statSync(LOG_PATH).size; } catch { return 0; }
 }
 
-function logRequest(line: object) {
-  // INTENTIONAL: verbose log with redundant fields. ~3KB per entry.
-  const padded = { ...line, padding: "x".repeat(2500) };
-  appendFileSync(LOG_PATH, JSON.stringify(padded) + "\n");
+function logRequest(_line: object) {
+  // MITIGATION: verbose per-request file logging removed from the
+  // customer path. Was filling 512KB cap in ~170 requests with no
+  // rotation. Use remote/async sink for debug telemetry instead.
+  return;
 }
 
 const app = new Hono();
