@@ -138,6 +138,7 @@ ddb_create() {
 }
 ddb_create orders id
 ddb_create tier-config tenant
+ddb_create charges id
 ok "DDB tables created (idempotent)"
 
 curl -s -X POST "http://localhost:$KUMO_PORT/" \
