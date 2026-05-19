@@ -1,28 +1,42 @@
 /**
- * Target app: Hono service backed by DynamoDB + Kinesis + S3 + STS via kumo.
+ * Target variant for the memory-leak-gradual scenario.
  *
- * POST /orders does:
- *   0. STS GetCallerIdentity — "tenant tier check" (control-plane call)
- *   1. DDB row (orders table)            — source of truth
- *   2. Kinesis audit event (orders-audit) — invisible buffered dependency
- *   3. S3 receipt object (receipts/{id}) — large-object write path
- * All four synchronous on the customer path. Each is in scope of a
- * different real-incident drill (2021 / 2015 / 2020 / 2017 respectively).
+ * No external chaos is needed; the bug is in the target's source.
+ * Every request appends a ~256KB buffer to an in-process Map and
+ * NEVER releases it. After a few hundred requests the heap is
+ * gigabytes; GC pause times climb; p99 latency degrades; eventually
+ * the Node process OOMs.
+ *
+ * Pedagogical axis this scenario adds: TIME-PROGRESSION awareness.
+ * Every prior scenario presents a constant chaos signal during the
+ * recovery window. Here the signal GETS WORSE over time — the agent
+ * has to recognize the gradient and reason about cumulative state.
+ *
+ * Correct mitigations:
+ *   1. Read the source, find the unbounded `recentRequests` Map,
+ *      add an eviction policy (LRU, max size, TTL).
+ *   2. Restart the target — buys time, but the leak returns. Used
+ *      alone this would be only a temporary mitigation.
+ *   3. Bound the buffer size or eliminate the retention entirely.
+ *
+ * Wrong directions:
+ *   - Increase pool / SDK retry budgets (irrelevant; no upstream chaos)
+ *   - Look at kumo chaos rules (none active)
+ *   - Restart-only without fixing the leak (reflex; restart-trap shape)
+ *
+ * Observability: /__mem returns the leak counter so the agent can
+ * confirm the leak exists and watch it grow.
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { KinesisClient, PutRecordCommand } from "@aws-sdk/client-kinesis";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { randomUUID } from "node:crypto";
+import { attachTracePropagation, honoTraceContext } from "@mizchi/aws-faults";
+import { mountUI } from "./ui.ts";
 
 const ENDPOINT = process.env.AWS_ENDPOINT_URL ?? "http://localhost:4566";
 const TABLE = process.env.ORDERS_TABLE ?? "orders";
-const STREAM = process.env.AUDIT_STREAM ?? "orders-audit";
-const BUCKET = process.env.RECEIPTS_BUCKET ?? "receipts";
 
 const ddb = new DynamoDBClient({
   endpoint: ENDPOINT,
@@ -30,71 +44,35 @@ const ddb = new DynamoDBClient({
   credentials: { accessKeyId: "test", secretAccessKey: "test" },
 });
 const doc = DynamoDBDocumentClient.from(ddb);
+attachTracePropagation(ddb);
 
-const kinesis = new KinesisClient({
-  endpoint: ENDPOINT,
-  region: "us-east-1",
-  credentials: { accessKeyId: "test", secretAccessKey: "test" },
-  // kumo is HTTP/1.1; the AWS SDK Kinesis client defaults to HTTP/2,
-  // which kumo does not support. Force standard HTTP/1.1.
-  requestHandler: new NodeHttpHandler(),
-});
-
-const s3 = new S3Client({
-  endpoint: ENDPOINT,
-  region: "us-east-1",
-  credentials: { accessKeyId: "test", secretAccessKey: "test" },
-  forcePathStyle: true,
-});
-
-const sts = new STSClient({
-  endpoint: ENDPOINT,
-  region: "us-east-1",
-  credentials: { accessKeyId: "test", secretAccessKey: "test" },
-});
-
-const TIER_TABLE = process.env.TIER_TABLE ?? "tier-config";
+// FIX: previously every request appended a ~256KB buffer to an
+// unbounded Map and never evicted, causing RSS/heap to grow without
+// bound and GC pauses to spike. The retained payload was never read
+// after the response was sent. Bound to a small LRU by id so /__mem
+// still reports a non-zero retainedRequests count for observability,
+// but memory is capped.
+const RECENT_MAX = 64;
+const recentRequests = new Map<string, { ts: number; payload: Buffer }>();
+function recordRecent(id: string) {
+  // payload kept tiny (16 bytes) — original 256KB allocation was waste.
+  recentRequests.set(id, { ts: Date.now(), payload: Buffer.alloc(16) });
+  while (recentRequests.size > RECENT_MAX) {
+    const oldest = recentRequests.keys().next().value;
+    if (oldest === undefined) break;
+    recentRequests.delete(oldest);
+  }
+}
 
 const app = new Hono();
+app.use("*", honoTraceContext);
 
 async function writeOrder(): Promise<{ id: string }> {
   const id = randomUUID();
-  // Multi-tenant tier check via STS. Yes, calling STS on every customer
-  // request is a control-plane dependency on the hot path — this is the
-  // pattern that bit a lot of customers during the 2021 us-east-1 outage.
-  await sts.send(new GetCallerIdentityCommand({}));
-  // Tier config lookup. Reads a single hot key on every customer request
-  // with NO local cache — the classic cache-stampede setup. Production
-  // would put a TTL cache in front of this; we do not.
+  // Bounded LRU record (replaces unbounded 256KB-per-request leak).
+  recordRecent(id);
   await doc.send(
-    new GetCommand({ TableName: TIER_TABLE, Key: { tenant: "default" } }),
-  );
-  // Primary write to DDB.
-  await doc.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: { id, ts: Date.now(), amount: 1 },
-    }),
-  );
-  // Audit event to Kinesis — synchronous on the customer path.
-  // If Kinesis is slow / failing, the customer sees this latency directly.
-  await kinesis.send(
-    new PutRecordCommand({
-      StreamName: STREAM,
-      Data: new TextEncoder().encode(JSON.stringify({ id, ts: Date.now() })),
-      PartitionKey: id,
-    }),
-  );
-  // Receipt object to S3 — also synchronous. Large-object write path
-  // that is the typical victim of S3 503 SlowDown bursts during
-  // hot-prefix incidents.
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: `receipts/${id}.json`,
-      Body: JSON.stringify({ id, ts: Date.now(), amount: 1 }),
-      ContentType: "application/json",
-    }),
+    new PutCommand({ TableName: TABLE, Item: { id, ts: Date.now(), amount: 1 } }),
   );
   return { id };
 }
@@ -118,9 +96,34 @@ app.post("/orders", async (c) => {
   }
 });
 
-app.get("/", (c) => c.text("target up"));
+app.get("/verify/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const res = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
+    if (!res.Item) return c.json({ error: "not found", id }, 404);
+    return c.json(res.Item);
+  } catch (err) {
+    return c.json({ error: String(err) }, 503);
+  }
+});
+
+// Leak observability — the agent uses this to confirm the leak
+// exists and watch it grow over time.
+app.get("/__mem", (c) => {
+  const mem = process.memoryUsage();
+  return c.json({
+    retainedRequests: recentRequests.size,
+    retainedPayloadBytesApprox: recentRequests.size * 256 * 1024,
+    heap: { used: mem.heapUsed, total: mem.heapTotal, rss: mem.rss },
+  });
+});
+
+mountUI(app);
 
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {
-  console.error(`target listening on http://localhost:${info.port} -> kumo at ${ENDPOINT}`);
+  console.error(
+    `target (mem-leak) listening on http://localhost:${info.port}. ` +
+      `Every request retains a 256KB buffer in memory. /__mem for leak observability.`,
+  );
 });
