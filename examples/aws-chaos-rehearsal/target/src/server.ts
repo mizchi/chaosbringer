@@ -71,15 +71,18 @@ app.get("/verify/:id", async (c) => {
     const r = await doc.send(new GetCommand({ TableName: TABLE, Key: { id } }));
     if (!r.Item) return c.json({ error: "not found", id }, 404);
     const row = r.Item as { id: string; ts: number; amount: number; version?: number; checksum?: string };
-    if (row.version !== 2) {
-      stats.v1Reads404++;
-      return c.json({ error: "schema mismatch — row is not v2", id, foundVersion: row.version ?? "(none)" }, 404);
+    // Read-path backward-compat shim: accept v1 rows (no version)
+    // during rolling deploy. v2 rows still validated by checksum.
+    if (row.version === 2) {
+      if (row.checksum !== checksum(row.id, row.ts, row.amount)) {
+        return c.json({ error: "checksum mismatch", id }, 400);
+      }
+      stats.v2Reads200++;
+      return c.json(row);
     }
-    if (row.checksum !== checksum(row.id, row.ts, row.amount)) {
-      return c.json({ error: "checksum mismatch", id }, 400);
-    }
+    // v1 row — treat as valid placed order.
     stats.v2Reads200++;
-    return c.json(row);
+    return c.json({ ...row, version: row.version ?? 1 });
   } catch (e) { return c.json({ error: String(e) }, 503); }
 });
 
