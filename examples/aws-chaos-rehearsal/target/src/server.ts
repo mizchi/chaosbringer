@@ -57,7 +57,7 @@ if (chaos) wrapPool(pool, chaos);
 // lets enough through to saturate the pool. pool.idleCount stays
 // HIGH for the same reason. The classic "local pool looks fine
 // but customer p99 is wrecked" shape.
-const BOUNCER_MAX = 3;
+const BOUNCER_MAX = 20;
 let bouncerActive = 0;
 let bouncerQueue: (() => void)[] = [];
 let stats = { acquired: 0, peakWait: 0, totalWaitMs: 0 };
