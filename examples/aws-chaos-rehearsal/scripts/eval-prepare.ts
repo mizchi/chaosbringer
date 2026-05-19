@@ -133,8 +133,10 @@ if (existsSync(baselineSrc)) {
 // have left an old child around). User-supplied factories should
 // idempotently kill prior instances inside their own boot().
 try {
-  // Match BOTH server.ts (legacy) and server.live.ts (current).
-  spawn("pkill", ["-f", "tsx target/src/server"]);
+  // Match server.ts (legacy), server.live.ts (current), and tsx
+  // processes spawned with absolute paths (npx exec). Using just
+  // the filename pattern catches all variants.
+  spawn("pkill", ["-9", "-f", "server\\.live\\.ts$|target/src/server"]);
 } catch {
   /* pkill returns non-zero when no match; ignore */
 }
@@ -298,7 +300,7 @@ function renderBrief(opts: { initialAlert: string; workDir: string; pagesFile: s
     `  4. You MAY NOT bypass the proxy to a different kumo port.`,
     `  5. Verify the CUSTOMER endpoint (/orders) before declaring recovery.`,
     `  6. Investigate first: pages + target source + chaos stats.`,
-    `  7. Restart target after editing: \`pkill -f "tsx target/src/server" || true; sleep 1; cd ${HERE} && nohup npx tsx target/src/server.live.ts > /tmp/target.log 2>&1 &\`. Verify the new PID with \`pgrep -af tsx\`.`,
+    `  7. Restart target after editing: \`pkill -9 -f "server\\.live\\.ts$" || true; sleep 1; cd ${HERE} && nohup npx tsx target/src/server.live.ts > /tmp/target.log 2>&1 &\`. Verify the new PID with \`pgrep -af server.live.ts\`.`,
     ``,
     `IMPORTANT — preserve correctness:`,
     `Some target dependencies are non-critical (audit sinks, metrics). Others are CRITICAL for customer correctness (orders, payments, regulatory data). When mitigating, consider what guarantees each write provides. "Fire-and-forget" is appropriate ONLY when data loss is acceptable. For data that must not be lost, use a durable write-ahead pattern.`,
