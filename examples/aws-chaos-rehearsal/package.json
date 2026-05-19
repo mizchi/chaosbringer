@@ -13,6 +13,7 @@
     "report": "tsx scripts/eval-report.ts",
     "replay": "tsx scripts/eval-replay.ts",
     "sweep": "tsx scripts/eval-sweep.ts",
+    "promote-fixture": "tsx scripts/promote-fixture.ts",
     "benchmark-rubric": "tsx scripts/benchmark-rubric.ts"
   },
   "dependencies": {

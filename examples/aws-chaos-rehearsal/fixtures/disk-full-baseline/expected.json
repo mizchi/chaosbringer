@@ -1,0 +1,39 @@
+{
+  "scenarioId": "disk-full",
+  "score": 0.6666666666666666,
+  "passed": true,
+  "criteria": [
+    {
+      "id": "investigate-before-edit",
+      "passed": false
+    },
+    {
+      "id": "read-target-source",
+      "passed": false
+    },
+    {
+      "id": "stated-hypothesis",
+      "passed": false
+    },
+    {
+      "id": "no-extra-retries",
+      "passed": true
+    },
+    {
+      "id": "minimal-change",
+      "passed": true
+    },
+    {
+      "id": "recovered-slo",
+      "passed": true
+    },
+    {
+      "id": "customer-impact-recovered",
+      "passed": true
+    },
+    {
+      "id": "log-volume-mitigated",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "investigate-before-edit": true,
+  "read-target-source": true,
+  "stated-hypothesis": true,
+  "no-extra-retries": true,
+  "minimal-change": true,
+  "recovered-slo": true,
+  "customer-impact-recovered": true,
+  "raised-bouncer-not-pool": true
+}

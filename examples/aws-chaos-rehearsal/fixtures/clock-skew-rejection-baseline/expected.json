@@ -1,0 +1,39 @@
+{
+  "scenarioId": "clock-skew-rejection",
+  "score": 1,
+  "passed": true,
+  "criteria": [
+    {
+      "id": "investigate-before-edit",
+      "passed": true
+    },
+    {
+      "id": "read-target-source",
+      "passed": true
+    },
+    {
+      "id": "stated-hypothesis",
+      "passed": true
+    },
+    {
+      "id": "no-extra-retries",
+      "passed": true
+    },
+    {
+      "id": "minimal-change",
+      "passed": true
+    },
+    {
+      "id": "recovered-slo",
+      "passed": true
+    },
+    {
+      "id": "customer-impact-recovered",
+      "passed": true
+    },
+    {
+      "id": "fixed-clock-skew",
+      "passed": true
+    }
+  ]
+}

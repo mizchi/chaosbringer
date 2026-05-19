@@ -1,0 +1,18 @@
+{
+  "customerProbe": {
+    "rate": 1,
+    "sampleN": 30,
+    "mode": "curl"
+  },
+  "postRunProbes": {
+    "customer-impact-recovered": {
+      "rate": 1,
+      "sampleN": 30,
+      "mode": "curl"
+    }
+  },
+  "chaosSnapshot": {
+    "rules": [],
+    "stats": []
+  }
+}
