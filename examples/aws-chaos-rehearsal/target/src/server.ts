@@ -62,7 +62,14 @@ attachTracePropagation(ddb);
 // "the note must be all 'a' followed by '!'", probably as a joke
 // or a placeholder that shipped. Easy to miss in code review
 // because the pathological input is rare in normal traffic.
-const NOTE_VALIDATION_REGEX = /^(a+)+!$/;
+// MITIGATION (ReDoS): the original regex /^(a+)+!$/ exhibits
+// catastrophic backtracking on long strings of 'a' without the
+// trailing '!'. Replaced with a linear-time regex (single
+// quantifier, no nesting) and bounded by an explicit length cap
+// applied BEFORE matching. This is a safe equivalent: the
+// language accepted is identical (one-or-more 'a' followed by '!').
+const NOTE_MAX_LEN = 256;
+const NOTE_VALIDATION_REGEX = /^a+!$/;
 
 const app = new Hono();
 app.use("*", honoTraceContext);
@@ -71,7 +78,7 @@ async function writeOrder(note: string): Promise<{ id: string }> {
   // Validate note before persisting — runs the catastrophic regex
   // synchronously on the customer path, blocking the event loop
   // for the duration of the backtracking.
-  const ok = NOTE_VALIDATION_REGEX.test(note);
+  const ok = note.length <= NOTE_MAX_LEN && NOTE_VALIDATION_REGEX.test(note);
   if (!ok && note.length > 0) {
     // Note isn't strictly required; a malformed note just gets
     // dropped. But the regex still runs synchronously to decide.
