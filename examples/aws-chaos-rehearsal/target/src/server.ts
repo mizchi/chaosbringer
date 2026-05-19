@@ -1,31 +1,37 @@
 /**
- * Target variant for the memory-leak-gradual scenario.
+ * Target variant for the regex-backtrack-dos scenario.
  *
- * No external chaos is needed; the bug is in the target's source.
- * Every request appends a ~256KB buffer to an in-process Map and
- * NEVER releases it. After a few hundred requests the heap is
- * gigabytes; GC pause times climb; p99 latency degrades; eventually
- * the Node process OOMs.
+ * The bug is a single-line catastrophic-backtracking regex applied
+ * to the order body. When the body contains a string that matches
+ * the regex's nested-quantifier pattern (e.g. a long sequence of
+ * 'a' followed by '!'), V8's regex engine consumes seconds of CPU
+ * per call. With concurrent traffic this pins the event loop and
+ * every customer order times out.
  *
- * Pedagogical axis this scenario adds: TIME-PROGRESSION awareness.
- * Every prior scenario presents a constant chaos signal during the
- * recovery window. Here the signal GETS WORSE over time — the agent
- * has to recognize the gradient and reason about cumulative state.
+ * Real-world analogs (a.k.a. ReDoS — Regular expression Denial of
+ * Service):
+ *   - Cloudflare 2019: a single regex caused a global outage.
+ *   - StackExchange 2016: site offline 34 minutes from a similar regex.
+ *
+ * Pedagogical novelty:
+ *   - No external chaos. No kumo rules active. The bug is one line
+ *     of source code.
+ *   - The CPU profile is the giveaway. node --inspect or
+ *     /__cpu would show the regex frame.
+ *   - Mitigation is targeted: rewrite the regex (no nested
+ *     quantifiers) OR validate input length first OR use RE2.
  *
  * Correct mitigations:
- *   1. Read the source, find the unbounded `recentRequests` Map,
- *      add an eviction policy (LRU, max size, TTL).
- *   2. Restart the target — buys time, but the leak returns. Used
- *      alone this would be only a temporary mitigation.
- *   3. Bound the buffer size or eliminate the retention entirely.
+ *   1. Rewrite the regex to remove the (a+)+ structure
+ *      (catastrophic backtracking).
+ *   2. Cap input length BEFORE running the regex.
+ *   3. Move validation off the customer path entirely.
  *
  * Wrong directions:
- *   - Increase pool / SDK retry budgets (irrelevant; no upstream chaos)
- *   - Look at kumo chaos rules (none active)
- *   - Restart-only without fixing the leak (reflex; restart-trap shape)
- *
- * Observability: /__mem returns the leak counter so the agent can
- * confirm the leak exists and watch it grow.
+ *   - Add SDK retries (doesn't help; the time is spent in regex).
+ *   - Restart only (CPU pinning will resume on next bad input).
+ *   - Look at kumo / DDB / pool (irrelevant).
+ *   - Bump pool size (the bottleneck is event loop, not pool).
  */
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
@@ -46,40 +52,40 @@ const ddb = new DynamoDBClient({
 const doc = DynamoDBDocumentClient.from(ddb);
 attachTracePropagation(ddb);
 
-// FIX: previously every request appended a ~256KB buffer to an
-// unbounded Map and never evicted, causing RSS/heap to grow without
-// bound and GC pauses to spike. The retained payload was never read
-// after the response was sent. Bound to a small LRU by id so /__mem
-// still reports a non-zero retainedRequests count for observability,
-// but memory is capped.
-const RECENT_MAX = 64;
-const recentRequests = new Map<string, { ts: number; payload: Buffer }>();
-function recordRecent(id: string) {
-  // payload kept tiny (16 bytes) — original 256KB allocation was waste.
-  recentRequests.set(id, { ts: Date.now(), payload: Buffer.alloc(16) });
-  while (recentRequests.size > RECENT_MAX) {
-    const oldest = recentRequests.keys().next().value;
-    if (oldest === undefined) break;
-    recentRequests.delete(oldest);
-  }
-}
+// INTENTIONAL WEAKNESS: catastrophic-backtracking regex on the
+// request body's `note` field. The (a+)+ structure with a $
+// anchor backtracks exponentially when the input is all 'a' chars
+// without the required trailing '!'. Inputs of length ~28+ pin
+// the CPU for seconds.
+//
+// Someone wrote this as input "validation" for a note field —
+// "the note must be all 'a' followed by '!'", probably as a joke
+// or a placeholder that shipped. Easy to miss in code review
+// because the pathological input is rare in normal traffic.
+const NOTE_VALIDATION_REGEX = /^(a+)+!$/;
 
 const app = new Hono();
 app.use("*", honoTraceContext);
 
-async function writeOrder(): Promise<{ id: string }> {
+async function writeOrder(note: string): Promise<{ id: string }> {
+  // Validate note before persisting — runs the catastrophic regex
+  // synchronously on the customer path, blocking the event loop
+  // for the duration of the backtracking.
+  const ok = NOTE_VALIDATION_REGEX.test(note);
+  if (!ok && note.length > 0) {
+    // Note isn't strictly required; a malformed note just gets
+    // dropped. But the regex still runs synchronously to decide.
+  }
   const id = randomUUID();
-  // Bounded LRU record (replaces unbounded 256KB-per-request leak).
-  recordRecent(id);
   await doc.send(
-    new PutCommand({ TableName: TABLE, Item: { id, ts: Date.now(), amount: 1 } }),
+    new PutCommand({ TableName: TABLE, Item: { id, ts: Date.now(), amount: 1, note: ok ? note : "" } }),
   );
   return { id };
 }
 
 app.post("/health", async (c) => {
   try {
-    const out = await writeOrder();
+    const out = await writeOrder("");
     return c.json({ ok: true, ...out });
   } catch (err) {
     return c.json({ ok: false, error: String(err) }, 503);
@@ -87,9 +93,9 @@ app.post("/health", async (c) => {
 });
 
 app.post("/orders", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+  const body = (await c.req.json().catch(() => ({}))) as { note?: string };
   try {
-    const out = await writeOrder();
+    const out = await writeOrder(typeof body.note === "string" ? body.note : "");
     return c.json({ ...out, echo: body });
   } catch (err) {
     return c.json({ ok: false, error: String(err) }, 503);
@@ -107,14 +113,22 @@ app.get("/verify/:id", async (c) => {
   }
 });
 
-// Leak observability — the agent uses this to confirm the leak
-// exists and watch it grow over time.
-app.get("/__mem", (c) => {
-  const mem = process.memoryUsage();
+// CPU profile for the agent's debugging surface — synchronous
+// sample of event loop blocking. The agent runs this several
+// times under normal vs adversarial traffic and sees the spike.
+app.get("/__cpu", async (c) => {
+  const samples: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    const t0 = performance.now();
+    await new Promise((r) => setImmediate(r));
+    const t1 = performance.now();
+    samples.push(t1 - t0);
+  }
+  const max = Math.max(...samples);
+  const mean = samples.reduce((s, x) => s + x, 0) / samples.length;
   return c.json({
-    retainedRequests: recentRequests.size,
-    retainedPayloadBytesApprox: recentRequests.size * 256 * 1024,
-    heap: { used: mem.heapUsed, total: mem.heapTotal, rss: mem.rss },
+    eventLoopDelayMs: { samples, mean, max },
+    hint: max > 100 ? "event loop is blocked — something is CPU-bound" : "event loop healthy",
   });
 });
 
@@ -123,7 +137,7 @@ mountUI(app);
 const port = Number(process.env.PORT ?? 3000);
 serve({ fetch: app.fetch, port }, (info) => {
   console.error(
-    `target (mem-leak) listening on http://localhost:${info.port}. ` +
-      `Every request retains a 256KB buffer in memory. /__mem for leak observability.`,
+    `target (regex-dos) listening on http://localhost:${info.port}. ` +
+      `note validation runs a catastrophic-backtracking regex on the customer path. /__cpu for event-loop observability.`,
   );
 });
