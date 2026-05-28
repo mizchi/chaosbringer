@@ -24,7 +24,15 @@ export interface CrawlerOptions {
   screenshotDir?: string;
   /** URL patterns to exclude (regex strings) */
   excludePatterns?: string[];
-  /** Error message patterns to ignore (regex strings) */
+  /**
+   * Error message patterns to ignore (regex strings).
+   *
+   * Matched (case-insensitively) against `PageError.message` for **every**
+   * error type — `console`, `network`, `js-exception`, `unhandled-rejection`,
+   * and `invariant-violation`. There is no separate
+   * `ignoreNetworkErrorPatterns`; use this single allowlist for both
+   * console noise and network noise.
+   */
   ignoreErrorPatterns?: string[];
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */
   spaPatterns?: string[];

@@ -839,6 +839,18 @@ export class ChaosCrawler {
     const endTime = Date.now();
     const report = this.generateReport(endTime);
 
+    // Surface fault rules that never matched a request — typically a typo'd
+    // urlPattern, or a rule shadowed by an earlier catch-all (rules are
+    // first-match-wins). Without this, the only signal is matched:0 buried
+    // inside report.faultInjections, which is easy to miss.
+    for (const compiled of this.compiledFaultRules) {
+      if (compiled.matched === 0) {
+        this.logger.warn("fault_rule_unmatched", {
+          rule: compiled.rule.name ?? compiled.pattern.toString(),
+        });
+      }
+    }
+
     // Log crawl end
     this.logger.logCrawlEnd({
       duration: report.duration,
