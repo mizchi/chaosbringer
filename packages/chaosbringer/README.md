@@ -201,7 +201,7 @@ faultInjection: [
 ],
 ```
 
-If you reverse the order, the catch-all swallows every request and `fulfill-api` will show `matched: 0` in the report (and trigger the unmatched-rule warning described above).
+If you reverse the order, the catch-all swallows every request and `fulfill-api` will show `matched: 0` in the report (and trigger the unmatched-rule warning described above). Chaosbringer also runs a best-effort static check at crawl start and emits one `fault_rule_shadowed` warning per shadowed pair — catching the common pathological case (broad regex before specific one) before the crawl has consumed a single request.
 
 ### Fault profiles
 
@@ -1232,6 +1232,10 @@ The logger emits one `fault_rule_unmatched` event per rule whose `matched` count
 - The `urlPattern` regex has a typo (escape mismatches and missing `^` / `$` anchors are common).
 - A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
 - The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
+
+### `fault_rule_shadowed` warning at crawl start
+
+Emitted (best-effort) when a later rule's `urlPattern` looks fully shadowed by an earlier one — typically a `/^https?:\/\//`-style catch-all placed before a specific override. Each warning includes `earlierRule`, `laterRule`, and a `sampleUrl` derived from the later pattern that the earlier rule also matches. Reorder so specific rules come first, or narrow the catch-all's pattern. False negatives are accepted (the detector is heuristic, not a regex-superset prover), but false positives are designed to be rare — `probability < 1` and non-overlapping `methods` filters disable the check for that pair.
 
 ### Loopback (`127.0.0.1`) sub-resources blocked under Chromium 130+
 
