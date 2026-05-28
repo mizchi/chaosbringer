@@ -182,7 +182,26 @@ await chaos({
 
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
 
-Per-rule `matched` / `injected` counters end up in `report.faultInjections`.
+Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
+
+### Rule order: first match wins
+
+Rules are evaluated **top-to-bottom** in the order you pass them, and the **first** match wins. This is the opposite of Playwright's raw `page.route(...)` API, where later registrations override earlier ones (LIFO). Put **specific rules first** and broad catch-alls last:
+
+```ts
+faultInjection: [
+  // ✅ specific overrides first
+  faults.status(200, {
+    urlPattern: /^https:\/\/api\.example\.com\/p\//,
+    body: '{"foo":"bar"}',
+    name: "fulfill-api",
+  }),
+  // ✅ catch-all last
+  faults.abort({ urlPattern: /^https?:\/\/(?!127\.0\.0\.1)/, name: "block-external" }),
+],
+```
+
+If you reverse the order, the catch-all swallows every request and `fulfill-api` will show `matched: 0` in the report (and trigger the unmatched-rule warning described above).
 
 ### Fault profiles
 
@@ -612,6 +631,14 @@ await chaos({
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
 - Fault injection rules still apply in replay mode and take precedence over HAR responses.
 
+> **Heads up — `notFound: "abort"` with `traceparent` injection:** when
+> `traceparent` is enabled, every outgoing request carries a freshly-generated
+> `traceparent` header that wasn't in the recorded HAR. Depending on your
+> Playwright version and HAR matcher, this can cause `notFound: "abort"` to
+> fail on every request during replay. If you hit this, either record the HAR
+> with `traceparent` also enabled (so the matcher sees consistent headers),
+> set `traceparent: false` for replay-mode runs, or use `notFound: "fallback"`.
+
 ## Accessibility (axe-core)
 
 Install `axe-core` as a peer and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
@@ -938,6 +965,19 @@ chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
 
 With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it. `--output <path>` also writes the analysis as JSON.
 
+Programmatic equivalent — `chaos()` does **not** throw when `strict: true` triggers a failure; it returns `{ report, passed: false, exitCode: 1 }`. That means you can collect reports across runs even with `strict: true` and pass them to `flakeReport()`:
+
+```ts
+import { chaos, flakeReport } from "chaosbringer";
+
+const reports = [];
+for (const seed of [1, 2, 3, 4, 5]) {
+  const { report } = await chaos({ ...sharedOpts, seed, strict: true });
+  reports.push(report);
+}
+const analysis = flakeReport(reports);
+```
+
 ### `shard`
 
 Split a crawl across N processes and merge the reports. Each worker is spawned with `--shard i/N` and hashes discovered URLs (FNV-1a) mod N; it only processes URLs whose hash matches its index, so shards do disjoint work. `baseUrl` is always processed by every shard so each has a seed for BFS.
@@ -1128,6 +1168,36 @@ new ChaosCrawler({
   "faultInjections": [{ "rule": "api-500", "matched": 4, "injected": 4 }]
 }
 ```
+
+## Troubleshooting
+
+### `fault_rule_unmatched` warning at end of run
+
+The logger emits one `fault_rule_unmatched` event per rule whose `matched` counter is `0` at the end of a crawl. Usually one of:
+
+- The `urlPattern` regex has a typo (escape mismatches and missing `^` / `$` anchors are common).
+- A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
+- The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
+
+### Loopback (`127.0.0.1`) sub-resources blocked under Chromium 130+
+
+If the page you're testing loads sub-resources from `127.0.0.1` (or any loopback address) while the page itself is served from a non-loopback origin, Chromium's Private Network Access classifier may block the sub-resource with:
+
+```
+Permission was denied for this request to access the `loopback` address space.
+```
+
+Switching the page origin to `*.localhost` or to a `127.0.0.1:PORT` URL does not help when the response is intercepted (Playwright `page.route`), because Chromium doesn't classify the intercepted response as loopback. The reliable workaround is to launch Chromium with `--disable-web-security`:
+
+```ts
+await chaos({
+  baseUrl,
+  launchOptions: { args: ["--disable-web-security"] },
+  // ...
+});
+```
+
+This is a test-only flag — never ship it to real users. The PNA-specific flags (`--disable-features=BlockInsecurePrivateNetworkRequests,...`) are not sufficient on their own for intercepted responses.
 
 ## License
 
