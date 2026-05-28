@@ -295,4 +295,80 @@ describe("validateOptions", () => {
       validateOptions(base({ failureArtifacts: { dir: "./x", maxArtifacts: -1 } }))
     ).toThrow(/maxArtifacts/);
   });
+
+  it("accepts a valid iframeFaults config", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [
+            { selector: "iframe", action: { kind: "never-load" } },
+            { selector: "iframe.ad", action: { kind: "load-delay", ms: 3000 } },
+            {
+              selector: "iframe[data-widget]",
+              action: { kind: "remove-mid-load", atMs: 500 },
+              probability: 0.5,
+            },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects an empty iframeFault selector", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [{ selector: "", action: { kind: "never-load" } }],
+        }),
+      ),
+    ).toThrow(/selector/);
+  });
+
+  it("rejects an iframe fault probability out of [0, 1]", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [
+            { selector: "iframe", action: { kind: "never-load" }, probability: 1.5 },
+          ],
+        }),
+      ),
+    ).toThrow(/probability/);
+  });
+
+  it("rejects a negative load-delay ms", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [
+            { selector: "iframe", action: { kind: "load-delay", ms: -1 } },
+          ],
+        }),
+      ),
+    ).toThrow(/load-delay ms/);
+  });
+
+  it("rejects a negative remove-mid-load atMs", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [
+            { selector: "iframe", action: { kind: "remove-mid-load", atMs: -1 } },
+          ],
+        }),
+      ),
+    ).toThrow(/atMs/);
+  });
+
+  it("rejects an unknown iframe fault action kind", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          iframeFaults: [
+            { selector: "iframe", action: { kind: "bogus" as never } },
+          ],
+        }),
+      ),
+    ).toThrow(/action.kind/);
+  });
 });

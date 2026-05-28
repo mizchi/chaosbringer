@@ -3,6 +3,9 @@ export type {
   Fault,
   FaultInjectionStats,
   FaultRule,
+  IframeAction,
+  IframeFault,
+  IframeFaultStats,
   LifecycleAction,
   LifecycleFault,
   LifecycleFaultStats,
@@ -19,6 +22,7 @@ export type {
 export {
   faults,
   type FaultHelperOptions,
+  type IframeHelperOptions,
   type LifecycleHelperOptions,
   type RuntimeHelperOptions,
 } from "./faults.js";
@@ -32,6 +36,15 @@ export {
   runtimeMatchesUrl,
   type CompiledRuntimeFault,
 } from "./runtime-faults.js";
+
+// Iframe-load (addInitScript-based monkey patches on HTMLIFrameElement)
+export {
+  buildIframeFaultsScript,
+  compileIframeFaults,
+  iframeFaultName,
+  mergeIframeStats,
+  type CompiledIframeFault,
+} from "./iframe-faults.js";
 
 // Page lifecycle (Playwright Page / BrowserContext at named stages)
 export {

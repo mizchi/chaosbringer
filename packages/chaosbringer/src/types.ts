@@ -91,6 +91,17 @@ export interface CrawlerOptions {
    */
   runtimeFaults?: RuntimeFault[];
   /**
+   * Iframe-load fault injection. Each fault monkey-patches
+   * `HTMLIFrameElement.prototype.src` (and `setAttribute("src", ...)`) so
+   * the fault fires the moment the host page assigns the iframe's URL.
+   * Use to test host libraries that inject iframes (ad SDKs, embeddable
+   * widgets, checkout flows) against slow / stuck / mid-load-removed
+   * iframes — a class of failure that `faultInjection` (request-scoped)
+   * can't express because the iframe element's own `onload` is observed
+   * by the parent page, not by Playwright's `route()`.
+   */
+  iframeFaults?: IframeFault[];
+  /**
    * Opt-in coverage-guided action selection. When enabled, the crawler
    * attaches a V8 precise-coverage collector (CDP `Profiler.takePreciseCoverage`)
    * to every page, attributes per-action coverage deltas to the target that
@@ -259,6 +270,9 @@ import type {
   Fault,
   FaultInjectionStats,
   FaultRule,
+  IframeAction,
+  IframeFault,
+  IframeFaultStats,
   LifecycleAction,
   LifecycleFault,
   LifecycleFaultStats,
@@ -274,6 +288,9 @@ export type {
   Fault,
   FaultInjectionStats,
   FaultRule,
+  IframeAction,
+  IframeFault,
+  IframeFaultStats,
   LifecycleAction,
   LifecycleFault,
   LifecycleFaultStats,
@@ -640,6 +657,12 @@ export interface CrawlReport {
    * `window.__chaosbringerRuntimeStats` snapshot.
    */
   runtimeFaults?: RuntimeFaultStats[];
+  /**
+   * Per-fault iframe-load fault stats (present only when `iframeFaults` was
+   * configured). Counts are accumulated across every page visit's
+   * `window.__chaosbringerIframeFaultStats` snapshot.
+   */
+  iframeFaults?: IframeFaultStats[];
   /**
    * Coverage-feedback summary (present only when `coverageFeedback.enabled`
    * was true). Reports total V8 functions executed, how many pages produced

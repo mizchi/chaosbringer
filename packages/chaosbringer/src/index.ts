@@ -13,6 +13,7 @@ export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
 export {
   faults,
   type FaultHelperOptions,
+  type IframeHelperOptions,
   type LifecycleHelperOptions,
   type RuntimeHelperOptions,
 } from "./faults.js";
@@ -25,6 +26,13 @@ export {
   runtimeMatchesUrl,
   type CompiledRuntimeFault,
 } from "./runtime-faults.js";
+export {
+  buildIframeFaultsScript,
+  compileIframeFaults,
+  iframeFaultName,
+  mergeIframeStats,
+  type CompiledIframeFault,
+} from "./iframe-faults.js";
 export {
   compileLifecycleFaults,
   executeLifecycleAction,
@@ -379,6 +387,9 @@ export type {
   RuntimeAction,
   RuntimeFault,
   RuntimeFaultStats,
+  IframeAction,
+  IframeFault,
+  IframeFaultStats,
   CoverageFeedbackOptions,
   CoverageReport,
   UrlMatcher,

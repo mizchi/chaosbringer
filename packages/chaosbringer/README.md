@@ -400,10 +400,64 @@ Layer comparison:
 | `faultInjection` | Playwright `route()` (Node side) | individual network requests | serve 500 on `/api/*` |
 | `lifecycleFaults` | per-page hook (CDP / page eval) | one-shot at named stages | wipe localStorage `afterLoad` |
 | `runtimeFaults` | `addInitScript` (in-page) | persistent JS API patches | reject `fetch()`, skew `Date.now` |
+| `iframeFaults` | `addInitScript` (in-page) | `HTMLIFrameElement.prototype.src` per matching iframe | delay / starve / mid-load-remove an iframe load |
 
 Stats land in `report.runtimeFaults` — one row per fault with `matched` (URL filtered ok, probability about to roll) and `fired` (actually triggered) counts.
 
 Like the other fault layers, `runtimeFaults` is programmatic-only.
+
+## Iframe-load faults
+
+Some classes of bugs only surface when a third-party library injects an iframe and the host page reacts to that iframe's load lifecycle — ad SDKs, embeddable widgets, checkout iframes, social plugins, video players. `faultInjection` operates on the request layer (requests *inside* the iframe) and `lifecycleFaults` operates on the *host* page lifecycle; neither can perturb the iframe element's own load as observed by the parent.
+
+`iframeFaults` is a fourth fault layer that monkey-patches `HTMLIFrameElement.prototype.src` (and `setAttribute("src", ...)`) so faults fire the moment the host page assigns the iframe's URL — three primitives that no other layer can express:
+
+```ts
+import { chaos, faults } from "chaosbringer";
+
+await chaos({
+  baseUrl: "http://localhost:3000",
+  iframeFaults: [
+    // Delay every ad iframe's load by 3s so the host library races a
+    // visibility timer against the contained document arriving.
+    faults.iframeLoadDelay(3000, { selector: "iframe.ad-slot" }),
+
+    // 20% of the time, never fire `load` on the player iframe — swap to
+    // about:blank so the host's onload-driven impression event is starved.
+    faults.iframeNeverLoad({
+      selector: "iframe[data-widget='player']",
+      probability: 0.2,
+    }),
+
+    // 10% of the time, remove the iframe from the DOM 500ms after src
+    // is set — exposes listener-teardown and pending-callback races.
+    faults.iframeRemoveMidLoad({
+      selector: "iframe",
+      atMs: 500,
+      probability: 0.1,
+    }),
+  ],
+});
+```
+
+Selectors are matched via `iframe.matches(selector)` at the moment `src` is set. If the library does `iframe.src = "..."; container.appendChild(iframe);` (i.e. assigns `src` *before* attaching to the DOM), ancestor combinators like `#container iframe` won't match — prefer attribute / class selectors on the iframe itself (`iframe[data-widget]`, `iframe.ad-slot`).
+
+Why not just `faults.delay({ urlPattern })`?
+
+- `faults.delay` slows the request *inside* the iframe, which does delay the parent's `iframe.onload` — that case (iframe loads slowly) overlaps.
+- But there's no way to express "iframe never fires `load`" via `route()` (the response body has to actually arrive).
+- And there's no way to express "iframe removed mid-load" via `route()` at all — it's a DOM-side operation.
+
+Stats land in `report.iframeFaults` — one row per fault with `selector`, `action`, `matched` (iframes whose selector matched), and `fired` (post-probability) counts. Like the other fault layers, `iframeFaults` is programmatic-only.
+
+```json
+{
+  "iframeFaults": [
+    { "rule": "iframe-load-delay:3000ms", "selector": "iframe.ad-slot", "action": "load-delay", "matched": 4, "fired": 4 },
+    { "rule": "iframe-never-load", "selector": "iframe[data-widget='player']", "action": "never-load", "matched": 2, "fired": 1 }
+  ]
+}
+```
 
 ## Invariants
 

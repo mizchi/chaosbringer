@@ -54,6 +54,12 @@ import {
   type CompiledRuntimeFault,
 } from "./runtime-faults.js";
 import {
+  buildIframeFaultsScript,
+  compileIframeFaults,
+  mergeIframeStats,
+  type CompiledIframeFault,
+} from "./iframe-faults.js";
+import {
   CoverageCollector,
   coverageDelta,
   noveltyMultiplier,
@@ -154,6 +160,7 @@ const DEFAULT_OPTIONS: Required<
   faultInjection: [],
   lifecycleFaults: [],
   runtimeFaults: [],
+  iframeFaults: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -358,6 +365,8 @@ export class ChaosCrawler {
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
   /** Compiled runtime faults — installed once at context level via init script. */
   private compiledRuntimeFaults: CompiledRuntimeFault[] = [];
+  /** Compiled iframe faults — installed once at context level via init script. */
+  private compiledIframeFaults: CompiledIframeFault[] = [];
   /**
    * Per-page lifecycle executor — created on `applyLifecycleStage` first
    * call for each page and dropped when the page is closed.
@@ -448,6 +457,7 @@ export class ChaosCrawler {
     this.compiledFaultRules = compileFaultRules(options.faultInjection);
     this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
     this.compiledRuntimeFaults = compileRuntimeFaults(options.runtimeFaults);
+    this.compiledIframeFaults = compileIframeFaults(options.iframeFaults);
     if (options.coverageFeedback?.enabled) {
       this.coverageFeedback = {
         enabled: true,
@@ -753,6 +763,18 @@ export class ChaosCrawler {
       await this.context.addInitScript({ content: script });
     }
 
+    // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
+    // (and setAttribute("src", …)) so faults fire when the host page assigns
+    // an iframe's URL. Independent of runtimeFaults so a page can configure
+    // either layer on its own.
+    if (this.compiledIframeFaults.length > 0) {
+      const script = buildIframeFaultsScript(
+        this.compiledIframeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await this.context.addInitScript({ content: script });
+    }
+
     // Replay mode: serve every matching request from the HAR before it hits
     // the network. Fault injection (installed per-page) still wins because
     // page.route runs before context.route in Playwright.
@@ -936,6 +958,27 @@ export class ChaosCrawler {
       mergeRuntimeStats(this.compiledRuntimeFaults, pageStats);
     } catch (err) {
       this.logger.warn("runtime_fault_stats_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Read `window.__chaosbringerIframeFaultStats` and accumulate into the
+   * compiled iframe-fault counters. Errors are swallowed: the in-page
+   * counter is best-effort diagnostics, not load-bearing.
+   */
+  private async collectIframeFaultStats(page: Page): Promise<void> {
+    if (this.compiledIframeFaults.length === 0) return;
+    try {
+      const pageStats = (await page.evaluate(
+        () =>
+          (globalThis as { __chaosbringerIframeFaultStats?: Record<string, { matched: number; fired: number }> })
+            .__chaosbringerIframeFaultStats ?? {},
+      )) as Record<string, { matched: number; fired: number }>;
+      mergeIframeStats(this.compiledIframeFaults, pageStats);
+    } catch (err) {
+      this.logger.warn("iframe_fault_stats_failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1445,6 +1488,7 @@ export class ChaosCrawler {
       // Merge runtime-fault stats from the in-page counter. Recovery
       // navigates away, so we collect before that path runs.
       await this.collectRuntimeFaultStats(page);
+      await this.collectIframeFaultStats(page);
 
       // Handle recovery from 404 or error status
       if (
@@ -2675,6 +2719,16 @@ export class ChaosCrawler {
               fired: c.fired,
             }))
           : undefined,
+      iframeFaults:
+        this.compiledIframeFaults.length > 0
+          ? this.compiledIframeFaults.map((c) => ({
+              rule: c.name,
+              selector: c.fault.selector,
+              action: c.fault.action.kind,
+              matched: c.matched,
+              fired: c.fired,
+            }))
+          : undefined,
       coverage: this.coverageFeedback
         ? summarizeCoverage({
             globalCovered: this.globalCoverage,
@@ -2939,6 +2993,43 @@ export function validateOptions(options: CrawlerOptions): void {
       if (!Number.isFinite(a.skewMs) || !Number.isInteger(a.skewMs)) {
         throw new Error(
           `chaosbringer: ${label} clock-skew skewMs must be a finite integer (got ${JSON.stringify(a.skewMs)})`
+        );
+      }
+    } else {
+      throw new Error(
+        `chaosbringer: ${label} action.kind is not recognized (got ${JSON.stringify((a as { kind: unknown }).kind)})`
+      );
+    }
+  }
+
+  for (const fault of options.iframeFaults ?? []) {
+    const label = fault.name
+      ? `iframeFaults entry "${fault.name}"`
+      : `iframeFaults entry`;
+    if (typeof fault.selector !== "string" || fault.selector.length === 0) {
+      throw new Error(`chaosbringer: ${label} selector must be a non-empty string`);
+    }
+    if (fault.probability !== undefined) {
+      const p = fault.probability;
+      if (!Number.isFinite(p) || p < 0 || p > 1) {
+        throw new Error(
+          `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+    const a = fault.action;
+    if (a.kind === "load-delay") {
+      if (!Number.isFinite(a.ms) || a.ms < 0) {
+        throw new Error(
+          `chaosbringer: ${label} load-delay ms must be a non-negative finite number (got ${JSON.stringify(a.ms)})`
+        );
+      }
+    } else if (a.kind === "never-load") {
+      // No further fields to validate.
+    } else if (a.kind === "remove-mid-load") {
+      if (!Number.isFinite(a.atMs) || a.atMs < 0) {
+        throw new Error(
+          `chaosbringer: ${label} remove-mid-load atMs must be a non-negative finite number (got ${JSON.stringify(a.atMs)})`
         );
       }
     } else {
