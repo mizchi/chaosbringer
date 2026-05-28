@@ -194,3 +194,74 @@ export interface RuntimeFaultStats {
   /** Times the fault actually fired. */
   fired: number;
 }
+
+// =====================================================================
+// 4. Iframe-load fault injection (Playwright addInitScript)
+// =====================================================================
+
+/**
+ * What an iframe-load fault does when it fires.
+ *
+ * Implemented by monkey-patching `HTMLIFrameElement.prototype` so the fault
+ * fires at the moment the host page sets the iframe's `src` — distinct from
+ * `FaultRule` (request-scoped, observable only inside the iframe's contained
+ * document) and `LifecycleFault` (one-shot at host-page lifecycle stages).
+ */
+export type IframeAction =
+  /**
+   * Delay the iframe's contained document load by `ms` milliseconds. The
+   * `src` assignment is queued and resolved after the timeout — the parent
+   * page's `iframe.onload` fires `ms` ms later than it normally would.
+   */
+  | { kind: "load-delay"; ms: number }
+  /**
+   * Swap the iframe's `src` to `about:blank` and never assign the real URL.
+   * The iframe's `load` event still fires (about:blank loads), but the host
+   * library's onload-driven impression / no-fill logic sees a blank document.
+   */
+  | { kind: "never-load" }
+  /**
+   * Set the real URL, then remove the iframe from the DOM after `atMs`.
+   * Simulates a user closing the overlay / host-library cleanup races.
+   */
+  | { kind: "remove-mid-load"; atMs: number };
+
+/**
+ * Per-iframe-load fault, applied via an in-page monkey-patch of
+ * `HTMLIFrameElement.prototype`. The fault matches by CSS selector against
+ * the iframe element at the moment its `src` is set.
+ *
+ * Distinct from `FaultRule` (request-scoped, applied via Playwright `route`),
+ * `LifecycleFault` (host-page stages), and `RuntimeFault` (in-page JS APIs).
+ */
+export interface IframeFault {
+  /** Optional human-readable name used in stats. Auto-derived when omitted. */
+  name?: string;
+  /**
+   * CSS selector applied to each iframe at the moment its `src` is set. The
+   * matcher uses `iframe.matches(selector)`, so ancestor combinators (e.g.
+   * `#container iframe`) only match if the iframe is already in the DOM when
+   * its `src` is assigned. Prefer attribute / class selectors on the iframe
+   * itself (e.g. `iframe[data-widget]`, `iframe.ad-slot`) for libraries that
+   * assign `src` before `appendChild`.
+   */
+  selector: string;
+  /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
+  probability?: number;
+  /** What to do when the fault fires. */
+  action: IframeAction;
+}
+
+/** Per-fault stats for iframe-load fault injection, emitted on the final report. */
+export interface IframeFaultStats {
+  /** `name` from the `IframeFault`, or an auto-derived label. */
+  rule: string;
+  /** The selector the fault was registered with. */
+  selector: string;
+  /** Action kind from the fault. */
+  action: "load-delay" | "never-load" | "remove-mid-load";
+  /** Iframes whose selector matched (probability not yet rolled). */
+  matched: number;
+  /** Iframes the fault actually fired on (after the probability roll). */
+  fired: number;
+}

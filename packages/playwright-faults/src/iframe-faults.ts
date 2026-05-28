@@ -1,0 +1,208 @@
+/**
+ * Iframe-load fault injection.
+ *
+ * Sibling of `runtime-faults` — installed via `addInitScript`, applied by
+ * monkey-patching `HTMLIFrameElement.prototype.src` (and `setAttribute("src",
+ * ...)`). The patch fires the moment the host page assigns the iframe's URL,
+ * giving us three primitives that `FaultRule` / `LifecycleFault` /
+ * `RuntimeFault` can't express:
+ *
+ *   - `load-delay`: `src` is assigned after a `setTimeout(ms)`, so the
+ *     contained document loads `ms` ms later than it normally would and the
+ *     parent's `iframe.onload` fires correspondingly late.
+ *   - `never-load`: `src` is set to `about:blank` so the host library's
+ *     onload-driven impression / no-fill logic sees a blank document.
+ *   - `remove-mid-load`: `src` is assigned for real, then `iframe.remove()`
+ *     is scheduled after `atMs` to simulate user-initiated close races.
+ *
+ * Pure helpers (`buildIframeFaultsScript`, `iframeFaultName`,
+ * `compileIframeFaults`) generate / serialize the init script and roll
+ * probability — unit-testable without a browser. Stats are reported by the
+ * in-page script via `window.__chaosbringerIframeFaultStats`; the crawler
+ * reads it after each page visit.
+ */
+
+import type { IframeAction, IframeFault, IframeFaultStats } from "./types.js";
+
+/** Compiled form: stats counters initialised, name pre-derived. */
+export interface CompiledIframeFault {
+  fault: IframeFault;
+  name: string;
+  matched: number;
+  fired: number;
+}
+
+/** Auto-derive a stats label when the user didn't set `fault.name`. */
+export function iframeFaultName(fault: IframeFault): string {
+  if (fault.name) return fault.name;
+  const a = fault.action;
+  switch (a.kind) {
+    case "load-delay":
+      return `iframe-load-delay:${a.ms}ms`;
+    case "never-load":
+      return "iframe-never-load";
+    case "remove-mid-load":
+      return `iframe-remove-mid-load:${a.atMs}ms`;
+  }
+}
+
+export function compileIframeFaults(
+  faults: IframeFault[] | undefined,
+): CompiledIframeFault[] {
+  if (!faults || faults.length === 0) return [];
+  return faults.map((fault) => ({
+    fault,
+    name: iframeFaultName(fault),
+    matched: 0,
+    fired: 0,
+  }));
+}
+
+/** Action discriminator for stats reporting. */
+function actionKind(a: IframeAction): IframeFaultStats["action"] {
+  return a.kind;
+}
+
+/**
+ * Build the init script body. Self-contained IIFE — no closure over the
+ * caller's scope, no external imports — because Playwright serializes init
+ * scripts as plain text and runs them in a fresh frame on every navigation.
+ *
+ * `seed` lets each page roll deterministic probabilities. Pass the
+ * crawler's seed so a `(seed, iframeFaults)` pair always produces the same
+ * pattern of injections.
+ */
+export function buildIframeFaultsScript(
+  faults: ReadonlyArray<IframeFault>,
+  seed: number,
+): string {
+  const serialized = faults.map((f, i) => ({
+    id: i,
+    name: iframeFaultName(f),
+    selector: f.selector,
+    probability: typeof f.probability === "number" ? f.probability : 1,
+    action: f.action,
+  }));
+
+  return `(() => {
+  if (typeof window === "undefined") return;
+  if (typeof HTMLIFrameElement === "undefined") return;
+  if (window.__chaosbringerIframeFaultsInstalled) return;
+  window.__chaosbringerIframeFaultsInstalled = true;
+  window.__chaosbringerIframeFaultStats = {};
+
+  // Park-Miller LCG — matches runtime-faults so seeded rolls stay deterministic.
+  let __rng = ${seed >>> 0} || 1;
+  const __nextRoll = () => {
+    __rng = ((__rng * 16807) % 2147483647) | 0;
+    if (__rng <= 0) __rng += 2147483647;
+    return (__rng - 1) / 2147483646;
+  };
+
+  const faults = ${JSON.stringify(serialized)};
+  const stats = window.__chaosbringerIframeFaultStats;
+  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
+
+  const roll = (f) => {
+    const slot = stats[String(f.id)];
+    slot.matched++;
+    if (f.probability >= 1) {
+      slot.fired++;
+      return true;
+    }
+    if (f.probability <= 0) return false;
+    const fired = __nextRoll() < f.probability;
+    if (fired) slot.fired++;
+    return fired;
+  };
+
+  const HIFE = HTMLIFrameElement.prototype;
+  const srcDescriptor = Object.getOwnPropertyDescriptor(HIFE, "src");
+  const setRealSrc = srcDescriptor && srcDescriptor.set;
+  const getRealSrc = srcDescriptor && srcDescriptor.get;
+  if (!setRealSrc || !getRealSrc) return;
+
+  const realSetAttribute = HIFE.setAttribute;
+
+  // Returns true if a fault claimed responsibility for this src assignment.
+  function handleSrc(iframe, value) {
+    for (const f of faults) {
+      let matched;
+      try {
+        matched = iframe.matches(f.selector);
+      } catch {
+        matched = false;
+      }
+      if (!matched) continue;
+      if (!roll(f)) continue;
+      const action = f.action;
+      if (action.kind === "load-delay") {
+        const ms = Number(action.ms);
+        setTimeout(() => {
+          try { setRealSrc.call(iframe, value); } catch {}
+        }, Number.isFinite(ms) && ms >= 0 ? ms : 0);
+        return true;
+      }
+      if (action.kind === "never-load") {
+        try { setRealSrc.call(iframe, "about:blank"); } catch {}
+        return true;
+      }
+      if (action.kind === "remove-mid-load") {
+        try { setRealSrc.call(iframe, value); } catch {}
+        const atMs = Number(action.atMs);
+        setTimeout(() => {
+          try { iframe.remove(); } catch {}
+        }, Number.isFinite(atMs) && atMs >= 0 ? atMs : 0);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Object.defineProperty(HIFE, "src", {
+    configurable: true,
+    enumerable: srcDescriptor.enumerable,
+    get() { return getRealSrc.call(this); },
+    set(value) {
+      const v = value == null ? "" : String(value);
+      if (handleSrc(this, v)) return;
+      setRealSrc.call(this, v);
+    },
+  });
+
+  HIFE.setAttribute = function (name, value) {
+    if (name && String(name).toLowerCase() === "src") {
+      const v = value == null ? "" : String(value);
+      if (handleSrc(this, v)) return;
+      return realSetAttribute.call(this, name, v);
+    }
+    return realSetAttribute.call(this, name, value);
+  };
+})();`;
+}
+
+/**
+ * Read the in-page stats counter and merge into the compiled-fault counters.
+ * Returns the merged stats; the compiled-fault objects are mutated in place
+ * so the next page picks up where this one left off.
+ */
+export function mergeIframeStats(
+  compiled: CompiledIframeFault[],
+  pageStats: Record<string, { matched: number; fired: number }>,
+): IframeFaultStats[] {
+  for (let i = 0; i < compiled.length; i++) {
+    const c = compiled[i]!;
+    const ps = pageStats[String(i)];
+    if (ps) {
+      c.matched += ps.matched;
+      c.fired += ps.fired;
+    }
+  }
+  return compiled.map((c) => ({
+    rule: c.name,
+    selector: c.fault.selector,
+    action: actionKind(c.fault.action),
+    matched: c.matched,
+    fired: c.fired,
+  }));
+}

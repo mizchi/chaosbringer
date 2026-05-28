@@ -12,6 +12,7 @@
 
 import type {
   FaultRule,
+  IframeFault,
   LifecycleFault,
   LifecycleStage,
   RuntimeFault,
@@ -203,6 +204,57 @@ export const faults = {
     const fault: RuntimeFault = { action: { kind: "clock-skew", skewMs } };
     return applyRuntimeCommon(fault, opts);
   },
+
+  /**
+   * Delay an iframe's contained-document load by `ms` ms. Wraps the iframe's
+   * `src` assignment in `setTimeout(ms)` so the parent's `iframe.onload`
+   * fires that much later. Different from `faults.delay()` (which slows the
+   * iframe's *inside* document) — `iframeLoadDelay` slows the iframe
+   * **element's own load** as observed by the parent page, including code
+   * paths that race a timer against `iframe.onload`.
+   */
+  iframeLoadDelay(ms: number, opts: IframeHelperOptions): IframeFault {
+    if (!Number.isFinite(ms) || ms < 0) {
+      throw new Error(`faults.iframeLoadDelay: ms must be a non-negative finite number (got ${ms})`);
+    }
+    const fault: IframeFault = {
+      selector: opts.selector,
+      action: { kind: "load-delay", ms },
+    };
+    return applyIframeCommon(fault, opts);
+  },
+
+  /**
+   * Swap a matching iframe's `src` to `about:blank` and never assign the
+   * real URL. Useful for testing host-library code paths that wait on
+   * `iframe.onload` to fire impression / no-fill / timeout events when the
+   * contained document never arrives.
+   */
+  iframeNeverLoad(opts: IframeHelperOptions): IframeFault {
+    const fault: IframeFault = {
+      selector: opts.selector,
+      action: { kind: "never-load" },
+    };
+    return applyIframeCommon(fault, opts);
+  },
+
+  /**
+   * Assign the real `src`, then `iframe.remove()` after `atMs` ms.
+   * Simulates the user closing an overlay or the host library cleaning up
+   * mid-load — exercises listener-teardown and pending-callback races.
+   */
+  iframeRemoveMidLoad(opts: IframeHelperOptions & { atMs: number }): IframeFault {
+    if (!Number.isFinite(opts.atMs) || opts.atMs < 0) {
+      throw new Error(
+        `faults.iframeRemoveMidLoad: atMs must be a non-negative finite number (got ${opts.atMs})`,
+      );
+    }
+    const fault: IframeFault = {
+      selector: opts.selector,
+      action: { kind: "remove-mid-load", atMs: opts.atMs },
+    };
+    return applyIframeCommon(fault, opts);
+  },
 };
 
 export interface RuntimeHelperOptions {
@@ -221,5 +273,33 @@ function applyRuntimeCommon(
   if (opts?.urlPattern !== undefined) fault.urlPattern = opts.urlPattern;
   if (opts?.probability !== undefined) fault.probability = opts.probability;
   if (opts?.name !== undefined) fault.name = opts.name;
+  return fault;
+}
+
+/** Common options accepted by every iframe-fault helper. */
+export interface IframeHelperOptions {
+  /**
+   * CSS selector applied to each iframe element at the moment its `src` is
+   * set. Matched via `iframe.matches(selector)`, so ancestor combinators
+   * (`#container iframe`) only fire if the iframe is already attached to
+   * the DOM when `src` is assigned. Attribute / class selectors on the
+   * iframe itself are more robust.
+   */
+  selector: string;
+  /** 0..1, default 1.0. Rolled per call against the in-page seeded RNG. */
+  probability?: number;
+  /** Override the auto-derived stats name. */
+  name?: string;
+}
+
+function applyIframeCommon(
+  fault: IframeFault,
+  opts: IframeHelperOptions,
+): IframeFault {
+  if (typeof opts.selector !== "string" || opts.selector.length === 0) {
+    throw new Error("faults.iframe*: selector must be a non-empty string");
+  }
+  if (opts.probability !== undefined) fault.probability = opts.probability;
+  if (opts.name !== undefined) fault.name = opts.name;
   return fault;
 }

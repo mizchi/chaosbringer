@@ -1,8 +1,8 @@
 // Re-export shim. Implementation moved to @mizchi/playwright-faults (extracted Layer-1 package).
 export {
-  faults,
-  type FaultHelperOptions,
-  type IframeHelperOptions,
-  type LifecycleHelperOptions,
-  type RuntimeHelperOptions,
+  buildIframeFaultsScript,
+  compileIframeFaults,
+  iframeFaultName,
+  mergeIframeStats,
+  type CompiledIframeFault,
 } from "@mizchi/playwright-faults";
