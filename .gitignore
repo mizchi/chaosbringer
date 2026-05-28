@@ -6,3 +6,4 @@ dist/
 flake.json
 heatmap.json
 failure-artifacts/
+.claude/settings.local.json
