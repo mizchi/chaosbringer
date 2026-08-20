@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
 import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
-import { compilePlanFaults, faultNameFor, type PlanRunResult } from "./runner.js";
+import {
+  compilePlanFaults,
+  faultNameFor,
+  resolvePlanTiming,
+  type PlanRunResult,
+} from "./runner.js";
+import { envelope, type CalibrationRun } from "./calibrate.js";
 
 /**
  * Fixtures are real `quint verify` / `quint run --mbt` output from the
@@ -334,3 +340,123 @@ describe("coverage", () => {
     expect(pairs).toEqual([["a", "b"]]);
   });
 });
+
+describe("resolvePlanTiming", () => {
+  const MEASURED = { delayFloorMs: 4, delayTailMs: 59, tightTailMs: 36, fixedPerPlanMs: 696 };
+
+  it("keeps the historical behaviour when no app deadline is given", () => {
+    expect(resolvePlanTiming({})).toEqual({ settleMs: 500 });
+    expect(resolvePlanTiming({ settleMs: 1600 })).toEqual({ settleMs: 1600 });
+  });
+
+  it("solves the settle window and the timing delays from the profile", () => {
+    const t = resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED });
+    expect(t.settleMs).toBe(5097);
+    expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5093 });
+    expect(t.solved?.pageTimeoutMs).toBe(5936);
+  });
+
+  it("refuses a settle window that cannot decide anything", () => {
+    // The configuration this repo actually shipped by hand.
+    expect(() =>
+      resolvePlanTiming({ settleMs: 1200, appDeadlineMs: 5000, timingProfile: MEASURED }),
+    ).toThrow(/cannot decide anything against a 5000ms app deadline/);
+  });
+
+  it("accepts a hand-written window that is generous enough", () => {
+    const t = resolvePlanTiming({ settleMs: 6000, appDeadlineMs: 5000, timingProfile: MEASURED });
+    expect(t.settleMs).toBe(6000);
+    // …and still exposes the solved delays, so timing plans work.
+    expect(t.delays?.slowMs).toBe(5093);
+  });
+
+  it("refuses a deadline this environment cannot resolve at all", () => {
+    expect(() => resolvePlanTiming({ appDeadlineMs: 120, timingProfile: MEASURED })).toThrow(
+      /no timing values can satisfy an app deadline of 120ms/,
+    );
+  });
+
+  it("treats the crawler timeout as the budget", () => {
+    expect(() =>
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
+    ).toThrow(/budget is too small/);
+  });
+});
+
+describe("timing outcomes", () => {
+  const rules = { cart: /\/api\/cart$/ };
+
+  it("realises slow-ok and slow-trip as delays from the solved timing", () => {
+    const plan: FaultPlan = {
+      name: "slow-cart",
+      schedule: [
+        { order: 0, rule: "cart", outcome: "slow-ok", occurrence: 0 },
+        { order: 1, rule: "cart", outcome: "slow-trip", occurrence: 1 },
+      ],
+      expect: {},
+    };
+    const { faultInjection } = compilePlanFaults(plan, rules, 500, { fastMs: 457, slowMs: 693 });
+    const ok = faultInjection.find((f) => f.name === faultNameFor("cart", "slow-ok"))!;
+    const trip = faultInjection.find((f) => f.name === faultNameFor("cart", "slow-trip"))!;
+    expect(ok.fault).toEqual({ kind: "delay", ms: 457 });
+    expect(trip.fault).toEqual({ kind: "delay", ms: 693 });
+    // Same rule, so the two decision tables must span the same occurrences.
+    expect(ok.schedule!.decisions).toEqual(["inject", "pass"]);
+    expect(trip.schedule!.decisions).toEqual(["pass", "inject"]);
+  });
+
+  it("refuses to invent a millisecond value when timing was not solved", () => {
+    const plan: FaultPlan = {
+      name: "slow-cart",
+      schedule: [{ order: 0, rule: "cart", outcome: "slow-ok", occurrence: 0 }],
+      expect: {},
+    };
+    expect(() => compilePlanFaults(plan, rules)).toThrow(/no portable millisecond value/);
+  });
+
+  it("maps the model's timing action names", () => {
+    const trace = parseItfTrace({
+      vars: ["log", "ui"],
+      states: [
+        {
+          "#meta": { index: 0 },
+          ui: "ready",
+          log: [
+            { kind: "slow", op: "cart" },
+            { kind: "tooSlow", op: "shipping" },
+          ],
+        },
+      ],
+    });
+    expect(compilePlan(trace, { name: "t" }).schedule.map((s) => s.outcome)).toEqual([
+      "slow-ok",
+      "slow-trip",
+    ]);
+  });
+});
+
+describe("calibration envelope", () => {
+  const run = (delayMax: number, tightMax: number, fixed: number): CalibrationRun => ({
+    delay: [
+      { nominal: 0, observedMin: 4, observedMax: 4 + delayMax, overheadMin: 4, overheadMax: delayMax },
+      { nominal: 20, observedMin: 26, observedMax: 26, overheadMin: 6, overheadMax: 6 },
+    ],
+    tight: [{ nominal: 200, observedMin: 200, observedMax: 200 + tightMax, overheadMin: 0, overheadMax: tightMax }],
+    fixedPerPlanMs: fixed,
+  });
+
+  it("takes floors at their min and tails at their max across runs", () => {
+    // A warm run under-reports the tail; the envelope must not.
+    const prof = envelope([run(14, 3, 650), run(107, 36, 700), run(15, 5, 680)]);
+    expect(prof.delayFloorMs).toBe(4);
+    expect(prof.delayTailMs).toBe(107);
+    expect(prof.tightTailMs).toBe(36);
+    expect(prof.fixedPerPlanMs).toBe(700);
+    expect(prof.runs).toBe(3);
+  });
+
+  it("refuses to aggregate nothing", () => {
+    expect(() => envelope([])).toThrow(/no calibration runs/);
+  });
+});
+

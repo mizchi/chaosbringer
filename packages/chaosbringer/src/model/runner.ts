@@ -15,6 +15,14 @@
 
 import type { Page } from "playwright";
 import { chaos } from "../chaos.js";
+import {
+  checkTiming,
+  formatTimingCheck,
+  solveTiming,
+  DEFAULT_TIMING_PROFILE,
+  type TimingProfile,
+  type TimingSolution,
+} from "../timing.js";
 import type { CrawlReport, FaultRule, Invariant, RuntimeFault, UrlMatcher } from "../types.js";
 import type { FaultPlan, PlanOutcome, PlanStep } from "./plan.js";
 import { validatePlan } from "./plan.js";
@@ -29,6 +37,10 @@ const OUTCOME_LAYER: Readonly<Record<PlanOutcome, OutcomeLayer>> = {
   "reject-body": "runtime",
   hang: "runtime",
   status: "network",
+  // A delay has to happen on the wire: a client-side patch cannot make a
+  // request take longer without also taking over its response.
+  "slow-ok": "network",
+  "slow-trip": "network",
 };
 
 /**
@@ -53,8 +65,28 @@ export interface RunPlanOptions {
   action?: (page: Page) => Promise<void>;
   /** Map the page back to the model's UI vocabulary. Omit to skip `ui` checks. */
   uiProbe?: (page: Page) => Promise<string>;
-  /** Quiet period after the action before probing. Default 500ms. */
+  /**
+   * Quiet period after the action before probing. Default 500ms.
+   *
+   * When `appDeadlineMs` is set this is *validated* rather than trusted: a
+   * settle window shorter than the app's own deadline reports a correctly
+   * bounded request as stuck, which is a harness bug wearing an app bug's
+   * clothes.
+   */
   settleMs?: number;
+  /**
+   * The app's own request bound (`AbortSignal.timeout(n)`, a `Promise.race`
+   * deadline, …). Set it and the timing values are solved from
+   * `timingProfile` instead of guessed — required for plans using the
+   * `slow-ok` / `slow-trip` outcomes, since those have no fixed millisecond
+   * value.
+   */
+  appDeadlineMs?: number;
+  /**
+   * Measured environment profile from `chaosbringer model calibrate`.
+   * Defaults to `DEFAULT_TIMING_PROFILE`, which is pessimistic on purpose.
+   */
+  timingProfile?: TimingProfile;
   /** Page timeout, forwarded to the crawler. Default 15000ms. */
   timeout?: number;
   /** Default true. */
@@ -121,6 +153,12 @@ export function compilePlanFaults(
   plan: FaultPlan,
   rules: Record<string, PlanRuleTarget>,
   statusCode = 500,
+  /**
+   * Millisecond values for the timing outcomes, from `resolvePlanTiming`.
+   * Absent means a plan using them is a configuration error rather than a
+   * guess: `slow-ok` has no portable default.
+   */
+  delays?: { fastMs: number; slowMs: number },
 ): { runtimeFaults: RuntimeFault[]; faultInjection: FaultRule[]; expectedInjections: Map<string, number> } {
   const byRule = new Map<string, PlanStep[]>();
   for (const step of plan.schedule) {
@@ -220,6 +258,24 @@ export function compilePlanFaults(
             fault: { kind: "status", status: statusCode },
           });
           break;
+        case "slow-ok":
+        case "slow-trip": {
+          if (!delays) {
+            throw new Error(
+              `chaosbringer/model: plan "${plan.name}" uses the "${outcome}" outcome, which has no ` +
+                `portable millisecond value — set \`appDeadlineMs\` (and ideally a \`timingProfile\` ` +
+                `from \`chaosbringer model calibrate\`) so the delay can be solved for this machine.`,
+            );
+          }
+          faultInjection.push({
+            name,
+            urlPattern,
+            ...methodFilter,
+            schedule,
+            fault: { kind: "delay", ms: outcome === "slow-ok" ? delays.fastMs : delays.slowMs },
+          });
+          break;
+        }
         case "pass":
           break;
       }
@@ -227,6 +283,64 @@ export function compilePlanFaults(
   }
 
   return { runtimeFaults, faultInjection, expectedInjections };
+}
+
+/** What the runner ended up using, and why. */
+export interface ResolvedPlanTiming {
+  settleMs: number;
+  /** Present only when `appDeadlineMs` was given. */
+  solved?: TimingSolution;
+  /** Milliseconds for `slow-ok` / `slow-trip`, when solvable. */
+  delays?: { fastMs: number; slowMs: number };
+}
+
+/**
+ * Decide the timing values for a run — before the browser launches.
+ *
+ * Without `appDeadlineMs` this keeps the historical behaviour (whatever
+ * `settleMs` the caller wrote, or 500ms). With it, the values are solved
+ * against the measured profile, and a hand-written `settleMs` is checked
+ * rather than trusted: a window shorter than the app's own deadline makes a
+ * correctly bounded request look stuck, and finding that out from an error
+ * message beats finding it out from a false mismatch.
+ */
+export function resolvePlanTiming(opts: {
+  settleMs?: number;
+  appDeadlineMs?: number;
+  timingProfile?: TimingProfile;
+  timeout?: number;
+}): ResolvedPlanTiming {
+  if (opts.appDeadlineMs === undefined) {
+    return { settleMs: opts.settleMs ?? 500 };
+  }
+  const profile = opts.timingProfile ?? DEFAULT_TIMING_PROFILE;
+  const request = {
+    deadlineMs: opts.appDeadlineMs,
+    ...(opts.timeout !== undefined ? { budgetMs: opts.timeout } : {}),
+  };
+  const solved = solveTiming(profile, request);
+  if (solved.status === "unsat") {
+    throw new Error(
+      `chaosbringer/model: no timing values can satisfy an app deadline of ${opts.appDeadlineMs}ms ` +
+        `in this environment (${solved.core.join(", ")}).\n${solved.explanation}`,
+    );
+  }
+  if (opts.settleMs !== undefined) {
+    const check = checkTiming(profile, request, { settleMs: opts.settleMs });
+    if (!check.ok) {
+      throw new Error(
+        `chaosbringer/model: settleMs=${opts.settleMs} cannot decide anything against a ` +
+          `${opts.appDeadlineMs}ms app deadline.\n${formatTimingCheck(check)}\n` +
+          `Drop settleMs to use the solved ${solved.settleMs}ms, or raise it above that.`,
+      );
+    }
+    return { settleMs: opts.settleMs, solved, delays: { fastMs: solved.fastMs, slowMs: solved.slowMs } };
+  }
+  return {
+    settleMs: solved.settleMs,
+    solved,
+    delays: { fastMs: solved.fastMs, slowMs: solved.slowMs },
+  };
 }
 
 function firedCounts(report: CrawlReport): Record<string, number> {
@@ -249,14 +363,19 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     };
   }
 
+  // Resolve timing first: an impossible configuration should fail before a
+  // browser is launched, not after a plan has produced a bogus verdict.
+  const timing = resolvePlanTiming(opts);
+  const settleMs = timing.settleMs;
+
   const { runtimeFaults, faultInjection, expectedInjections } = compilePlanFaults(
     plan,
     opts.rules,
     opts.statusCode ?? 500,
+    timing.delays,
   );
 
   const observed: PlanRunResult["observed"] = { unhandledRejection: false, fired: {} };
-  const settleMs = opts.settleMs ?? 500;
 
   // The action and the probe run as an `afterLoad` invariant: that is the one
   // hook with a live page, and rejections raised here are still drained and
@@ -284,7 +403,9 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     maxActionsPerPage: 0,
     headless: opts.headless ?? true,
     seed: opts.seed ?? 1,
-    timeout: opts.timeout ?? 15000,
+    // A solved page timeout beats the default: it is derived from the same
+    // profile as the settle window, so the run cannot be killed mid-probe.
+    timeout: opts.timeout ?? timing.solved?.pageTimeoutMs ?? 15000,
     ...(runtimeFaults.length > 0 ? { runtimeFaults } : {}),
     ...(faultInjection.length > 0 ? { faultInjection } : {}),
     ...(opts.coverageFingerprints ? { coverageFeedback: { enabled: true } } : {}),

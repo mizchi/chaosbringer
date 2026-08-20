@@ -1,0 +1,12 @@
+{
+  "delayFloorMs": 4,
+  "delayTailMs": 61,
+  "tightTailMs": 3,
+  "fixedPerPlanMs": 703,
+  "runs": 3,
+  "measuredAt": "2026-08-20T14:59:31.247Z",
+  "env": {
+    "node": "v22.22.2",
+    "platform": "linux"
+  }
+}

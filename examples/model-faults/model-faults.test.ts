@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import {
   aggregateCoverage,
   modelRunPassed,
+  resolvePlanTiming,
   runPlans,
   validatePlan,
   type FaultPlan,
@@ -56,6 +57,26 @@ function mismatchKeys(results: PlanRunResult[]): string[] {
 
 describe("model-driven fault coverage", () => {
   const plans = loadPlans();
+
+  it("keeps the bridge's appDeadlineMs in step with the app's own deadline", () => {
+    // Every timing value is derived from this number, so drift between the
+    // app and the bridge would silently invalidate the whole suite.
+    const appSource = readFileSync(join(here, "public", "app.js"), "utf8");
+    const match = appSource.match(/const DEADLINE_MS = (\d+)/);
+    expect(match, "public/app.js must declare DEADLINE_MS").not.toBeNull();
+    expect(bridge.appDeadlineMs).toBe(Number(match![1]));
+  });
+
+  it("solves the settle window instead of hand-picking it", () => {
+    const timing = resolvePlanTiming({
+      appDeadlineMs: bridge.appDeadlineMs,
+      timingProfile: bridge.timingProfile,
+    });
+    // Must outlast the app's own deadline, or a bounded request reads as stuck.
+    expect(timing.settleMs).toBeGreaterThan(bridge.appDeadlineMs!);
+    // …and the old hand-picked 1600ms was more than it needed.
+    expect(timing.settleMs).toBeLessThan(1600);
+  });
 
   it("compiled one plan per reachable model state", () => {
     // 4 outcomes x 2 operations = 16 reachable combinations.

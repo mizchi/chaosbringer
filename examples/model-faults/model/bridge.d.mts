@@ -3,6 +3,6 @@
 import type { RunPlanOptions } from "chaosbringer";
 
 declare const bridge: Omit<RunPlanOptions, "baseUrl" | "rules"> & {
-  rules: Record<string, RegExp | string>;
+  rules: Record<string, RegExp | string | { urlPattern: RegExp | string; methods?: string[] }>;
 };
 export default bridge;

@@ -31,7 +31,18 @@ export type PlanOutcome =
   /** Never settles. */
   | "hang"
   /** Resolves with an HTTP error status (server error, promise still resolves). */
-  | "status";
+  | "status"
+  /**
+   * Slow, but inside whatever bound the app sets — the app must still succeed.
+   *
+   * Deliberately carries no millisecond value: how slow "slow enough to
+   * matter, fast enough to tolerate" is depends on the machine, so the runner
+   * resolves it from a calibrated timing profile at run time. That keeps a
+   * committed plan portable between a laptop and a CI runner.
+   */
+  | "slow-ok"
+  /** Slow past the app's bound — the app must give up and say so. */
+  | "slow-trip";
 
 export const PLAN_OUTCOMES: readonly PlanOutcome[] = [
   "pass",
@@ -40,6 +51,8 @@ export const PLAN_OUTCOMES: readonly PlanOutcome[] = [
   "reject-body",
   "hang",
   "status",
+  "slow-ok",
+  "slow-trip",
 ];
 
 export interface PlanStep {
@@ -93,6 +106,10 @@ export const DEFAULT_ACTION_OUTCOMES: Readonly<Record<string, PlanOutcome>> = {
   "reject-body": "reject-body",
   hang: "hang",
   stall: "hang",
+  slow: "slow-ok",
+  slowOk: "slow-ok",
+  tooSlow: "slow-trip",
+  timeout: "slow-trip",
   status: "status",
   serverError: "status",
 };

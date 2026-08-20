@@ -18,9 +18,28 @@ export {
   type RuntimeHelperOptions,
 } from "./faults.js";
 export { profiles } from "./profiles.js";
+// Timing values this environment can keep (solved, not guessed).
+export {
+  checkTiming,
+  formatTimingCheck,
+  solveTiming,
+  timingLadder,
+  DEFAULT_TIMING_PROFILE,
+  type ProposedTiming,
+  type ResolvedProfile,
+  type TimingCheck,
+  type TimingConstraint,
+  type TimingInfeasible,
+  type TimingProfile,
+  type TimingRequest,
+  type TimingResult,
+  type TimingSlack,
+  type TimingSolution,
+} from "./timing.js";
 // Model-driven fault coverage (Quint / ITF -> deterministic replay).
 export {
   aggregateCoverage,
+  calibrateTiming,
   compilePlan,
   compilePlanFaults,
   decodeItfValue,
@@ -36,6 +55,7 @@ export {
   parseItfTrace,
   readBool,
   readString,
+  resolvePlanTiming,
   runPlan,
   runPlans,
   unwrapVariant,
@@ -44,6 +64,8 @@ export {
   DEFAULT_IGNORED_ACTIONS,
   PLAN_OUTCOMES,
   type AggregateCoverageOptions,
+  type CalibrateOptions,
+  type CalibrationResult,
   type CompilePlanOptions,
   type FaultPlan,
   type ItfState,
@@ -57,6 +79,7 @@ export {
   type PlanRuleTarget,
   type PlanRunResult,
   type PlanStep,
+  type ResolvedPlanTiming,
   type RunPlanOptions,
   type TargetOutcome,
 } from "./model/index.js";

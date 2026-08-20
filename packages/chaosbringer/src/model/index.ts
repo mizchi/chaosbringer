@@ -41,14 +41,25 @@ export {
   compilePlanFaults,
   faultNameFor,
   fingerprintsOf,
+  resolvePlanTiming,
   runPlan,
   runPlans,
   type MismatchField,
   type PlanMismatch,
   type PlanRuleTarget,
   type PlanRunResult,
+  type ResolvedPlanTiming,
   type RunPlanOptions,
 } from "./runner.js";
+
+export {
+  calibrateTiming,
+  envelope,
+  type CalibrateOptions,
+  type CalibrationResult,
+  type CalibrationRun,
+  type CalibrationSample,
+} from "./calibrate.js";
 
 export {
   aggregateCoverage,

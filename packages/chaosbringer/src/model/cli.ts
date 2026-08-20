@@ -1,8 +1,12 @@
 /**
- * `chaosbringer model <compile|run>`.
+ * `chaosbringer model <calibrate|compile|run>`.
  *
- * Two stages with deliberately different dependency footprints:
+ * Three stages with deliberately different dependency footprints:
  *
+ *   calibrate  measure what this machine can honour (browser, no Quint) and
+ *              write a timing profile. Numbers are per-machine, so the
+ *              profile is an artifact of the environment, not of the model.
+
  *   compile  ITF traces (from `quint verify --out-itf`) → plan JSON files.
  *            Pure Node, no browser. Run it when the model changes and
  *            commit the plans.
@@ -42,6 +46,16 @@ Commands:
       --unhandled-var <name> Variable holding the escaped-rejection flag
                              (default: unhandled)
 
+  calibrate --url <url> [--out <file>]
+      Measure what THIS machine can honour and write a timing profile:
+      the injection floor, the jitter tails, and the fixed per-plan cost.
+      Timing values are then solved from it instead of guessed.
+
+      --runs <n>        Calibration runs to take the envelope over (default 3).
+                        A warm run under-reports the tail, so more than one.
+      --samples <n>     Fetches per nominal delay, per run (default 20).
+      --probe-path <p>  Path the probe fetches (default: the URL's own path).
+
   run --plans <dir> --url <url> --config <file>
       Replay every plan and check its oracle. Exits 1 on any mismatch,
       skipped plan, or plan whose faults never fired.
@@ -54,6 +68,7 @@ Commands:
       --json             Print the coverage report instead of the summary.
 
 Examples:
+  chaosbringer model calibrate --url http://localhost:3000 --out model/profile.json
   chaosbringer model compile --traces model/traces --out model/plans
   chaosbringer model run --plans model/plans --url http://localhost:3000 \\
     --config model/bridge.mjs
@@ -220,9 +235,66 @@ function stripReport(r: Awaited<ReturnType<typeof runPlans>>[number]): unknown {
   return { ...rest, pagesVisited: report?.pagesVisited };
 }
 
+async function runCalibrate(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      url: { type: "string" },
+      out: { type: "string" },
+      runs: { type: "string" },
+      samples: { type: "string" },
+      "probe-path": { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help || !values.url) {
+    console.log(HELP);
+    if (!values.help) process.exitCode = 1;
+    return;
+  }
+
+  const { calibrateTiming } = await import("./calibrate.js");
+  const { solveTiming } = await import("../timing.js");
+  const result = await calibrateTiming({
+    url: values.url,
+    ...(values["probe-path"] !== undefined ? { probePath: values["probe-path"] } : {}),
+    ...(values.runs !== undefined ? { runs: Number.parseInt(values.runs, 10) } : {}),
+    ...(values.samples !== undefined ? { samples: Number.parseInt(values.samples, 10) } : {}),
+    onProgress: (m) => console.error(`  ${m}`),
+  });
+
+  const json = `${JSON.stringify(result.profile, null, 2)}\n`;
+  if (values.out) {
+    const out = resolve(values.out);
+    mkdirSync(resolve(out, ".."), { recursive: true });
+    writeFileSync(out, json);
+    console.log(`model calibrate: profile -> ${values.out}`);
+  }
+  console.log(json.trimEnd());
+
+  // The profile alone is abstract; show what it implies for a plausible
+  // deadline so the operator can sanity-check it against their app.
+  for (const deadline of [500, 5000]) {
+    const solved = solveTiming(result.profile, { deadlineMs: deadline });
+    if (solved.status === "sat") {
+      console.log(
+        `\nat a ${deadline}ms app deadline: settleMs=${solved.settleMs}, ` +
+          `tolerated delay <=${solved.fastMs}ms, tripping delay >=${solved.slowMs}ms, ` +
+          `~${solved.wallClockMs}ms per plan`,
+      );
+    } else {
+      console.log(`\nat a ${deadline}ms app deadline: INFEASIBLE — ${solved.explanation}`);
+    }
+  }
+}
+
 export async function runModelCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   switch (command) {
+    case "calibrate":
+      await runCalibrate(rest);
+      return;
     case "compile":
       await runCompile(rest);
       return;
