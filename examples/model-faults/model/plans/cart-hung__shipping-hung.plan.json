@@ -1,0 +1,22 @@
+{
+  "name": "cart-hung__shipping-hung",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "shipping",
+      "outcome": "hang",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "cart",
+      "outcome": "hang",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 3
+}

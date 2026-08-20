@@ -1,0 +1,27 @@
+{
+  "name": "@mizchi/chaosbringer-example-model-faults",
+  "private": true,
+  "type": "module",
+  "description": "Model-driven fault coverage: a Quint model of the checkout load contract enumerates every failure state, each state replays as a deterministic chaosbringer run, and the model is the oracle.",
+  "scripts": {
+    "start": "tsx run.ts",
+    "start:fixed": "FIXED=1 tsx run.ts",
+    "dev": "tsx server.ts",
+    "enumerate": "model/enumerate.sh",
+    "compile": "chaosbringer model compile --traces model/traces --out model/plans",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.52.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.0.7"
+  }
+}

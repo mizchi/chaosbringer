@@ -1,0 +1,925 @@
+{
+  "name": "ApalacheIR",
+  "version": "1.0",
+  "description": "https://apalache-mc.org/docs/adr/005adr-json.html",
+  "modules": [
+    {
+      "kind": "TlaModule",
+      "name": "counterexample",
+      "declarations": [
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "ConstInit",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "ValEx",
+            "value": {
+              "kind": "TlaBool",
+              "value": true
+            }
+          }
+        },
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "State0",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "OperEx",
+            "oper": "AND",
+            "args": [
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "NameEx",
+                    "name": "log"
+                  },
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "OperEx",
+                    "oper": "TUPLE",
+                    "args": []
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "NameEx",
+                    "name": "opState"
+                  },
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "OperEx",
+                    "oper": "Apalache!SetAsFun",
+                    "args": [
+                      {
+                        "type": "Set(<<Str, Str>>)",
+                        "kind": "OperEx",
+                        "oper": "SET_ENUM",
+                        "args": [
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "cart"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "unstarted"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "shipping"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "unstarted"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "NameEx",
+                    "name": "ui"
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "idle"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Bool",
+                    "kind": "NameEx",
+                    "name": "unhandled"
+                  },
+                  {
+                    "type": "Bool",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaBool",
+                      "value": false
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "State1",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "OperEx",
+            "oper": "AND",
+            "args": [
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "NameEx",
+                    "name": "log"
+                  },
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "OperEx",
+                    "oper": "TUPLE",
+                    "args": [
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "start"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "-"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "NameEx",
+                    "name": "opState"
+                  },
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "OperEx",
+                    "oper": "Apalache!SetAsFun",
+                    "args": [
+                      {
+                        "type": "Set(<<Str, Str>>)",
+                        "kind": "OperEx",
+                        "oper": "SET_ENUM",
+                        "args": [
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "cart"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "pending"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "shipping"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "pending"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "NameEx",
+                    "name": "ui"
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "loading"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Bool",
+                    "kind": "NameEx",
+                    "name": "unhandled"
+                  },
+                  {
+                    "type": "Bool",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaBool",
+                      "value": false
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "State2",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "OperEx",
+            "oper": "AND",
+            "args": [
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "NameEx",
+                    "name": "log"
+                  },
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "OperEx",
+                    "oper": "TUPLE",
+                    "args": [
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "start"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "-"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "hang"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "shipping"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "NameEx",
+                    "name": "opState"
+                  },
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "OperEx",
+                    "oper": "Apalache!SetAsFun",
+                    "args": [
+                      {
+                        "type": "Set(<<Str, Str>>)",
+                        "kind": "OperEx",
+                        "oper": "SET_ENUM",
+                        "args": [
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "cart"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "pending"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "shipping"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "hung"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "NameEx",
+                    "name": "ui"
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "error"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Bool",
+                    "kind": "NameEx",
+                    "name": "unhandled"
+                  },
+                  {
+                    "type": "Bool",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaBool",
+                      "value": false
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "State3",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "OperEx",
+            "oper": "AND",
+            "args": [
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "NameEx",
+                    "name": "log"
+                  },
+                  {
+                    "type": "Seq({ kind: Str, op: Str })",
+                    "kind": "OperEx",
+                    "oper": "TUPLE",
+                    "args": [
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "start"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "-"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "hang"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "shipping"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "{ kind: Str, op: Str }",
+                        "kind": "OperEx",
+                        "oper": "RECORD",
+                        "args": [
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "kind"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "reject"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "op"
+                            }
+                          },
+                          {
+                            "type": "Str",
+                            "kind": "ValEx",
+                            "value": {
+                              "kind": "TlaStr",
+                              "value": "cart"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "NameEx",
+                    "name": "opState"
+                  },
+                  {
+                    "type": "(Str -> Str)",
+                    "kind": "OperEx",
+                    "oper": "Apalache!SetAsFun",
+                    "args": [
+                      {
+                        "type": "Set(<<Str, Str>>)",
+                        "kind": "OperEx",
+                        "oper": "SET_ENUM",
+                        "args": [
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "cart"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "rejected"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "type": "<<Str, Str>>",
+                            "kind": "OperEx",
+                            "oper": "TUPLE",
+                            "args": [
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "shipping"
+                                }
+                              },
+                              {
+                                "type": "Str",
+                                "kind": "ValEx",
+                                "value": {
+                                  "kind": "TlaStr",
+                                  "value": "hung"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "NameEx",
+                    "name": "ui"
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "error"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Bool",
+                    "kind": "NameEx",
+                    "name": "unhandled"
+                  },
+                  {
+                    "type": "Bool",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaBool",
+                      "value": false
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "type": "(() => Bool)",
+          "kind": "TlaOperDecl",
+          "name": "InvariantViolation",
+          "formalParams": [],
+          "isRecursive": false,
+          "body": {
+            "type": "Bool",
+            "kind": "OperEx",
+            "oper": "AND",
+            "args": [
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "OperEx",
+                    "oper": "FUN_APP",
+                    "args": [
+                      {
+                        "type": "(Str -> Str)",
+                        "kind": "NameEx",
+                        "name": "opState"
+                      },
+                      {
+                        "type": "Str",
+                        "kind": "ValEx",
+                        "value": {
+                          "kind": "TlaStr",
+                          "value": "cart"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "rejected"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Bool",
+                "kind": "OperEx",
+                "oper": "EQ",
+                "args": [
+                  {
+                    "type": "Str",
+                    "kind": "OperEx",
+                    "oper": "FUN_APP",
+                    "args": [
+                      {
+                        "type": "(Str -> Str)",
+                        "kind": "NameEx",
+                        "name": "opState"
+                      },
+                      {
+                        "type": "Str",
+                        "kind": "ValEx",
+                        "value": {
+                          "kind": "TlaStr",
+                          "value": "shipping"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "Str",
+                    "kind": "ValEx",
+                    "value": {
+                      "kind": "TlaStr",
+                      "value": "hung"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

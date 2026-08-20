@@ -50,6 +50,7 @@ jobs:
         run: |
           pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" typecheck
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
+          pnpm -F "@mizchi/chaosbringer-example-model-faults" typecheck
 
   example-tests:
     # Runs in parallel with build-and-test. Each matrix value is its own
@@ -64,6 +65,7 @@ jobs:
         example:
           - cloudflare-worker
           - playwright-test
+          - model-faults
     steps:
       - uses: actions/checkout@v4
 

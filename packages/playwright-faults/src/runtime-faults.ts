@@ -199,9 +199,25 @@ export function buildRuntimeFaultsScript(
         input instanceof URL ? input.toString() :
         (input && typeof input.url === "string") ? input.url :
         "";
+      // Two passes. A *scheduled* fault always advances its occurrence
+      // counter when its pattern matches, even if an earlier fault already
+      // claimed this call — otherwise two faults watching the same URL
+      // would number occurrences differently and a plan could not give
+      // occurrence 0 to one outcome and occurrence 1 to another. Faults on
+      // the probability path stay lazy (not consulted once a winner exists),
+      // so existing seeds draw exactly as many numbers as before.
+      let chosen = null;
       for (const f of fetchFaults) {
         if (!matchUrl(f.pattern, url)) continue;
-        if (!roll(f)) continue;
+        if (f.schedule) {
+          const fired = roll(f);
+          if (fired && !chosen) chosen = f;
+        } else if (!chosen) {
+          if (roll(f)) chosen = f;
+        }
+      }
+      if (chosen) {
+        const f = chosen;
         const a = f.action;
         const msg = a.rejectionMessage || "chaosbringer: simulated fetch failure";
         if (a.kind === "flaky-fetch") {

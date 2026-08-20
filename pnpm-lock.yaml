@@ -57,6 +57,34 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  examples/model-faults:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.0
+        version: 1.19.14(hono@4.12.17)
+      hono:
+        specifier: ^4.6.0
+        version: 4.12.17
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      chaosbringer:
+        specifier: workspace:*
+        version: link:../../packages/chaosbringer
+      playwright:
+        specifier: ^1.52.0
+        version: 1.59.1
+      tsx:
+        specifier: ^4.19.4
+        version: 4.21.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.0.7
+        version: 3.2.4(@types/node@22.19.17)(tsx@4.21.0)
+
   examples/playwright-test:
     devDependencies:
       '@playwright/test':

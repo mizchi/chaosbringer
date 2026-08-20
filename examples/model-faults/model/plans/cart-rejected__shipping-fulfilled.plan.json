@@ -1,0 +1,22 @@
+{
+  "name": "cart-rejected__shipping-fulfilled",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "cart",
+      "outcome": "reject",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "shipping",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 3
+}

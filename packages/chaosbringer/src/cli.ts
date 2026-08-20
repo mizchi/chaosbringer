@@ -58,6 +58,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
     import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
   parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
   journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
+  model: () => import("./model/cli.js").then((m) => m.runModelCli),
 };
 
 const rawSub = process.argv[2];

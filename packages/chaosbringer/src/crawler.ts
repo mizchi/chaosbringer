@@ -1439,6 +1439,15 @@ export class ChaosCrawler {
 
       // 1. Fault injection has priority so tests can exercise backends that
       // would otherwise be allowed through.
+      //
+      // Two passes. A *scheduled* rule always advances its occurrence
+      // counter when it matches, even if an earlier rule already claimed the
+      // request: two rules watching the same URL must agree on what
+      // "occurrence 3" means, or a plan cannot hand occurrence 0 to one
+      // outcome and occurrence 1 to another. Rules on the probability path
+      // stay lazy (never consulted once a winner exists), so existing seeds
+      // draw exactly as many numbers as before.
+      let winner: (typeof rules)[number] | null = null;
       for (const compiled of rules) {
         if (!compiled.pattern.test(url)) continue;
         if (compiled.methods && !compiled.methods.includes(method)) continue;
@@ -1447,12 +1456,22 @@ export class ChaosCrawler {
         // `schedule` reads it as a decision table; `probability` rolls the
         // crawler's seeded RNG (and only when prob < 1, so a probability-1
         // rule never shifts the seed sequence).
+        if (compiled.rule.schedule) {
+          const occurrence = compiled.matched;
+          compiled.matched++;
+          if (decideFault(compiled.rule, occurrence, this.rng) === "inject" && !winner) {
+            winner = compiled;
+          }
+          continue;
+        }
+        if (winner) continue;
         const occurrence = compiled.matched;
         compiled.matched++;
-        if (decideFault(compiled.rule, occurrence, this.rng) === "pass") continue;
-
-        compiled.injected++;
-        await applyFault(route, compiled.rule.fault, (held) => this.holdRoute(held));
+        if (decideFault(compiled.rule, occurrence, this.rng) === "inject") winner = compiled;
+      }
+      if (winner) {
+        winner.injected++;
+        await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
 
