@@ -323,6 +323,128 @@ describe("ChaosCrawler against fixture site", () => {
     expect(alwaysReport.summary.invariantViolations).toBeGreaterThanOrEqual(1);
   }, 120000);
 
+  it("reject-body surfaces the missed catch around res.json()", async () => {
+    // Baseline: the page renders fine, no unhandled rejection.
+    const clean = await new ChaosCrawler({
+      baseUrl: `${server.url}/api-json-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 3,
+    }).start();
+    expect(clean.summary.unhandledRejections).toBe(0);
+
+    // fetch resolves, res.json() rejects. The page's try/catch covers the
+    // fetch only, so the rejection escapes — which is the bug this fault
+    // is for. The DOM must also still say "loading…": the success branch
+    // never ran and no error branch exists.
+    const report = await new ChaosCrawler({
+      baseUrl: `${server.url}/api-json-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 3,
+      runtimeFaults: [
+        {
+          name: "body-boom",
+          // Fetch-scoped kinds match the *request* URL, not the page URL.
+          urlPattern: "/api/data$",
+          action: { kind: "reject-body", rejectionMessage: "truncated body" },
+        },
+      ],
+      invariants: [
+        {
+          name: "status-resolved",
+          urlPattern: "/api-json-consumer$",
+          when: "afterLoad",
+          check: async ({ page }) => {
+            const status = (await page.locator("#status").textContent())?.trim() ?? "";
+            return status !== "loading…" || "status stuck at loading";
+          },
+        },
+      ],
+    }).start();
+
+    expect(report.summary.unhandledRejections).toBeGreaterThanOrEqual(1);
+    expect(
+      report.pages[0]!.errors.some((e) => e.message.includes("truncated body"))
+    ).toBe(true);
+    expect(report.summary.invariantViolations).toBeGreaterThanOrEqual(1);
+    const stats = report.runtimeFaults!.find((f) => f.rule === "body-boom")!;
+    expect(stats.fired).toBeGreaterThanOrEqual(1);
+  }, 120000);
+
+  it("never-settle-fetch leaves the UI mid-flight without blocking the load", async () => {
+    // No request is issued, so `networkidle` still fires — the page simply
+    // never leaves its loading state. That is a missing-timeout bug.
+    const report = await new ChaosCrawler({
+      baseUrl: `${server.url}/api-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 4,
+      runtimeFaults: [
+        { name: "hang-fetch", urlPattern: "/api/data$", action: { kind: "never-settle-fetch" } },
+      ],
+      invariants: [
+        {
+          name: "status-resolved",
+          urlPattern: "/api-consumer$",
+          when: "afterLoad",
+          check: async ({ page }) => {
+            const status = (await page.locator("#status").textContent())?.trim() ?? "";
+            return status !== "loading…" || "status stuck at loading";
+          },
+        },
+      ],
+    }).start();
+
+    expect(report.summary.invariantViolations).toBeGreaterThanOrEqual(1);
+    expect(report.runtimeFaults!.find((f) => f.rule === "hang-fetch")!.fired).toBe(1);
+  }, 120000);
+
+  it("hang holds the request until releaseAfterMs, then the app sees a failure", async () => {
+    const report = await new ChaosCrawler({
+      baseUrl: `${server.url}/api-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 5,
+      faultInjection: [
+        {
+          name: "api-hang",
+          urlPattern: "/api/data$",
+          fault: { kind: "hang", releaseAfterMs: 300 },
+        },
+      ],
+    }).start();
+
+    const stats = report.faultInjections!.find((f) => f.rule === "api-hang")!;
+    expect(stats.injected).toBeGreaterThanOrEqual(1);
+    // Released as "timedout", so the page's catch branch runs.
+    expect(report.heldRequests).toBeUndefined();
+  }, 120000);
+
+  it("an unbounded hang is drained at page teardown and counted on the report", async () => {
+    // No releaseAfterMs: the route is parked until the page is torn down.
+    // `waitUntil: "networkidle"` therefore burns the page timeout — the run
+    // must still finish, and the held request must be reported.
+    const report = await new ChaosCrawler({
+      baseUrl: `${server.url}/api-consumer`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 6,
+      timeout: 2000,
+      faultInjection: [
+        { name: "api-park", urlPattern: "/api/data$", fault: { kind: "hang" } },
+      ],
+    }).start();
+
+    expect(report.heldRequests).toBe(1);
+    expect(report.faultInjections!.find((f) => f.rule === "api-park")!.injected).toBe(1);
+  }, 120000);
+
   it("honours fault probability and is reproducible with the same seed", async () => {
     // probability 0 means the rule never injects but still matches.
     const crawler = new ChaosCrawler({

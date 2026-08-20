@@ -84,6 +84,36 @@ export const faults = {
     return applyCommon(rule, opts);
   },
 
+  /**
+   * Hold the request open without ever responding, so the caller's promise
+   * never settles. Distinct from `delay`, which always eventually responds:
+   * this is the "spinner forever" fault.
+   *
+   * `releaseAfterMs` aborts with `"timedout"` after that long. Without it
+   * the request is held until the page closes — and because the crawler
+   * navigates with `waitUntil: "networkidle"`, a hang on a navigation-time
+   * request costs one page `timeout`. Prefer hanging what an action fires
+   * after load, or pass `releaseAfterMs`.
+   */
+  hang(opts: FaultHelperOptions & { releaseAfterMs?: number }): FaultRule {
+    if (
+      opts.releaseAfterMs !== undefined &&
+      (!Number.isFinite(opts.releaseAfterMs) || opts.releaseAfterMs < 0)
+    ) {
+      throw new Error(
+        `faults.hang: releaseAfterMs must be a non-negative finite number (got ${opts.releaseAfterMs})`,
+      );
+    }
+    const rule: FaultRule = {
+      urlPattern: opts.urlPattern,
+      fault: {
+        kind: "hang",
+        ...(opts.releaseAfterMs !== undefined ? { releaseAfterMs: opts.releaseAfterMs } : {}),
+      },
+    };
+    return applyCommon(rule, opts);
+  },
+
   /** Abort the request (e.g. to simulate a blocked third-party or transport failure). */
   abort(opts: FaultHelperOptions & { errorCode?: string }): FaultRule {
     const rule: FaultRule = {
@@ -191,6 +221,80 @@ export const faults = {
     const fault: RuntimeFault = {
       action: {
         kind: "flaky-fetch",
+        ...(opts?.rejectionMessage !== undefined
+          ? { rejectionMessage: opts.rejectionMessage }
+          : {}),
+      },
+    };
+    return applyRuntimeCommon(fault, opts);
+  },
+
+  /**
+   * Reject `window.fetch` with a chosen error shape — `"TypeError"`
+   * (network failure, the default) or `"AbortError"` (a `DOMException`, what
+   * an `AbortController` produces). Supersedes `flakyFetch`.
+   */
+  rejectFetch(
+    opts?: RuntimeHelperOptions & {
+      rejectAs?: "TypeError" | "AbortError";
+      rejectionMessage?: string;
+    },
+  ): RuntimeFault {
+    const fault: RuntimeFault = {
+      action: {
+        kind: "reject-fetch",
+        ...(opts?.rejectAs !== undefined ? { rejectAs: opts.rejectAs } : {}),
+        ...(opts?.rejectionMessage !== undefined
+          ? { rejectionMessage: opts.rejectionMessage }
+          : {}),
+      },
+    };
+    return applyRuntimeCommon(fault, opts);
+  },
+
+  /**
+   * Return a `fetch` promise that never settles, without issuing a request.
+   * Surfaces missing timeouts even in code paths that never hit the network.
+   */
+  neverSettleFetch(opts?: RuntimeHelperOptions): RuntimeFault {
+    const fault: RuntimeFault = { action: { kind: "never-settle-fetch" } };
+    return applyRuntimeCommon(fault, opts);
+  },
+
+  /**
+   * Let `fetch` resolve, then reject when the app reads the body
+   * (`res.json()` by default). Catches the classic missed `catch`: error
+   * handling wrapped around the fetch but not around `await res.json()`.
+   */
+  rejectBody(
+    opts?: RuntimeHelperOptions & {
+      consumers?: ReadonlyArray<"json" | "text" | "arrayBuffer" | "blob" | "formData">;
+      rejectionMessage?: string;
+    },
+  ): RuntimeFault {
+    const fault: RuntimeFault = {
+      action: {
+        kind: "reject-body",
+        ...(opts?.consumers !== undefined ? { consumers: opts.consumers } : {}),
+        ...(opts?.rejectionMessage !== undefined
+          ? { rejectionMessage: opts.rejectionMessage }
+          : {}),
+      },
+    };
+    return applyRuntimeCommon(fault, opts);
+  },
+
+  /**
+   * Resolve `fetch` with a rejecting thenable instead of rejecting
+   * directly: same outcome, one microtask later, via the spec's
+   * assimilation path. Exposes handlers attached too late.
+   */
+  rejectedThenable(
+    opts?: RuntimeHelperOptions & { rejectionMessage?: string },
+  ): RuntimeFault {
+    const fault: RuntimeFault = {
+      action: {
+        kind: "resolve-rejected-thenable",
         ...(opts?.rejectionMessage !== undefined
           ? { rejectionMessage: opts.rejectionMessage }
           : {}),

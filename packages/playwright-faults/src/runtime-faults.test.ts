@@ -280,3 +280,60 @@ describe("faults.flakyFetch / faults.clockSkew round-trip via compile", () => {
     expect(compiled[1]!.name).toBe("clock-skew:30000ms");
   });
 });
+
+describe("Promise-level fetch faults", () => {
+  it("names every new kind distinctly", () => {
+    expect(runtimeFaultName({ action: { kind: "reject-fetch" } })).toBe("reject-fetch:TypeError");
+    expect(
+      runtimeFaultName({ action: { kind: "reject-fetch", rejectAs: "AbortError" } }),
+    ).toBe("reject-fetch:AbortError");
+    expect(runtimeFaultName({ action: { kind: "never-settle-fetch" } })).toBe(
+      "never-settle-fetch",
+    );
+    expect(runtimeFaultName({ action: { kind: "reject-body" } })).toBe("reject-body:json");
+    expect(
+      runtimeFaultName({ action: { kind: "reject-body", consumers: ["json", "text"] } }),
+    ).toBe("reject-body:json+text");
+    expect(runtimeFaultName({ action: { kind: "resolve-rejected-thenable" } })).toBe(
+      "resolve-rejected-thenable",
+    );
+  });
+
+  it("emits one patched fetch that dispatches on every fetch-scoped kind", () => {
+    const script = buildRuntimeFaultsScript(
+      [
+        { action: { kind: "reject-fetch", rejectAs: "AbortError" }, urlPattern: /\/a$/ },
+        { action: { kind: "never-settle-fetch" }, urlPattern: /\/b$/ },
+        { action: { kind: "reject-body", consumers: ["json"] }, urlPattern: /\/c$/ },
+        { action: { kind: "resolve-rejected-thenable" }, urlPattern: /\/d$/ },
+      ],
+      7,
+    );
+    // Exactly one fetch patch, dispatching internally — not four.
+    expect(script.match(/window\.fetch = function chaosFetch/g)).toHaveLength(1);
+    expect(script).toContain('AbortError');
+    expect(script).toContain("new Promise(() => {})");
+    expect(script).toContain("Object.defineProperty(res, name");
+    expect(script).toContain("then: (_resolve, reject)");
+  });
+
+  it("guards the fetch patch so a clock-skew-only config installs nothing", () => {
+    // The patch source is always emitted; installing it is guarded at run
+    // time on there being at least one fetch-scoped fault.
+    const script = buildRuntimeFaultsScript([{ action: { kind: "clock-skew", skewMs: 1000 } }], 1);
+    expect(script).toContain(
+      'if (fetchFaults.length > 0 && typeof window.fetch === "function")',
+    );
+    expect(script).toContain('"clock-skew"');
+    // …and the serialized fault list carries no fetch-scoped kind at all.
+    const serialized = script.slice(script.indexOf("const faults = ["));
+    expect(serialized.slice(0, serialized.indexOf("];"))).not.toContain("fetch");
+  });
+
+  it("keeps flaky-fetch working as the TypeError alias", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "flaky-fetch" } }], 1);
+    expect(script).toContain("chaosFetch");
+    expect(script).toContain("new TypeError(msg)");
+  });
+});
+

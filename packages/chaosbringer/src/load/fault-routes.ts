@@ -6,6 +6,7 @@
  * shared abstraction here would over-couple two evolving callers.
  */
 import type { BrowserContext, Route, Request } from "playwright";
+import { decideFault } from "../schedule.js";
 import type { Fault, FaultRule, FaultInjectionStats, UrlMatcher } from "../types.js";
 
 interface CompiledRule {
@@ -22,6 +23,13 @@ interface CompiledRule {
    */
   firings: number[];
 }
+
+/**
+ * Upper bound for a `hang` fault with no explicit `releaseAfterMs` in a load
+ * run. Long enough that the app has clearly missed any sane timeout, short
+ * enough that a worker isn't wedged for the rest of the run.
+ */
+const LOAD_HANG_RELEASE_MS = 30_000;
 
 function toRegExp(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return /.*/;
@@ -76,6 +84,19 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
       await new Promise((r) => setTimeout(r, fault.ms));
       await route.fallback();
       return;
+    case "hang": {
+      // Load runs have no per-page teardown hook to drain parked routes, so
+      // a hang always gets a bound here: `releaseAfterMs` when given, else
+      // LOAD_HANG_RELEASE_MS. Until then the request stays in flight, which
+      // is the fault.
+      const ms = fault.releaseAfterMs ?? LOAD_HANG_RELEASE_MS;
+      setTimeout(() => {
+        void route.abort("timedout").catch(() => {
+          /* context already gone */
+        });
+      }, ms);
+      return;
+    }
   }
 }
 
@@ -95,9 +116,12 @@ export async function installFaultRoutes(
     for (const c of compiled) {
       if (!c.pattern.test(url)) continue;
       if (c.methods && !c.methods.includes(method)) continue;
+      const occurrence = c.matched;
       c.matched += 1;
-      const probability = c.rule.probability ?? 1;
-      if (Math.random() >= probability) continue;
+      // Load runs are unseeded by design (workers run concurrently), so the
+      // probability path draws from Math.random; a `schedule` ignores the RNG
+      // entirely and reads its decision table by occurrence.
+      if (decideFault(c.rule, occurrence, { next: Math.random }) === "pass") continue;
       c.injected += 1;
       c.firings.push(Date.now());
       await applyFault(route, c.rule.fault);

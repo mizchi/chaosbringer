@@ -174,6 +174,36 @@ const pages: Record<string, Route> = {
     }),
   },
 
+  // The classic missed `catch`: the fetch is guarded, `res.json()` is not.
+  // A body that rejects therefore escapes as an unhandled rejection even
+  // though the page "handles fetch errors". Exercises `reject-body`.
+  "/api-json-consumer": {
+    body: html({
+      title: "API JSON Consumer",
+      nav: true,
+      body: `
+        <h1>API JSON Consumer</h1>
+        <p id="status">loading…</p>
+        <script>
+          async function load() {
+            let res;
+            try {
+              res = await fetch("/api/data");
+            } catch (err) {
+              document.getElementById("status").textContent = "network error";
+              return;
+            }
+            // Outside the try — a rejecting body is unhandled.
+            const data = await res.json();
+            document.getElementById("status").textContent = "ok:" + data.items.length;
+          }
+          load();
+        </script>
+        <a href="/">back</a>
+      `,
+    }),
+  },
+
   "/api/data": {
     body: JSON.stringify({ ok: true, items: [1, 2, 3] }),
     contentType: "application/json; charset=utf-8",

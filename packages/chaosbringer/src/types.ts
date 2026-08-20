@@ -650,6 +650,13 @@ export interface CrawlReport {
   /** Per-rule fault injection stats (present only when rules were configured). */
   faultInjections?: FaultInjectionStats[];
   /**
+   * Requests parked by a `hang` fault (the ones with no `releaseAfterMs`,
+   * which the crawler aborts at page teardown). Present only when at least
+   * one request was held — a non-zero count means the app was left waiting
+   * on a promise that never settled, which is usually the point.
+   */
+  heldRequests?: number;
+  /**
    * Per-fault lifecycle fault stats (present only when `lifecycleFaults` was
    * configured). One row per `LifecycleFault`, regardless of how many pages
    * matched.

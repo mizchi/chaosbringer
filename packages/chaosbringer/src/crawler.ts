@@ -361,6 +361,14 @@ export class ChaosCrawler {
     matched: number;
     injected: number;
   }> = [];
+  /**
+   * Routes held open by a `hang` fault with no `releaseAfterMs`. Drained
+   * (aborted with "timedout") when the page that issued them is torn down,
+   * so a hung request can't keep the context from closing. `heldRequests`
+   * survives the drain for the report.
+   */
+  private heldRoutes: Route[] = [];
+  private heldRequests = 0;
   /** Page-lifecycle faults compiled once at construction time. */
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
   /** Compiled runtime faults — installed once at context level via init script. */
@@ -1303,6 +1311,29 @@ export class ChaosCrawler {
    * are caught and recorded in the fault's stats counter — a misbehaving
    * fault should not abort the rest of the crawl.
    */
+  /** Register a route parked by a `hang` fault. */
+  private holdRoute(route: Route): void {
+    this.heldRoutes.push(route);
+    this.heldRequests++;
+  }
+
+  /**
+   * Abort every parked route. Called on page teardown and at crawl end;
+   * safe to call repeatedly (aborting a dead route is swallowed).
+   */
+  private async drainHeldRoutes(): Promise<void> {
+    if (this.heldRoutes.length === 0) return;
+    const held = this.heldRoutes;
+    this.heldRoutes = [];
+    await Promise.all(
+      held.map((route) =>
+        route.abort("timedout").catch(() => {
+          /* page already gone — the request died with it */
+        }),
+      ),
+    );
+  }
+
   private async applyLifecycleStage(
     stage: LifecycleStage,
     page: Page,
@@ -1421,7 +1452,7 @@ export class ChaosCrawler {
         if (decideFault(compiled.rule, occurrence, this.rng) === "pass") continue;
 
         compiled.injected++;
-        await applyFault(route, compiled.rule.fault);
+        await applyFault(route, compiled.rule.fault, (held) => this.holdRoute(held));
         return;
       }
 
@@ -1563,6 +1594,9 @@ export class ChaosCrawler {
         }
         this.coverageCollector = null;
       }
+      // Release hung requests before the page goes away, so `page.close()`
+      // isn't racing a route handler that never responded.
+      await this.drainHeldRoutes();
       await page.close();
     }
   }
@@ -2723,6 +2757,7 @@ export class ChaosCrawler {
       actions: this.actions,
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
+      heldRequests: this.heldRequests > 0 ? this.heldRequests : undefined,
       lifecycleFaults:
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
@@ -2924,6 +2959,14 @@ export function validateOptions(options: CrawlerOptions): void {
         );
       }
     }
+    if (rule.fault.kind === "hang" && rule.fault.releaseAfterMs !== undefined) {
+      const ms = rule.fault.releaseAfterMs;
+      if (!Number.isFinite(ms) || ms < 0) {
+        throw new Error(
+          `chaosbringer: ${label} hang releaseAfterMs must be a non-negative finite number (got ${JSON.stringify(ms)})`
+        );
+      }
+    }
   }
 
   const VALID_STAGES = new Set([
@@ -3004,9 +3047,40 @@ export function validateOptions(options: CrawlerOptions): void {
       }
     }
     const a = fault.action;
+    const assertMessage = (kind: string, message: unknown): void => {
+      if (message !== undefined && typeof message !== "string") {
+        throw new Error(`chaosbringer: ${label} ${kind} rejectionMessage must be a string`);
+      }
+    };
     if (a.kind === "flaky-fetch") {
-      if (a.rejectionMessage !== undefined && typeof a.rejectionMessage !== "string") {
-        throw new Error(`chaosbringer: ${label} flaky-fetch rejectionMessage must be a string`);
+      assertMessage("flaky-fetch", a.rejectionMessage);
+    } else if (a.kind === "reject-fetch") {
+      assertMessage("reject-fetch", a.rejectionMessage);
+      if (a.rejectAs !== undefined && a.rejectAs !== "TypeError" && a.rejectAs !== "AbortError") {
+        throw new Error(
+          `chaosbringer: ${label} reject-fetch rejectAs must be "TypeError" or "AbortError" (got ${JSON.stringify(a.rejectAs)})`
+        );
+      }
+    } else if (a.kind === "never-settle-fetch") {
+      // No fields to validate.
+    } else if (a.kind === "resolve-rejected-thenable") {
+      assertMessage("resolve-rejected-thenable", a.rejectionMessage);
+    } else if (a.kind === "reject-body") {
+      assertMessage("reject-body", a.rejectionMessage);
+      const VALID_CONSUMERS = new Set(["json", "text", "arrayBuffer", "blob", "formData"]);
+      if (a.consumers !== undefined) {
+        if (!Array.isArray(a.consumers) || a.consumers.length === 0) {
+          throw new Error(
+            `chaosbringer: ${label} reject-body consumers must be a non-empty array`
+          );
+        }
+        for (const c of a.consumers) {
+          if (!VALID_CONSUMERS.has(c)) {
+            throw new Error(
+              `chaosbringer: ${label} reject-body consumers entry is not recognized (got ${JSON.stringify(c)})`
+            );
+          }
+        }
       }
     } else if (a.kind === "clock-skew") {
       if (!Number.isFinite(a.skewMs) || !Number.isInteger(a.skewMs)) {
@@ -3345,7 +3419,20 @@ export function findFaultRuleShadows(
   return out;
 }
 
-async function applyFault(route: Route, fault: Fault): Promise<void> {
+/**
+ * Realise one `Fault` on a matched route.
+ *
+ * `hold` is the crawler's held-route registry, used only by `hang`: a hung
+ * request must stay in flight, so the handler returns without responding and
+ * the registry aborts it later (page teardown, or `releaseAfterMs`). Without
+ * that registry a hung route would keep the browser context from closing
+ * cleanly.
+ */
+async function applyFault(
+  route: Route,
+  fault: Fault,
+  hold?: (route: Route) => void,
+): Promise<void> {
   switch (fault.kind) {
     case "abort":
       await route.abort(fault.errorCode ?? "failed");
@@ -3367,5 +3454,20 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
       await new Promise((r) => setTimeout(r, fault.ms));
       await route.fallback();
       return;
+    case "hang": {
+      // Deliberately do not respond and do not await: returning leaves the
+      // request in flight, which is the whole point of the fault.
+      if (fault.releaseAfterMs !== undefined) {
+        const ms = fault.releaseAfterMs;
+        setTimeout(() => {
+          void route.abort("timedout").catch(() => {
+            /* page may already be gone */
+          });
+        }, ms);
+        return;
+      }
+      hold?.(route);
+      return;
+    }
   }
 }

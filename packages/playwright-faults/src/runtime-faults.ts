@@ -46,6 +46,14 @@ export function runtimeFaultName(fault: RuntimeFault): string {
   switch (a.kind) {
     case "flaky-fetch":
       return "flaky-fetch";
+    case "reject-fetch":
+      return `reject-fetch:${a.rejectAs ?? "TypeError"}`;
+    case "never-settle-fetch":
+      return "never-settle-fetch";
+    case "reject-body":
+      return `reject-body:${(a.consumers ?? ["json"]).join("+")}`;
+    case "resolve-rejected-thenable":
+      return "resolve-rejected-thenable";
     case "clock-skew":
       return `clock-skew:${a.skewMs}ms`;
   }
@@ -168,10 +176,23 @@ export function buildRuntimeFaultsScript(
     return fired;
   };
 
-  // --- flaky-fetch ---
-  const fetchFaults = faults.filter((f) => f.action.kind === "flaky-fetch");
+  // --- fetch-scoped faults (Promise-level failure modes) ---
+  const FETCH_KINDS = [
+    "flaky-fetch",
+    "reject-fetch",
+    "never-settle-fetch",
+    "reject-body",
+    "resolve-rejected-thenable",
+  ];
+  const fetchFaults = faults.filter((f) => FETCH_KINDS.indexOf(f.action.kind) !== -1);
   if (fetchFaults.length > 0 && typeof window.fetch === "function") {
     const realFetch = window.fetch.bind(window);
+    const makeError = (rejectAs, msg) => {
+      if (rejectAs === "AbortError" && typeof DOMException === "function") {
+        return new DOMException(msg, "AbortError");
+      }
+      return new TypeError(msg);
+    };
     window.fetch = function chaosFetch(input, init) {
       const url =
         typeof input === "string" ? input :
@@ -179,9 +200,46 @@ export function buildRuntimeFaultsScript(
         (input && typeof input.url === "string") ? input.url :
         "";
       for (const f of fetchFaults) {
-        if (matchUrl(f.pattern, url) && roll(f)) {
-          const msg = f.action.rejectionMessage || "chaosbringer: simulated fetch failure";
+        if (!matchUrl(f.pattern, url)) continue;
+        if (!roll(f)) continue;
+        const a = f.action;
+        const msg = a.rejectionMessage || "chaosbringer: simulated fetch failure";
+        if (a.kind === "flaky-fetch") {
           return Promise.reject(new TypeError(msg));
+        }
+        if (a.kind === "reject-fetch") {
+          return Promise.reject(makeError(a.rejectAs, msg));
+        }
+        if (a.kind === "never-settle-fetch") {
+          // No request, no settlement — the caller waits forever.
+          return new Promise(() => {});
+        }
+        if (a.kind === "resolve-rejected-thenable") {
+          // Resolving *with a thenable* means the rejection arrives one
+          // microtask later, through the assimilation path.
+          return Promise.resolve({
+            then: (_resolve, reject) => { reject(makeError(a.rejectAs, msg)); },
+          });
+        }
+        if (a.kind === "reject-body") {
+          const consumers = a.consumers && a.consumers.length > 0 ? a.consumers : ["json"];
+          return realFetch(input, init).then((res) => {
+            // Own properties shadow Response.prototype, so "instanceof
+            // Response", res.ok, headers and status all stay real — only
+            // the body consumers reject.
+            for (const name of consumers) {
+              try {
+                Object.defineProperty(res, name, {
+                  configurable: true,
+                  writable: true,
+                  value: () => Promise.reject(new TypeError(msg)),
+                });
+              } catch (e) {
+                // Frozen response (shouldn't happen) — leave it alone.
+              }
+            }
+            return res;
+          });
         }
       }
       return realFetch(input, init);
