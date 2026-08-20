@@ -79,6 +79,16 @@ export type TimingConstraint =
   | "fast_tolerated"
   /** A "too slow" delay misses the bound, best case included. */
   | "slow_trips"
+  /**
+   * A "too slow" delay also outlasts the probe.
+   *
+   * Missing the app's bound is not enough to be *observable*: against an app
+   * with no bound at all — the very thing a timing plan is trying to detect —
+   * the response still arrives, and if it lands before the probe the page
+   * reads as "ready" instead of "stuck". So the tripping delay has to survive
+   * the settle window too.
+   */
+  | "slow_outlasts_probe"
   /** The probe fires after the app's own bound has resolved. */
   | "probe_after_deadline"
   /** A hung request outlasts the probe, so "stuck" is observable. */
@@ -173,7 +183,11 @@ export function solveTiming(
 
   const settleMs = deadline + tight + margin;
   const fastMs = deadline - tail - margin;
-  const slowMs = deadline + tight + margin - floor;
+  // Two requirements, and the second is the one that is easy to miss: the
+  // tripping delay must miss the deadline (settle >= deadline + tight + margin
+  // covers that) *and* outlast the probe, or an unbounded app answers
+  // mid-probe and reads as healthy.
+  const slowMs = settleMs + margin - floor;
   const releaseMs = settleMs + margin;
   const pageTimeoutMs = fixed + settleMs + tail + margin;
 
@@ -181,6 +195,10 @@ export function solveTiming(
   if (fastMs < floor) core.push("expressible", "fast_tolerated");
   if (slowMs < floor) core.push("expressible", "slow_trips");
   if (pageTimeoutMs > budget) core.push("fits_page_timeout", "within_budget");
+
+  // slowMs is derived from settleMs, so this cannot fail independently — but
+  // assert the relationship rather than trusting the algebra to stay right.
+  if (slowMs + floor < settleMs + margin) core.push("slow_outlasts_probe");
 
   if (core.length > 0) {
     return {
@@ -292,6 +310,14 @@ export function checkTiming(
       constraint: "slow_trips",
       slackMs: proposed.slowMs + floor - (deadline + tight + margin),
       detail: `slowMs=${proposed.slowMs} + floor ${floor} must be >= deadline ${deadline} + tightTail ${tight} + margin ${margin}`,
+    });
+    // Against an unbounded app the response still arrives; if it lands before
+    // the probe, "no deadline at all" is indistinguishable from "handled".
+    const settle = proposed.settleMs ?? deadline + tight + margin;
+    rows.push({
+      constraint: "slow_outlasts_probe",
+      slackMs: proposed.slowMs + floor - (settle + margin),
+      detail: `slowMs=${proposed.slowMs} + floor ${floor} must be >= settleMs ${settle} + margin ${margin}, or an unbounded app answers mid-probe and reads as ready`,
     });
   }
   if (proposed.releaseMs !== undefined && proposed.settleMs !== undefined) {

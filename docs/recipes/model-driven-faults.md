@@ -98,6 +98,8 @@ Outcomes are model-level, and the runner maps them onto fault kinds:
 | `reject-body` | `reject-body` (`res.json()` rejects) | runtime |
 | `hang` | `never-settle-fetch` | runtime |
 | `status` | `faults.status(500)` | network |
+| `slow-ok` | `faults.delay(<solved>)` — slow, still inside the app's bound | network |
+| `slow-trip` | `faults.delay(<solved>)` — past the bound *and* past the probe | network |
 
 One operation cannot mix layers: a client-side rejection issues no request, so
 a network rule and a runtime fault on the same operation would number
@@ -128,6 +130,55 @@ export default {
 3. **`injection`** — *did the planned faults actually fire?* Without this a
    plan whose request the app never issues looks like a pass, and the coverage
    claim becomes a lie.
+
+## Timing is solved, not guessed
+
+`slow-ok` and `slow-trip` carry no millisecond value, because the right value
+depends on the machine. Give the runner the app's own bound and a measured
+profile, and it solves the rest:
+
+```bash
+chaosbringer model calibrate --url http://localhost:3000 --runs 3 --out model/profile.json
+```
+
+```js
+// bridge.mjs — no settleMs, no delay constants
+export default {
+  appDeadlineMs: 700,       // must match the app's own AbortSignal.timeout
+  timingProfile: JSON.parse(readFileSync(new URL("./profile.json", import.meta.url), "utf8")),
+  // …rules / action / uiProbe
+};
+```
+
+What the solver derives, and why each one matters:
+
+| value | rule | what goes wrong without it |
+|---|---|---|
+| `settleMs` | `>= deadline + tightTail + margin` | a probe that fires before the app's own deadline reports a correctly-bounded request as `stuck` |
+| `slow-ok` delay | `<= deadline − delayTail − margin` | jitter pushes a "tolerable" delay past the deadline and the plan flakes |
+| `slow-trip` delay | `>= settleMs + margin − floor` | against an app with *no* bound the response still arrives; landing mid-probe, it reads as healthy |
+| `releaseMs` | `>= settleMs + margin` | a hang released before the probe is not observable as a hang |
+| `pageTimeout` | `>= fixed + settleMs + delayTail + margin` | the crawler kills the run mid-probe |
+
+Infeasible is a first-class answer. A deadline smaller than the machine's own
+jitter cannot be tested at all, and the solver says so with the number to fix:
+
+```
+no expressible delay is tolerable under a 120ms deadline: this environment's
+jitter is 118ms and its floor is 4ms, so even the smallest injectable delay can
+be observed at 122ms. Raise the deadline above 147ms […]
+```
+
+Two measured facts worth internalising, from
+[the solver's notes](../superpowers/specs/2026-08-20-timing-solver/):
+
+- **Deadlines are exact, injected delays are not.** `AbortSignal.timeout` fired
+  within 3ms of nominal; an injected delay overshot by up to 107ms on a cold
+  run. So delay-side separations need ~120ms of margin and probe-side ones
+  need ~5ms — an asymmetry no hand-picked constant encodes.
+- **The margin is load-bearing.** A delay 133ms closer to the deadline than the
+  solved one misclassified 2 of 15 trials unthrottled, 4 of 15 under 4× CPU
+  throttle. The solved value held 15/15 in both.
 
 ## Determinism boundary
 

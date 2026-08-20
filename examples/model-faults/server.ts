@@ -39,6 +39,7 @@ export function createApp(fixed: boolean): Hono {
       `<script>window.__CHECKOUT_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__ORDER_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__TOKEN_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__SLOW_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -123,6 +124,17 @@ export function createApp(fixed: boolean): Hono {
     const session = c.req.query("session") ?? "anonymous";
     return c.json({ refreshes: refreshes.get(session) ?? 0 });
   });
+
+  // --- timeout-ladder pattern ------------------------------------------
+  //
+  // The endpoint itself is always fast; slowness is injected by a plan, with
+  // the actual millisecond values solved from this machine's calibration.
+  app.get("/slow", (c) => c.html(pageWithFlags("slow.html", fixed)));
+  app.get("/slow.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "slow.js"), "utf8"));
+  });
+  app.get("/api/report", (c) => c.json({ rows: 128, generatedAt: "2026-08-20" }));
 
   app.get("/api/orders/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";

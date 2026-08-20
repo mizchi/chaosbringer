@@ -12,7 +12,10 @@ from z3 import Int, Optimize, sat
 def closed_form(deadline, floor, tail, tight, margin, fixed, budget):
     settle = deadline + tight + margin
     fast = deadline - tail - margin
-    slow = deadline + tight + margin - floor
+    # The tripping delay must miss the deadline AND outlast the probe: against
+    # an app with no bound the response still arrives, and one that lands
+    # mid-probe reads as healthy.
+    slow = settle + margin - floor
     release = settle + margin
     page = fixed + settle + tail + margin
     if fast < floor or slow < floor or page > budget:
@@ -25,6 +28,7 @@ def z3_optimum(deadline, floor, tail, tight, margin, fixed, budget):
     o.add(fast >= floor, slow >= floor, settle >= 0, release >= floor)
     o.add(fast + tail + margin <= deadline)
     o.add(slow + floor >= deadline + tight + margin)
+    o.add(slow + floor >= settle + margin)
     o.add(settle >= deadline + tight + margin)
     o.add(settle + margin <= release)
     o.add(fixed + settle + tail + margin <= page)

@@ -19,8 +19,16 @@ import {
   type PlanRunResult,
 } from "chaosbringer";
 import { afterAll, describe, expect, it } from "vitest";
+import { resolvePlanTiming } from "chaosbringer";
 import { startServer, type StartedServer } from "../server.js";
 import { PATTERNS } from "./index.mjs";
+import timeoutLadderBridge from "./timeout-ladder/bridge.mjs";
+
+/** Bridges are plain JS modules; this keeps the import list honest. */
+function bridgeOf(name: string) {
+  if (name === "timeout-ladder") return timeoutLadderBridge;
+  throw new Error(`no bridge wired for ${name}`);
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const servers: StartedServer[] = [];
@@ -143,4 +151,59 @@ describe("pattern: token-refresh", () => {
     expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
   }, 300000);
 });
+
+describe("pattern: timeout-ladder", () => {
+  const pattern = PATTERNS.find((p) => p.name === "timeout-ladder")!;
+
+  it("keeps milliseconds out of the committed plans", async () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(3); // quick | slow-but-tolerable | too-slow
+    expect(plans.map((p) => p.schedule[0]!.outcome).sort()).toEqual([
+      "pass",
+      "slow-ok",
+      "slow-trip",
+    ]);
+    // Portability: the plan says "slow", never "553ms". The milliseconds come
+    // from the local profile, so the same plan works on a slower runner.
+    expect(JSON.stringify(plans)).not.toMatch(/\d{3,}/);
+  });
+
+  it("derives the delays from the app's own deadline", async () => {
+    const appSource = readFileSync(join(here, "..", "public", "slow.js"), "utf8");
+    const declared = Number(appSource.match(/const DEADLINE_MS = (\d+)/)![1]);
+    expect(bridgeOf("timeout-ladder").appDeadlineMs).toBe(declared);
+
+    const timing = resolvePlanTiming({
+      appDeadlineMs: declared,
+      timingProfile: bridgeOf("timeout-ladder").timingProfile,
+    });
+    // "Slow but tolerable" must land inside the app's bound…
+    expect(timing.delays!.fastMs).toBeLessThan(declared);
+    // …and "too slow" must outlast the probe, not merely the deadline: an
+    // unbounded app still answers, and one that answers mid-probe reads as
+    // healthy. This exact off-by-a-margin produced a false pass before the
+    // slow_outlasts_probe constraint existed.
+    expect(timing.delays!.slowMs).toBeGreaterThan(timing.settleMs);
+  });
+
+  it("catches the missing bound, and tolerates merely-slow responses", async () => {
+    const results = await run(pattern, false);
+    const tooSlow = results.find((r) => r.plan.name === "report-tooSlow")!;
+    expect(tooSlow.mismatches.map((m) => m.field)).toEqual(["ui"]);
+    expect(tooSlow.observed.ui).toBe("stuck");
+
+    // The control: slow-but-inside-the-bound must render fine even in the
+    // buggy variant. An app that failed here would be broken in the other
+    // direction, and only enumerating the extremes would miss it.
+    expect(results.find((r) => r.plan.name === "report-slow")!.mismatches).toEqual([]);
+    expect(results.find((r) => r.plan.name === "report-quick")!.mismatches).toEqual([]);
+  }, 300000);
+
+  it("passes every rung once the request is bounded", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+
 

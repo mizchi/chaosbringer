@@ -24,4 +24,13 @@ export const PATTERNS = [
       "one refresh per 401 hammers the endpoint you least want to overload, and on a rotating " +
       "refresh token the second one invalidates the first and logs the user out.",
   },
+  {
+    name: "timeout-ladder",
+    path: "/slow",
+    spec: "patterns/timeout-ladder/ladder.qnt",
+    catches:
+      "a request with no bound. Slow and never are different failures: the first must still " +
+      "render, the second must give up. An unbounded app handles the slow case perfectly, which " +
+      "is why the missing bound survives review — and spins forever on the other.",
+  },
 ];

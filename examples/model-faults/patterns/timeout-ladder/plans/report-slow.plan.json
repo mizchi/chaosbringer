@@ -1,0 +1,16 @@
+{
+  "name": "report-slow",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "report",
+      "outcome": "slow-ok",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "ready",
+    "unhandledRejection": false
+  },
+  "modelSteps": 2
+}

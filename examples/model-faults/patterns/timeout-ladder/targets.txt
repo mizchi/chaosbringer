@@ -1,0 +1,6 @@
+reachable    report-quick
+reachable    report-slow
+reachable    report-tooSlow
+unreachable  contract-forbids-stuck
+unreachable  contract-forbids-slow-error
+unreachable  contract-forbids-unhandled

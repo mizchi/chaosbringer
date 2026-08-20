@@ -360,7 +360,8 @@ describe("resolvePlanTiming", () => {
   it("solves the settle window and the timing delays from the profile", () => {
     const t = resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED });
     expect(t.settleMs).toBe(5097);
-    expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5093 });
+    // slowMs outlasts the probe, not merely the deadline: settle 5097 + 25 - 4.
+    expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5118 });
     expect(t.solved?.pageTimeoutMs).toBe(5936);
   });
 
@@ -375,7 +376,7 @@ describe("resolvePlanTiming", () => {
     const t = resolvePlanTiming({ settleMs: 6000, appDeadlineMs: 5000, timingProfile: MEASURED });
     expect(t.settleMs).toBe(6000);
     // …and still exposes the solved delays, so timing plans work.
-    expect(t.delays?.slowMs).toBe(5093);
+    expect(t.delays?.slowMs).toBe(5118);
   });
 
   it("refuses a deadline this environment cannot resolve at all", () => {

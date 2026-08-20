@@ -31,7 +31,7 @@ describe("solveTiming", () => {
     // safety 2 => delayTail 118, tightTail 72; margin 25.
     expect(r.settleMs).toBe(5097); // 5000 + 72 + 25
     expect(r.fastMs).toBe(4857); // 5000 - 118 - 25
-    expect(r.slowMs).toBe(5093); // 5000 + 72 + 25 - 4
+    expect(r.slowMs).toBe(5118); // settle 5097 + margin 25 - floor 4
     expect(r.releaseMs).toBe(5122); // settle + margin
     expect(r.pageTimeoutMs).toBe(5936); // 696 + 5097 + 118 + 25
     expect(r.wallClockMs).toBe(5793); // fixed + settle
@@ -107,6 +107,20 @@ describe("checkTiming", () => {
     // Solved values sit exactly on the boundary — that is what "tightest" means.
     expect(check.rows.every((r) => r.slackMs >= 0)).toBe(true);
     expect(check.rows.some((r) => r.slackMs === 0)).toBe(true);
+  });
+
+  it("requires the tripping delay to outlast the probe, not just the deadline", () => {
+    // 5093ms misses a 5000ms deadline, so a bounded app fails as intended —
+    // but an UNBOUNDED app answers at ~5093ms, before the 5097ms probe, and
+    // reads as ready. That is precisely the app a timing plan is hunting.
+    const check = checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5093, settleMs: 5097 });
+    expect(check.rows.find((r) => r.constraint === "slow_trips")!.slackMs).toBeGreaterThanOrEqual(0);
+    const outlasts = check.violations.find((r) => r.constraint === "slow_outlasts_probe")!;
+    expect(outlasts.slackMs).toBe(-25);
+    // The solved value satisfies both.
+    expect(
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5118, settleMs: 5097 }).ok,
+    ).toBe(true);
   });
 
   it("rejects the value that empirically flaked (590ms under a 600ms deadline)", () => {
