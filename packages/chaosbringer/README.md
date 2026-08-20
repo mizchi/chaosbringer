@@ -23,7 +23,9 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
-- **Runtime fault injection** — persistent in-page monkey-patches (`flaky-fetch`, `clock-skew`) installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach (e.g. `fetch` rejection before any request goes out).
+- **Runtime fault injection** — persistent in-page monkey-patches installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach: `reject-fetch` (TypeError or AbortError), `never-settle-fetch`, `reject-body` (`res.json()` rejects after the fetch resolved), `resolve-rejected-thenable`, `clock-skew`.
+- **Deterministic fault schedules** — `schedule: { decisions: ["inject", "pass"] }` on any fault layer replaces the probability roll with a per-occurrence decision table, so "fail the first call, pass the retry" is a test rather than a lucky run. Consumes no RNG, so seeds stay stable.
+- **Model-driven fault coverage** — a temporal-logic model (Quint / ITF) enumerates the failure space, `chaosbringer model compile` turns each witness into a committed `FaultPlan`, and `model run` replays every state with the model as the oracle. Reports which states are reachable, which are unreachable within the bound, and which plans the app never actually exercised.
 - **Coverage-guided action selection** — opt-in V8 precise coverage feedback (CDP `Profiler.takePreciseCoverage`) attributes per-action coverage deltas to the target that fired them and biases subsequent action weights toward targets that historically delivered new code paths.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
@@ -181,6 +183,26 @@ await chaos({
 ```
 
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
+
+### Deterministic schedules
+
+`probability` cannot say "fail the first call, let the retry through". `schedule` can: a decision table indexed by how many times the rule has already matched.
+
+```ts
+faultInjection: [
+  faults.status(500, {
+    urlPattern: /\/api\/cart$/,
+    schedule: { decisions: ["inject", "pass"] }, // 1st call 500s, retry works
+  }),
+],
+```
+
+- `afterEnd` decides what happens past the table: `"pass"` (default — spent), `"inject"` (keep firing), `"repeat"` (cycle it).
+- Available on all four layers (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`). `probability` + `schedule` together is a validation error.
+- A schedule consumes no RNG, so adding one leaves the seed sequence — and therefore chaos action selection — untouched.
+- Faults watching the same URL share occurrence numbering, so occurrence 0 can get one fault kind and occurrence 2 another. Don't split one endpoint across the network and runtime layers this way: a client-side rejection issues no request, so the network counter never advances.
+
+To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](../../docs/recipes/model-driven-faults.md).
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
 
@@ -391,7 +413,22 @@ await chaos({
 });
 ```
 
+Promise-shaped kinds, for the failure modes a network mock cannot express:
+
+| Helper | What the app sees | Bug it exposes |
+| --- | --- | --- |
+| `faults.rejectFetch({ rejectAs })` | `fetch` rejects with a `TypeError` (default) or a `DOMException` named `AbortError` | Handlers that branch on `instanceof TypeError`; a retry banner shown on a user cancel |
+| `faults.rejectBody()` | `fetch` resolves, then `res.json()` rejects | The classic missed `catch`: guarded fetch, unguarded `await res.json()` |
+| `faults.neverSettleFetch()` | the promise never settles, no request is issued | Missing timeout. Because nothing is in flight, `networkidle` still fires — the UI simply never leaves loading |
+| `faults.rejectedThenable()` | same rejection, one microtask later, via thenable assimilation | Handlers attached too late |
+
+`faults.flakyFetch()` still works; it is `rejectFetch({ rejectAs: "TypeError" })`.
+
+The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked until page teardown and counted in `report.heldRequests`; since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
+
 The probability roll is deterministic given the same `(seed, runtimeFaults)` pair — the in-page LCG is seeded from `seed` so two runs roll identically.
+
+`urlPattern` means different things per kind: **fetch-scoped** kinds (`flaky-fetch`, `reject-fetch`, `never-settle-fetch`, `reject-body`, `resolve-rejected-thenable`) match the **request URL** passed to `fetch()`, per call; **page-scoped** kinds (`clock-skew`) match `location.href` once, when the init script installs.
 
 Layer comparison:
 
@@ -925,6 +962,40 @@ chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
 Severity maps from cluster type: invariants / exceptions / network errors / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
+
+## Model-driven fault coverage
+
+Probability sampling tells you what fired; it cannot tell you what was never
+attempted. A temporal-logic model (Quint, or anything emitting ITF) enumerates
+the failure space instead, and each enumerated state replays as one
+deterministic run with the model's prediction as the oracle:
+
+```bash
+# dev-time: ITF witnesses -> committed plan files (pure Node)
+chaosbringer model compile --traces model/traces --out model/plans
+
+# CI: replay every plan, check every oracle (no Quint, no JVM)
+chaosbringer model run --plans model/plans --url http://localhost:3000 \
+  --config model/bridge.mjs
+```
+
+```
+=== MODEL COVERAGE ===
+States: 16/18 reachable (depth <= 4), 2 unreachable
+Plans run: 16
+Mismatches: 13
+  [unhandledRejection] cart-fulfilled__shipping-rejected: a rejection escaped every handler, which the model's contract forbids
+  [ui] cart-hung__shipping-fulfilled: model predicted ui="error", page reported "stuck"
+```
+
+Programmatic equivalent: `compilePlan` / `runPlans` / `aggregateCoverage`,
+exported from the package root. The runner checks three things per plan — the
+UI label via your `uiProbe`, whether a rejection escaped, and whether the
+planned faults actually fired (a plan whose request the app never issues is
+reported, not counted as a pass).
+
+Full walkthrough: [model-driven faults](../../docs/recipes/model-driven-faults.md).
+Runnable: [`examples/model-faults/`](../../examples/model-faults/).
 
 ## Error clustering
 

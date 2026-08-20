@@ -4,7 +4,7 @@
 
 import type { Browser, BrowserContext, Page, Route } from "playwright";
 import { chromium, devices } from "playwright";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -2807,6 +2807,10 @@ export class ChaosCrawler {
             topN: this.coverageFeedback.topN,
           })
         : undefined,
+      coverageFingerprint:
+        this.coverageFeedback && this.globalCoverage.size > 0
+          ? coverageFingerprintOf(this.globalCoverage)
+          : undefined,
       advisor: this.advisorRuntime
         ? {
             provider: this.advisorRuntime.provider.name,
@@ -3436,6 +3440,20 @@ export function findFaultRuleShadows(
     }
   }
   return out;
+}
+
+/**
+ * Stable digest of the set of function fingerprints a run executed.
+ *
+ * Two runs with the same digest ran the same code. The model pipeline uses
+ * that to spot plans the model calls distinct states but that exercise
+ * identical code — either the model is over-refined or the app does not
+ * actually distinguish the cases, and neither is visible from the model
+ * alone. Sorted before hashing so the digest is order-independent.
+ */
+export function coverageFingerprintOf(covered: ReadonlySet<string>): string {
+  const sorted = [...covered].sort();
+  return createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 32);
 }
 
 /**

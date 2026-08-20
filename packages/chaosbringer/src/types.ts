@@ -681,6 +681,13 @@ export interface CrawlReport {
    */
   coverage?: CoverageReport;
   /**
+   * Stable digest of every function fingerprint the run executed (present
+   * only when `coverageFeedback` was enabled). Two runs sharing a digest ran
+   * the same code — which is how the model pipeline detects plans that the
+   * model calls distinct states but that exercise identical code.
+   */
+  coverageFingerprint?: string;
+  /**
    * Action-advisor activity (present only when `advisor` was configured).
    * Reports the provider, attempt + success counts, and one row per pick
    * the advisor actually made — useful for auditing which crawl decisions

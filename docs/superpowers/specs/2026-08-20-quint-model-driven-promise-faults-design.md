@@ -2,7 +2,41 @@
 
 **Date:** 2026-08-20
 **Branch:** `claude/promise-exception-state-coverage-3bfyl0`
-**Status:** Draft (feasibility spike done — see [Appendix A](#appendix-a--feasibility-spike))
+**Status:** Implemented. See [What shipped](#what-shipped) for the four places
+the implementation deviates from this design, and why.
+
+## What shipped
+
+All four phases landed. Four deliberate deviations from the design below:
+
+1. **Order-sensitivity is detected across the plan *set*, not per plan.** The
+   design said the compiler would reject a plan whose adjacent steps target
+   the same rule. That test is wrong: per-rule occurrence order *is*
+   deterministic (the app issues call 0 before call 1). What is not
+   enforceable is order *between* operations — so `markOrderSensitivePlans`
+   flags plans that inject the same multiset of outcomes yet predict
+   different results, and the runner skips them (`coverage.plansSkipped`)
+   instead of producing a coin-flip verdict.
+2. **A plan's `hang` outcome maps to the runtime `never-settle-fetch`, not
+   the network `hang`.** No request is issued, so `networkidle` still fires
+   and the page load isn't held hostage to the fault; the app simply never
+   gets its answer. The network `hang` remains for non-fetch requests.
+3. **One operation cannot mix fault layers.** A client-side rejection issues
+   no request, so a network rule and a runtime fault on the same operation
+   would number occurrences differently. `compilePlanFaults` refuses it with
+   an error naming the operation.
+4. **The CLI is `model compile` + `model run`; there is no `model
+   enumerate`.** Enumeration is a `quint verify` loop over a target list
+   (`examples/model-faults/model/enumerate.sh`). Wrapping it in the CLI would
+   bake Apalache into the package whose whole point is not needing it at run
+   time.
+
+One addition: `CrawlReport.coverageFingerprint` (a digest of the V8 function
+fingerprints a run executed) makes the model/implementation cross-check real.
+In the example app it immediately found a genuine collapse — the fixed
+variant's symmetric error path means `cart-bodyRejected__shipping-rejected`
+and `cart-rejected__shipping-bodyRejected` execute identical code, so the
+model distinguishes two states the implementation does not.
 
 ## Problem
 
@@ -22,12 +56,24 @@ the fault space *enumerable*. Three consequences:
    which failure *combinations* were never attempted. "Not seen yet" and
    "cannot happen" are indistinguishable.
 2. **Combination faults are exponentially unlikely.** The interesting Promise
-   bugs are combinational, not single-fault. `Promise.all([a, b])` settles on
-   the *first* rejection, so a second rejection lands on a promise that has no
-   handler attached — `unhandledrejection`. Hitting that needs *both* requests
-   to fail *in the same action*. At `probability: 0.3` per rule that is ~9% of
-   actions, and the crawler must also be on the right page, in the right state,
-   and click the right button.
+   bugs are combinational, not single-fault. The canonical one: two requests
+   started eagerly to avoid a waterfall, then awaited one after another —
+
+   ```js
+   const cartReq = fetchJson("/api/cart");
+   const shippingReq = fetchJson("/api/shipping");
+   const cart = await cartReq;         // rejects -> we return…
+   const shipping = await shippingReq; // …so nothing was ever attached here
+   ```
+
+   `shippingReq`'s rejection has no handler at the moment it rejects, so it
+   escapes as `unhandledrejection` — and any global handler wired to error
+   reporting fires. (This is specifically *not* what `Promise.all` does:
+   `Promise.all` subscribes to every input immediately, so a second rejection
+   there is handled. The bug is the sequential `await`.) Hitting it needs
+   *both* requests to fail *in the same action*: at `probability: 0.3` per
+   rule that is ~9% of actions, and the crawler must also be on the right
+   page, in the right state, and click the right button.
 3. **No oracle.** A random run can only assert generic invariants ("no
    unhandled rejection anywhere"). It cannot assert *this* schedule should end
    in `error`, not `loading` — because nothing knows what the schedule was.
@@ -268,7 +314,7 @@ Network (`Fault`):
 
 | Kind | Semantics | Bug class it exposes |
 |---|---|---|
-| `hang` | Hold the route; never fulfil. Optional `releaseAfterMs`, else released at action teardown via `route.abort("timedout")`. | Spinner with no timeout; `Promise.all` that never settles |
+| `hang` | Hold the route; never fulfil. Optional `releaseAfterMs`, else released at action teardown via `route.abort("timedout")`. | Spinner with no timeout; a load that can never finish |
 
 Runtime (`RuntimeAction`):
 
@@ -382,21 +428,24 @@ the piece that keeps the coverage claim honest.
 
 Walking the `error_true` witness end to end (measured in the spike):
 
-1. **Model** — `promise.qnt` describes two ops folded by `Promise.all`, with
-   `HAS_CATCH = true` (the intended contract).
-2. **Enumerate** — `quint verify --invariant='not(ui == "error" and unhandled == true)'`
-   returns a counterexample in ~14 s: `start → reject(A) → reject(B)`.
-   *The model found the bug class before any browser ran*: even with a `catch`
-   on the `Promise.all`, the second rejection has no handler.
-3. **Compile** — ITF → `{ schedule: [ {opA,0,reject}, {opB,0,reject} ],
+1. **Model** — `promise.qnt` describes two ops loaded for one action, with
+   the intended contract (every rejection handled, every request bounded).
+2. **Enumerate** — `quint verify --invariant='not(opState.get("cart") == "rejected"
+   and opState.get("shipping") == "rejected")'` returns a counterexample in
+   ~14 s: `start → reject(cart) → reject(shipping)`. The state the probability
+   sweep reaches ~9% of the time is now a named, always-run test case.
+3. **Compile** — ITF → `{ schedule: [ {cart,0,reject}, {shipping,0,reject} ],
    expect: { ui: "error", unhandledRejection: false } }`.
-4. **Replay** — one `chaos()` run: `opA` → `reject-fetch`, `opB` →
-   `reject-fetch`, both `schedule.decisions[0] = "inject"`, barrier ordering
-   A-then-B, one click.
+4. **Replay** — one `chaos()` run: both operations get a `reject-fetch` fault
+   whose `schedule.decisions[0] = "inject"`, one click, one settle window.
 5. **Verdict** — `uiProbe` returns `error` (matches), but the run records an
-   `unhandled-rejection` while the oracle expected none → `mismatches` gets one
+   `unhandled-rejection` while the contract forbids one → `mismatches` gets an
    entry naming plan, field, expected, actual. That is the report line the
    probability sweep never produced.
+
+This is not hypothetical: it is what `examples/model-faults/` reports today.
+The buggy variant of that app fails 13 of 16 plans (5 `ui`, 8
+`unhandledRejection`); `FIXED=1` passes all 16.
 
 ## Testing strategy
 

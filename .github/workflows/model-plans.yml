@@ -1,0 +1,59 @@
+# Regenerate the committed model plans and fail if they drifted.
+#
+# Enumeration needs Quint + a JVM (Apalache), which is exactly why it does not
+# run on PRs: `chaosbringer model run` replays committed plan files and needs
+# neither. This job exists so a model edit that nobody recompiled is caught
+# here rather than silently leaving the plans stale.
+name: model plans
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays, 04:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "examples/model-faults/model/**"
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build chaosbringer (for the model CLI)
+        run: pnpm -F chaosbringer build
+
+      - name: Enumerate witnesses
+        working-directory: examples/model-faults
+        run: model/enumerate.sh
+
+      - name: Compile plans
+        working-directory: examples/model-faults
+        run: node ../../packages/chaosbringer/dist/cli.js model compile --traces model/traces --out model/plans
+
+      - name: Fail if the committed plans drifted
+        run: |
+          if ! git diff --quiet -- examples/model-faults/model; then
+            echo "::error::Committed model plans/traces differ from a fresh enumeration."
+            echo "Run examples/model-faults/model/enumerate.sh + pnpm compile and commit the result."
+            git diff --stat -- examples/model-faults/model
+            git diff -- examples/model-faults/model | head -200
+            exit 1
+          fi
+          echo "plans are up to date"

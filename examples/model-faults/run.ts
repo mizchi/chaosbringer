@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aggregateCoverage,
+  fingerprintsOf,
   formatModelCoverage,
   modelRunPassed,
   runPlans,
@@ -57,11 +58,19 @@ console.log(`checkout app (${fixed ? "fixed" : "buggy"}) on ${server.url}\n`);
 
 try {
   const plans = loadPlans();
-  const results = await runPlans(plans, { ...bridge, baseUrl: server.url });
+  // `coverageFingerprints` adds a V8 profiler session per plan: it is what
+  // lets the report say whether two distinct model states actually exercised
+  // distinct code.
+  const results = await runPlans(plans, {
+    ...bridge,
+    baseUrl: server.url,
+    coverageFingerprints: true,
+  });
   const coverage = aggregateCoverage(results, {
     spec: "model/checkout.qnt",
     depthBound: 4,
     targets: loadTargets(),
+    fingerprints: fingerprintsOf(results),
   });
   console.log(formatModelCoverage(coverage));
   process.exitCode = modelRunPassed(coverage) ? 0 : 1;

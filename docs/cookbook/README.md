@@ -49,6 +49,7 @@ The three doc surfaces:
 ### Fault design
 
 - **[Which fault layer for which bug](./fault-layer-cheatsheet.md)** — Decision table: `faults.*` (network) vs `runtimeFaults` (in-page JS) vs `lifecycleFaults` (page stage) vs `@mizchi/server-faults` (inside the server).
+- **[Fail the first call, pass the retry](./deterministic-schedules.md)** — `schedule: { decisions: ["inject", "pass"] }` instead of a probability roll, plus the Promise-shaped faults worth scheduling (`rejectBody`, `neverSettleFetch`, `rejectFetch({ rejectAs: "AbortError" })`).
 
 ### Debugging
 

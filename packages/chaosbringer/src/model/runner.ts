@@ -55,6 +55,12 @@ export interface RunPlanOptions {
   statusCode?: number;
   /** Run plans flagged `orderSensitive` anyway. Default false. */
   allowOrderSensitive?: boolean;
+  /**
+   * Collect a V8 coverage fingerprint per plan, so `aggregateCoverage` can
+   * report plans the model calls distinct states but whose executed code was
+   * identical. Costs a CDP profiler session per run.
+   */
+  coverageFingerprints?: boolean;
 }
 
 export type MismatchField = "ui" | "unhandledRejection" | "injection";
@@ -79,6 +85,8 @@ export interface PlanRunResult {
     fired: Record<string, number>;
     /** Thrown by `action` / `uiProbe`, if either did. */
     probeError?: string;
+    /** V8 coverage digest, when `coverageFingerprints` was set. */
+    coverageFingerprint?: string;
   };
   mismatches: PlanMismatch[];
   /** The underlying crawl report — artifacts, errors, timings. */
@@ -259,11 +267,15 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     timeout: opts.timeout ?? 15000,
     ...(runtimeFaults.length > 0 ? { runtimeFaults } : {}),
     ...(faultInjection.length > 0 ? { faultInjection } : {}),
+    ...(opts.coverageFingerprints ? { coverageFeedback: { enabled: true } } : {}),
     invariants: [oracleHook],
   });
 
   observed.fired = firedCounts(report);
   observed.unhandledRejection = report.summary.unhandledRejections > 0;
+  if (report.coverageFingerprint !== undefined) {
+    observed.coverageFingerprint = report.coverageFingerprint;
+  }
 
   const mismatches: PlanMismatch[] = [];
 
@@ -292,7 +304,12 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
         field: "ui",
         expected: plan.expect.ui,
         actual: observed.probeError !== undefined ? `probe error: ${observed.probeError}` : observed.ui,
-        detail: `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"`,
+        detail:
+          `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"` +
+          (plan.schedule.every((s) => s.outcome === "pass")
+            ? ` (this plan injects nothing — if "${plan.expect.ui}" is a transient state, ` +
+              `it is not observable after the settle window; drop it from the target list)`
+            : ""),
       });
     }
   }
@@ -325,4 +342,18 @@ export async function runPlans(
     results.push(await runPlan(plan, opts));
   }
   return results;
+}
+
+/**
+ * Per-plan coverage digests, ready for `aggregateCoverage({ fingerprints })`.
+ * Empty unless the run was made with `coverageFingerprints: true`.
+ */
+export function fingerprintsOf(results: readonly PlanRunResult[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const r of results) {
+    if (r.observed.coverageFingerprint !== undefined) {
+      out.set(r.plan.name, r.observed.coverageFingerprint);
+    }
+  }
+  return out;
 }

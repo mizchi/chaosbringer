@@ -75,9 +75,12 @@ module promise {
     all {
       opState' = nx,
       ui' = expectedUi(nx),
-      // Promise.all rejects on the first rejection; a *second* rejection has
-      // no handler attached to it -> unhandled rejection. This is the
-      // Promise-spec corner the random fault injector only hits by luck.
+      // Models "the second failure escapes": with eager-start +
+      // sequential-await, nothing is attached to the second promise at the
+      // moment it rejects. NOTE: Promise.all does NOT behave this way -- it
+      // subscribes to every input immediately. The shipped model in
+      // examples/model-faults/model/checkout.qnt states the contract
+      // instead of predicting the bug; see that file.
       unhandled' = (unhandled or anyRejected(opState) or not(HAS_CATCH)),
       log' = log.append({ kind: "reject", op: op }),
     },

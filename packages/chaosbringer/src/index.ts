@@ -27,6 +27,7 @@ export {
   failingPlans,
   faultNameFor,
   finalState,
+  fingerprintsOf,
   findCollapsedPlans,
   formatModelCoverage,
   markOrderSensitivePlans,

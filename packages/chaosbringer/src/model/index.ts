@@ -40,6 +40,7 @@ export {
 export {
   compilePlanFaults,
   faultNameFor,
+  fingerprintsOf,
   runPlan,
   runPlans,
   type MismatchField,
