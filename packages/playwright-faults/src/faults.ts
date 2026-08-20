@@ -12,6 +12,7 @@
 
 import type {
   FaultRule,
+  FaultSchedule,
   IframeFault,
   LifecycleFault,
   LifecycleStage,
@@ -24,6 +25,8 @@ export interface FaultHelperOptions {
   urlPattern: UrlMatcher;
   methods?: string[];
   probability?: number;
+  /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
+  schedule?: FaultSchedule;
   name?: string;
 }
 
@@ -31,6 +34,7 @@ function applyCommon(rule: FaultRule, opts: FaultHelperOptions): FaultRule {
   rule.urlPattern = opts.urlPattern;
   if (opts.methods !== undefined) rule.methods = opts.methods;
   if (opts.probability !== undefined) rule.probability = opts.probability;
+  if (opts.schedule !== undefined) rule.schedule = opts.schedule;
   if (opts.name !== undefined) rule.name = opts.name;
   return rule;
 }
@@ -43,6 +47,8 @@ export interface LifecycleHelperOptions {
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Uses the crawler's seeded RNG. */
   probability?: number;
+  /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
+  schedule?: FaultSchedule;
   /** Override the auto-derived stats name. */
   name?: string;
 }
@@ -55,6 +61,7 @@ function applyLifecycleCommon(
   fault.when = opts?.when ?? defaultStage;
   if (opts?.urlPattern !== undefined) fault.urlPattern = opts.urlPattern;
   if (opts?.probability !== undefined) fault.probability = opts.probability;
+  if (opts?.schedule !== undefined) fault.schedule = opts.schedule;
   if (opts?.name !== undefined) fault.name = opts.name;
   return fault;
 }
@@ -262,6 +269,8 @@ export interface RuntimeHelperOptions {
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Rolled per call against the in-page seeded RNG. */
   probability?: number;
+  /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
+  schedule?: FaultSchedule;
   /** Override the auto-derived stats name. */
   name?: string;
 }
@@ -272,6 +281,7 @@ function applyRuntimeCommon(
 ): RuntimeFault {
   if (opts?.urlPattern !== undefined) fault.urlPattern = opts.urlPattern;
   if (opts?.probability !== undefined) fault.probability = opts.probability;
+  if (opts?.schedule !== undefined) fault.schedule = opts.schedule;
   if (opts?.name !== undefined) fault.name = opts.name;
   return fault;
 }
@@ -288,6 +298,8 @@ export interface IframeHelperOptions {
   selector: string;
   /** 0..1, default 1.0. Rolled per call against the in-page seeded RNG. */
   probability?: number;
+  /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
+  schedule?: FaultSchedule;
   /** Override the auto-derived stats name. */
   name?: string;
 }
@@ -300,6 +312,7 @@ function applyIframeCommon(
     throw new Error("faults.iframe*: selector must be a non-empty string");
   }
   if (opts.probability !== undefined) fault.probability = opts.probability;
+  if (opts.schedule !== undefined) fault.schedule = opts.schedule;
   if (opts.name !== undefined) fault.name = opts.name;
   return fault;
 }

@@ -138,6 +138,42 @@ const pages: Record<string, Route> = {
     }),
   },
 
+  // Retry-on-failure consumer: the first attempt is allowed to fail and the
+  // page tries once more. Exercises occurrence-indexed fault schedules
+  // (`{ decisions: ["inject", "pass"] }` must end in "ok after retry", while
+  // a probability-1 rule leaves it in "error").
+  "/api-retry": {
+    body: html({
+      title: "API Retry",
+      nav: true,
+      body: `
+        <h1>API Retry</h1>
+        <p id="status">loading…</p>
+        <p id="attempts">0</p>
+        <script>
+          let attempts = 0;
+          const get = () => {
+            attempts++;
+            document.getElementById("attempts").textContent = String(attempts);
+            return fetch("/api/data").then((r) =>
+              r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))
+            );
+          };
+          get()
+            .then(() => { document.getElementById("status").textContent = "ok"; })
+            .catch(() =>
+              get()
+                .then(() => { document.getElementById("status").textContent = "ok after retry"; })
+                .catch((err) => {
+                  document.getElementById("status").textContent = "error: " + err.message;
+                })
+            );
+        </script>
+        <a href="/">back</a>
+      `,
+    }),
+  },
+
   "/api/data": {
     body: JSON.stringify({ ok: true, items: [1, 2, 3] }),
     contentType: "application/json; charset=utf-8",

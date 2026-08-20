@@ -44,9 +44,9 @@ import {
   lifecycleMatchesUrl,
   lifecycleStatsFrom,
   PlaywrightLifecycleExecutor,
-  shouldFireProbability,
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
+import { decideFault, validateFaultSchedule } from "./schedule.js";
 import {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -1318,8 +1318,9 @@ export class ChaosCrawler {
 
     for (const c of compiled) {
       if (!lifecycleMatchesUrl(c, url)) continue;
+      const occurrence = c.matched;
       c.matched++;
-      if (!shouldFireProbability(c.fault.probability, this.rng)) continue;
+      if (decideFault(c.fault, occurrence, this.rng) === "pass") continue;
       try {
         await executeLifecycleAction(c.fault.action, executor);
         c.fired++;
@@ -1411,11 +1412,13 @@ export class ChaosCrawler {
         if (!compiled.pattern.test(url)) continue;
         if (compiled.methods && !compiled.methods.includes(method)) continue;
 
+        // Occurrence index = how many times this rule matched before now.
+        // `schedule` reads it as a decision table; `probability` rolls the
+        // crawler's seeded RNG (and only when prob < 1, so a probability-1
+        // rule never shifts the seed sequence).
+        const occurrence = compiled.matched;
         compiled.matched++;
-        const prob = compiled.rule.probability ?? 1;
-        // prob 0 should never inject; prob 1 always injects; in between we
-        // use the crawler's seeded RNG so probability is reproducible.
-        if (prob < 1 && this.rng.next() >= prob) continue;
+        if (decideFault(compiled.rule, occurrence, this.rng) === "pass") continue;
 
         compiled.injected++;
         await applyFault(route, compiled.rule.fault);
@@ -2912,6 +2915,7 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const rule of options.faultInjection ?? []) {
     const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
     assertMatcher(`${label} urlPattern`, rule.urlPattern);
+    validateFaultSchedule(label, rule);
     if (rule.probability !== undefined) {
       const p = rule.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -2939,6 +2943,7 @@ export function validateOptions(options: CrawlerOptions): void {
       );
     }
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    validateFaultSchedule(label, fault);
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -2989,6 +2994,7 @@ export function validateOptions(options: CrawlerOptions): void {
       ? `runtimeFaults entry "${fault.name}"`
       : `runtimeFaults entry`;
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    validateFaultSchedule(label, fault);
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -3022,6 +3028,7 @@ export function validateOptions(options: CrawlerOptions): void {
     if (typeof fault.selector !== "string" || fault.selector.length === 0) {
       throw new Error(`chaosbringer: ${label} selector must be a non-empty string`);
     }
+    validateFaultSchedule(label, fault);
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -3303,6 +3310,13 @@ export function findFaultRuleShadows(
     // A probability < 1 rule never reliably shadows — some requests fall
     // through to the next rule. Skip to avoid false positives.
     if ((earlier.rule.probability ?? 1) < 1) continue;
+    // Same for a schedule that ever passes: only a table of all-"inject"
+    // decisions that also keeps injecting past its end covers every
+    // occurrence, and therefore shadows what follows.
+    const sched = earlier.rule.schedule;
+    if (sched && !(sched.afterEnd === "inject" && sched.decisions.every((d) => d === "inject"))) {
+      continue;
+    }
 
     for (let j = i + 1; j < compiled.length; j++) {
       const later = compiled[j]!;

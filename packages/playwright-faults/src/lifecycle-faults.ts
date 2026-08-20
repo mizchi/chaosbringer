@@ -14,6 +14,7 @@
  */
 
 import type { BrowserContext, CDPSession, Page } from "playwright";
+import { validateFaultSchedule } from "./schedule.js";
 import type {
   LifecycleAction,
   LifecycleFault,
@@ -60,14 +61,17 @@ export function compileLifecycleFaults(
   faults: LifecycleFault[] | undefined,
 ): CompiledLifecycleFault[] {
   if (!faults || faults.length === 0) return [];
-  return faults.map((fault) => ({
-    fault,
-    pattern: compilePattern(fault.urlPattern),
-    name: lifecycleFaultName(fault),
-    matched: 0,
-    fired: 0,
-    errored: 0,
-  }));
+  return faults.map((fault) => {
+    validateFaultSchedule(`lifecycleFault "${lifecycleFaultName(fault)}"`, fault);
+    return {
+      fault,
+      pattern: compilePattern(fault.urlPattern),
+      name: lifecycleFaultName(fault),
+      matched: 0,
+      fired: 0,
+      errored: 0,
+    };
+  });
 }
 
 /** True when `compiled.pattern` matches `url` (or no pattern was set). */
@@ -80,7 +84,8 @@ export function lifecycleMatchesUrl(
 
 /**
  * Roll the seeded RNG against `probability`. Returns true when the fault
- * should fire. `prob >= 1` (or undefined) always fires; `prob <= 0` never
+ * should fire. Ignores `schedule` — callers supporting deterministic
+ * schedules must use `decideFault` from `./schedule.js` instead. `prob >= 1` (or undefined) always fires; `prob <= 0` never
  * fires; anything in between samples one number from `rng`.
  *
  * RNG consumption is deliberately conditional on `prob < 1` so that adding

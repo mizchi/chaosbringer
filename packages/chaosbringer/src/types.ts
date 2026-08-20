@@ -268,8 +268,10 @@ export type { ErrorCluster };
 // (and to satisfy CrawlerOptions / CrawlReport references in this file).
 import type {
   Fault,
+  FaultDecision,
   FaultInjectionStats,
   FaultRule,
+  FaultSchedule,
   IframeAction,
   IframeFault,
   IframeFaultStats,
@@ -286,8 +288,10 @@ import type {
 
 export type {
   Fault,
+  FaultDecision,
   FaultInjectionStats,
   FaultRule,
+  FaultSchedule,
   IframeAction,
   IframeFault,
   IframeFaultStats,

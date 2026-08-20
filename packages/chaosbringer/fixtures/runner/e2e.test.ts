@@ -248,6 +248,81 @@ describe("ChaosCrawler against fixture site", () => {
     ).toBe(true);
   }, 120000);
 
+  it("replays a deterministic fault schedule: first call fails, retry succeeds", async () => {
+    // The value probability cannot express: fail occurrence 0, pass
+    // occurrence 1. The page retries once, so the DOM must end up in
+    // "ok after retry" — proving both decisions were honoured in order.
+    const scheduled = new ChaosCrawler({
+      baseUrl: `${server.url}/api-retry`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+      faultInjection: [
+        {
+          name: "api-500-once",
+          urlPattern: "/api/data$",
+          fault: { kind: "status", status: 500, body: "boom" },
+          schedule: { decisions: ["inject", "pass"] },
+        },
+      ],
+      invariants: [
+        {
+          name: "retry-recovered",
+          urlPattern: "/api-retry$",
+          when: "afterLoad",
+          check: async ({ page }) => {
+            const status = (await page.locator("#status").textContent())?.trim() ?? "";
+            const attempts = (await page.locator("#attempts").textContent())?.trim() ?? "";
+            return (
+              (status === "ok after retry" && attempts === "2") ||
+              `status="${status}" attempts=${attempts}`
+            );
+          },
+        },
+      ],
+    });
+
+    const report = await scheduled.start();
+    const stats = report.faultInjections!.find((f) => f.rule === "api-500-once")!;
+    expect(stats.matched).toBe(2);
+    expect(stats.injected).toBe(1);
+    expect(report.summary.invariantViolations).toBe(0);
+
+    // Same page, same seed, probability-1 rule: every attempt fails, so the
+    // retry cannot save it. This is the run a scheduled fault replaces.
+    const always = new ChaosCrawler({
+      baseUrl: `${server.url}/api-retry`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      headless: true,
+      seed: 1,
+      faultInjection: [
+        {
+          name: "api-500-always",
+          urlPattern: "/api/data$",
+          fault: { kind: "status", status: 500, body: "boom" },
+        },
+      ],
+      invariants: [
+        {
+          name: "retry-recovered",
+          urlPattern: "/api-retry$",
+          when: "afterLoad",
+          check: async ({ page }) => {
+            const status = (await page.locator("#status").textContent())?.trim() ?? "";
+            return status === "ok after retry" || `status="${status}"`;
+          },
+        },
+      ],
+    });
+
+    const alwaysReport = await always.start();
+    const alwaysStats = alwaysReport.faultInjections!.find((f) => f.rule === "api-500-always")!;
+    expect(alwaysStats.injected).toBe(alwaysStats.matched);
+    expect(alwaysReport.summary.invariantViolations).toBeGreaterThanOrEqual(1);
+  }, 120000);
+
   it("honours fault probability and is reproducible with the same seed", async () => {
     // probability 0 means the rule never injects but still matches.
     const crawler = new ChaosCrawler({

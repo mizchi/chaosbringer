@@ -1,8 +1,10 @@
 // Types
 export type {
   Fault,
+  FaultDecision,
   FaultInjectionStats,
   FaultRule,
+  FaultSchedule,
   IframeAction,
   IframeFault,
   IframeFaultStats,
@@ -26,6 +28,16 @@ export {
   type LifecycleHelperOptions,
   type RuntimeHelperOptions,
 } from "./faults.js";
+
+// Deterministic occurrence-indexed decisions (shared by all four layers)
+export {
+  buildDecisionHelperSource,
+  decideFault,
+  scheduleDecisionAt,
+  serializeSchedule,
+  validateFaultSchedule,
+  type ScheduledFaultLike,
+} from "./schedule.js";
 
 // Runtime-level (addInitScript-based monkey patches)
 export {

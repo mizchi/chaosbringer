@@ -371,4 +371,51 @@ describe("validateOptions", () => {
       ),
     ).toThrow(/action.kind/);
   });
+
+  it("rejects a fault rule that sets both probability and schedule", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [
+            {
+              name: "both",
+              urlPattern: /\/api\//,
+              fault: { kind: "abort" },
+              probability: 0.5,
+              schedule: { decisions: ["inject"] },
+            },
+          ],
+        })
+      )
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("rejects an empty schedule decision table", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [
+            { name: "empty", action: { kind: "flaky-fetch" }, schedule: { decisions: [] } },
+          ],
+        })
+      )
+    ).toThrow(/empty "schedule.decisions"/);
+  });
+
+  it("accepts a schedule on its own", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [
+            {
+              name: "sched",
+              urlPattern: /\/api\//,
+              fault: { kind: "abort" },
+              schedule: { decisions: ["inject", "pass"], afterEnd: "repeat" },
+            },
+          ],
+        })
+      )
+    ).not.toThrow();
+  });
 });

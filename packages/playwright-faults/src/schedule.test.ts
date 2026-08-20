@@ -1,0 +1,193 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildDecisionHelperSource,
+  decideFault,
+  scheduleDecisionAt,
+  serializeSchedule,
+  validateFaultSchedule,
+} from "./schedule.js";
+import type { FaultSchedule, Rng } from "./types.js";
+
+/** RNG that hands out a fixed script of values and counts draws. */
+function scriptedRng(values: number[]): Rng & { draws: number } {
+  let i = 0;
+  return {
+    draws: 0,
+    next() {
+      this.draws++;
+      return values[i++ % values.length]!;
+    },
+  };
+}
+
+const never: Rng = {
+  next() {
+    throw new Error("RNG must not be consumed by a scheduled fault");
+  },
+};
+
+describe("scheduleDecisionAt", () => {
+  const table: FaultSchedule = { decisions: ["inject", "pass", "inject"] };
+
+  it("reads the decision table by occurrence", () => {
+    expect(scheduleDecisionAt(table, 0)).toBe("inject");
+    expect(scheduleDecisionAt(table, 1)).toBe("pass");
+    expect(scheduleDecisionAt(table, 2)).toBe("inject");
+  });
+
+  it("defaults to spent (pass) past the end", () => {
+    expect(scheduleDecisionAt(table, 3)).toBe("pass");
+    expect(scheduleDecisionAt(table, 99)).toBe("pass");
+  });
+
+  it("afterEnd: inject keeps firing", () => {
+    const s: FaultSchedule = { decisions: ["pass"], afterEnd: "inject" };
+    expect(scheduleDecisionAt(s, 0)).toBe("pass");
+    expect(scheduleDecisionAt(s, 1)).toBe("inject");
+    expect(scheduleDecisionAt(s, 1000)).toBe("inject");
+  });
+
+  it("afterEnd: repeat cycles the table", () => {
+    const s: FaultSchedule = { decisions: ["inject", "pass"], afterEnd: "repeat" };
+    expect([0, 1, 2, 3, 4].map((i) => scheduleDecisionAt(s, i))).toEqual([
+      "inject",
+      "pass",
+      "inject",
+      "pass",
+      "inject",
+    ]);
+  });
+
+  it("refuses to invent faults for a broken occurrence counter", () => {
+    const s: FaultSchedule = { decisions: ["inject"], afterEnd: "inject" };
+    expect(scheduleDecisionAt(s, -1)).toBe("pass");
+    expect(scheduleDecisionAt(s, 1.5)).toBe("pass");
+    expect(scheduleDecisionAt(s, Number.NaN)).toBe("pass");
+  });
+
+  it("treats an empty table as pass rather than throwing", () => {
+    expect(scheduleDecisionAt({ decisions: [] }, 0)).toBe("pass");
+  });
+});
+
+describe("decideFault", () => {
+  it("schedule wins and consumes no RNG", () => {
+    const rule = { schedule: { decisions: ["inject", "pass"] } as FaultSchedule };
+    expect(decideFault(rule, 0, never)).toBe("inject");
+    expect(decideFault(rule, 1, never)).toBe("pass");
+  });
+
+  it("falls back to the probability roll", () => {
+    const rng = scriptedRng([0.1, 0.9]);
+    const rule = { probability: 0.5 };
+    expect(decideFault(rule, 0, rng)).toBe("inject"); // 0.1 < 0.5
+    expect(decideFault(rule, 1, rng)).toBe("pass"); // 0.9 >= 0.5
+    expect(rng.draws).toBe(2);
+  });
+
+  it("does not draw for p >= 1 / p <= 0, so seeds stay stable", () => {
+    const rng = scriptedRng([0.5]);
+    expect(decideFault({}, 0, rng)).toBe("inject");
+    expect(decideFault({ probability: 1 }, 0, rng)).toBe("inject");
+    expect(decideFault({ probability: 0 }, 0, rng)).toBe("pass");
+    expect(rng.draws).toBe(0);
+  });
+});
+
+describe("validateFaultSchedule", () => {
+  it("passes a rule with no schedule", () => {
+    expect(() => validateFaultSchedule("rule", { probability: 0.5 })).not.toThrow();
+  });
+
+  it("rejects probability + schedule together", () => {
+    expect(() =>
+      validateFaultSchedule("rule x", {
+        probability: 0.5,
+        schedule: { decisions: ["inject"] },
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("rejects an empty decision table", () => {
+    expect(() => validateFaultSchedule("rule x", { schedule: { decisions: [] } })).toThrow(
+      /empty "schedule.decisions"/,
+    );
+  });
+
+  it("rejects an unknown decision value", () => {
+    expect(() =>
+      validateFaultSchedule("rule x", {
+        schedule: { decisions: ["inject", "nope" as unknown as "pass"] },
+      }),
+    ).toThrow(/schedule.decisions\[1\]/);
+  });
+
+  it("rejects an unknown afterEnd", () => {
+    expect(() =>
+      validateFaultSchedule("rule x", {
+        schedule: {
+          decisions: ["inject"],
+          afterEnd: "loop" as unknown as "repeat",
+        },
+      }),
+    ).toThrow(/schedule.afterEnd/);
+  });
+});
+
+describe("serializeSchedule", () => {
+  it("returns null when there is no schedule", () => {
+    expect(serializeSchedule(undefined)).toBeNull();
+  });
+
+  it("materialises afterEnd so the in-page evaluator can skip defaulting", () => {
+    expect(serializeSchedule({ decisions: ["inject"] })).toEqual({
+      decisions: ["inject"],
+      afterEnd: "pass",
+    });
+  });
+});
+
+describe("buildDecisionHelperSource", () => {
+  // The in-page twin must agree with the Node-side helper on every case, or a
+  // scheduled run means one thing in the crawler and another in the page.
+  const inPageDecide = (
+    fault: { probability?: number; schedule: ReturnType<typeof serializeSchedule> },
+    occurrence: number,
+    rolls: number[],
+  ): boolean => {
+    let i = 0;
+    const body = `${buildDecisionHelperSource()}
+    return __decide(f, occurrence);`;
+    // eslint-disable-next-line no-new-func
+    const fn = new Function("f", "occurrence", "__nextRoll", body) as (
+      f: unknown,
+      o: number,
+      r: () => number,
+    ) => boolean;
+    return fn({ probability: 1, ...fault }, occurrence, () => rolls[i++ % rolls.length]!);
+  };
+
+  const cases: Array<{ schedule: FaultSchedule; occurrences: number[] }> = [
+    { schedule: { decisions: ["inject", "pass", "inject"] }, occurrences: [0, 1, 2, 3, 7] },
+    { schedule: { decisions: ["pass"], afterEnd: "inject" }, occurrences: [0, 1, 5] },
+    { schedule: { decisions: ["inject", "pass"], afterEnd: "repeat" }, occurrences: [0, 1, 2, 3] },
+  ];
+
+  for (const [i, c] of cases.entries()) {
+    it(`agrees with decideFault for case ${i}`, () => {
+      for (const occ of c.occurrences) {
+        const node = decideFault({ schedule: c.schedule }, occ, never) === "inject";
+        const page = inPageDecide({ schedule: serializeSchedule(c.schedule) }, occ, [0.5]);
+        expect(page, `occurrence ${occ}`).toBe(node);
+      }
+    });
+  }
+
+  it("agrees on the probability path too", () => {
+    // 0.25 < 0.5 → inject; 0.75 >= 0.5 → pass.
+    expect(inPageDecide({ probability: 0.5, schedule: null }, 0, [0.25])).toBe(true);
+    expect(inPageDecide({ probability: 0.5, schedule: null }, 0, [0.75])).toBe(false);
+    expect(decideFault({ probability: 0.5 }, 0, scriptedRng([0.25]))).toBe("inject");
+    expect(decideFault({ probability: 0.5 }, 0, scriptedRng([0.75]))).toBe("pass");
+  });
+});

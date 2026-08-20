@@ -22,6 +22,27 @@ export interface Rng {
   next(): number;
 }
 
+/** One occurrence's verdict in a `FaultSchedule`. */
+export type FaultDecision = "pass" | "inject";
+
+/**
+ * Deterministic replacement for `probability`: a decision table indexed by
+ * how many times the fault has already matched (occurrence 0, 1, 2, …).
+ *
+ * Understood by all four fault layers. Mutually exclusive with
+ * `probability` — setting both throws at compile time. Evaluated by
+ * `decideFault` (Node-side layers) or its generated in-page twin.
+ */
+export interface FaultSchedule {
+  /** Verdict for occurrence 0, 1, 2, … */
+  decisions: ReadonlyArray<FaultDecision>;
+  /**
+   * Behaviour past the end of `decisions`. Default `"pass"` (spent).
+   * `"inject"` keeps firing; `"repeat"` cycles the table.
+   */
+  afterEnd?: "pass" | "inject" | "repeat";
+}
+
 // =====================================================================
 // 1. Network-level fault injection (Playwright route())
 // =====================================================================
@@ -43,6 +64,12 @@ export interface FaultRule {
   fault: Fault;
   /** 0..1, default 1.0. Uses the caller-provided RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions, e.g. `{ decisions: ["inject",
+   * "pass"] }` to fail the first matching request and let the retry through.
+   * Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
 }
 
 /** Per-rule stats for fault injection, emitted on the final report. */
@@ -126,6 +153,11 @@ export interface LifecycleFault {
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Uses the caller-provided RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions. Occurrence counts page visits
+   * whose URL matched. Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: LifecycleAction;
 }
@@ -181,6 +213,14 @@ export interface RuntimeFault {
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions, evaluated in-page. Occurrence
+   * counts matching calls (e.g. `fetch()` invocations whose URL matched)
+   * within one page load — the counter resets on navigation, because the
+   * init script is re-installed in the new frame. Mutually exclusive with
+   * `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: RuntimeAction;
 }
@@ -248,6 +288,12 @@ export interface IframeFault {
   selector: string;
   /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions, evaluated in-page. Occurrence
+   * counts iframes matching `selector` whose `src` was assigned during this
+   * page load. Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: IframeAction;
 }

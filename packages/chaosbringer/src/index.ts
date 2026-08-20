@@ -19,6 +19,14 @@ export {
 } from "./faults.js";
 export { profiles } from "./profiles.js";
 export {
+  buildDecisionHelperSource,
+  decideFault,
+  scheduleDecisionAt,
+  serializeSchedule,
+  validateFaultSchedule,
+  type ScheduledFaultLike,
+} from "./schedule.js";
+export {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
   mergeRuntimeStats,
@@ -377,7 +385,9 @@ export type {
   Invariant,
   InvariantContext,
   Fault,
+  FaultDecision,
   FaultRule,
+  FaultSchedule,
   FaultInjectionStats,
   LifecycleAction,
   LifecycleFault,

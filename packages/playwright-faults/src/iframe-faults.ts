@@ -22,6 +22,11 @@
  * reads it after each page visit.
  */
 
+import {
+  buildDecisionHelperSource,
+  serializeSchedule,
+  validateFaultSchedule,
+} from "./schedule.js";
 import type { IframeAction, IframeFault, IframeFaultStats } from "./types.js";
 
 /** Compiled form: stats counters initialised, name pre-derived. */
@@ -50,12 +55,15 @@ export function compileIframeFaults(
   faults: IframeFault[] | undefined,
 ): CompiledIframeFault[] {
   if (!faults || faults.length === 0) return [];
-  return faults.map((fault) => ({
-    fault,
-    name: iframeFaultName(fault),
-    matched: 0,
-    fired: 0,
-  }));
+  return faults.map((fault) => {
+    validateFaultSchedule(`iframeFault "${iframeFaultName(fault)}"`, fault);
+    return {
+      fault,
+      name: iframeFaultName(fault),
+      matched: 0,
+      fired: 0,
+    };
+  });
 }
 
 /** Action discriminator for stats reporting. */
@@ -81,6 +89,7 @@ export function buildIframeFaultsScript(
     name: iframeFaultName(f),
     selector: f.selector,
     probability: typeof f.probability === "number" ? f.probability : 1,
+    schedule: serializeSchedule(f.schedule),
     action: f.action,
   }));
 
@@ -103,15 +112,14 @@ export function buildIframeFaultsScript(
   const stats = window.__chaosbringerIframeFaultStats;
   for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
 
+  ${buildDecisionHelperSource()}
+
+  // Occurrence = how many matching iframes this fault has seen in this frame.
   const roll = (f) => {
     const slot = stats[String(f.id)];
+    const occurrence = slot.matched;
     slot.matched++;
-    if (f.probability >= 1) {
-      slot.fired++;
-      return true;
-    }
-    if (f.probability <= 0) return false;
-    const fired = __nextRoll() < f.probability;
+    const fired = __decide(f, occurrence);
     if (fired) slot.fired++;
     return fired;
   };

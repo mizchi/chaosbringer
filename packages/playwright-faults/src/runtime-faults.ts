@@ -22,6 +22,11 @@
  * crawler reads it after each page visit.
  */
 
+import {
+  buildDecisionHelperSource,
+  serializeSchedule,
+  validateFaultSchedule,
+} from "./schedule.js";
 import type { Rng, RuntimeFault, RuntimeFaultStats, UrlMatcher } from "./types.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
@@ -55,13 +60,16 @@ export function compileRuntimeFaults(
   faults: RuntimeFault[] | undefined,
 ): CompiledRuntimeFault[] {
   if (!faults || faults.length === 0) return [];
-  return faults.map((fault) => ({
-    fault,
-    pattern: compilePattern(fault.urlPattern),
-    name: runtimeFaultName(fault),
-    matched: 0,
-    fired: 0,
-  }));
+  return faults.map((fault) => {
+    validateFaultSchedule(`runtimeFault "${runtimeFaultName(fault)}"`, fault);
+    return {
+      fault,
+      pattern: compilePattern(fault.urlPattern),
+      name: runtimeFaultName(fault),
+      matched: 0,
+      fired: 0,
+    };
+  });
 }
 
 /** True when `compiled.pattern` matches `url` (or no pattern was set). */
@@ -115,6 +123,7 @@ export function buildRuntimeFaultsScript(
     name: runtimeFaultName(f),
     pattern: serializeMatcher(f.urlPattern),
     probability: typeof f.probability === "number" ? f.probability : 1,
+    schedule: serializeSchedule(f.schedule),
     action: f.action,
   }));
 
@@ -147,15 +156,14 @@ export function buildRuntimeFaultsScript(
     }
   };
 
+  ${buildDecisionHelperSource()}
+
+  // Occurrence = how many times this fault has matched so far in this frame.
   const roll = (f) => {
     const slot = stats[String(f.id)];
+    const occurrence = slot.matched;
     slot.matched++;
-    if (f.probability >= 1) {
-      slot.fired++;
-      return true;
-    }
-    if (f.probability <= 0) return false;
-    const fired = __nextRoll() < f.probability;
+    const fired = __decide(f, occurrence);
     if (fired) slot.fired++;
     return fired;
   };
