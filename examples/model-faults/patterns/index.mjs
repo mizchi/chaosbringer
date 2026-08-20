@@ -15,4 +15,13 @@ export const PATTERNS = [
       "and the client could not read the reply: without one idempotency key per intent, the " +
       "retry is a second order, and the UI looks identical either way.",
   },
+  {
+    name: "token-refresh",
+    path: "/token",
+    spec: "patterns/token-refresh/token.qnt",
+    catches:
+      "a refresh stampede. Two requests hitting 401 together must share one in-flight refresh; " +
+      "one refresh per 401 hammers the endpoint you least want to overload, and on a rotating " +
+      "refresh token the second one invalidates the first and logs the user out.",
+  },
 ];

@@ -1,0 +1,7 @@
+reachable    me-fresh__prefs-fresh
+reachable    me-fresh__prefs-replayed
+reachable    me-replayed__prefs-fresh
+reachable    me-replayed__prefs-replayed
+unreachable  contract-forbids-stampede
+unreachable  contract-forbids-error
+unreachable  contract-forbids-unhandled

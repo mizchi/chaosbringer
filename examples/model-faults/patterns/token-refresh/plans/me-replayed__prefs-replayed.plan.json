@@ -1,0 +1,25 @@
+{
+  "name": "me-replayed__prefs-replayed",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "me",
+      "outcome": "status",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "prefs",
+      "outcome": "status",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "ready",
+    "unhandledRejection": false,
+    "state": {
+      "refreshes": 1
+    }
+  },
+  "modelSteps": 4
+}

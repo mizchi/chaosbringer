@@ -130,7 +130,9 @@ export function formatModelCoverage(coverage: ModelCoverage): string {
     lines.push("Collapsed plans (distinct model states, identical code coverage):");
     for (const [a, b] of coverage.collapsedPlans) lines.push(`  ${a} == ${b}`);
   }
-  if (coverage.mismatches.length === 0) {
+  if (coverage.plansRun === 0) {
+    lines.push("No plans ran — nothing was verified. Check that the plan directory is populated.");
+  } else if (coverage.mismatches.length === 0) {
     lines.push("Mismatches: none — every plan matched the model's prediction");
   } else {
     lines.push(`Mismatches: ${coverage.mismatches.length}`);
@@ -141,9 +143,15 @@ export function formatModelCoverage(coverage: ModelCoverage): string {
   return lines.join("\n");
 }
 
-/** True when nothing needs a human: no mismatches and nothing silently skipped. */
+/**
+ * True when nothing needs a human: no mismatches, nothing silently skipped,
+ * and — the easy one to forget — at least one plan actually ran. A run of zero
+ * plans has no mismatches by definition, and reporting that as a pass is how a
+ * broken compile step looks like a green suite.
+ */
 export function modelRunPassed(coverage: ModelCoverage): boolean {
   return (
+    coverage.plansRun > 0 &&
     coverage.mismatches.length === 0 &&
     coverage.plansSkipped === 0 &&
     coverage.plansNotExercised.length === 0

@@ -329,6 +329,14 @@ describe("coverage", () => {
     expect(modelRunPassed(aggregateCoverage([result("ok")]))).toBe(true);
   });
 
+  it("does not pass a run of zero plans", () => {
+    // No plans means no mismatches, which is not the same as verified.
+    const empty = aggregateCoverage([]);
+    expect(empty.plansRun).toBe(0);
+    expect(modelRunPassed(empty)).toBe(false);
+    expect(formatModelCoverage(empty)).toMatch(/No plans ran/);
+  });
+
   it("pairs plans that share a coverage fingerprint", () => {
     const pairs = findCollapsedPlans(
       new Map([

@@ -99,3 +99,48 @@ describe("pattern: retry-idempotency", () => {
     expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
   }, 300000);
 });
+
+describe("pattern: token-refresh", () => {
+  const pattern = PATTERNS.find((p) => p.name === "token-refresh")!;
+
+  it("asserts one refresh per expiry, whatever the 401 fan-out", () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(4); // {me fresh|expired} x {prefs fresh|expired}
+    for (const plan of plans) {
+      expect(Number(plan.expect.state!.refreshes)).toBeLessThanOrEqual(1);
+      // Every enumerated state ends ready: an expiry the app handles must
+      // never reach the user as an error.
+      expect(plan.expect.ui).toBe("ready");
+    }
+  });
+
+  it("catches the stampede, and only when both requests hit 401 together", async () => {
+    const results = await run(pattern, false);
+
+    // Two concurrent 401s, one shared refresh required.
+    const both = results.find((r) => r.plan.name === "me-replayed__prefs-replayed")!;
+    expect(both.mismatches.map((m) => m.field)).toEqual(["state"]);
+    expect(both.observed.state).toEqual({ refreshes: 2 });
+    // The user saw nothing wrong — hence the state probe.
+    expect(both.observed.ui).toBe("ready");
+
+    // One 401 needs one refresh in either variant: these are the controls, and
+    // if they failed the pattern would be flagging refreshes in general.
+    for (const name of ["me-replayed__prefs-fresh", "me-fresh__prefs-replayed"]) {
+      const control = results.find((r) => r.plan.name === name)!;
+      expect(control.mismatches).toEqual([]);
+      expect(control.observed.state).toEqual({ refreshes: 1 });
+    }
+    // No expiry, no refresh.
+    expect(
+      results.find((r) => r.plan.name === "me-fresh__prefs-fresh")!.observed.state,
+    ).toEqual({ refreshes: 0 });
+  }, 300000);
+
+  it("passes every plan once the refresh is a single shared in-flight promise", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+

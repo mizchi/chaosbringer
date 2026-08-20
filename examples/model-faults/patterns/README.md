@@ -14,6 +14,7 @@ pnpm test:patterns                                          # all of them, both 
 | Pattern | Catches | Visible in the UI? |
 |---|---|---|
 | [`retry-idempotency`](./retry-idempotency/) | A retry that writes twice. The dangerous failure is the one where the server **committed** and the client could not read the reply — without one idempotency key per intent, the retry is a second order. | **No.** Same "Order placed" banner either way; only the server's order count differs. |
+| [`token-refresh`](./token-refresh/) | A refresh stampede. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload, and on a rotating refresh token the second invalidates the first and logs the user out. | **No.** Both variants render the account fine; only the refresh count differs. |
 
 ## Why these need a state probe
 
@@ -47,3 +48,10 @@ Two conventions that keep them honest:
 - **Assert both directions.** The buggy variant must produce the specific
   mismatch the pattern exists for, and the fixed variant must produce none. A
   pattern that only ever passes proves nothing.
+- **Keep controls in the enumeration.** `token-refresh` enumerates the
+  single-401 cases as well as the double, and they must pass in *both*
+  variants — otherwise the pattern would be flagging refreshes in general
+  rather than the stampede. The enumeration gives you those controls for free;
+  a hand-written test usually skips them.
+- **Model actions that are not injections get `--ignore-action`.** The refresh
+  in `token-refresh` is something the app does, not something a fault does.

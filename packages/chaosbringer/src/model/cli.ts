@@ -25,7 +25,13 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { aggregateCoverage, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { parseItfTrace } from "./itf.js";
-import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
+import {
+  compilePlan,
+  markOrderSensitivePlans,
+  validatePlan,
+  DEFAULT_IGNORED_ACTIONS,
+  type FaultPlan,
+} from "./plan.js";
 import { runPlans, type RunPlanOptions } from "./runner.js";
 
 const HELP = `Usage: chaosbringer model <command> [options]
@@ -49,6 +55,10 @@ Commands:
                              compared against the bridge's stateProbe. Repeatable.
                              Use for observables the UI does not show: write
                              counts, refresh counts, rollback flags.
+      --ignore-action <name> A model action that is app behaviour rather than an
+                             injection (a token refresh the app performs on its
+                             own, say). Repeatable; added to the built-in list
+                             of init/start/stutter.
 
   calibrate --url <url> [--out <file>]
       Measure what THIS machine can honour and write a timing profile:
@@ -101,6 +111,8 @@ export function compilePlansFromTraces(
     uiVar?: string;
     unhandledVar?: string;
     stateVars?: readonly string[];
+    /** Extended with the built-in ignore list, not replacing it. */
+    ignoreActions?: readonly string[];
   } = {},
 ): FaultPlan[] {
   const plans = tracePaths.map((path) => {
@@ -111,6 +123,11 @@ export function compilePlansFromTraces(
       ...(opts.uiVar !== undefined ? { uiVar: opts.uiVar } : {}),
       ...(opts.unhandledVar !== undefined ? { unhandledVar: opts.unhandledVar } : {}),
       ...(opts.stateVars !== undefined ? { stateVars: opts.stateVars } : {}),
+      // Extend rather than replace: a caller naming one app-behaviour action
+      // does not mean init/start should suddenly become injections.
+      ...(opts.ignoreActions !== undefined
+        ? { ignoreActions: [...DEFAULT_IGNORED_ACTIONS, ...opts.ignoreActions] }
+        : {}),
     });
   });
   return markOrderSensitivePlans(plans);
@@ -126,6 +143,7 @@ async function runCompile(argv: string[]): Promise<void> {
       "ui-var": { type: "string" },
       "unhandled-var": { type: "string" },
       "state-var": { type: "string", multiple: true },
+      "ignore-action": { type: "string", multiple: true },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -147,6 +165,7 @@ async function runCompile(argv: string[]): Promise<void> {
     ...(values["ui-var"] !== undefined ? { uiVar: values["ui-var"] } : {}),
     ...(values["unhandled-var"] !== undefined ? { unhandledVar: values["unhandled-var"] } : {}),
     ...(values["state-var"] !== undefined ? { stateVars: values["state-var"] } : {}),
+    ...(values["ignore-action"] !== undefined ? { ignoreActions: values["ignore-action"] } : {}),
   });
 
   const outDir = resolve(values.out);

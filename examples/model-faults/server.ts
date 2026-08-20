@@ -38,6 +38,7 @@ export function createApp(fixed: boolean): Hono {
     const flags =
       `<script>window.__CHECKOUT_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__ORDER_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__TOKEN_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -90,6 +91,37 @@ export function createApp(fixed: boolean): Hono {
     const id = `ord-${perSession.size + 1}`;
     perSession.set(key ?? id, id);
     return c.json({ id, deduped: false });
+  });
+
+  // --- token-refresh pattern -------------------------------------------
+  //
+  // The 401s themselves are injected by a plan (that is what an expired token
+  // looks like from the client's side), so the server only has to count
+  // refreshes. It sleeps briefly on purpose: the refresh has to still be in
+  // flight when the second 401 arrives, or there is no stampede to observe
+  // and the pattern would pass for the wrong reason.
+  const refreshes = new Map<string, number>();
+  const REFRESH_LATENCY_MS = 80;
+
+  app.get("/token", (c) => c.html(pageWithFlags("token.html", fixed)));
+  app.get("/token.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "token.js"), "utf8"));
+  });
+
+  app.get("/api/me", (c) => c.json({ name: "Ada Lovelace", id: 1 }));
+  app.get("/api/prefs", (c) => c.json({ theme: "dark", locale: "en" }));
+
+  app.post("/api/refresh", async (c) => {
+    const session = c.req.header("x-session") ?? "anonymous";
+    refreshes.set(session, (refreshes.get(session) ?? 0) + 1);
+    await new Promise((r) => setTimeout(r, REFRESH_LATENCY_MS));
+    return c.json({ token: `t-${Math.random().toString(36).slice(2)}` });
+  });
+
+  app.get("/api/refresh/count", (c) => {
+    const session = c.req.query("session") ?? "anonymous";
+    return c.json({ refreshes: refreshes.get(session) ?? 0 });
   });
 
   app.get("/api/orders/count", (c) => {
