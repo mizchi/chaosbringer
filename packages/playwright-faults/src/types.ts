@@ -227,6 +227,11 @@ export type RuntimeAction =
    * no route matches, nothing is in flight, and `await fetch(...)` simply
    * never returns. Exposes missing timeouts in code that never reaches the
    * network (Service Worker / cache layers included).
+   *
+   * An `init.signal` is still honoured — the promise rejects when the caller
+   * aborts, exactly as a real hung request does. So an app that bounds its
+   * requests with `AbortController` / `AbortSignal.timeout` survives this
+   * fault, and only one that cannot cancel is left hanging.
    */
   | { kind: "never-settle-fetch" }
   /**
@@ -283,11 +288,18 @@ export interface RuntimeFault {
   /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
   probability?: number;
   /**
+   * HTTP methods to match (case-insensitive), for fetch-scoped kinds.
+   * Omitted = every method. Needed whenever one URL carries more than one
+   * operation — `GET /api/todos` and `POST /api/todos` are different
+   * operations that a URL pattern alone cannot tell apart.
+   */
+  methods?: string[];
+  /**
    * Deterministic per-occurrence decisions, evaluated in-page. Occurrence
-   * counts matching calls (e.g. `fetch()` invocations whose URL matched)
-   * within one page load — the counter resets on navigation, because the
-   * init script is re-installed in the new frame. Mutually exclusive with
-   * `probability`.
+   * counts matching calls (e.g. `fetch()` invocations whose URL and method
+   * matched) within one page load — the counter resets on navigation,
+   * because the init script is re-installed in the new frame. Mutually
+   * exclusive with `probability`.
    */
   schedule?: FaultSchedule;
   /** What to do when the fault fires. */

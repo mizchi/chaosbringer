@@ -31,11 +31,21 @@ const OUTCOME_LAYER: Readonly<Record<PlanOutcome, OutcomeLayer>> = {
   status: "network",
 };
 
+/**
+ * Where a model operation lives, in HTTP terms.
+ *
+ * A bare matcher is the common case. Use the object form when one URL carries
+ * more than one operation — `GET /api/todos` and `POST /api/todos` are
+ * different operations that a URL pattern alone cannot tell apart, and
+ * without the method filter a plan would fire on whichever call came first.
+ */
+export type PlanRuleTarget = UrlMatcher | { urlPattern: UrlMatcher; methods?: string[] };
+
 export interface RunPlanOptions {
   /** Page to open. The modelled action runs on this page after load. */
   baseUrl: string;
-  /** Model operation id → URL matcher. Every rule a plan references must be here. */
-  rules: Record<string, UrlMatcher>;
+  /** Model operation id → where it lives. Every rule a plan references must be here. */
+  rules: Record<string, PlanRuleTarget>;
   /**
    * Fire the modelled user action (click "Load", submit the form, …). Omit
    * for models whose operations are issued by page load itself.
@@ -109,7 +119,7 @@ export function faultNameFor(rule: string, outcome: PlanOutcome): string {
  */
 export function compilePlanFaults(
   plan: FaultPlan,
-  rules: Record<string, UrlMatcher>,
+  rules: Record<string, PlanRuleTarget>,
   statusCode = 500,
 ): { runtimeFaults: RuntimeFault[]; faultInjection: FaultRule[]; expectedInjections: Map<string, number> } {
   const byRule = new Map<string, PlanStep[]>();
@@ -124,12 +134,17 @@ export function compilePlanFaults(
   const expectedInjections = new Map<string, number>();
 
   for (const [rule, steps] of byRule) {
-    const urlPattern = rules[rule];
-    if (urlPattern === undefined) {
+    const target = rules[rule];
+    if (target === undefined) {
       throw new Error(
         `chaosbringer/model: plan "${plan.name}" references operation "${rule}" with no entry in \`rules\``,
       );
     }
+    const isTargetObject =
+      typeof target === "object" && target !== null && !(target instanceof RegExp);
+    const urlPattern = isTargetObject ? target.urlPattern : target;
+    const methods = isTargetObject ? target.methods : undefined;
+    const methodFilter = methods !== undefined ? { methods } : {};
 
     const layers = new Set(steps.map((s) => OUTCOME_LAYER[s.outcome]).filter((l) => l !== "none"));
     if (layers.size > 1) {
@@ -162,6 +177,7 @@ export function compilePlanFaults(
           runtimeFaults.push({
             name,
             urlPattern,
+            ...methodFilter,
             schedule,
             action: { kind: "reject-fetch", rejectAs: "TypeError", rejectionMessage: `model:${name}` },
           });
@@ -170,6 +186,7 @@ export function compilePlanFaults(
           runtimeFaults.push({
             name,
             urlPattern,
+            ...methodFilter,
             schedule,
             action: { kind: "reject-fetch", rejectAs: "AbortError", rejectionMessage: `model:${name}` },
           });
@@ -178,6 +195,7 @@ export function compilePlanFaults(
           runtimeFaults.push({
             name,
             urlPattern,
+            ...methodFilter,
             schedule,
             action: { kind: "reject-body", rejectionMessage: `model:${name}` },
           });
@@ -188,6 +206,7 @@ export function compilePlanFaults(
           runtimeFaults.push({
             name,
             urlPattern,
+            ...methodFilter,
             schedule,
             action: { kind: "never-settle-fetch" },
           });
@@ -196,6 +215,7 @@ export function compilePlanFaults(
           faultInjection.push({
             name,
             urlPattern,
+            ...methodFilter,
             schedule,
             fault: { kind: "status", status: statusCode },
           });
@@ -309,6 +329,10 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
           (plan.schedule.every((s) => s.outcome === "pass")
             ? ` (this plan injects nothing — if "${plan.expect.ui}" is a transient state, ` +
               `it is not observable after the settle window; drop it from the target list)`
+            : "") +
+          (plan.schedule.some((s) => s.outcome === "hang")
+            ? ` (settleMs=${settleMs}: if the app bounds this request with a longer ` +
+              `timeout, the probe fires before the timeout does — raise settleMs above the app's deadline)`
             : ""),
       });
     }

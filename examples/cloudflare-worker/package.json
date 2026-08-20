@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "chaos": "tsx chaos/run.ts",
+    "model": "chaosbringer model run --plans model/plans --url ${BASE_URL:-http://localhost:8787} --config model/bridge.mjs",
+    "model:enumerate": "model/enumerate.sh",
+    "model:compile": "chaosbringer model compile --traces model/traces --out model/plans",
     "typecheck": "tsc --noEmit",
     "test": "node test.mjs"
   },

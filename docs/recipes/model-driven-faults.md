@@ -162,6 +162,39 @@ the model does. Either the model is over-refined or the app is missing a
 distinction — both are review-worthy, and neither is visible from the model
 alone.
 
+## Applied to an app that already existed
+
+`examples/model-faults/` is purpose-built for this pipeline, which makes it a
+weak proof. `examples/cloudflare-worker/` is not: it is a todo app written
+months earlier for the server-fault-correlation demo. A model was written
+against its "add a todo" flow without touching the app, and the first run
+reported four findings — all in the write path, none in the read path (its
+`refresh()` was already correctly guarded):
+
+| Plan | What the app did | Why |
+|---|---|---|
+| `write-rejected__no-refresh` | `unhandledrejection`, list unchanged | the `click` listener was `async` with no `try`/`catch`: a failed POST escaped, and the stale list told the user it had saved |
+| `write-errored__no-refresh` | rendered as success | `r.ok` was never checked, so a 500 refreshed the list as if the write worked |
+| `write-hung__no-refresh` | rendered as success | nothing bounded the POST |
+| (harness, not the app) | false `stuck` | `settleMs` was shorter than the app's own deadline, so the probe judged a bounded request as hung |
+
+Two lessons went straight back into the tooling:
+
+- **One URL can host two operations.** `GET /api/todos` and `POST /api/todos`
+  are different operations, so `rules` accepts `{ urlPattern, methods }` and
+  runtime faults gained a method filter. Without it a plan fires on whichever
+  call arrives first.
+- **A hung request must still reject when the caller cancels it.**
+  `never-settle-fetch` honours `init.signal`, so an app that bounds its
+  requests with `AbortController` / `AbortSignal.timeout` survives the fault
+  and only one that *cannot* cancel is left hanging. Otherwise the fault would
+  report correct code as broken.
+
+Model the *contract*, not the implementation, and account for what the page
+does on load: the app fetches its list once at load, so the post-click refresh
+is occurrence **1** of that rule, not 0. The model states the page-load fetch
+explicitly for exactly that reason.
+
 ## Cost and where it runs
 
 | Step | Cost | Needs |

@@ -54,6 +54,7 @@ export {
   type PlanExpectation,
   type PlanMismatch,
   type PlanOutcome,
+  type PlanRuleTarget,
   type PlanRunResult,
   type PlanStep,
   type RunPlanOptions,

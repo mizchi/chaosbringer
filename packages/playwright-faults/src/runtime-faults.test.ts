@@ -299,6 +299,15 @@ describe("Promise-level fetch faults", () => {
     );
   });
 
+  it("never-settle-fetch honours an abort signal so bounded apps aren't false-flagged", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "never-settle-fetch" } }], 1);
+    expect(script).toContain("init.signal");
+    expect(script).toContain('signal.addEventListener("abort"');
+    expect(script).toContain("signal.reason");
+    // Still hangs forever when the caller has no way to cancel.
+    expect(script).toContain("if (!signal) return new Promise(() => {});");
+  });
+
   it("emits one patched fetch that dispatches on every fetch-scoped kind", () => {
     const script = buildRuntimeFaultsScript(
       [
@@ -336,4 +345,32 @@ describe("Promise-level fetch faults", () => {
     expect(script).toContain("new TypeError(msg)");
   });
 });
+
+describe("method filtering", () => {
+  it("serializes an upper-cased method list and matches on it in-page", () => {
+    const script = buildRuntimeFaultsScript(
+      [
+        {
+          name: "post-only",
+          urlPattern: /\/api\/todos$/,
+          methods: ["post"],
+          action: { kind: "reject-fetch" },
+        },
+      ],
+      1,
+    );
+    expect(script).toContain('"methods":["POST"]');
+    expect(script).toContain("const matchMethod =");
+    expect(script).toContain("if (!matchMethod(f, method)) continue;");
+    // The method is read from init, then from a Request-like input, then GET.
+    expect(script).toContain("init.method");
+    expect(script).toContain('return "GET";');
+  });
+
+  it("omits the filter when no methods are given, so every method matches", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "reject-fetch" } }], 1);
+    expect(script).toContain('"methods":null');
+  });
+});
+
 

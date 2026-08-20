@@ -1,0 +1,8 @@
+reachable    write-ok__refresh-fulfilled
+reachable    write-ok__refresh-rejected
+reachable    write-ok__refresh-bodyRejected
+reachable    write-rejected__no-refresh
+reachable    write-errored__no-refresh
+reachable    write-hung__no-refresh
+unreachable  contract-forbids-stuck
+unreachable  contract-forbids-unhandled

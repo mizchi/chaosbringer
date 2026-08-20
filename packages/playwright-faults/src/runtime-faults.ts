@@ -130,6 +130,7 @@ export function buildRuntimeFaultsScript(
     id: i,
     name: runtimeFaultName(f),
     pattern: serializeMatcher(f.urlPattern),
+    methods: f.methods && f.methods.length > 0 ? f.methods.map((m) => m.toUpperCase()) : null,
     probability: typeof f.probability === "number" ? f.probability : 1,
     schedule: serializeSchedule(f.schedule),
     action: f.action,
@@ -193,12 +194,21 @@ export function buildRuntimeFaultsScript(
       }
       return new TypeError(msg);
     };
+    const methodOf = (input, init) => {
+      if (init && typeof init.method === "string") return init.method.toUpperCase();
+      if (input && typeof input === "object" && typeof input.method === "string") {
+        return input.method.toUpperCase();
+      }
+      return "GET";
+    };
+    const matchMethod = (f, method) => !f.methods || f.methods.indexOf(method) !== -1;
     window.fetch = function chaosFetch(input, init) {
       const url =
         typeof input === "string" ? input :
         input instanceof URL ? input.toString() :
         (input && typeof input.url === "string") ? input.url :
         "";
+      const method = methodOf(input, init);
       // Two passes. A *scheduled* fault always advances its occurrence
       // counter when its pattern matches, even if an earlier fault already
       // claimed this call — otherwise two faults watching the same URL
@@ -209,6 +219,7 @@ export function buildRuntimeFaultsScript(
       let chosen = null;
       for (const f of fetchFaults) {
         if (!matchUrl(f.pattern, url)) continue;
+        if (!matchMethod(f, method)) continue;
         if (f.schedule) {
           const fired = roll(f);
           if (fired && !chosen) chosen = f;
@@ -227,8 +238,25 @@ export function buildRuntimeFaultsScript(
           return Promise.reject(makeError(a.rejectAs, msg));
         }
         if (a.kind === "never-settle-fetch") {
-          // No request, no settlement — the caller waits forever.
-          return new Promise(() => {});
+          // No request, no settlement — the caller waits forever *unless it
+          // cancels*, which is what a real hung request does: an
+          // AbortController (or AbortSignal.timeout) still rejects it. Without
+          // honouring the signal this fault would report a correctly-bounded
+          // app as stuck.
+          const signal = (init && init.signal) || (input && input.signal) || null;
+          if (!signal) return new Promise(() => {});
+          const abortError = () =>
+            signal.reason ||
+            (typeof DOMException === "function"
+              ? new DOMException("The operation was aborted.", "AbortError")
+              : new Error("The operation was aborted."));
+          return new Promise((_resolve, reject) => {
+            if (signal.aborted) {
+              reject(abortError());
+              return;
+            }
+            signal.addEventListener("abort", () => { reject(abortError()); }, { once: true });
+          });
         }
         if (a.kind === "resolve-rejected-thenable") {
           // Resolving *with a thenable* means the rejection arrives one

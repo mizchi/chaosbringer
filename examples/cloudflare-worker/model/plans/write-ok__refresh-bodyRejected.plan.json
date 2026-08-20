@@ -1,0 +1,28 @@
+{
+  "name": "write-ok__refresh-bodyRejected",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "list",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "post",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 2,
+      "rule": "list",
+      "outcome": "reject-body",
+      "occurrence": 1
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 4
+}

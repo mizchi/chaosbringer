@@ -369,8 +369,13 @@ export const faults = {
 };
 
 export interface RuntimeHelperOptions {
-  /** Restrict the fault to pages whose URL matches this matcher. */
+  /**
+   * Restrict the fault by URL. Fetch-scoped kinds match the request URL;
+   * `clockSkew` matches `location.href`.
+   */
   urlPattern?: UrlMatcher;
+  /** HTTP methods to match (case-insensitive). Fetch-scoped kinds only. */
+  methods?: string[];
   /** 0..1, default 1.0. Rolled per call against the in-page seeded RNG. */
   probability?: number;
   /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
@@ -384,6 +389,7 @@ function applyRuntimeCommon(
   opts: RuntimeHelperOptions | undefined,
 ): RuntimeFault {
   if (opts?.urlPattern !== undefined) fault.urlPattern = opts.urlPattern;
+  if (opts?.methods !== undefined) fault.methods = opts.methods;
   if (opts?.probability !== undefined) fault.probability = opts.probability;
   if (opts?.schedule !== undefined) fault.schedule = opts.schedule;
   if (opts?.name !== undefined) fault.name = opts.name;

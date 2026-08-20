@@ -3061,6 +3061,18 @@ export function validateOptions(options: CrawlerOptions): void {
       : `runtimeFaults entry`;
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
     validateFaultSchedule(label, fault);
+    if (fault.methods !== undefined) {
+      if (!Array.isArray(fault.methods) || fault.methods.length === 0) {
+        throw new Error(`chaosbringer: ${label} methods must be a non-empty array of HTTP methods`);
+      }
+      for (const m of fault.methods) {
+        if (typeof m !== "string" || m.length === 0) {
+          throw new Error(
+            `chaosbringer: ${label} methods entry must be a non-empty string (got ${JSON.stringify(m)})`
+          );
+        }
+      }
+    }
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {

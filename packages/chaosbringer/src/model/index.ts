@@ -45,6 +45,7 @@ export {
   runPlans,
   type MismatchField,
   type PlanMismatch,
+  type PlanRuleTarget,
   type PlanRunResult,
   type RunPlanOptions,
 } from "./runner.js";
