@@ -12,12 +12,18 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "examples/model-faults/model/**"
+      - "examples/*/model/**"
 
 jobs:
   regenerate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - model-faults
+          - cloudflare-worker
     steps:
       - uses: actions/checkout@v4
 
@@ -39,21 +45,22 @@ jobs:
       - name: Build chaosbringer (for the model CLI)
         run: pnpm -F chaosbringer build
 
-      - name: Enumerate witnesses
-        working-directory: examples/model-faults
-        run: model/enumerate.sh
+      - name: Enumerate witnesses into a scratch directory
+        working-directory: examples/${{ matrix.example }}
+        # OUT keeps the committed traces untouched: they carry a "Created by
+        # Apalache on <timestamp>" line, so regenerating them in place would
+        # make every run look dirty.
+        run: OUT=/tmp/fresh-traces model/enumerate.sh
 
-      - name: Compile plans
-        working-directory: examples/model-faults
-        run: node ../../packages/chaosbringer/dist/cli.js model compile --traces model/traces --out model/plans
-
-      - name: Fail if the committed plans drifted
+      - name: Compile the fresh witnesses
+        working-directory: examples/${{ matrix.example }}
         run: |
-          if ! git diff --quiet -- examples/model-faults/model; then
-            echo "::error::Committed model plans/traces differ from a fresh enumeration."
-            echo "Run examples/model-faults/model/enumerate.sh + pnpm compile and commit the result."
-            git diff --stat -- examples/model-faults/model
-            git diff -- examples/model-faults/model | head -200
-            exit 1
-          fi
-          echo "plans are up to date"
+          node ../../packages/chaosbringer/dist/cli.js model compile \
+            --traces /tmp/fresh-traces --out /tmp/fresh-plans
+
+      - name: Compare against the committed plans
+        working-directory: examples/${{ matrix.example }}
+        # Semantic comparison, not `git diff`: what matters is the injection
+        # schedule and the oracle, not which equivalent witness the solver
+        # happened to return this time.
+        run: node ../model-faults/model/check-plans.mjs model/plans /tmp/fresh-plans

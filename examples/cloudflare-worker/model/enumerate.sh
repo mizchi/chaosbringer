@@ -7,12 +7,13 @@ cd "$(dirname "$0")"
 
 Q="${QUINT:-npx --yes @informalsystems/quint@0.32.0}"
 DEPTH="${DEPTH:-4}"
+OUT="${OUT:-traces}"
 
-mkdir -p traces
+mkdir -p "$OUT"
 : > targets.txt
 
 emit() {
-  local name="$1" pred="$2" out="traces/$1.itf.json"
+  local name="$1" pred="$2" out="$OUT/$1.itf.json"
   if $Q verify todo.qnt --max-steps="$DEPTH" --invariant="not($pred)" --out-itf="$out" >/dev/null 2>&1; then
     echo "unreachable  $name" | tee -a targets.txt
     rm -f "$out"
