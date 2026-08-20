@@ -10,6 +10,8 @@
     "enumerate": "model/enumerate.sh",
     "compile": "chaosbringer model compile --traces model/traces --out model/plans",
     "test": "vitest run",
+    "test:patterns": "vitest run patterns/patterns.test.ts",
+    "pattern": "tsx patterns/run-pattern.mts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

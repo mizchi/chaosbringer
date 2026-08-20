@@ -66,6 +66,13 @@ export interface RunPlanOptions {
   /** Map the page back to the model's UI vocabulary. Omit to skip `ui` checks. */
   uiProbe?: (page: Page) => Promise<string>;
   /**
+   * Read the observables a plan's `expect.state` names — server-side counters,
+   * storage, anything. Most real failures (a retry that writes twice, a
+   * refresh stampede) are invisible on screen, so this is how a model asserts
+   * on them. Only the keys a plan actually expects are compared.
+   */
+  stateProbe?: (page: Page) => Promise<Record<string, unknown>>;
+  /**
    * Quiet period after the action before probing. Default 500ms.
    *
    * When `appDeadlineMs` is set this is *validated* rather than trusted: a
@@ -105,7 +112,7 @@ export interface RunPlanOptions {
   coverageFingerprints?: boolean;
 }
 
-export type MismatchField = "ui" | "unhandledRejection" | "injection";
+export type MismatchField = "ui" | "unhandledRejection" | "injection" | "state";
 
 export interface PlanMismatch {
   plan: string;
@@ -125,7 +132,9 @@ export interface PlanRunResult {
     unhandledRejection: boolean;
     /** Faults that fired, keyed by `${rule}:${outcome}`. */
     fired: Record<string, number>;
-    /** Thrown by `action` / `uiProbe`, if either did. */
+    /** Whatever `stateProbe` returned. */
+    state?: Record<string, unknown>;
+    /** Thrown by `action` / `uiProbe` / `stateProbe`, if any did. */
     probeError?: string;
     /** V8 coverage digest, when `coverageFingerprints` was set. */
     coverageFingerprint?: string;
@@ -390,6 +399,7 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
         if (opts.action) await opts.action(page);
         if (settleMs > 0) await page.waitForTimeout(settleMs);
         if (opts.uiProbe) observed.ui = await opts.uiProbe(page);
+        if (opts.stateProbe) observed.state = await opts.stateProbe(page);
       } catch (err) {
         observed.probeError = err instanceof Error ? err.message : String(err);
       }
@@ -459,7 +469,37 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     }
   }
 
-  // 3. Did a rejection escape when the model said it must not (or vice versa)?
+  // 3. Observables the UI does not show: write counts, refresh counts, …
+  if (plan.expect.state !== undefined) {
+    if (!opts.stateProbe) {
+      mismatches.push({
+        plan: plan.name,
+        field: "state",
+        expected: plan.expect.state,
+        actual: undefined,
+        detail:
+          `plan expects state ${JSON.stringify(plan.expect.state)} but the bridge has no ` +
+          `stateProbe, so nothing was read — an unchecked expectation is worse than none`,
+      });
+    } else {
+      for (const [key, want] of Object.entries(plan.expect.state)) {
+        const got = observed.state?.[key];
+        // Compare loosely on shape: a probe reading JSON gets numbers, a probe
+        // reading the DOM gets strings, and the model should not have to care.
+        if (String(got) !== String(want)) {
+          mismatches.push({
+            plan: plan.name,
+            field: "state",
+            expected: want,
+            actual: got,
+            detail: `model predicted ${key}=${JSON.stringify(want)}, probe read ${JSON.stringify(got)}`,
+          });
+        }
+      }
+    }
+  }
+
+  // 4. Did a rejection escape when the model said it must not (or vice versa)?
   if (plan.expect.unhandledRejection !== undefined) {
     if (plan.expect.unhandledRejection !== observed.unhandledRejection) {
       mismatches.push({

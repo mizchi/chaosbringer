@@ -45,6 +45,10 @@ Commands:
       --ui-var <name>        Variable holding the expected UI label (default: ui)
       --unhandled-var <name> Variable holding the escaped-rejection flag
                              (default: unhandled)
+      --state-var <name>     Extra model variable to lift into expect.state,
+                             compared against the bridge's stateProbe. Repeatable.
+                             Use for observables the UI does not show: write
+                             counts, refresh counts, rollback flags.
 
   calibrate --url <url> [--out <file>]
       Measure what THIS machine can honour and write a timing profile:
@@ -92,7 +96,12 @@ function stemOf(path: string): string {
 
 export function compilePlansFromTraces(
   tracePaths: readonly string[],
-  opts: { logVar?: string; uiVar?: string; unhandledVar?: string } = {},
+  opts: {
+    logVar?: string;
+    uiVar?: string;
+    unhandledVar?: string;
+    stateVars?: readonly string[];
+  } = {},
 ): FaultPlan[] {
   const plans = tracePaths.map((path) => {
     const trace = parseItfTrace(JSON.parse(readFileSync(path, "utf8")));
@@ -101,6 +110,7 @@ export function compilePlansFromTraces(
       ...(opts.logVar !== undefined ? { logVar: opts.logVar } : {}),
       ...(opts.uiVar !== undefined ? { uiVar: opts.uiVar } : {}),
       ...(opts.unhandledVar !== undefined ? { unhandledVar: opts.unhandledVar } : {}),
+      ...(opts.stateVars !== undefined ? { stateVars: opts.stateVars } : {}),
     });
   });
   return markOrderSensitivePlans(plans);
@@ -115,6 +125,7 @@ async function runCompile(argv: string[]): Promise<void> {
       "log-var": { type: "string" },
       "ui-var": { type: "string" },
       "unhandled-var": { type: "string" },
+      "state-var": { type: "string", multiple: true },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -135,6 +146,7 @@ async function runCompile(argv: string[]): Promise<void> {
     ...(values["log-var"] !== undefined ? { logVar: values["log-var"] } : {}),
     ...(values["ui-var"] !== undefined ? { uiVar: values["ui-var"] } : {}),
     ...(values["unhandled-var"] !== undefined ? { unhandledVar: values["unhandled-var"] } : {}),
+    ...(values["state-var"] !== undefined ? { stateVars: values["state-var"] } : {}),
   });
 
   const outDir = resolve(values.out);
@@ -147,8 +159,11 @@ async function runCompile(argv: string[]): Promise<void> {
   console.log(`model compile: ${plans.length} plan(s) -> ${values.out}`);
   for (const plan of plans) {
     const steps = plan.schedule.map((s) => `${s.rule}@${s.occurrence}=${s.outcome}`).join(" ");
+    const state = plan.expect.state
+      ? ` ${Object.entries(plan.expect.state).map(([k, v]) => `${k}=${v}`).join(" ")}`
+      : "";
     console.log(
-      `  ${plan.name}: [${steps}] -> ui=${plan.expect.ui ?? "?"} unhandled=${plan.expect.unhandledRejection ?? "?"}${plan.orderSensitive ? "  (order-sensitive)" : ""}`,
+      `  ${plan.name}: [${steps}] -> ui=${plan.expect.ui ?? "?"} unhandled=${plan.expect.unhandledRejection ?? "?"}${state}${plan.orderSensitive ? "  (order-sensitive)" : ""}`,
     );
   }
   if (flagged.length > 0) {

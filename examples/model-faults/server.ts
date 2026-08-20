@@ -25,13 +25,24 @@ export interface StartedServer {
 export function createApp(fixed: boolean): Hono {
   const app = new Hono();
 
-  app.get("/", (c) => {
-    const html = readFileSync(join(publicDir, "index.html"), "utf8").replace(
-      "<script src=\"/app.js\"></script>",
-      `<script>window.__CHECKOUT_FIXED__ = ${fixed ? "true" : "false"};</script>\n    <script src="/app.js"></script>`,
-    );
-    return c.html(html);
-  });
+  /**
+   * Serve a page with its variant flag and a fresh session id injected.
+   *
+   * The session id scopes server-side state to one page load, so plans that
+   * assert on write counts cannot see each other's writes — every plan gets
+   * its own browser, and now its own server-side slate too.
+   */
+  function pageWithFlags(file: string, isFixed: boolean): string {
+    const html = readFileSync(join(publicDir, file), "utf8");
+    const session = `s-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+    const flags =
+      `<script>window.__CHECKOUT_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__ORDER_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
+    return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
+  }
+
+  app.get("/", (c) => c.html(pageWithFlags("index.html", fixed)));
 
   app.get("/app.js", (c) => {
     c.header("content-type", "text/javascript; charset=utf-8");
@@ -51,6 +62,40 @@ export function createApp(fixed: boolean): Hono {
   app.get("/api/shipping", (c) =>
     c.json({ carrier: "Yamato", eta: "2026-08-24", cost: 5 }),
   );
+
+  // --- retry / idempotency pattern -------------------------------------
+  //
+  // Orders are keyed by session so concurrent plan runs cannot see each
+  // other's writes, and deduped by Idempotency-Key the way a real payment
+  // API would be. `writes` counts *distinct* orders, which is what the model
+  // asserts on: one user intent must produce one order however many times the
+  // client retries.
+  const orders = new Map<string, Map<string, string>>();
+
+  app.get("/retry", (c) => c.html(pageWithFlags("retry.html", fixed)));
+  app.get("/retry.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "retry.js"), "utf8"));
+  });
+
+  app.post("/api/order", async (c) => {
+    const session = c.req.header("x-session") ?? "anonymous";
+    const key = c.req.header("idempotency-key");
+    const perSession = orders.get(session) ?? new Map<string, string>();
+    orders.set(session, perSession);
+    if (key && perSession.has(key)) {
+      // Replay of a write we already committed: same id, no second order.
+      return c.json({ id: perSession.get(key), deduped: true });
+    }
+    const id = `ord-${perSession.size + 1}`;
+    perSession.set(key ?? id, id);
+    return c.json({ id, deduped: false });
+  });
+
+  app.get("/api/orders/count", (c) => {
+    const session = c.req.query("session") ?? "anonymous";
+    return c.json({ orders: orders.get(session)?.size ?? 0 });
+  });
 
   return app;
 }

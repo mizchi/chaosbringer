@@ -1,0 +1,10 @@
+reachable    first-fulfil
+reachable    first-rejectBefore__then-fulfil
+reachable    first-rejectBefore__then-rejectBefore
+reachable    first-rejectBefore__then-rejectAfter
+reachable    first-rejectAfter__then-fulfil
+reachable    first-rejectAfter__then-rejectBefore
+reachable    first-rejectAfter__then-rejectAfter
+unreachable  contract-forbids-double-write
+unreachable  contract-forbids-unhandled
+unreachable  contract-forbids-phantom-success

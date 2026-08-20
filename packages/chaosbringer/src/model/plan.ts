@@ -70,6 +70,16 @@ export interface PlanExpectation {
   ui?: string;
   /** Whether the model says a rejection escapes every handler. */
   unhandledRejection?: boolean;
+  /**
+   * Model variables lifted verbatim, compared against the runner's
+   * `stateProbe`.
+   *
+   * The UI is not where most real failures are visible. "The order was placed
+   * exactly once" and "the token was refreshed at most once" are server-side
+   * facts, and a retry that double-writes looks perfectly healthy on screen —
+   * so a model can name any observable, and the bridge says how to read it.
+   */
+  state?: Record<string, string | number | boolean>;
 }
 
 export interface FaultPlan {
@@ -134,6 +144,12 @@ export interface CompilePlanOptions {
   uiVar?: string;
   /** Variable holding the escaped-rejection flag. Default `"unhandled"`. */
   unhandledVar?: string;
+  /**
+   * Extra state variables to lift from the final state into `expect.state`.
+   * Use for observables the UI does not show: write counts, refresh counts,
+   * rollback flags.
+   */
+  stateVars?: readonly string[];
   /** Extra / overriding action → outcome mappings. */
   actionOutcomes?: Record<string, PlanOutcome>;
   /** Action names to drop. Defaults to `DEFAULT_IGNORED_ACTIONS`. */
@@ -247,6 +263,24 @@ export function compilePlan(trace: ItfTrace, opts: CompilePlanOptions = {}): Fau
   if (ui !== undefined) plan.expect.ui = ui;
   const unhandled = readBool(last, unhandledVar);
   if (unhandled !== undefined) plan.expect.unhandledRejection = unhandled;
+
+  for (const name of opts.stateVars ?? []) {
+    const value = last.vars[name];
+    if (value === undefined) {
+      throw new Error(
+        `chaosbringer/model: stateVar "${name}" is not in the trace's final state — check the ` +
+          `spelling, or that the model declares it as a state variable`,
+      );
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      throw new Error(
+        `chaosbringer/model: stateVar "${name}" is ${JSON.stringify(value)}; only strings, ` +
+          `numbers and booleans can be compared against a probe`,
+      );
+    }
+    plan.expect.state ??= {};
+    plan.expect.state[name] = value;
+  }
   return plan;
 }
 

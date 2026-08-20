@@ -64,3 +64,19 @@ jobs:
         # schedule and the oracle, not which equivalent witness the solver
         # happened to return this time.
         run: node ../model-faults/model/check-plans.mjs model/plans /tmp/fresh-plans
+
+      - name: Re-enumerate every pattern that has its own model
+        working-directory: examples/${{ matrix.example }}
+        # Each pattern owns its enumerate.sh and compile.sh, so this loop needs
+        # to know nothing about any individual pattern's options.
+        run: |
+          shopt -s nullglob
+          for script in patterns/*/enumerate.sh; do
+            dir=$(dirname "$script")
+            name=$(basename "$dir")
+            echo "::group::$name"
+            OUT="/tmp/fresh-$name" "$script"
+            TRACES="/tmp/fresh-$name" OUT="/tmp/fresh-plans-$name" "$dir/compile.sh"
+            node ../model-faults/model/check-plans.mjs "$dir/plans" "/tmp/fresh-plans-$name"
+            echo "::endgroup::"
+          done

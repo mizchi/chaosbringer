@@ -1,0 +1,19 @@
+{
+  "name": "first-fulfil",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "order",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "placed",
+    "unhandledRejection": false,
+    "state": {
+      "orders": 1
+    }
+  },
+  "modelSteps": 2
+}
