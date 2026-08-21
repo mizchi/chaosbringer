@@ -3144,6 +3144,18 @@ export function validateOptions(options: CrawlerOptions): void {
           `chaosbringer: ${label} clock-skew skewMs must be a finite integer (got ${JSON.stringify(a.skewMs)})`
         );
       }
+      // `clock-skew` is page-scoped: it patches `Date` once when the init
+      // script installs, matching on `location.href`. There is no request, so
+      // there is no method to filter on — and a `methods` here was accepted
+      // and then ignored, which reads as "the fault applies to POSTs only"
+      // while it applies to the whole page.
+      if (fault.methods !== undefined) {
+        throw new Error(
+          `chaosbringer: ${label} sets methods on a clock-skew action, which is page-scoped ` +
+            `(it patches Date once per page load and matches location.href, so no request method ` +
+            `is involved) — drop methods, or use urlPattern to scope it to a page`
+        );
+      }
     } else {
       throw new Error(
         `chaosbringer: ${label} action.kind is not recognized (got ${JSON.stringify((a as { kind: unknown }).kind)})`

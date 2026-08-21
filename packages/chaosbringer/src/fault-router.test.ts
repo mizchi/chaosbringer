@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { faults } from "@mizchi/playwright-faults";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyFaultRules } from "./fault-router.js";
+import { applyFault, applyFaultRules } from "./fault-router.js";
 
 /**
  * `applyFaultRules` exists because every other way into the fault layers runs
@@ -164,4 +164,38 @@ describe("applyFaultRules on a page you drive yourself", () => {
       await page.close();
     }
   }, 60_000);
+});
+
+describe("a fault kind the library does not know", () => {
+  it("throws instead of parking the request forever", async () => {
+    // Before `hang` existed, falling off `applyFault`'s switch was obviously a
+    // bug: nothing responded, so the request hung and somebody noticed. Now
+    // that "park it deliberately" is a real fault, a typo'd `kind` produced the
+    // same symptom — with no entry in the held-route registry, so nothing
+    // drained it and nothing counted it. A config error that presents as
+    // intent is the worst kind, so it is now loud.
+    const route = {
+      abort: async () => {},
+      fulfill: async () => {},
+      fallback: async () => {},
+    } as unknown as import("playwright").Route;
+    await expect(
+      applyFault(route, { kind: "statsu", status: 500 } as never),
+    ).rejects.toThrow(/unknown fault kind "statsu"/);
+  });
+
+  it("still realises each kind it does know", async () => {
+    // The guard above must not be satisfiable by throwing for everything.
+    const calls: string[] = [];
+    const route = {
+      abort: async () => void calls.push("abort"),
+      fulfill: async () => void calls.push("fulfill"),
+      fallback: async () => void calls.push("fallback"),
+    } as unknown as import("playwright").Route;
+    await applyFault(route, { kind: "abort" });
+    await applyFault(route, { kind: "status", status: 500 });
+    await applyFault(route, { kind: "delay", ms: 1 });
+    await applyFault(route, { kind: "hang" }, () => calls.push("held"));
+    expect(calls).toEqual(["abort", "fulfill", "fallback", "held"]);
+  });
 });

@@ -131,6 +131,19 @@ export async function applyFault(
       hold?.(route);
       return;
     }
+    default: {
+      // Falling off this switch used to be obviously a bug: nothing responded,
+      // so the request hung and somebody noticed. Since `hang` exists, a
+      // typo'd `kind` produces exactly the "deliberately parked" behaviour —
+      // but with no entry in the held-route registry, so nothing drains it and
+      // nothing counts it. Indistinguishable from intent, which is the worst
+      // way for a config error to present.
+      const unknown: never = fault;
+      throw new Error(
+        `chaosbringer: unknown fault kind ${JSON.stringify((unknown as { kind?: unknown }).kind)} — ` +
+          `expected one of abort, status, delay, hang`,
+      );
+    }
   }
 }
 

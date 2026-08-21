@@ -419,3 +419,29 @@ describe("validateOptions", () => {
     ).not.toThrow();
   });
 });
+
+describe("config errors that used to pass silently", () => {
+  it("refuses `methods` on a clock-skew fault, which is page-scoped", () => {
+    // Accepted and then ignored: the config reads "skew the clock on POSTs
+    // only" while the skew applies to the whole page.
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        runtimeFaults: [
+          { name: "skew", methods: ["POST"], action: { kind: "clock-skew", skewMs: 60_000 } },
+        ],
+      }),
+    ).toThrow(/page-scoped/);
+  });
+
+  it("still accepts a clock-skew scoped by urlPattern", () => {
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        runtimeFaults: [
+          { urlPattern: /\/checkout/, action: { kind: "clock-skew", skewMs: 60_000 } },
+        ],
+      }),
+    ).not.toThrow();
+  });
+});

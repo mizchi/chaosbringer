@@ -447,7 +447,7 @@ Promise-shaped kinds, for the failure modes a network mock cannot express:
 | `faults.neverSettleFetch()` | the promise never settles, no request is issued | Missing timeout. Because nothing is in flight, `networkidle` still fires — the UI simply never leaves loading |
 | `faults.rejectedThenable()` | same rejection, one microtask later, via thenable assimilation | Handlers attached too late |
 
-`faults.flakyFetch()` still works; it is `rejectFetch({ rejectAs: "TypeError" })`.
+`faults.flakyFetch()` still works; it is `rejectFetch({ rejectAs: "TypeError" })`. One thing to know if you migrate: the stats label changes with it. An unnamed `flakyFetch` reported `rule: "flaky-fetch"` and the `rejectFetch` form reports `rule: "reject-fetch:TypeError"`, so anything matching on `report.runtimeFaults[].rule` needs updating — or pass an explicit `name` and stop depending on the derived one.
 
 `faults.status(500, { urlPattern })` with no `body` does **not** send an empty body: Chromium emits a spurious `ERR_ABORTED` alongside an empty-bodied intercepted response, so the default is `{"error":500}` with `content-type: application/json`. That default decides which app bug a 500 finds — a client that skips `res.ok` and calls `res.json()` renders `undefined` from it, where an HTML or empty body makes `res.json()` *reject* instead. Both are worth testing; pass `body: ""` or `body: "<html>…"` explicitly for the second.
 
