@@ -55,6 +55,16 @@ export const PATTERNS = [
       "exactly like one tab being patient.",
   },
   {
+    name: "stale-revalidate",
+    path: "/cache",
+    spec: "patterns/stale-revalidate/swr.qnt",
+    catches:
+      "a revalidation whose response nothing consumes. Serving the cached copy is the feature, " +
+      "so \"the screen shows old data\" cannot be the bug — ending there is. The request goes " +
+      "out, the response comes back, the JSON parses, and the screen never moves; every error " +
+      "path a reviewer thinks to try behaves perfectly, because the bug is on the success path.",
+  },
+  {
     name: "timeout-ladder",
     path: "/slow",
     spec: "patterns/timeout-ladder/ladder.qnt",

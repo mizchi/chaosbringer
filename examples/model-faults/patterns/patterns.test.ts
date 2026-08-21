@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aggregateCoverage,
+  fingerprintsOf,
   modelRunPassed,
   runPlans,
   validatePlan,
@@ -409,6 +410,67 @@ describe("pattern: reconnect-budget", () => {
     const results = await run(pattern, true);
     expect(keys(results)).toEqual([]);
     expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+
+describe("pattern: stale-revalidate", () => {
+  const pattern = PATTERNS.find((p) => p.name === "stale-revalidate")!;
+
+  it("separates what the app received from what it rendered", () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(3); // revalidation: fulfil | reject | serverError
+    const byName = new Map(plans.map((p) => [p.name, p]));
+
+    // Every plan states that the revalidation happened — without that, an app
+    // that serves the cache and never asks would pass the two failure plans.
+    for (const plan of plans) expect(plan.expect.calls).toEqual({ profile: 2 });
+
+    // And the successful one is the only plan whose screen must move. A model
+    // with one "shown" variable could not say that: serving rev 1 is correct
+    // until the app has received rev 2.
+    expect(byName.get("revalidate-fulfil")!.expect.state).toEqual({ shown: 2 });
+    expect(byName.get("revalidate-fulfil")!.expect.ui).toBe("fresh");
+    for (const name of ["revalidate-reject", "revalidate-serverError"]) {
+      expect(byName.get(name)!.expect.state).toEqual({ shown: 1 });
+      expect(byName.get(name)!.expect.ui).toBe("stale");
+    }
+  });
+
+  it("catches the response nothing consumed, on the success path only", async () => {
+    const results = await run(pattern, false);
+    const dropped = results.find((r) => r.plan.name === "revalidate-fulfil")!;
+
+    // The request went out, the reply came back, the JSON parsed, and the
+    // screen stayed where it was. The call count is satisfied — this app does
+    // revalidate — so only the gap between received and rendered shows it.
+    expect(dropped.mismatches.map((m) => m.field)).toEqual(["state"]);
+    expect(dropped.observed.state).toEqual({ shown: 1 });
+    expect(dropped.observed.matched.profile).toBe(2);
+    // …and it claimed to be up to date while doing it.
+    expect(dropped.observed.ui).toBe("fresh");
+
+    // Both failure paths are correct in this variant, and must stay passing:
+    // the bug is on the success path, which is exactly why it survives review.
+    for (const name of ["revalidate-reject", "revalidate-serverError"]) {
+      expect(results.find((r) => r.plan.name === name)!.mismatches).toEqual([]);
+    }
+  }, 300000);
+
+  it("reports two model states the coverage digest cannot tell apart", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    const coverage = aggregateCoverage(results, { fingerprints: fingerprintsOf(results) });
+    expect(modelRunPassed(coverage)).toBe(true);
+
+    // The only shipped assertion on collapsedPlans, and the honest reading is
+    // narrower than "the app does not distinguish them": V8 coverage is
+    // cumulative over the run, so the page load has already exercised the
+    // render path, and at this granularity the success and 500 branches touch
+    // no function the other does not. `reject` stays distinct because the
+    // runtime-layer fault patches `fetch` in the page, so the *harness* shows
+    // up in the digest too. All of which is why this is a review prompt and
+    // never a failure — modelRunPassed above is still true.
+    expect(coverage.collapsedPlans).toEqual([["revalidate-fulfil", "revalidate-serverError"]]);
   }, 300000);
 });
 

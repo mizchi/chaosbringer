@@ -43,6 +43,7 @@ export function createApp(fixed: boolean): Hono {
       `window.__NOTES_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__FEED_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__STREAM_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__CACHE_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -218,6 +219,33 @@ export function createApp(fixed: boolean): Hono {
     return c.body(readFileSync(join(publicDir, "stream.js"), "utf8"));
   });
   app.get("/api/stream", (c) => c.json({ events: 3, cursor: "c-1" }));
+
+  // --- stale-revalidate pattern ----------------------------------------
+  //
+  // Every read moves the revision on, so a revalidation always has something
+  // newer to return: that is what makes "the app received rev 2 and rendered
+  // rev 1" observable at all. `/api/profile/rev` reads without moving it, so
+  // the state probe cannot perturb what it measures — and the rule's regex
+  // cannot match it either.
+  const profileRev = new Map<string, number>();
+
+  app.get("/cache", (c) => c.html(pageWithFlags("cache.html", fixed)));
+  app.get("/cache.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "cache.js"), "utf8"));
+  });
+
+  app.get("/api/profile", (c) => {
+    const session = c.req.header("x-session") ?? "anonymous";
+    const rev = (profileRev.get(session) ?? 0) + 1;
+    profileRev.set(session, rev);
+    return c.json({ rev, name: "Ada Lovelace" });
+  });
+
+  app.get("/api/profile/rev", (c) => {
+    const session = c.req.query("session") ?? "anonymous";
+    return c.json({ rev: profileRev.get(session) ?? 0 });
+  });
 
   app.get("/api/orders/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";

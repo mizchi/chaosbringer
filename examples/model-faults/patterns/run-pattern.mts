@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   aggregateCoverage,
+  fingerprintsOf,
   formatModelCoverage,
   modelRunPassed,
   runPlans,
@@ -43,7 +44,14 @@ console.log(`${pattern.name} (${fixed ? "fixed" : "buggy"}) on ${server.url}${pa
 try {
   const bridge = (await import(`./${pattern.name}/bridge.mjs`)).default;
   const results = await runPlans(plans, { ...bridge, baseUrl: `${server.url}${pattern.path}` });
-  const coverage = aggregateCoverage(results, { spec: pattern.spec });
+  // Fingerprints are empty unless the bridge asked for them, so this costs
+  // nothing for the patterns that do not — and without it a bridge that sets
+  // `coverageFingerprints` would collect the digests and report nothing, which
+  // is the shape of bug this whole example exists to catch.
+  const coverage = aggregateCoverage(results, {
+    spec: pattern.spec,
+    fingerprints: fingerprintsOf(results),
+  });
   console.log(formatModelCoverage(coverage));
   process.exitCode = modelRunPassed(coverage) ? 0 : 1;
 } finally {

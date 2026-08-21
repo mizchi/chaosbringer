@@ -34,7 +34,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,19 +44,38 @@ const QUINT = process.env.QUINT_PKG ?? "@informalsystems/quint@0.32.0";
 const SAMPLES = process.env.SAMPLES ?? "400";
 
 /**
- * Model unit → its directory and spec file. The depth comes from the unit's own
- * `enumerate.sh`, so the two cannot drift apart. `model` is the 4x4 tutorial,
- * which has contract-forbids targets for the same reason the patterns do.
+ * Model unit → its directory and spec file, **discovered** rather than listed.
+ *
+ * A hand-maintained list was the first version of this, and it lasted exactly
+ * until the next pattern: a unit nobody added is a unit nobody classifies, and
+ * an unclassified target looks the same as a checked one — which is the finding
+ * this script exists for. The depth still comes from each unit's own
+ * `enumerate.sh`, so the two cannot drift apart. `../model` is the 4x4
+ * tutorial, which has contract-forbids targets for the same reason.
  */
-const MODELS = {
-  "retry-idempotency": { dir: "retry-idempotency", file: "retry.qnt" },
-  "token-refresh": { dir: "token-refresh", file: "token.qnt" },
-  "timeout-ladder": { dir: "timeout-ladder", file: "ladder.qnt" },
-  "optimistic-rollback": { dir: "optimistic-rollback", file: "rollback.qnt" },
-  "pagination-order": { dir: "pagination-order", file: "feed.qnt" },
-  "reconnect-budget": { dir: "reconnect-budget", file: "reconnect.qnt" },
-  model: { dir: "../model", file: "checkout.qnt" },
-};
+function discoverModels() {
+  const out = {};
+  for (const dir of ["../model", ...readdirSync(here, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort()]) {
+    const abs = join(here, dir);
+    if (!existsSync(join(abs, "enumerate.sh"))) continue;
+    const specs = readdirSync(abs).filter((f) => f.endsWith(".qnt"));
+    if (specs.length !== 1) {
+      // Zero or several: the convention is one spec per unit, and guessing
+      // which one would be worse than saying so.
+      console.error(
+        `vacuity: ${dir} has ${specs.length} .qnt files, expected exactly one — skipping`,
+      );
+      continue;
+    }
+    out[dir === "../model" ? "model" : dir] = { dir, file: specs[0] };
+  }
+  return out;
+}
+
+const MODELS = discoverModels();
 
 const args = process.argv.slice(2);
 const annotate = args.includes("--annotate");

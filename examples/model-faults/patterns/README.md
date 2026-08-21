@@ -16,6 +16,7 @@ pnpm test:patterns                                          # all of them, both 
 | [`retry-idempotency`](./retry-idempotency/) | A retry that writes twice. The dangerous failure is the one where the server **committed** and the client could not read the reply — without one idempotency key per intent, the retry is a second order. | **No.** Same "Order placed" banner either way; only the server's order count differs. |
 | [`pagination-order`](./pagination-order/) | Page 2 overtaking page 1. Two "load more" clicks are two requests, and nothing about the network returns them in the order they left; an app that appends on arrival is correct exactly as long as the network is. | **Yes, and every signal says otherwise.** Four rows, a `ready` banner, no escaped rejection — the model's prediction met exactly, in the wrong order. |
 | [`reconnect-budget`](./reconnect-budget/) | A reconnect loop with no cap. Retrying a dropped stream is not the question; what the client does when the retry *also* fails is, because every client in the fleet is doing it at once against the service that is already failing. | **No, and worse than no.** The uncapped client eventually connects, so it renders a success. "It recovers" and "it hammers a failing service until it recovers" differ by one number. |
+| [`stale-revalidate`](./stale-revalidate/) | A revalidation whose response nothing consumes. Serving the cached copy is the *feature*, so "the screen shows old data" cannot be the bug — ending there is. Every error path a reviewer thinks to try behaves perfectly, because the bug is on the success path. | **No.** It says "Up to date" while showing the revision before last. Only the gap between what the app received and what it rendered shows it. |
 | [`timeout-ladder`](./timeout-ladder/) | A request with no bound. Slow and never are different failures: the first must still render, the second must give up. An unbounded app handles the slow case perfectly — which is why the missing bound survives review. | **Yes**, but only if you wait long enough — which is why this pattern's probe window is *solved*, not guessed. |
 | [`optimistic-rollback`](./optimistic-rollback/) | An optimistic row the server never took. "Roll back on error" is the wrong contract: a request that never arrived and a reply that could not be read need *opposite* corrections, and only asking the server tells them apart. | **Partly.** The row that should have vanished is visible — but the app that keeps a committed row *without asking* looks identical to one that knows, and only the missing read separates them. |
 | [`token-refresh`](./token-refresh/) | A refresh stampede, and the retry loop under it. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload. And when the *refresh* comes back 401 there is nothing left to try — retrying it is where an auth-loop outage comes from. | **No** for the stampede: both variants render the account fine and only the count differs. **Yes** for the failed refresh, and only because the fixed client says so out loud instead of spinning. |
@@ -120,6 +121,34 @@ stating: that flag compares against the schedule's occurrence span and is a
 claim about the *model* covering every call to a URL. Here every plan already
 states an exact `expect.calls`, so the flag would only produce a second mismatch
 for the same fact. Redundant signals are not a demonstration.
+
+## What a coverage fingerprint can and cannot prove
+
+`stale-revalidate` is the only bridge that sets `coverageFingerprints`, and the
+result is worth reading carefully because it is *not* the headline you would
+guess. The report says:
+
+```
+Collapsed plans (distinct model states, identical code coverage):
+  revalidate-fulfil == revalidate-serverError
+```
+
+— in **both** variants, the buggy one and the corrected one. So it is not a
+statement about the bug. Three things make it true, and all three are worth
+knowing before you trust a fingerprint:
+
+- **Coverage is cumulative over the run.** The page load has already exercised
+  the render path, so a plan that never renders still shows those functions
+  covered.
+- **The granularity is coarser than a branch.** The success and 500 paths touch
+  no function the other does not.
+- **The harness is in the digest too.** `revalidate-reject` stays distinct from
+  the other two because a runtime-layer fault patches `fetch` inside the page —
+  that is injected code being counted, not app code.
+
+Which is exactly why `collapsedPlans` is a review prompt and never a failure:
+the run above still reports `modelRunPassed`. Read it as "these two states are
+worth a human", not as "the model is over-refined".
 
 ## Anatomy of a pattern
 
