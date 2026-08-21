@@ -290,8 +290,10 @@ backend. The label was never wrong; what the label promised was.
 | `unhandledRejection` | a rejection escaped every handler when the contract forbids it — or failed to escape when the model predicts one |
 | `unhandledRejection@late` | the same, but it escaped only *after* the probe, from work the app scheduled itself |
 | `state` | an observable the model named came out wrong, read once the run had settled |
-| `injection` | a planned fault never fired, so the state was not actually exercised — *including* an all-`pass` plan whose operation the app never called |
-| `amplification` | the app called an operation more often than the model described (`expect.calls`, or the opt-in span comparison) |
+| `injection` | a planned fault never fired, so the state was not actually exercised — *including* an all-`pass` plan whose operation the app never called, and an `expect.calls` count the app came in *under* |
+| `amplification` | the app called an operation *more* often than the model described (`expect.calls`, or the opt-in span comparison). Over-counts only: an under-count is `injection`, because "the app did not make a call the model says it makes" is that field's question |
+| `probeError` | the bridge itself threw — a selector that matches nothing, a probe whose `evaluate` failed. Reported *instead of* the other checks, because nothing observed after a thrown action is evidence: a run that reported "the app never issued that request" when the cause was a typo'd selector is a report that cannot be trusted about anything else either. Lands in `plansNotExercised`, since a plan whose action never ran did not reach its state |
+| `undecided` | the probe fired so late that the tripping response could already have landed, so the run cannot tell an app that enforced its deadline from one with no deadline at all. Not a pass and not a failure — a refusal to answer, which is the honest output when the measurement was invalid. Seen on a loaded machine; if it is frequent, re-calibrate under that load rather than raising the window |
 
 `injection` is the one that keeps the coverage claim honest: without it a plan
 whose request the app never issues looks like a pass. Note that it now covers
@@ -435,10 +437,19 @@ An app that **retries** needs one more line, because `appDeadlineMs` describes
 one request and the app's terminal state is several away:
 
 ```js
+import { ladderSettleMs } from "chaosbringer";
+
+const appDeadlineMs = 500;                              // one bounded attempt
+const appLadder = { attempts: 3, backoffsMs: [60, 120] };  // …climbed three times
+
 export default {
-  appDeadlineMs: 500,                              // one bounded attempt
-  appLadder: { attempts: 3, backoffsMs: [60, 120] },  // …climbed three times
-  settleMs: 1800,          // declared, and validated against the ladder
+  appDeadlineMs,
+  appLadder,
+  // Derived, not written down. A literal here is a number that is correct until
+  // the profile is re-measured and then silently too small: the pre-flight
+  // catches it, but only when someone next runs the suite. `ladderSettleMs` is
+  // exported for exactly this.
+  settleMs: ladderSettleMs(appLadder, appDeadlineMs, timingProfile.tightTailMs * 2, 25) + 25,
   timingProfile,
 };
 ```
@@ -449,8 +460,8 @@ author who knows their app retries states the window while still getting solved
 put a window nobody asked for on every plan — and the error names the number to
 write. Note the tripping delay is re-derived from the declared window rather
 than the solved one: `slow_outlasts_probe` is a statement about the probe
-instant, and a delay solved for a 531ms probe lands mid-window when the author
-declared 1800ms, where an unbounded app reads as healthy.
+instant, and a delay solved for a 629ms probe lands mid-window when the author
+declared 2092ms, where an unbounded app reads as healthy.
 
 What the solver derives, and why each one matters:
 
@@ -458,10 +469,10 @@ What the solver derives, and why each one matters:
 |---|---|---|
 | `settleMs` | `>= deadline + tightTail + margin` | a probe that fires before the app's own deadline reports a correctly-bounded request as `stuck` |
 | `slow-ok` delay | `<= deadline − delayTail − margin` | jitter pushes a "tolerable" delay past the deadline and the plan flakes |
-| `slow-trip` delay | `>= settleMs + margin − floor` | against an app with *no* bound the response still arrives; landing mid-probe, it reads as healthy |
+| `slow-trip` delay | `>= settleMs + tightTail + margin − floor` | against an app with *no* bound the response still arrives; landing mid-probe, it reads as healthy. `tightTail` is in there because the probe is itself a tight wait and can fire that late — separating from the *nominal* probe instant left 22ms whatever the profile said, and a loaded machine ate it |
 | `quiescenceMs` | `>= deadline + tightTail + margin` | the run stops watching before the retry the app scheduled on the error path has run, so `unhandledRejection: false` describes a page nobody looked at |
 | `releaseMs` | `>= settleMs + margin` | a hang released before the probe is not observable as a hang |
-| `pageTimeout` | `>= fixed + settleMs + delayTail + margin` | the crawler kills the run mid-probe |
+| `pageTimeout` | `>= fixed + slow-trip delay + delayTail + margin` | `timeout` bounds `page.goto` and nothing else, so what can overrun it is a page whose *load* issues the delayed request — not the probe, which runs inside an unbounded invariant |
 | `settleMs`, when the bridge declares `appLadder` | `>= attempts × (deadline + tightTail + margin) + Σ backoffs` | `deadline` describes one request; a client that retries three times reaches its terminal state three rounds later, and a window solved for one of them reports a correctly budgeted client as an endless spinner |
 
 Infeasible is a first-class answer. A deadline smaller than the machine's own
@@ -469,8 +480,8 @@ jitter cannot be tested at all, and the solver says so with the number to fix:
 
 ```
 no expressible delay is tolerable under a 120ms deadline: this environment's
-jitter is 122ms (measured × safety 2) and its floor is 4ms, so even the smallest
-injectable delay can be observed at 126ms. Raise the deadline above 151ms, lower
+jitter is 132ms (measured × safety 2) and its floor is 3ms, so even the smallest
+injectable delay can be observed at 135ms. Raise the deadline above 160ms, lower
 the safety factor if your calibration is trustworthy, or stop asserting on
 timing at this scale.
 ```
@@ -605,14 +616,14 @@ And it cannot be a hand-maintained list of what to check. The unit is a *model
 directory* — anything carrying the `enumerate.sh` + `compile.sh` + `plans/`
 triple — discovered by globbing for it, because a model nobody added to the list
 is a model nobody regenerates and it looks exactly like a green run. One CI leg
-per unit also keeps them parallel: eight units today, the slowest ~2 minutes,
+per unit also keeps them parallel: nine units today, the slowest ~2m40s,
 where a loop over them was already at 5m43s with three.
 
 ## Scaling guidance
 
 Model **one user action** with ≤4 operations and ≤6 steps. The 4×4 grid in the
 example is 16 targets, ~4 minutes to enumerate once and ~40 seconds to replay.
-The six patterns in `examples/model-faults/patterns/` are each 3–7 targets,
+The seven patterns in `examples/model-faults/patterns/` are each 3–7 targets,
 which is the size a real pattern wants: one action, one contract, and the grid
 that makes its interleavings appear.
 A 6-operation model with 5 outcomes each is 15 625 targets — that is not a
@@ -621,9 +632,9 @@ coverage plan, it is a hang.
 ## See also
 
 - [`examples/model-faults/`](../../examples/model-faults/) — runnable: buggy
-  variant fails 13 of 16 plans, `FIXED=1` passes all 16.
+  variant fails 11 of 16 plans with 13 mismatches, `FIXED=1` passes all 16.
 - [`examples/model-faults/patterns/`](../../examples/model-faults/patterns/) —
-  six real-world async shapes, each a model of what a correct implementation
+  seven real-world async shapes, each a model of what a correct implementation
   must do plus the bug class it catches. Useful as a map of which oracle field
   earns its keep where: a double write needs `expect.state`, a reconnect storm
   needs `expect.calls` and has no state at all, and an out-of-order render needs

@@ -444,8 +444,10 @@ Walking the `error_true` witness end to end (measured in the spike):
    probability sweep never produced.
 
 This is not hypothetical: it is what `examples/model-faults/` reports today.
-The buggy variant of that app fails 13 of 16 plans (5 `ui`, 8
-`unhandledRejection`); `FIXED=1` passes all 16.
+The buggy variant of that app fails **11 of 16 plans with 13 mismatches** (5
+`ui`, 8 `unhandledRejection` — two plans carry one of each); `FIXED=1` passes
+all 16. The plan count and the mismatch count are different numbers, and this
+sentence said 13 for both until a reviewer counted.
 
 ## Testing strategy
 
