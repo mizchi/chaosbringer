@@ -24,11 +24,14 @@ URL) plus its own options. All accept `probability` and `schedule`.
 
 | Constructor | Effect |
 |---|---|
-| `faults.status(500, { urlPattern })` | respond with that status; `body`, `contentType` optional |
+| `faults.status(500, { urlPattern })` | respond with that status. **Default body is `{"error":500}`**, not empty — pass `body: ""` for an empty one, and note that the choice decides whether the app's `res.json()` succeeds with junk or rejects |
 | `faults.delay(ms, { urlPattern })` | respond, late. Always eventually responds |
 | `faults.abort({ urlPattern, errorCode })` | the request fails at the network layer |
 | `faults.hang({ urlPattern, releaseAfterMs })` | hold it open, never respond |
 | `faults.cpu(rate)` | lifecycle: CPU throttling |
+| `faults.rejectBody({ urlPattern, consumers })` | runtime: the request really goes out and the server really commits; `res.json()` rejects on the way back. The only browser-reachable shape that reproduces a write the client could not read. Defaults to `["json"]` |
+| `faults.rejectFetch({ urlPattern, rejectAs })` | runtime: `fetch()` itself rejects — `TypeError`, or `AbortError` |
+| `faults.neverSettleFetch({ urlPattern })` | runtime: never settles, but honours `init.signal` — so a bounded request escapes and only an unbounded one hangs |
 
 `faults.hang` without `releaseAfterMs` holds until the page closes. The crawler
 navigates with `waitUntil: "networkidle"`, so hanging a *navigation-time*
@@ -103,18 +106,81 @@ nothing. This is where your oracle lives, so it is worth more care than the
 faults themselves — see the main SKILL.md on the four ways an oracle passes
 without checking anything.
 
-## Playwright Test integration
+## Driving a known path instead of a random one
 
-```js
-import { ChaosCrawler } from "chaosbringer";
+```ts
+import { chaos, flowDriver } from "chaosbringer";
 
-test("survives a failing cart", async ({ page }) => {
-  const crawler = new ChaosCrawler({ faultInjection: [ … ] });
-  const result = await crawler.testPage(page, "http://localhost:3000");
-  expect(result.violations).toEqual([]);
+await chaos({
+  baseUrl,
+  driver: flowDriver({
+    steps: [
+      { name: "open", urlPattern: /\/$/, run: async (page) => page.click("#open") },
+      { name: "save", urlPattern: /\/$/, run: async (page) => page.click("#save") },
+    ],
+  }),
+  faultInjection: [ … ],
 });
 ```
 
-`testPage` uses a page *you* own. Be careful with `hang` here: a request parked
-on a page the caller still owns is not released by the crawler's own teardown,
-so pass `releaseAfterMs` when you use `hang` through this entry point.
+The default driver picks actions by weighted random, which is right for
+exploring and wrong for a claim: a fault test that cannot name the button
+pressed cannot say what failed. `flowDriver` runs your steps in order, waiting
+on pages a step's `when`/`urlPattern` does not claim. `compositeDriver([flowDriver(steps), weightedRandomDriver()])`
+gets both — the flow on its path, random exploration everywhere else.
+
+**It is one-shot, and it is stateful.** Once every step has completed the driver
+returns null forever, so a second `chaos()` call handed the *same instance*
+performs no actions at all — a run with `matched: 0` that looks exactly like a
+wrong `urlPattern`. Build a fresh driver per run. (This one cost somebody an
+hour, and the only thing that caught it was asserting the fault had fired.)
+
+## Faults on a page you drive yourself
+
+```ts
+import { applyFaultRules, faults } from "chaosbringer";
+
+const session = await applyFaultRules(page, [
+  faults.status(503, {
+    name: "save-503",
+    urlPattern: /\/api\/save$/,
+    methods: ["POST"],
+    schedule: { decisions: ["inject", "pass"] },
+  }),
+]);
+```
+
+| On the session | |
+|---|---|
+| `stats()` | per-rule `{ rule, matched, injected, suppressed? }`, live |
+| `heldRequests()` | requests currently parked by an unbounded `hang` |
+| `release()` | abort the parked ones, so the app's `catch` runs |
+| `dispose()` | release, then remove the route — page talks to the real origin again |
+
+No crawl, no driver, no report: you navigate and click. The fault decision is
+the crawler's own (`pickFaultRule`), so schedules and occurrence numbering mean
+the same thing here.
+
+Worth knowing: **while any route is installed, Playwright disables the page's
+HTTP cache.** A cacheable asset is re-fetched on every navigation until you
+`dispose()`. It does not change the responses your rules serve, but it does
+change request counts and adds ~20ms per navigation — so if your assertion
+counts asset requests, or your window is tight, account for it.
+
+## Playwright Test integration
+
+```ts
+import { chaosTest } from "chaosbringer/fixture";   // subpath, not the root
+
+chaosTest("survives a failing cart", async ({ page, chaos }) => {
+  const result = await chaos.testPage(page, "http://localhost:3000");
+  expect(result.errors).toEqual([]);          // PageResult.errors — there is
+});                                            // no `result.violations`
+```
+
+`chaosbringer/fixture` is the only entry point that needs `@playwright/test`
+installed; the package root needs only `playwright`.
+
+`testPage` uses a page *you* own, and releases anything a `hang` parked before
+it returns. If you drive the page across several steps of your own, `release()`
+on the crawler drains on demand.
