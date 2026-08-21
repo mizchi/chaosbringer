@@ -104,24 +104,29 @@ default profile is already pessimistic and the solver multiplies it again.
 bounded attempts plus backoffs away, a window solved for one of them reports a
 correctly budgeted client as an endless spinner.
 
+Declare the ladder and the window is solved for all of it:
+
 ```js
-import { ladderSettleMs } from "chaosbringer";
-
-const appDeadlineMs = 500;
-const appLadder = { attempts: 3, backoffsMs: [60, 120] };
-
 export default {
-  appDeadlineMs,
-  appLadder,
-  // Derived, not written down: a literal is correct until the profile is
-  // re-measured and then silently too small.
-  settleMs: ladderSettleMs(appLadder, appDeadlineMs, timingProfile.tightTailMs * 2, 25) + 25,
+  appDeadlineMs: 500,
+  appLadder: { attempts: 3, backoffsMs: [60, 120] },
   timingProfile,
+  // no settleMs: `solveTiming` returns
+  // max(oneRound, attempts x (deadline + tightTail + margin) + backoffs)
 };
 ```
 
-Declaring `settleMs` alongside `appDeadlineMs` is supported and is what this is
-for. The ladder only *validates* — the error names the number to write.
+The same holds calling it directly — `solveTiming(profile, { deadlineMs, ladder })`
+returns the ladder-sized `settleMs`, and `ladderSettleMs` is exported if you want
+the number on its own.
+
+You *may* still declare `settleMs` yourself, and then the ladder validates it:
+too short and the pre-flight refuses it, naming the number to write. Both paths
+work; the difference is who does the arithmetic.
+
+(This section used to say the ladder "only validates" — true when `solveTiming`
+ignored `request.ladder`, which was a bug: it returned a one-round window its
+own checker rejected. Fixed, and this text with it.)
 
 ## Never put milliseconds in a committed plan
 

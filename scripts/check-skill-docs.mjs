@@ -69,6 +69,52 @@ for (const rel of files) {
   }
 }
 
+// The CLI has no fault-injection flag, and a doc that implies otherwise sends a
+// reader to a monkey-clicker that comes back green. Cheap to keep honest: the
+// flags are declared in one place.
+const cliHelp = readFileSync(
+  new URL("../packages/chaosbringer/src/cli.ts", import.meta.url),
+  "utf8",
+);
+// Every flag any CLI entry point declares — the root one and each subcommand,
+// since `chaosbringer model calibrate --runs 3` is parsed by `model/cli.ts`.
+// The union is deliberately loose: the failure worth catching is an invented
+// flag that appears in no parser at all.
+const cliDir = new URL("../packages/chaosbringer/src/", import.meta.url).pathname;
+const cliSources = [];
+const collect = (dir) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) collect(join(dir, entry.name));
+    else if (/cli\.ts$/.test(entry.name)) cliSources.push(readFileSync(join(dir, entry.name), "utf8"));
+  }
+};
+collect(cliDir);
+const cliFlags = new Set(["--no-headless", "--help"]);
+for (const src of cliSources) {
+  for (const m of src.matchAll(/["']?([a-z][a-z0-9-]*)["']?:\s*\{\s*type:\s*["'](?:string|boolean)["']/g)) {
+    cliFlags.add(`--${m[1]}`);
+  }
+}
+for (const rel of files) {
+  const text = readFileSync(join(skillDir, rel), "utf8");
+  // Inline code AND fenced blocks: CLI invocations live in ```bash fences, and
+  // the first version of this check only scanned backticks — so it passed a
+  // deliberately-planted `--fault-500` and was a guard that could not fail.
+  const candidates = [
+    ...[...text.matchAll(/`([^`\n]*chaosbringer [^`\n]*)`/g)].map((m) => m[1]),
+    ...[...text.matchAll(/```(?:bash|sh|console)?\n([\s\S]*?)```/g)]
+      .flatMap(([, body]) => body.split("\n"))
+      .filter((line) => /chaosbringer /.test(line)),
+  ];
+  for (const line of candidates) {
+    for (const flag of line.match(/--[a-z][a-z0-9-]*/g) ?? []) {
+      if (!cliFlags.has(flag)) {
+        problems.push(`${rel}: \`${line.trim()}\` uses ${flag}, which the CLI does not accept`);
+      }
+    }
+  }
+}
+
 // And the session surface the docs promise.
 const SESSION_METHODS = ["stats", "runtimeStats", "firings", "heldRequests", "release", "dispose"];
 const apiText = readFileSync(join(skillDir, "references/api.md"), "utf8");

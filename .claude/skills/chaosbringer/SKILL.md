@@ -140,7 +140,10 @@ nothing. Expected, not a finding.
 A decision table indexed by how many times the rule has already matched: first
 call passes, second 500s, rest pass. Consumes no randomness, so it can't drift.
 "The retry is the one that fails" is a schedule, not a probability — reach for
-`probability` only when you're exploring.
+`probability` only when you're exploring, and note that exploring with faults
+means `chaos({ faultInjection, … })` rather than the CLI: **the `chaosbringer`
+command injects no faults at all.** It crawls and clicks and reports what broke
+on its own, which is a useful first look and says nothing about error handling.
 
 ## Fault shapes decide which bug you find
 

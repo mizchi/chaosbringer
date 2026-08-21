@@ -10,6 +10,15 @@ pnpm add -D chaosbringer            # or npm/yarn
 npx chaosbringer --url http://localhost:3000 --seed 42
 ```
 
+**The CLI injects no faults.** It crawls, clicks randomly, and reports console
+errors, exceptions, unhandled rejections, dead links, invariants, perf budgets
+and axe findings — a useful first look at an unfamiliar app, and a green run
+from it says nothing about error handling. The only perturbations it offers are
+`--network offline|slow-3g|fast-3g` and `--device`. Fault rules are reachable
+from code only: `chaos({ faultInjection, runtimeFaults, … })`, `ChaosCrawler`,
+`applyFaults`, or `model run`. If you want breadth *with* faults, that is
+`chaos()` with `probability` rules and a seed, not this command.
+
 Working *inside* the chaosbringer repo, the CLI lives at
 `packages/chaosbringer/dist/cli.js` and `dist/` is gitignored — so
 `pnpm -F chaosbringer build` first. If you get type errors mentioning
