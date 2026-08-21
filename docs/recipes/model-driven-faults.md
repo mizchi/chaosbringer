@@ -407,14 +407,32 @@ explicitly for exactly that reason.
 | …plus, for a plan naming `expect.state` | one `quiescenceMs` window | — |
 | …plus, on a page with pending timers | up to `asyncDrainCapMs` (3s) | — |
 
-Enumerate at dev time or in a nightly job, commit the plans, and diff the
-regenerated output against them so a model change that nobody recompiled
-fails the nightly rather than the PR.
+Enumerate at dev time or in a scheduled job, commit the plans, and re-check the
+regenerated output against them so a model change that nobody recompiled is
+caught there rather than silently leaving the plans stale.
+
+Two things that check cannot be. It cannot be `git diff`: ITF traces carry a
+"Created by Apalache on <timestamp>" line, and the solver may return a
+different-but-equivalent witness for the same target — both make a regeneration
+look dirty when nothing changed. Compare what matters instead, per state: the
+set of (operation, occurrence, outcome) injections and the oracle
+(`examples/model-faults/model/check-plans.mjs` does exactly that, and every
+example shares it).
+
+And it cannot be a hand-maintained list of what to check. The unit is a *model
+directory* — anything carrying the `enumerate.sh` + `compile.sh` + `plans/`
+triple — discovered by globbing for it, because a model nobody added to the list
+is a model nobody regenerates and it looks exactly like a green run. One CI leg
+per unit also keeps them parallel: eight units today, the slowest ~2 minutes,
+where a loop over them was already at 5m43s with three.
 
 ## Scaling guidance
 
 Model **one user action** with ≤4 operations and ≤6 steps. The 4×4 grid in the
 example is 16 targets, ~4 minutes to enumerate once and ~40 seconds to replay.
+The six patterns in `examples/model-faults/patterns/` are each 3–7 targets,
+which is the size a real pattern wants: one action, one contract, and the grid
+that makes its interleavings appear.
 A 6-operation model with 5 outcomes each is 15 625 targets — that is not a
 coverage plan, it is a hang.
 
@@ -422,6 +440,12 @@ coverage plan, it is a hang.
 
 - [`examples/model-faults/`](../../examples/model-faults/) — runnable: buggy
   variant fails 13 of 16 plans, `FIXED=1` passes all 16.
+- [`examples/model-faults/patterns/`](../../examples/model-faults/patterns/) —
+  six real-world async shapes, each a model of what a correct implementation
+  must do plus the bug class it catches. Useful as a map of which oracle field
+  earns its keep where: a double write needs `expect.state`, a reconnect storm
+  needs `expect.calls` and has no state at all, and an out-of-order render needs
+  `uiInvariants` because prompt and slow predict byte-identical oracles.
 - [`examples/model-faults/redteam/`](../../examples/model-faults/redteam/) —
   one app per blind spot the oracle used to have, each in a buggy and a
   corrected variant. `attack.mts` asserts that the buggy one now fails and the
