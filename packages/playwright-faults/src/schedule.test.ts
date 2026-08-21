@@ -164,7 +164,36 @@ describe("buildDecisionHelperSource", () => {
       o: number,
       r: () => number,
     ) => boolean;
-    return fn({ probability: 1, ...fault }, occurrence, () => rolls[i++ % rolls.length]!);
+    // No `probability: 1` default here, deliberately. Both production
+    // serializers apply that default, so injecting it too meant the table
+    // could only ever compare inputs that had already been normalised — and
+    // `undefined` was the one input on which the two evaluators disagreed
+    // (node: always fire, page: never fire *and* burn a draw). A parity table
+    // that pre-normalises its own inputs tests the normaliser, not the parity.
+    return fn({ ...fault }, occurrence, () => rolls[i++ % rolls.length]!);
+  };
+
+  /** Draws taken, so "never fires" and "never fires but rolled anyway" differ. */
+  const inPageDraws = (
+    fault: { probability?: number; schedule: ReturnType<typeof serializeSchedule> },
+    occurrence: number,
+  ): number => {
+    let draws = 0;
+    inPageDecide(fault, occurrence, []);
+    // `inPageDecide` closes over its own counter, so count through a roll that
+    // records instead: same helper source, a roll that tallies.
+    const body = `${buildDecisionHelperSource()}
+    return __decide(f, occurrence);`;
+    const fn = new Function("f", "occurrence", "__nextRoll", body) as (
+      f: unknown,
+      o: number,
+      r: () => number,
+    ) => boolean;
+    fn({ ...fault }, occurrence, () => {
+      draws++;
+      return 0.5;
+    });
+    return draws;
   };
 
   // The occurrence-sanity values belong in *every* case, not in a Node-only
@@ -205,5 +234,26 @@ describe("buildDecisionHelperSource", () => {
     expect(inPageDecide({ probability: 0.5, schedule: null }, 0, [0.75])).toBe(false);
     expect(decideFault({ probability: 0.5 }, 0, scriptedRng([0.25]))).toBe("inject");
     expect(decideFault({ probability: 0.5 }, 0, scriptedRng([0.75]))).toBe("pass");
+  });
+
+  // The three values the serializers normalise away, which is exactly why the
+  // page side needs to agree on them: `buildDecisionHelperSource` is a public
+  // export for callers writing their own init-script layer, and their
+  // serializer is not this package's.
+  for (const p of [undefined, 0, 1] as const) {
+    it(`agrees on probability ${String(p)} without a serializer in between`, () => {
+      const node = decideFault({ probability: p }, 0, scriptedRng([0.5])) === "inject";
+      expect(inPageDecide({ probability: p, schedule: null }, 0, [0.5])).toBe(node);
+    });
+  }
+
+  it("takes no draw on a decided probability, so the seed sequence is stable", () => {
+    // `undefined` used to fall through to `__nextRoll() < undefined` — false
+    // forever, and a draw consumed on the way. Either half alone is a bug: a
+    // fault that never fires, and a seed that shifts when a rule is added.
+    expect(inPageDraws({ probability: undefined, schedule: null }, 0)).toBe(0);
+    expect(inPageDraws({ probability: 1, schedule: null }, 0)).toBe(0);
+    expect(inPageDraws({ probability: 0, schedule: null }, 0)).toBe(0);
+    expect(inPageDraws({ probability: 0.5, schedule: null }, 0)).toBe(1);
   });
 });

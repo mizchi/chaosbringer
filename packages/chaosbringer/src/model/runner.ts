@@ -580,11 +580,24 @@ export function compilePlanFaults(
     // A rule that injects nothing still needs its requests counted. Without a
     // route there is no `matched` for it, so an `expect.calls` bound naming it
     // would be accepted, typechecked, and then never enforced — the exact
-    // failure mode this pipeline exists to remove. Counting is behaviourally
-    // neutral: every decision is `pass`, so `route.fallback()` runs for it
-    // exactly as if the rule were absent. And unlike a counter installed after
-    // page load, this one sees the fetch a page issues on mount, which is
-    // occurrence 0 of most read operations.
+    // failure mode this pipeline exists to remove. And unlike a counter
+    // installed after page load, this one sees the fetch a page issues on
+    // mount, which is occurrence 0 of most read operations.
+    //
+    // Counting is not free, and calling it "neutral" would be wrong. The
+    // *decision* is neutral — every entry is `pass`, so `route.fallback()`
+    // serves the origin's own status, body and timing. Installing the route
+    // is not: Playwright disables the browser's HTTP cache for the whole page
+    // as soon as any route is active, so a cacheable asset is re-fetched on
+    // every navigation instead of once. Measured on a three-navigation page
+    // with one `max-age=3600` script: 1 origin request without a route, 3
+    // with; per-request latency ~1.5x (3.3-3.8ms -> 5.0-5.8ms) and about
+    // +20ms per navigation. Narrowing the pattern does not buy it back — a
+    // glob or a predicate that matches only `/api/**` bypasses the cache for
+    // the asset just the same, because the cache is disabled per page, not
+    // per pattern. So the cost is the price of being able to decide a count
+    // at all, and a plan whose verdict would turn on asset cache hits or on
+    // a millisecond-tight budget has to account for it.
     //
     // *Requiring* those calls is a separate question with a different answer,
     // which is why only the plan-level `allPass` case sets an expectation: in a

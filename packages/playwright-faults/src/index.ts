@@ -71,3 +71,6 @@ export {
   type CompiledLifecycleFault,
   type LifecycleActionExecutor,
 } from "./lifecycle-faults.js";
+
+// URL matching (shared by every layer, and by consumers that compile their own)
+export { compileUrlMatcher, stripStatefulFlags } from "./url-matcher.js";

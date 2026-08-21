@@ -165,7 +165,16 @@ export function buildDecisionHelperSource(): string {
   return `const __decide = (f, occurrence) => {
     const s = f.schedule;
     if (!s) {
-      if (f.probability >= 1) return true;
+      // \`undefined\` means "always fire", the same as \`decideFault\`. Both
+      // serializers in this package normalise it to 1 before it gets here, so
+      // this arm is unreachable through them — but the helper is a public
+      // export for callers writing their own init-script layer, and without
+      // it \`undefined >= 1\` and \`undefined <= 0\` are both false, so such a
+      // caller's fault falls through to \`__nextRoll() < undefined\`: never
+      // fires, and burns a draw doing it. Silently never firing is the worst
+      // shape a fault can take, and burning the draw breaks the seed
+      // stability the paragraph above spends its length defending.
+      if (f.probability === undefined || f.probability >= 1) return true;
       if (f.probability <= 0) return false;
       return __nextRoll() < f.probability;
     }

@@ -22,6 +22,7 @@ import type {
   LifecycleStage,
   UrlMatcher,
 } from "./types.js";
+import { compileUrlMatcher } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
 export interface CompiledLifecycleFault {
@@ -54,7 +55,7 @@ export function lifecycleFaultName(fault: LifecycleFault): string {
 
 function compilePattern(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return null;
-  return matcher instanceof RegExp ? matcher : new RegExp(matcher);
+  return compileUrlMatcher(matcher);
 }
 
 export function compileLifecycleFaults(

@@ -650,10 +650,13 @@ export interface CrawlReport {
   /** Per-rule fault injection stats (present only when rules were configured). */
   faultInjections?: FaultInjectionStats[];
   /**
-   * Requests parked by a `hang` fault (the ones with no `releaseAfterMs`,
-   * which the crawler aborts at page teardown). Present only when at least
-   * one request was held — a non-zero count means the app was left waiting
-   * on a promise that never settled, which is usually the point.
+   * Requests parked by a `hang` fault — the ones with no `releaseAfterMs`.
+   * The crawler aborts them when it tears down a page it owns, and before
+   * `testPage()` hands a page it does *not* own back to the caller;
+   * `ChaosCrawler.release()` does it on demand for a caller driving the page
+   * itself. Present only when at least one request was held — a non-zero
+   * count means the app was left waiting on a promise that never settled
+   * during the run, which is usually the point.
    */
   heldRequests?: number;
   /**

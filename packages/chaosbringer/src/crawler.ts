@@ -47,6 +47,7 @@ import {
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
 import { decideFault, validateFaultSchedule } from "./schedule.js";
+import { compileUrlMatcher } from "./url-matcher.js";
 import {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -925,12 +926,36 @@ export class ChaosCrawler {
       await this.setupNavigationBlocking(page);
     }
 
-    const result = await this.crawlPageWithExistingPage(page, url);
-    this.events.onPageComplete?.(result);
-    this.logger.logPageComplete(result);
-    this.results.push(result);
+    // The page belongs to the caller, so this method never closes it — which
+    // is exactly why it has to release what it parked. A `hang` fault holds a
+    // route open with no answer; leaving it held past the result means the
+    // caller's next action on this page waits on a request nothing will ever
+    // answer. The drain is in a `finally` rather than after the result
+    // because a page that throws mid-run is exactly the case where the
+    // caller is least likely to release it themselves.
+    try {
+      const result = await this.crawlPageWithExistingPage(page, url);
+      this.events.onPageComplete?.(result);
+      this.logger.logPageComplete(result);
+      this.results.push(result);
 
-    return result;
+      return result;
+    } finally {
+      await this.drainHeldRoutes();
+    }
+  }
+
+  /**
+   * Release every request currently parked by a `hang` fault, on demand.
+   *
+   * `testPage()` already does this before it returns, so most callers never
+   * need it. It exists for the one shape that owns the page across several
+   * operations of its own — apply faults, drive the page directly, then hand
+   * it back — where "parked until the crawler is done with it" is not the
+   * lifetime the caller has in mind.
+   */
+  async release(): Promise<void> {
+    await this.drainHeldRoutes();
   }
 
   private shouldExclude(url: string): boolean {
@@ -1318,8 +1343,11 @@ export class ChaosCrawler {
   }
 
   /**
-   * Abort every parked route. Called on page teardown and at crawl end;
-   * safe to call repeatedly (aborting a dead route is swallowed).
+   * Abort every parked route. Called when a page the crawler owns is torn
+   * down (`crawlPage`) and before `testPage()` hands a caller-owned page
+   * back. Safe to call repeatedly, and safe to call late: a caller can close
+   * the page while a route is still parked, so aborting a route whose page is
+   * already gone is swallowed rather than surfaced as a run failure.
    */
   private async drainHeldRoutes(): Promise<void> {
     if (this.heldRoutes.length === 0) return;
@@ -3307,11 +3335,15 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid regex. */
+/**
+ * Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid
+ * regex. `compileUrlMatcher` drops stateful flags (`g`, `y`): one pattern is
+ * tested against every request that goes past, and a `lastIndex` would make
+ * the rule fire on alternating requests.
+ */
 function toRegExp(m: UrlMatcher): RegExp | null {
-  if (m instanceof RegExp) return m;
   try {
-    return new RegExp(m);
+    return compileUrlMatcher(m);
   } catch {
     return null;
   }

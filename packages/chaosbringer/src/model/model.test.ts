@@ -1171,8 +1171,10 @@ describe("compilePlanFaults: observing a plan that injects nothing", () => {
     expect(expectedObservations.size).toBe(0);
     expect(faultInjection).toHaveLength(1);
     expect(faultInjection[0]!.name).toBe(observationNameFor("B"));
-    // Behaviourally neutral: nothing but `pass`, so `route.fallback()` runs
-    // for it exactly as if the rule were absent.
+    // Every decision is `pass`, so `route.fallback()` serves the origin's own
+    // response — the *decision* changes nothing. Installing the route is not
+    // free (an active route disables the page's HTTP cache); see the comment
+    // on this branch in `compilePlanFaults` for the measured cost.
     expect(faultInjection[0]!.schedule).toEqual({ decisions: ["pass"], afterEnd: "pass" });
   });
 

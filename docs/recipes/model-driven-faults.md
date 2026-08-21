@@ -161,6 +161,26 @@ there is no count to compare, so `{ "refresh": 0 }` — the strongest thing a
 control plan says — would be accepted, typechecked and never checked. A bound
 nobody applies is worse than no bound.
 
+Counting is not free, and it is worth knowing where the cost lands before a
+plan's verdict turns on it. The *decision* changes nothing: every entry is
+`pass`, so `route.fallback()` serves the origin's own status, body and timing.
+Installing the route does change something, because Playwright disables the
+page's HTTP cache the moment any route is active. Measured on a
+three-navigation page with one `max-age=3600` script: **1 origin request for
+that script without a route, 3 with**, per-request latency about 1.5x
+(3.3–3.8ms → 5.0–5.8ms) and roughly +20ms per navigation. Narrowing the
+pattern does not buy it back — a glob or a predicate scoped to `/api/**`
+bypasses the cache for the asset just the same, because the cache is disabled
+per page, not per pattern. So an all-`pass` control plan is *not* a run of the
+app as shipped; it is a run of the app with its browser cache off. That
+matters for two kinds of claim: one whose numbers include asset requests, and
+one whose window is tight enough that +20ms per navigation is inside the
+margin. The timing profile helps with the second but does not settle it:
+`calibrateTiming` measures its delay path with interception already active, so
+the jitter it reports is the routed number — but it measures one probe URL on a
+fixture page, not your app's asset graph. A plan whose window is tight relative
+to its own navigation cost wants `calibrate` run against the real app.
+
 One rule about the rule, learned the hard way: **a `$`-anchored `urlPattern` on
 an operation a plan counts is refused before the browser launches.** Everywhere
 else the regex is a selector, and too narrow shows up as a missing injection.

@@ -28,6 +28,7 @@ import {
   validateFaultSchedule,
 } from "./schedule.js";
 import type { Rng, RuntimeFault, RuntimeFaultStats, UrlMatcher } from "./types.js";
+import { compileUrlMatcher, stripStatefulFlags } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
 export interface CompiledRuntimeFault {
@@ -61,7 +62,7 @@ export function runtimeFaultName(fault: RuntimeFault): string {
 
 function compilePattern(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return null;
-  return matcher instanceof RegExp ? matcher : new RegExp(matcher);
+  return compileUrlMatcher(matcher);
 }
 
 export function compileRuntimeFaults(
@@ -106,7 +107,11 @@ export function shouldFireProbability(probability: number | undefined, rng: Rng)
  */
 function serializeMatcher(m: UrlMatcher | undefined): { source: string; flags: string } | null {
   if (m === undefined) return null;
-  if (m instanceof RegExp) return { source: m.source, flags: m.flags };
+  // Stateful flags are stripped on the way into the page for the same reason
+  // they are stripped on the way into `compilePattern`: the in-page script
+  // rebuilds one RegExp and tests it against every `fetch()` the page makes,
+  // so a `lastIndex` would carry across calls.
+  if (m instanceof RegExp) return { source: m.source, flags: stripStatefulFlags(m.flags) };
   return { source: m, flags: "" };
 }
 
@@ -168,13 +173,20 @@ export function buildRuntimeFaultsScript(
   ${buildDecisionHelperSource()}
 
   // Occurrence = how many times this fault has matched so far in this frame.
+  // Deciding and firing are two separate counts on purpose: a scheduled fault
+  // whose decision is "inject" still advances its occurrence, but only one
+  // fault can actually act on a given call. Counting \`fired\` here would
+  // credit the runners-up with work they did not do — the network layer
+  // increments \`injected\` only for the winner, and these two report the same
+  // feature.
   const roll = (f) => {
     const slot = stats[String(f.id)];
     const occurrence = slot.matched;
     slot.matched++;
-    const fired = __decide(f, occurrence);
-    if (fired) slot.fired++;
-    return fired;
+    return __decide(f, occurrence);
+  };
+  const fire = (f) => {
+    stats[String(f.id)].fired++;
   };
 
   // --- fetch-scoped faults (Promise-level failure modes) ---
@@ -229,6 +241,7 @@ export function buildRuntimeFaultsScript(
       }
       if (chosen) {
         const f = chosen;
+        fire(f);
         const a = f.action;
         const msg = a.rejectionMessage || "chaosbringer: simulated fetch failure";
         if (a.kind === "flaky-fetch") {
@@ -261,8 +274,15 @@ export function buildRuntimeFaultsScript(
         if (a.kind === "resolve-rejected-thenable") {
           // Resolving *with a thenable* means the rejection arrives one
           // microtask later, through the assimilation path.
+          //
+          // \`TypeError\` directly, not \`makeError(a.rejectAs, …)\`: this action
+          // has no \`rejectAs\` field (see \`RuntimeAction\` in types.ts), so the
+          // read was always \`undefined\` and the helper always returned a
+          // TypeError anyway. The emitted script is a template string, so TS
+          // never saw the mistake — worth remembering when reading the rest
+          // of this function.
           return Promise.resolve({
-            then: (_resolve, reject) => { reject(makeError(a.rejectAs, msg)); },
+            then: (_resolve, reject) => { reject(new TypeError(msg)); },
           });
         }
         if (a.kind === "reject-body") {
@@ -298,6 +318,7 @@ export function buildRuntimeFaultsScript(
     let totalSkew = 0;
     for (const f of skewFaults) {
       if (matchUrl(f.pattern, location.href) && roll(f)) {
+        fire(f);
         totalSkew += Number(f.action.skewMs);
       }
     }
