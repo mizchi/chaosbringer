@@ -338,7 +338,15 @@ export function getExitCode(report: CrawlReport, strict: boolean | ExitCodeOptio
   if (report.summary.invariantViolations > 0) {
     return 1;
   }
-  if (opts.strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {
+  if (
+    opts.strict &&
+    (report.summary.consoleErrors > 0 ||
+      report.summary.jsExceptions > 0 ||
+      // An escaping rejection is the failure mode this library exists to
+      // find, and it used to be the one thing `strict` ignored: a run whose
+      // whole finding was "the app left a rejection unhandled" exited 0.
+      report.summary.unhandledRejections > 0)
+  ) {
     return 1;
   }
   if (opts.baselineStrict && report.diff) {

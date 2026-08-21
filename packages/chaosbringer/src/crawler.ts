@@ -47,6 +47,13 @@ import {
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
 import { decideFault, validateFaultSchedule } from "./schedule.js";
+import {
+  applyFault,
+  compileFaultRules,
+  pickFaultRule,
+  toRegExp,
+  type CompiledFaultRule,
+} from "./fault-router.js";
 import { compileUrlMatcher } from "./url-matcher.js";
 import {
   buildRuntimeFaultsScript,
@@ -119,6 +126,7 @@ const DEFAULT_OPTIONS: Required<
   Omit<
     CrawlerOptions,
     | "baseUrl"
+    | "launchOptions"
     | "har"
     | "storageState"
     | "performanceBudget"
@@ -747,7 +755,12 @@ export class ChaosCrawler {
       mkdirSync(this.options.screenshotDir, { recursive: true });
     }
 
-    this.browser = await chromium.launch({ headless: this.options.headless });
+    this.browser = await chromium.launch({
+      ...this.options.launchOptions,
+      // Last, so the explicit option (and the CLI flag behind it) wins over
+      // anything `launchOptions` happens to carry.
+      headless: this.options.headless,
+    });
     // Device descriptor overrides viewport / userAgent / device pixel ratio;
     // explicit options in CrawlerOptions still win because they come later.
     const deviceDesc =
@@ -1460,46 +1473,13 @@ export class ChaosCrawler {
       }
 
       // 1. Fault injection has priority so tests can exercise backends that
-      // would otherwise be allowed through.
-      //
-      // Two passes. A *scheduled* rule always advances its occurrence
-      // counter when it matches, even if an earlier rule already claimed the
-      // request: two rules watching the same URL must agree on what
-      // "occurrence 3" means, or a plan cannot hand occurrence 0 to one
-      // outcome and occurrence 1 to another. Rules on the probability path
-      // stay lazy (never consulted once a winner exists), so existing seeds
-      // draw exactly as many numbers as before.
-      let winner: (typeof rules)[number] | null = null;
-      for (const compiled of rules) {
-        if (!compiled.pattern.test(url)) continue;
-        if (compiled.methods && !compiled.methods.includes(method)) continue;
-
-        // Occurrence index = how many times this rule matched before now.
-        // `schedule` reads it as a decision table; `probability` rolls the
-        // crawler's seeded RNG (and only when prob < 1, so a probability-1
-        // rule never shifts the seed sequence).
-        if (compiled.rule.schedule) {
-          const occurrence = compiled.matched;
-          compiled.matched++;
-          if (decideFault(compiled.rule, occurrence, this.rng) === "inject") {
-            // The decision is consumed either way — that is what keeps two
-            // rules on one URL agreeing about occurrence numbers — but only
-            // one rule can answer the request. Record the loss instead of
-            // dropping it: `injected` alone cannot tell "the schedule said
-            // pass" from "the schedule said inject and somebody else got
-            // there first".
-            if (winner) compiled.suppressed++;
-            else winner = compiled;
-          }
-          continue;
-        }
-        if (winner) continue;
-        const occurrence = compiled.matched;
-        compiled.matched++;
-        if (decideFault(compiled.rule, occurrence, this.rng) === "inject") winner = compiled;
-      }
+      // would otherwise be allowed through. The decision — two passes,
+      // shared occurrence numbering, lazy probability — lives in
+      // `pickFaultRule` so that this handler and the public
+      // `applyFaultRules` cannot drift: a rule encoded twice is the defect
+      // this file has produced more than any other.
+      const winner = pickFaultRule(rules, url, method, this.rng);
       if (winner) {
-        winner.injected++;
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
@@ -1783,7 +1763,15 @@ export class ChaosCrawler {
     page.on("requestfailed", (request) => {
       if (!collecting) return;
       const requestUrl = request.url();
-      if (this.shouldIgnoreError(requestUrl)) return;
+      // Test the pattern against the *message* — `"<url> - <errorText>"` — not
+      // the URL alone. The doc on `ignoreErrorPatterns` promised
+      // `PageError.message` for every error type, and this one path tested the
+      // URL, so `"net::ERR_FAILED"` silenced the console copy of an aborted
+      // request and left the network copy standing. Matching the message is a
+      // superset: every pattern that matched the URL still matches.
+      const failure = request.failure();
+      const message = `${requestUrl} - ${failure?.errorText || "Unknown error"}`;
+      if (this.shouldIgnoreError(message)) return;
 
       // Check if this is a SPA-related error
       const spaPattern = this.matchesSpaPattern(requestUrl);
@@ -1798,10 +1786,9 @@ export class ChaosCrawler {
         return; // Don't count as regular error
       }
 
-      const failure = request.failure();
       const error: PageError = {
         type: "network",
-        message: `${requestUrl} - ${failure?.errorText || "Unknown error"}`,
+        message,
         url: page.url(),
         timestamp: Date.now(),
       };
@@ -3337,58 +3324,7 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid
- * regex. `compileUrlMatcher` drops stateful flags (`g`, `y`): one pattern is
- * tested against every request that goes past, and a `lastIndex` would make
- * the rule fire on alternating requests.
- */
-function toRegExp(m: UrlMatcher): RegExp | null {
-  try {
-    return compileUrlMatcher(m);
-  } catch {
-    return null;
-  }
-}
 
-/** A `FaultRule` with its pattern compiled once and its counters. */
-type CompiledFaultRule = {
-  rule: FaultRule;
-  pattern: RegExp;
-  methods?: string[];
-  matched: number;
-  injected: number;
-  /**
-   * Times this rule's schedule said "inject" and an earlier rule had already
-   * claimed the request. The decision was consumed — the occurrence advanced —
-   * and could not be acted on. Without this counter such a rule reports
-   * `matched=3 injected=0`, byte-identical to an all-`pass` schedule, and the
-   * one thing a reader needs (a planned fault that did not happen, and why) is
-   * the thing the report drops.
-   */
-  suppressed: number;
-};
-
-function compileFaultRules(rules: FaultRule[] | undefined): CompiledFaultRule[] {
-  if (!rules || rules.length === 0) return [];
-  const compiled: CompiledFaultRule[] = [];
-  for (const rule of rules) {
-    const pattern = toRegExp(rule.urlPattern);
-    if (!pattern) {
-      // Skip invalid regex silently; validateOptions will have already raised.
-      continue;
-    }
-    compiled.push({
-      rule,
-      pattern,
-      methods: rule.methods?.map((m) => m.toUpperCase()),
-      matched: 0,
-      injected: 0,
-      suppressed: 0,
-    });
-  }
-  return compiled;
-}
 
 /**
  * Strip the regex-metacharacters from `re.source` to produce a candidate
@@ -3513,63 +3449,3 @@ export function coverageFingerprintOf(covered: ReadonlySet<string>): string {
   return createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 32);
 }
 
-/**
- * Realise one `Fault` on a matched route.
- *
- * `hold` is the crawler's held-route registry, used only by an *unbounded*
- * `hang`: a hung request must stay in flight, so the handler returns without
- * responding and the registry aborts it when the run is done with the page.
- * Without that registry a hung route would keep the browser context from
- * closing cleanly. A `hang` with `releaseAfterMs` never enters the registry —
- * it aborts itself on its own timer — which is also why `report.heldRequests`
- * counts only the unbounded kind.
- */
-async function applyFault(
-  route: Route,
-  fault: Fault,
-  hold?: (route: Route) => void,
-): Promise<void> {
-  switch (fault.kind) {
-    case "abort":
-      await route.abort(fault.errorCode ?? "failed");
-      return;
-    case "status": {
-      // Chromium emits a spurious ERR_ABORTED alongside the response when the
-      // body is empty, so synthesise a minimal JSON body by default. Callers
-      // can still opt into an empty body by passing `body: ""` explicitly.
-      const body =
-        fault.body !== undefined ? fault.body : JSON.stringify({ error: fault.status });
-      await route.fulfill({
-        status: fault.status,
-        body,
-        contentType: fault.contentType ?? "application/json",
-      });
-      return;
-    }
-    case "delay":
-      await new Promise((r) => setTimeout(r, fault.ms));
-      await route.fallback();
-      return;
-    case "hang": {
-      // Deliberately do not respond and do not await: returning leaves the
-      // request in flight, which is the whole point of the fault.
-      if (fault.releaseAfterMs !== undefined) {
-        const ms = fault.releaseAfterMs;
-        // `unref` so the timer cannot outlive the work. A library consumer —
-        // vitest, `playwright test` — has a worker process that would
-        // otherwise linger for the whole release window after the run is
-        // finished; a 15s hang held one for 15s past the last assertion. The
-        // CLI never noticed because it calls `process.exit`.
-        const timer = setTimeout(() => {
-          void route.abort("timedout").catch(() => {
-            /* page may already be gone */
-          });
-        }, ms);
-        timer.unref?.();
-        return;
-      }
-      hold?.(route);
-      return;
-    }
-  }
-}

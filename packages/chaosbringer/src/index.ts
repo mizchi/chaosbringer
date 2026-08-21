@@ -445,8 +445,31 @@ export {
   type WriteFailureBundleArgs,
 } from "./failure-artifacts.js";
 
-// Playwright Test integration
-export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
+// Playwright Test integration — deliberately NOT re-exported here.
+//
+// `./fixture.js` statically imports `@playwright/test`, which is an *optional*
+// peer dependency. Re-exporting it from the root barrel made that peer
+// effectively required: `import { chaos } from "chaosbringer"` threw
+// `Cannot find package '@playwright/test'` for anyone who had installed
+// `playwright` alone, and the `exports` map left no way around it. Four
+// separate first-time readers lost their first stretch of work to it.
+//
+// The import to use is the one the fixture's own docs have always shown:
+//
+//   import { chaosTest, withChaos } from "chaosbringer/fixture";
+//
+// That subpath is unchanged. If you were importing those four names from the
+// package root, add `/fixture` — it is the only breaking edit here.
+
+// The network fault layer, applied to a page you drive yourself. Everything
+// else in the library that injects faults also runs a crawl; this does not.
+export {
+  applyFaultRules,
+  faultStatsOf,
+  pickFaultRule,
+  type CompiledFaultRule,
+  type FaultSession,
+} from "./fault-router.js";
 
 // Types
 export type {

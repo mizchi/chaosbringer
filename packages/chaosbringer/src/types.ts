@@ -16,6 +16,21 @@ export interface CrawlerOptions {
   maxActionsPerPage?: number;
   /** Page load timeout in ms */
   timeout?: number;
+  /**
+   * Extra options forwarded to `chromium.launch()`. `headless` here loses to
+   * the top-level `headless` option, which is the one the CLI sets.
+   *
+   * The case this exists for is Chromium's Private Network Access classifier:
+   * a page served from a non-loopback origin cannot load a `127.0.0.1`
+   * sub-resource, and switching origins does not help once the response is
+   * intercepted, because Chromium does not classify an intercepted response
+   * as loopback. `{ args: ["--disable-web-security"] }` is the workaround —
+   * test-only, never ship it. The README documented this before the option
+   * existed, so anyone who followed it was passing a field nothing read.
+   */
+  launchOptions?: Omit<Parameters<typeof import("playwright").chromium.launch>[0], "headless"> & {
+    headless?: boolean;
+  };
   /** Run browser in headless mode */
   headless?: boolean;
   /** Take screenshots of visited pages */
@@ -32,6 +47,13 @@ export interface CrawlerOptions {
    * and `invariant-violation`. There is no separate
    * `ignoreNetworkErrorPatterns`; use this single allowlist for both
    * console noise and network noise.
+   *
+   * A `network` error's message is `"<request url> - <errorText>"`, so a
+   * pattern can name either half: `"analytics"` silences a third-party
+   * beacon, `"net::ERR_FAILED"` silences a class of failure wherever it
+   * happens. (This path used to test the URL alone, which meant the second
+   * form silenced the console copy of an aborted request and left the network
+   * copy standing.)
    */
   ignoreErrorPatterns?: string[];
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */

@@ -225,7 +225,7 @@ faultInjection: [
 - A schedule consumes no RNG, so adding one leaves the seed sequence — and therefore chaos action selection — untouched.
 - Faults watching the same URL share occurrence numbering on the layers that evaluate every matching rule — the network layer, the runtime `fetch` layer and the lifecycle layer — so occurrence 0 can get one fault kind and occurrence 2 another. The **iframe layer and the load path are single-pass**: the first fault to claim an assignment returns, and a scheduled fault sitting behind it does not advance. Numbering there is per-rule, so don't write a two-fault occurrence split on those layers. Don't split one endpoint across the network and runtime layers either: a client-side rejection issues no request, so the network counter never advances.
 
-To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](../../docs/recipes/model-driven-faults.md).
+To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
 
@@ -449,11 +449,15 @@ Promise-shaped kinds, for the failure modes a network mock cannot express:
 
 `faults.flakyFetch()` still works; it is `rejectFetch({ rejectAs: "TypeError" })`.
 
+`faults.status(500, { urlPattern })` with no `body` does **not** send an empty body: Chromium emits a spurious `ERR_ABORTED` alongside an empty-bodied intercepted response, so the default is `{"error":500}` with `content-type: application/json`. That default decides which app bug a 500 finds — a client that skips `res.ok` and calls `res.json()` renders `undefined` from it, where an HTML or empty body makes `res.json()` *reject* instead. Both are worth testing; pass `body: ""` or `body: "<html>…"` explicitly for the second.
+
 The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
 
 Since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
 
 Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws, and that throw is recorded as a page error of type `exception` — so `summary.jsExceptions` reads 1 and an error cluster appears carrying Playwright's own timeout message. **The page threw nothing.** The classification is the crawler's, not the app's, and it is the expected outcome of the fault rather than a finding. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+
+`never-settle-fetch` honours `init.signal`, which is what makes it a fair test of a bounded request rather than a way to fail every client. Note what the caller sees: under `AbortSignal.timeout(ms)` the rejection is a `TimeoutError`, not an `AbortError` — a `catch` branching only on `err.name === "AbortError"` misses it. An explicit `AbortController.abort()` still gives `AbortError`.
 
 The probability roll is deterministic given the same `(seed, runtimeFaults)` pair — the in-page LCG is seeded from `seed` so two runs roll identically.
 
@@ -1023,8 +1027,8 @@ UI label via your `uiProbe`, whether a rejection escaped, and whether the
 planned faults actually fired (a plan whose request the app never issues is
 reported, not counted as a pass).
 
-Full walkthrough: [model-driven faults](../../docs/recipes/model-driven-faults.md).
-Runnable: [`examples/model-faults/`](../../examples/model-faults/).
+Full walkthrough: [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
+Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree/main/examples/model-faults).
 
 ## Error clustering
 
@@ -1045,9 +1049,17 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 | No navigation errors, no invariant violations | **0** |
 | At least one page with `status: "error"` or `"timeout"` | **1** |
 | At least one invariant violation (any mode) | **1** |
-| `--strict` and any console error / JS exception | **1** |
+| `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
+
+> **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
+> used to ignore them, so a run whose entire finding was "the app left a
+> rejection unhandled" exited 0 while a single `console.error` exited 1 — and
+> an escaping rejection is the failure mode this library's Promise fault kinds
+> exist to produce. If you were running `--strict` over a page with a known
+> unhandled rejection, that run now fails; add the pattern to
+> `ignoreErrorPatterns`, or fix it.
 
 ## Playwright Test integration
 

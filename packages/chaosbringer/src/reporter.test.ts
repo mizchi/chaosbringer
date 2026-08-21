@@ -292,3 +292,26 @@ describe("formatReport: fault injection block", () => {
     expect(none).not.toMatch(/requests held open/);
   });
 });
+
+describe("getExitCode and an escaping rejection", () => {
+  const withRejections = (n: number) =>
+    makeReport({
+      summary: { ...makeReport().summary, unhandledRejections: n },
+    });
+
+  it("fails under strict, because that is the finding this library is for", () => {
+    // It used to exit 0: a run whose entire result was "the app left a
+    // rejection unhandled" reported success, while a single `console.error`
+    // failed.
+    expect(getExitCode(withRejections(1), true)).toBe(1);
+    expect(getExitCode(withRejections(1), { strict: true })).toBe(1);
+  });
+
+  it("stays quiet without strict, like console errors do", () => {
+    expect(getExitCode(withRejections(1))).toBe(0);
+  });
+
+  it("does not fail a clean run under strict", () => {
+    expect(getExitCode(withRejections(0), true)).toBe(0);
+  });
+});
