@@ -98,3 +98,46 @@ jobs:
         run: pnpm -F "@mizchi/chaosbringer-example-${{ matrix.example }}" test
         env:
           WRANGLER_SEND_METRICS: "false"
+
+  adversarial:
+    # The red-team suites: each one is an app built to walk past the oracle, in
+    # a buggy and a corrected variant, asserting that the buggy one now fails.
+    # They were dev-time scripts nobody ran, which is the same failure the
+    # audit's own F6 finding was about — a check that cannot fail, and a check
+    # nobody invokes, are indistinguishable from the outside.
+    #
+    # Its own job rather than a step in example-tests: ~5 minutes of browser
+    # work would push that job's 2m34s close to its 10-minute limit, and a
+    # separate leg names itself in the checks list when it breaks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system deps only (cache hit path)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Red-team suites
+        run: pnpm -F "@mizchi/chaosbringer-example-model-faults" test:adversarial
