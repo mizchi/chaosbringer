@@ -63,7 +63,7 @@ describe("held routes are released to the caller", () => {
     return new ChaosCrawler({
       baseUrl: base,
       maxPages: 1,
-      maxActions: 0,
+      maxActionsPerPage: 0,
       headless: true,
       timeout: 1500,
       faultInjection: [faults.hang({ urlPattern: /\/api\/hang/ })],

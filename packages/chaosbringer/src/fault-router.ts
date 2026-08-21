@@ -332,8 +332,31 @@ export async function applyFaults(
   // options object to validate, so it happens here — a rule setting both
   // `probability` and `schedule` should fail at the call site, not silently
   // pick one.
-  for (const rule of rules) {
+  for (const [i, rule] of rules.entries()) {
+    // A runtime fault handed to `network:` used to reach the route handler and
+    // die there with "Cannot read properties of undefined (reading 'kind')",
+    // which names nothing a caller can act on. It is an easy mistake — the
+    // library's own recipe for a retry-double-write is `faults.rejectBody()`,
+    // a runtime fault — so refuse it here and say where it goes.
+    if (rule !== null && typeof rule === "object" && !("fault" in rule) && "action" in rule) {
+      const named = (rule as { name?: string }).name ?? `#${i}`;
+      throw new Error(
+        `chaosbringer: fault ${named} passed to \`network:\` is a RuntimeFault (it has ` +
+          `\`action\`, not \`fault\`) — pass it as \`applyFaults(page, { runtime: [...] })\`. ` +
+          `Runtime faults patch \`fetch\` inside the page, so they install as an init script ` +
+          `and take effect on the next navigation.`,
+      );
+    }
     validateFaultSchedule(`fault rule "${rule.name ?? String(rule.urlPattern)}"`, rule);
+  }
+  for (const [i, fault] of runtime.entries()) {
+    if (fault !== null && typeof fault === "object" && "fault" in fault && !("action" in fault)) {
+      const named = (fault as { name?: string }).name ?? `#${i}`;
+      throw new Error(
+        `chaosbringer: fault ${named} passed to \`runtime:\` is a network FaultRule (it has ` +
+          `\`fault\`, not \`action\`) — pass it as \`applyFaults(page, { network: [...] })\`.`,
+      );
+    }
   }
   const compiled = compileFaultRules([...rules]);
   const seed = spec.seed ?? randomSeed();
@@ -391,13 +414,30 @@ export async function applyFaults(
    * runtime fault applied *after* the navigation that would have installed it
    * really did match nothing, and saying so is more useful than an error.
    */
+  // The last counters read out of the page, kept so a read after teardown
+  // reports what happened rather than zeros. Reading `firings()` after
+  // `dispose()` — or after the context closed — used to return all zeros,
+  // which is indistinguishable from "the fault never fired": a silent no-op in
+  // the one call that exists to stop silent no-ops.
+  let lastRuntime: RuntimeFaultStats[] | null = null;
+
   const readRuntime = async (): Promise<RuntimeFaultStats[]> => {
     if (compiledRuntime.length === 0) return [];
     const raw = (await page.evaluate("window.__chaosbringerRuntimeStats").catch(() => null)) as
       | Record<string, { matched: number; fired: number; suppressed?: number }>
       | null;
-    return compiledRuntime.map((c, i) => {
-      const ps = raw?.[String(i)];
+    // `undefined` as well as `null`: an un-navigated page has no such global,
+    // and `page.evaluate` hands back `undefined` rather than throwing.
+    if (raw == null) {
+      // The page is gone, or was never navigated. If we read real counters
+      // earlier, those are the answer; otherwise zeros are honest — a runtime
+      // fault applied after the navigation that would have installed it really
+      // did match nothing.
+      if (lastRuntime !== null) return lastRuntime;
+      return compiledRuntime.map((c) => ({ rule: c.name, matched: 0, fired: 0 }));
+    }
+    const out = compiledRuntime.map((c, i) => {
+      const ps = raw[String(i)];
       return {
         rule: c.name,
         matched: ps?.matched ?? 0,
@@ -405,6 +445,8 @@ export async function applyFaults(
         ...(ps?.suppressed ? { suppressed: ps.suppressed } : {}),
       };
     });
+    lastRuntime = out;
+    return out;
   };
 
   return {
@@ -418,6 +460,11 @@ export async function applyFaults(
     heldRequests: () => heldCount,
     release: drain,
     dispose: async () => {
+      // Snapshot before teardown, so a `firings()` afterwards reports the run
+      // rather than zeros.
+      await readRuntime().catch(() => {
+        /* nothing to snapshot */
+      });
       await drain();
       if (rules.length > 0) {
         await page.unroute("**/*", handler).catch(() => {

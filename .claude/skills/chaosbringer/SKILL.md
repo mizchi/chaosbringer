@@ -40,18 +40,31 @@ const session = await applyFaults(page, {
 await page.goto(url);
 await page.getByRole("button", { name: "Save" }).click();
 
-const [save] = await session.firings();
-expect(save.fired).toBeGreaterThan(0);   // it really happened — see below
+const fired = await session.firings();     // one row per fault, labelled by name
+if (!fired.every((f) => f.fired > 0)) throw new Error(`nothing fired: ${JSON.stringify(fired)}`);
 // …assert what the app did…
 await session.dispose();     // release parked requests, drop the route
 ```
 
-Give each fault a `name`. Without one the label is derived from the action
-(`"reject-body:json"`), which is fine until you are matching on it.
+Give each fault a `name` and match on it — without one the label is derived
+from the action (`"reject-body:json"`), and matching by position breaks the
+moment you add a fault. The assertions here are yours: the root API is
+framework-agnostic and runs fine under `node --test`, so `expect` is
+illustrative. Add `"type": "module"` to your `package.json` (or use `.mjs`) —
+the package is ESM-only, and from a CJS directory the error is
+`ERR_PACKAGE_PATH_NOT_EXPORTED`, which reads like a broken install.
 
 You drive the page: no crawl, no random driver, nothing happening between your
 click and your assertion. This is the shape a regression test for one incident
-wants. `applyFaultRules(page, rules)` is the network-only shorthand.
+wants.
+
+Two things about those keys. They are **not** the names `chaos()` uses —
+there it is `faultInjection` and `runtimeFaults` — and the layers are not
+interchangeable: `rejectBody` / `rejectFetch` / `neverSettleFetch` are runtime
+faults, `status` / `delay` / `abort` / `hang` are network rules, and passing one
+under the other's key is refused with a message naming the fix.
+`applyFaultRules(page, rules)` is a network-only shorthand and takes a bare
+array rather than an object.
 
 The alternatives, and when they beat it:
 
@@ -65,8 +78,13 @@ The alternatives, and when they beat it:
   Build a fresh one per run.
 - **`chaosTest` from `chaosbringer/fixture`** — inside Playwright Test. Its
   `chaos.testPage(page, url)` returns `PageResult` with **`.errors`** (there is
-  no `.violations`), and it only *loads* the page — it clicks nothing, so it is
-  the wrong entry point for a fault behind a button.
+  no `.violations`). It loads the page *and* performs chaos actions —
+  weighted-random, five per page by default — so it may or may not press the
+  button your fault is about, which makes it the wrong entry point for a
+  targeted regression. `maxActionsPerPage: 0` makes it load-only. (Watch the
+  name: `maxActions` is not an option, and a misspelled option is silently
+  ignored — measured, 4 clicks with the default, 0 with
+  `maxActionsPerPage: 0`, 3 with `maxActions: 0`.)
 - **Model-driven** — when the question is "which failure states did we cover",
   a temporal model enumerates them and each state becomes a replayable plan
   with the model's own prediction as the oracle. More work, and it earns a

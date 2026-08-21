@@ -192,6 +192,81 @@ describe("applyFaultRules on a page you drive yourself", () => {
     }
   }, 60_000);
 
+  it("never-settle-fetch rejects as TimeoutError under AbortSignal.timeout", async () => {
+    // Stated as fact in the skill, so it needs to be a test rather than a
+    // recollection: a `catch` branching on `err.name === "AbortError"` misses
+    // this, and the app then looks broken when it is not.
+    const page = await browser.newPage();
+    try {
+      const session = await applyFaults(page, {
+        runtime: [
+          { name: "never", urlPattern: /\/api\/slow$/, action: { kind: "never-settle-fetch" } },
+        ],
+      });
+      await page.goto(base + "/");
+      await page.evaluate("window.hangBounded(250)");
+      await expect.poll(() => page.textContent("#state"), { timeout: 5000 }).toBe(
+        "bounded:TimeoutError",
+      );
+      // An explicit abort still gives AbortError, which is the contrast that
+      // makes the first half worth knowing.
+      await page.evaluate(`(() => {
+        const c = new AbortController();
+        const s = document.getElementById("state");
+        s.textContent = "waiting";
+        fetch("/api/slow", { signal: c.signal }).then(
+          () => { s.textContent = "answered"; },
+          (e) => { s.textContent = "bounded:" + e.name; });
+        c.abort();
+      })()`);
+      await expect.poll(() => page.textContent("#state"), { timeout: 5000 }).toBe(
+        "bounded:AbortError",
+      );
+      await session.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("still reports what fired after dispose, and after the page is gone", async () => {
+    // `firings()` reads counters out of the page, so calling it after teardown
+    // used to return zeros — indistinguishable from "the fault never fired",
+    // in the one call whose whole purpose is to stop silent no-ops. Somebody
+    // hit this ordering trap.
+    const page = await browser.newPage();
+    const session = await applyFaults(page, {
+      runtime: [
+        { name: "save-unreadable", urlPattern: /\/api\/save$/, action: { kind: "reject-body" } },
+      ],
+    });
+    await page.goto(base + "/");
+    await page.click("#save");
+    await expect.poll(() => page.textContent("#state")).toBe("threw");
+
+    await session.dispose();
+    expect(await session.firings()).toMatchObject([{ name: "save-unreadable", fired: 1 }]);
+    await page.close();
+    // And after the page itself is gone.
+    expect(await session.firings()).toMatchObject([{ name: "save-unreadable", fired: 1 }]);
+  }, 60_000);
+
+  it("but reports zero when there is genuinely nothing to report", async () => {
+    // The snapshot must not become a way to invent numbers: a fault applied
+    // after the navigation that would have installed it really did match
+    // nothing, and that has to keep reading as zero.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      const session = await applyFaults(page, {
+        runtime: [{ name: "too-late", urlPattern: /\/api\/save$/, action: { kind: "reject-fetch" } }],
+      });
+      await session.dispose();
+      expect(await session.firings()).toMatchObject([{ name: "too-late", matched: 0, fired: 0 }]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   it("hands the page back to the real origin on dispose", async () => {
     const page = await browser.newPage();
     try {
@@ -270,6 +345,26 @@ describe("applyFaultRules on a page you drive yourself", () => {
         { rule: "too-late", matched: 0, fired: 0 },
       ]);
       await session.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("refuses a fault handed to the wrong layer, and says where it goes", async () => {
+    // The library's own recipe for a retry-double-write is `faults.rejectBody`,
+    // a *runtime* fault — so handing it to `network:` is the mistake a reader
+    // following the docs makes, and it used to reach the route handler and die
+    // with "Cannot read properties of undefined (reading 'kind')".
+    const page = await browser.newPage();
+    try {
+      await expect(
+        applyFaultRules(page, [faults.rejectBody({ name: "body", urlPattern: /\/api\/save$/ })] as never),
+      ).rejects.toThrow(/is a RuntimeFault.*runtime: \[/s);
+      await expect(
+        applyFaults(page, {
+          runtime: [faults.status(500, { name: "five", urlPattern: /\/api\/save$/ })] as never,
+        }),
+      ).rejects.toThrow(/is a network FaultRule.*network: \[/s);
     } finally {
       await page.close();
     }

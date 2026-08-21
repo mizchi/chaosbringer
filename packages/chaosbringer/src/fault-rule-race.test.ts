@@ -64,7 +64,7 @@ describe("two fault rules on one URL", () => {
     const crawler = new ChaosCrawler({
       baseUrl: base,
       maxPages: 1,
-      maxActions: 0,
+      maxActionsPerPage: 0,
       headless: true,
       timeout: 5000,
       faultInjection: [
@@ -102,7 +102,7 @@ describe("two fault rules on one URL", () => {
     const crawler = new ChaosCrawler({
       baseUrl: base,
       maxPages: 1,
-      maxActions: 0,
+      maxActionsPerPage: 0,
       headless: true,
       timeout: 5000,
       faultInjection: [

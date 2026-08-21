@@ -159,28 +159,71 @@ hour, and the only thing that caught it was asserting the fault had fired.)
 ## Faults on a page you drive yourself
 
 ```ts
-import { applyFaultRules, faults } from "chaosbringer";
+import { applyFaults, faults } from "chaosbringer";
 
-const session = await applyFaultRules(page, [
-  faults.status(503, {
-    name: "save-503",
-    urlPattern: /\/api\/save$/,
-    methods: ["POST"],
-    schedule: { decisions: ["inject", "pass"] },
-  }),
-]);
+const session = await applyFaults(page, {
+  network: [
+    faults.status(503, {
+      name: "save-503",
+      urlPattern: /\/api\/save$/,
+      methods: ["POST"],
+      schedule: { decisions: ["inject", "pass"] },
+    }),
+  ],
+  runtime: [
+    faults.rejectBody({ name: "body-unreadable", urlPattern: /\/api\/save$/, methods: ["POST"] }),
+  ],
+  seed: 1,          // only matters for `probability`; a schedule needs no randomness
+});
+await page.goto(url);   // runtime faults install as an init script — navigate AFTER applying
 ```
+
+**Mind the two vocabularies.** In `chaos()` / `ChaosCrawler` the option names
+are `faultInjection` and `runtimeFaults`; here they are `network:` and
+`runtime:`. Same objects, different keys. And the layers are not
+interchangeable: a fault built by `faults.rejectBody()` / `rejectFetch()` /
+`neverSettleFetch()` carries an `action` and belongs under `runtime:`, while
+`faults.status()` / `delay()` / `abort()` / `hang()` carry a `fault` and belong
+under `network:`. Passing one to the other's key is refused with a message
+naming the fix, so you will not spend an afternoon on
+`Cannot read properties of undefined (reading 'kind')`.
+
+`applyFaultRules(page, rules)` is a shorthand for `applyFaults(page, { network:
+rules })` — note the different argument shape: a bare array, not an object.
+It cannot take runtime faults.
 
 | On the session | |
 |---|---|
-| `stats()` | per-rule `{ rule, matched, injected, suppressed? }`, live |
+| `stats()` | network rules: `{ rule, matched, injected, suppressed? }[]`, live |
+| `runtimeStats()` | runtime faults: `Promise<{ rule, matched, fired, suppressed? }[]>`, read out of the page |
+| `firings()` | `Promise<Firing[]>` — both layers in one shape: `{ name, layer, matched, fired, suppressed, errored }`. `layer` is `"network" \| "runtime" \| "lifecycle" \| "iframe"` |
 | `heldRequests()` | requests currently parked by an unbounded `hang` |
 | `release()` | abort the parked ones, so the app's `catch` runs |
 | `dispose()` | release, then remove the route — page talks to the real origin again |
 
+`firings()` and `runtimeStats()` return **arrays**, in the order you passed the
+faults, and each row is labelled by the `name` you gave the fault — so give
+them names, or an unnamed network rule is labelled with its stringified regex.
+Both are safe to call after `dispose()`: the counters are snapshotted on the way
+out, because a post-teardown read that returned zeros would be
+indistinguishable from "the fault never fired".
+
 No crawl, no driver, no report: you navigate and click. The fault decision is
 the crawler's own (`pickFaultRule`), so schedules and occurrence numbering mean
-the same thing here.
+the same thing here. Nothing in this path uses exit codes or `strict` — those
+belong to `chaos()`.
+
+## The package is ESM-only
+
+`exports` declares `import` and no `require`, so from a directory without
+`"type": "module"` you get `ERR_PACKAGE_PATH_NOT_EXPORTED`, which reads like a
+broken install. Add `"type": "module"` to your `package.json`, or name the file
+`.mjs` / `.mts`. And the test file has to sit where `chaosbringer` resolves — a
+sibling directory of the app fails with `ERR_MODULE_NOT_FOUND`.
+
+Assertions here are yours: the root API is framework-agnostic and works fine
+under `node --test`. The `expect(...)` in these examples is illustrative, not a
+dependency — `@playwright/test` is needed only for `chaosbringer/fixture`.
 
 Worth knowing: **while any route is installed, Playwright disables the page's
 HTTP cache.** A cacheable asset is re-fetched on every navigation until you

@@ -2910,7 +2910,97 @@ export class ChaosCrawler {
  * well-formed inputs. Every error starts with `chaosbringer:` and names
  * the field, so users don't get an anonymous `TypeError: Invalid URL`.
  */
+/**
+ * Option names the type system cannot protect a caller from getting wrong.
+ *
+ * `CrawlerOptions` is a closed type, but excess-property checking only applies
+ * to a fresh object literal — spread one, build it in a helper, or write plain
+ * JS, and `maxActions: 0` sails through and does nothing. Measured on the
+ * fixture page: 4 chaos actions with the default, 0 with
+ * `maxActionsPerPage: 0`, and 4 with `maxActions: 0`, which is the shape of
+ * "my fault never fired and I cannot see why". This file's own tests did it.
+ *
+ * Only *near misses* are refused. A key nobody could have meant as an option —
+ * a caller's own `myAppPort` riding along in a config object — is left alone,
+ * because breaking those to catch typos would trade one silent failure for a
+ * loud one somebody did not ask for.
+ */
+const KNOWN_OPTION_NAMES = [
+  "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
+  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
+  "userAgent", "traceparent", "actionWeights", "logFile", "logLevel", "logToConsole",
+  "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
+  "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
+  "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
+  "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
+  "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
+] as const;
+
+/**
+ * Compile-time guard that the list above is complete.
+ *
+ * A list like this rots silently in the worst possible direction: add an option
+ * and forget it here, and the near-miss check refuses the *correct* new name as
+ * a typo of an old one. If this line fails to compile, the error names the
+ * options that are missing from `KNOWN_OPTION_NAMES` — add them.
+ */
+type UnlistedOptionNames = Exclude<keyof CrawlerOptions, (typeof KNOWN_OPTION_NAMES)[number]>;
+const _allOptionsListed: UnlistedOptionNames extends never ? true : UnlistedOptionNames = true;
+void _allOptionsListed;
+
+/** Levenshtein distance, capped: we only care whether it is 1 or 2. */
+function editDistance(a: string, b: string, cap = 3): number {
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j]! + 1,
+        row[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+function rejectNearMissOptions(options: object): void {
+  const known: ReadonlySet<string> = new Set<string>(KNOWN_OPTION_NAMES);
+  for (const key of Object.keys(options)) {
+    if (known.has(key)) continue;
+    const lower = key.toLowerCase();
+    // Rank rather than take the first hit: in list order, `shard` matched
+    // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
+    // makes no sense is worse than none. Prefix relationships win, then the
+    // smaller edit distance.
+    let suggestion: string | undefined;
+    let best = Number.POSITIVE_INFINITY;
+    for (const name of KNOWN_OPTION_NAMES as readonly string[]) {
+      const n = name.toLowerCase();
+      // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
+      // plural/singular slip (`faultInjections` for `faultInjection`).
+      const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
+      const distance = editDistance(lower, n, 2);
+      const score = prefix ? 0 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+      if (score < best) {
+        best = score;
+        suggestion = name;
+      }
+    }
+    if (suggestion !== undefined) {
+      throw new Error(
+        `chaosbringer: unknown option "${key}" — did you mean "${suggestion}"? ` +
+          `A misspelled option is accepted and ignored by JavaScript, so it fails as ` +
+          `"my fault never fired" rather than as an error.`,
+      );
+    }
+  }
+}
+
 export function validateOptions(options: CrawlerOptions): void {
+  rejectNearMissOptions(options);
   // baseUrl — parse and surface a named error.
   try {
     // eslint-disable-next-line no-new
