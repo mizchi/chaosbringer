@@ -112,6 +112,14 @@ No probabilities, no seeds, no Quint concepts — reviewable JSON:
 }
 ```
 
+`rule` names an operation the bridge declares; `order` is the settlement order
+the witness had. **`occurrence` is the count of that operation's calls, from
+zero** — so a page that fetches on mount and again on click has the click as
+occurrence *1*, and a plan aimed at the click but written as occurrence 0 fires
+on page load instead. That off-by-one is the single most common way a plan
+misses, and the models in this repo state their page-load reads explicitly for
+exactly that reason.
+
 `expect` has four fields, and a model states whichever ones it knows:
 
 | field | compared against | when to use it |
@@ -161,18 +169,53 @@ neither faults nor counts `/api/stream?cursor=…`, so a client that resumed 58
 times reported exactly the 9 the model predicted. Write
 `/\/api\/stream(\?|$)/`.
 
-Outcomes are model-level, and the runner maps them onto fault kinds:
+### What the model writes, and what it compiles to
 
-| Outcome | Realised as | Layer |
-|---|---|---|
-| `pass` | nothing injected | — |
-| `reject` | `reject-fetch` (TypeError) | runtime |
-| `abort` | `reject-fetch` (DOMException `AbortError`) | runtime |
-| `reject-body` | `reject-body` (`res.json()` rejects) | runtime |
-| `hang` | `never-settle-fetch` | runtime |
-| `status` | `faults.status(500)` | network |
-| `slow-ok` | `faults.delay(<solved>)` — slow, still inside the app's bound | network |
-| `slow-trip` | `faults.delay(<solved>)` — past the bound *and* past the probe | network |
+Two vocabularies, and confusing them is the first thing that will stop you.
+**Left column is what you write in the model.** The middle column is what
+appears in the committed plan — you never type it — and the right column is how
+the runner realises it.
+
+| Model action (`kind` in the log) | Plan outcome | Realised as | Layer |
+|---|---|---|---|
+| `fulfil` / `fulfill` / `resolve` / `succeed` | `pass` | nothing injected | — |
+| `reject` / `fail` | `reject` | `reject-fetch` (TypeError) | runtime |
+| `abort` / `cancel` | `abort` | `reject-fetch` (DOMException `AbortError`) | runtime |
+| `rejectBody` | `reject-body` | `res.json()` rejects after the fetch resolved | runtime |
+| `hang` / `stall` | `hang` | `never-settle-fetch` | runtime |
+| `status` / `serverError` | `status` | `faults.status(500)` | network |
+| `slow` / `slowOk` | `slow-ok` | `faults.delay(<solved>)` — slow, inside the app's bound | network |
+| `tooSlow` / `timeout` | `slow-trip` | `faults.delay(<solved>)` — past the bound *and* past the probe | network |
+
+Anything else is an error at compile time rather than a silently dropped
+injection — but note that three plan outcomes are *not* action names: `pass`,
+`slow-ok` and `slow-trip` only ever appear in the compiled plan. Write `fulfil`,
+`slow` and `tooSlow`.
+
+### The model tells the compiler what it did
+
+The compiler does not infer the schedule from state diffs — the model states it,
+in a log variable:
+
+```quint
+var log: List[{ kind: str, op: str }]
+```
+
+`kind` is an action name from the table above; `op` is the operation id, which
+must match a key of the bridge's `rules`. Append one entry per settlement:
+
+```quint
+action reject = all {
+  // …the rest of the transition…
+  log' = log.append({ kind: "reject", op: "cart" }),
+}
+```
+
+An action that is app behaviour rather than an injection — a token refresh the
+app performs on its own — logs nothing and is named in `--ignore-action`. The
+variable name, the two field names and the state/UI variables are all
+overridable (`--log-var`, `--ui-var`, `--unhandled-var`); the defaults above are
+what every model in this repo uses.
 
 One operation cannot mix layers: a client-side rejection issues no request, so
 a network rule and a runtime fault on the same operation would number
@@ -208,9 +251,26 @@ export default {
     // "*" runs for every label.
   },
 
+  // Observables the UI does not show: write counts, refresh counts, rendered
+  // revisions. Required by any plan that names `expect.state` — without it the
+  // runner reports the expectation as unchecked rather than passing it, because
+  // an unchecked expectation is worse than none.
+  stateProbe: async (page) =>
+    page.evaluate(async () => {
+      const res = await fetch(`/api/orders/count?session=${window.__SESSION__}`);
+      return { orders: (await res.json()).orders };
+    }),
+
   settleMs: 1600,
 };
 ```
+
+Two things about `stateProbe` that cost time to learn the hard way. Its own
+requests must not match any rule in `rules`, or the probe is counted as an
+operation and `expect.calls` becomes unassertable — anchor the patterns, and
+give the probe its own endpoint. And an endpoint that *changes* what it
+measures (a read that bumps a revision, say) makes the probe part of the
+experiment; keep a side-effect-free reader for it.
 
 `uiInvariants` is where an app's own consistency rules go, once, instead of
 being restated in every plan. It is the cheapest closure for the largest class
@@ -275,8 +335,11 @@ action ──── settleMs ────▶ probe: ui, uiInvariants, state
   not looked. Recurring timers are *reported*, never waited on: an uncleared
   `setInterval` is a fact about the app, not a reason to hang.
 - `expect.state` is compared against a **second** read, taken after
-  `quiescenceMs`. The window is only spent when a plan actually names state
-  observables, so a suite of label-only plans pays nothing for it.
+  `quiescenceMs`. The window is spent by any plan the second look could change
+  its mind about — one naming `expect.state`, or a `ui` label, or a bridge with
+  `uiInvariants` — which in practice is nearly every plan. Set
+  `quiescenceMs: 0` to opt a suite out, and read the cost table below first: on
+  this repo's example suite the window is ~25s of the 135s.
 - A read that disagrees with itself is named in the failure detail, so the
   report says *the probe read the value the model predicted, and something else
   afterwards* rather than looking like a flake. A read that started wrong and
@@ -406,20 +469,33 @@ jitter cannot be tested at all, and the solver says so with the number to fix:
 
 ```
 no expressible delay is tolerable under a 120ms deadline: this environment's
-jitter is 118ms and its floor is 4ms, so even the smallest injectable delay can
-be observed at 122ms. Raise the deadline above 147ms […]
+jitter is 122ms (measured × safety 2) and its floor is 4ms, so even the smallest
+injectable delay can be observed at 126ms. Raise the deadline above 151ms, lower
+the safety factor if your calibration is trustworthy, or stop asserting on
+timing at this scale.
 ```
 
-Two measured facts worth internalising, from
+The `× safety` clause is the part to read: the shipped profile is already
+pessimistic and the solver multiplies it again, so an infeasible answer is
+sometimes the *safety factor* talking rather than the machine.
+
+Two facts about the measurement, in more detail in
 [the solver's notes](../superpowers/specs/2026-08-20-timing-solver/):
 
 - **Deadlines are exact, injected delays are not.** `AbortSignal.timeout` fired
   within 3ms of nominal; an injected delay overshot by up to 107ms on a cold
-  run. So delay-side separations need ~120ms of margin and probe-side ones
-  need ~5ms — an asymmetry no hand-picked constant encodes.
-- **The margin is load-bearing.** A delay 133ms closer to the deadline than the
-  solved one misclassified 2 of 15 trials unthrottled, 4 of 15 under 4× CPU
-  throttle. The solved value held 15/15 in both.
+  run. Delay-side separations therefore need far more margin than probe-side
+  ones — an asymmetry no hand-picked constant encodes, and the reason the
+  solver treats the two directions differently.
+- **A profile measured on an idle machine is not a bound on a loaded one, and
+  the probe side is where that bites.** An earlier version of this page quoted
+  ~5ms as the probe-side requirement, from a warm calibration. Under real
+  single-core contention a `page.waitForTimeout(settleMs)` overshoots that
+  easily, and a tripping delay solved to land just after the probe lands
+  *before* it instead — so an app with no bound at all reads healthy, which is
+  the one verdict a timing plan must never produce. Calibrate under the load
+  your CI actually has, and treat a probe-side tail measured warm as optimistic.
+  `calibrate` warns when it thinks that happened; believe it.
 
 ## Determinism boundary
 
@@ -433,9 +509,18 @@ test.
 
 So plans that inject the same multiset of outcomes but predict *different*
 results are flagged `orderSensitive` at compile time and skipped by the runner
-(`coverage.plansSkipped`) rather than run as a coin flip. If you hit that,
-either the model over-specifies (an ordering assumption it never states) or
-the operations should be modelled separately.
+rather than run as a coin flip.
+
+Skipped is not quietly tolerated, and it is worth being clear about that
+because "skipped" usually means "ignored": `modelRunPassed` requires
+`plansSkipped === 0`, so `model run` **exits 1** and your suite goes red. That
+is deliberate — a plan whose verdict would be a coin flip is not a plan you
+should be able to commit and forget — but it means there is no "known
+unenforceable, tracked" state. If you hit it, the fix is on the model side:
+either it over-specifies (an ordering assumption it never states) or the
+operations belong in separate rules. `--allow-order-sensitive` runs them
+anyway, and exists for one case only: finding out *whether* the ordering is
+what your app actually depends on, before you go back and change the model.
 
 ## Keeping the coverage claim honest
 
