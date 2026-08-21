@@ -25,6 +25,16 @@ export const PATTERNS = [
       "refresh token the second one invalidates the first and logs the user out.",
   },
   {
+    name: "optimistic-rollback",
+    path: "/optimistic",
+    spec: "patterns/optimistic-rollback/rollback.qnt",
+    catches:
+      "an optimistic row the server never took. \"Roll back on error\" is the wrong contract: a " +
+      "request that never arrived and a reply that could not be read need opposite corrections, " +
+      "and only asking the server tells them apart. The app that guesses is right half the time " +
+      "and has verified nothing either way.",
+  },
+  {
     name: "timeout-ladder",
     path: "/slow",
     spec: "patterns/timeout-ladder/ladder.qnt",

@@ -15,6 +15,7 @@ pnpm test:patterns                                          # all of them, both 
 |---|---|---|
 | [`retry-idempotency`](./retry-idempotency/) | A retry that writes twice. The dangerous failure is the one where the server **committed** and the client could not read the reply — without one idempotency key per intent, the retry is a second order. | **No.** Same "Order placed" banner either way; only the server's order count differs. |
 | [`timeout-ladder`](./timeout-ladder/) | A request with no bound. Slow and never are different failures: the first must still render, the second must give up. An unbounded app handles the slow case perfectly — which is why the missing bound survives review. | **Yes**, but only if you wait long enough — which is why this pattern's probe window is *solved*, not guessed. |
+| [`optimistic-rollback`](./optimistic-rollback/) | An optimistic row the server never took. "Roll back on error" is the wrong contract: a request that never arrived and a reply that could not be read need *opposite* corrections, and only asking the server tells them apart. | **Partly.** The row that should have vanished is visible — but the app that keeps a committed row *without asking* looks identical to one that knows, and only the missing read separates them. |
 | [`token-refresh`](./token-refresh/) | A refresh stampede. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload, and on a rotating refresh token the second invalidates the first and logs the user out. | **No.** Both variants render the account fine; only the refresh count differs. |
 
 ## Why these need a state probe
@@ -25,6 +26,14 @@ names the observable (`orders`, `refreshes`, …), `chaosbringer model compile
 --state-var` lifts it into the plan's `expect.state`, and the bridge's
 `stateProbe` reads it back. A plan whose expectation nothing can read is
 reported as a mismatch rather than passing quietly.
+
+`optimistic-rollback` needs one thing a state probe cannot give it. Its worst
+case ends with the *right* rows on screen: the server committed, the reply was
+lost, and an app that simply kept the optimistic row is correct by luck. Every
+state assertion passes. What distinguishes it from an app that knows is a
+request — the reconcile read — so the model counts list reads and
+`--calls-var list=listCalls` lifts that count into `expect.calls`. A call the
+app owes the user is not always a call a fault can target.
 
 ## Anatomy of a pattern
 

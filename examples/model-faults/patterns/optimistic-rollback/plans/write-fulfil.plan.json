@@ -1,0 +1,30 @@
+{
+  "name": "write-fulfil",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "list",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "note",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "saved",
+    "unhandledRejection": false,
+    "state": {
+      "committed": 1,
+      "shown": 1
+    },
+    "calls": {
+      "list": 1,
+      "note": 1
+    }
+  },
+  "modelSteps": 3
+}

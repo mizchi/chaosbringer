@@ -152,6 +152,60 @@ describe("pattern: token-refresh", () => {
   }, 300000);
 });
 
+describe("pattern: optimistic-rollback", () => {
+  const pattern = PATTERNS.find((p) => p.name === "optimistic-rollback")!;
+
+  it("bounds the reconcile read, which no state probe could report", () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(4); // fulfil | rejectBefore | serverError | rejectAfter
+
+    // A success needs no reconcile; every failure does, because the app cannot
+    // tell "never arrived" from "arrived, reply lost" without asking.
+    const byName = new Map(plans.map((p) => [p.name, p]));
+    expect(byName.get("write-fulfil")!.expect.calls).toEqual({ list: 1, note: 1 });
+    for (const name of ["write-rejectBefore", "write-serverError", "write-rejectAfter"]) {
+      expect(byName.get(name)!.expect.calls).toEqual({ list: 2, note: 1 });
+    }
+    // …and the schedule still names occurrence 0 only. The reconcile is app
+    // behaviour, not an injection point, which is exactly why the occurrence
+    // schedule cannot express this bound and expect.calls has to.
+    for (const plan of plans) {
+      expect(plan.schedule.filter((s) => s.rule === "list")).toHaveLength(1);
+    }
+  });
+
+  it("catches the row the server never took, and the row it did", async () => {
+    const results = await run(pattern, false);
+    const byName = new Map(results.map((r) => [r.plan.name, r]));
+
+    // Nothing committed, row still on screen: the user believes it saved.
+    for (const name of ["write-rejectBefore", "write-serverError"]) {
+      const r = byName.get(name)!;
+      expect(r.mismatches.map((m) => m.field).sort()).toEqual(["amplification", "state"]);
+      expect(r.observed.state).toEqual({ committed: 0, shown: 1 });
+    }
+
+    // The one that makes the pattern worth having. The server DID commit, so
+    // the row on screen is correct and every state assertion passes — the app
+    // is right by luck, having verified nothing. Only the missing reconcile
+    // read separates it from an app that knows.
+    const ambiguous = byName.get("write-rejectAfter")!;
+    expect(ambiguous.mismatches.map((m) => m.field)).toEqual(["amplification"]);
+    expect(ambiguous.observed.state).toEqual({ committed: 1, shown: 1 });
+    expect(ambiguous.observed.matched.list).toBe(1);
+
+    // The control: an optimistic update that succeeds must pass in both
+    // variants, or the pattern would be flagging optimistic UI in general.
+    expect(byName.get("write-fulfil")!.mismatches).toEqual([]);
+  }, 300000);
+
+  it("passes every outcome once the app asks the server instead of guessing", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+
 describe("pattern: timeout-ladder", () => {
   const pattern = PATTERNS.find((p) => p.name === "timeout-ladder")!;
 

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Notes</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+      .banner { padding: .75rem 1rem; border-radius: .4rem; margin: 1rem 0; background: #f3f4f6; }
+      [data-state="error"] .banner { background: #fee2e2; }
+      [data-state="saved"] .banner { background: #ecfdf5; }
+      li[data-pending] { opacity: .55; font-style: italic; }
+      button, input { padding: .5rem 1rem; font-size: 1rem; }
+    </style>
+  </head>
+  <body>
+    <main id="app" data-state="idle">
+      <h1>Notes</h1>
+      <input id="text" value="Buy milk" aria-label="Note" />
+      <button id="add">Add note</button>
+      <p class="banner" id="banner">Nothing saved yet.</p>
+      <ul id="notes"></ul>
+    </main>
+    <script src="/optimistic.js"></script>
+  </body>
+</html>

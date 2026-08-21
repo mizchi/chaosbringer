@@ -1,0 +1,30 @@
+{
+  "name": "write-rejectBefore",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "list",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "note",
+      "outcome": "reject",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false,
+    "state": {
+      "committed": 0,
+      "shown": 0
+    },
+    "calls": {
+      "list": 2,
+      "note": 1
+    }
+  },
+  "modelSteps": 3
+}

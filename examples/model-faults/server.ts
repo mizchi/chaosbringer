@@ -40,6 +40,7 @@ export function createApp(fixed: boolean): Hono {
       `window.__ORDER_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__TOKEN_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SLOW_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__NOTES_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -135,6 +136,41 @@ export function createApp(fixed: boolean): Hono {
     return c.body(readFileSync(join(publicDir, "slow.js"), "utf8"));
   });
   app.get("/api/report", (c) => c.json({ rows: 128, generatedAt: "2026-08-20" }));
+
+  // --- optimistic-rollback pattern -------------------------------------
+  //
+  // GET and POST share one URL on purpose: that is what a REST collection
+  // looks like, and it is why `rules` needs a method filter — without one a
+  // plan fires on whichever call arrives first. The write commits before it
+  // answers, so a client that cannot read the reply has still changed the
+  // server's mind: the ambiguous case the pattern exists for.
+  const notes = new Map<string, Array<{ id: string; text: string }>>();
+
+  app.get("/optimistic", (c) => c.html(pageWithFlags("optimistic.html", fixed)));
+  app.get("/optimistic.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "optimistic.js"), "utf8"));
+  });
+
+  app.get("/api/notes", (c) => {
+    const session = c.req.query("session") ?? "anonymous";
+    return c.json({ notes: notes.get(session) ?? [] });
+  });
+
+  app.post("/api/notes", async (c) => {
+    const session = c.req.header("x-session") ?? "anonymous";
+    const body = await c.req.json<{ text?: string }>().catch(() => ({}) as { text?: string });
+    const rows = notes.get(session) ?? [];
+    notes.set(session, rows);
+    const id = `note-${rows.length + 1}`;
+    rows.push({ id, text: body.text ?? "" });
+    return c.json({ id });
+  });
+
+  app.get("/api/notes/count", (c) => {
+    const session = c.req.query("session") ?? "anonymous";
+    return c.json({ notes: notes.get(session)?.length ?? 0 });
+  });
 
   app.get("/api/orders/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";
