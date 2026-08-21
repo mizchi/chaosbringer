@@ -477,7 +477,12 @@ timing at this scale.
 
 The `× safety` clause is the part to read: the shipped profile is already
 pessimistic and the solver multiplies it again, so an infeasible answer is
-sometimes the *safety factor* talking rather than the machine.
+sometimes the *safety factor* talking rather than the machine. All three levers
+the message names are reachable from a bridge — `safety: 1` uses the measurement
+rather than twice it — but spend that one only against a profile measured under
+the load the run will actually see. `safety` stands in for the gap between a warm
+calibration and a busy machine, so trading it away on a warm profile buys flakes
+rather than speed.
 
 Two facts about the measurement, in more detail in
 [the solver's notes](../superpowers/specs/2026-08-20-timing-solver/):
