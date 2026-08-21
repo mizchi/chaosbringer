@@ -206,6 +206,71 @@ describe("pattern: optimistic-rollback", () => {
   }, 300000);
 });
 
+describe("pattern: pagination-order", () => {
+  const pattern = PATTERNS.find((p) => p.name === "pagination-order")!;
+
+  it("enumerates a pair of states no per-plan expectation can tell apart", () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(3); // page 1 fulfil | slow | rejected
+    const byName = new Map(plans.map((p) => [p.name, p]));
+
+    // The point of the pattern, visible in the plans themselves: prompt and
+    // slow predict *identical* oracles. Everything the model can say about the
+    // two states is the same, and only the injection differs.
+    expect(byName.get("page1-fulfil")!.expect).toEqual(byName.get("page1-slow")!.expect);
+    expect(byName.get("page1-fulfil")!.schedule[0]!.outcome).toBe("pass");
+    expect(byName.get("page1-slow")!.schedule[0]!.outcome).toBe("slow-ok");
+
+    // Portability: the plan says "slow", never a millisecond value.
+    expect(JSON.stringify(plans)).not.toMatch(/\d{3,}/);
+  });
+
+  it("derives the losing delay from the app's own deadline", async () => {
+    const appSource = readFileSync(join(here, "..", "public", "feed.js"), "utf8");
+    const declared = Number(appSource.match(/const DEADLINE_MS = (\d+)/)![1]);
+    const bridge = (await import("./pagination-order/bridge.mjs")).default;
+    expect(bridge.appDeadlineMs).toBe(declared);
+
+    // The delay has to be tolerable — a page 1 that misses the app's own bound
+    // would be a *timeout* test, and the rows would legitimately be absent
+    // rather than out of order. This pattern needs both pages to arrive.
+    const timing = resolvePlanTiming({
+      appDeadlineMs: declared,
+      timingProfile: bridge.timingProfile,
+    });
+    expect(timing.delays!.fastMs).toBeLessThan(declared);
+    expect(timing.delays!.fastMs).toBeGreaterThan(0);
+  });
+
+  it("catches the out-of-order render that every other signal calls healthy", async () => {
+    const results = await run(pattern, false);
+    const raced = results.find((r) => r.plan.name === "page1-slow")!;
+
+    // One mismatch, and it is the invariant. Everything the model predicted
+    // came true: the label, the row count, no escaped rejection.
+    expect(raced.mismatches.map((m) => m.field)).toEqual(["uiInvariant"]);
+    expect(raced.observed.ui).toBe("ready");
+    expect(raced.observed.state).toEqual({ items: 4 });
+    expect(raced.observed.unhandledRejection).toBe(false);
+    // …and the invariant says which rows, in which order, because a report
+    // that only said "invariant failed" would not be actionable.
+    expect(raced.mismatches[0]!.detail).toMatch(/rendered 3,4,1,2/);
+
+    // Controls. Prompt pages and a failed page must both pass in the buggy
+    // variant: arrival order only reorders anything when a response is late,
+    // and a pattern that failed here would be flagging pagination in general.
+    for (const name of ["page1-fulfil", "page1-rejectBefore"]) {
+      expect(results.find((r) => r.plan.name === name)!.mismatches).toEqual([]);
+    }
+  }, 300000);
+
+  it("passes every plan once the list is rendered from page order, not arrival order", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+
 describe("pattern: timeout-ladder", () => {
   const pattern = PATTERNS.find((p) => p.name === "timeout-ladder")!;
 

@@ -41,6 +41,7 @@ export function createApp(fixed: boolean): Hono {
       `window.__TOKEN_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SLOW_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__NOTES_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__FEED_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -170,6 +171,31 @@ export function createApp(fixed: boolean): Hono {
   app.get("/api/notes/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";
     return c.json({ notes: notes.get(session)?.length ?? 0 });
+  });
+
+  // --- pagination-order pattern ----------------------------------------
+  //
+  // Two pages, two rows each, ascending indices. The endpoint is always fast;
+  // the delay that makes page 1 lose the race to page 2 is injected by a plan
+  // and solved from the app's own deadline.
+  const PAGE_SIZE = 2;
+
+  app.get("/feed", (c) => c.html(pageWithFlags("feed.html", fixed)));
+  app.get("/feed.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "feed.js"), "utf8"));
+  });
+
+  app.get("/api/feed", (c) => {
+    const page = Number(c.req.query("page") ?? "1");
+    const base = (page - 1) * PAGE_SIZE;
+    return c.json({
+      page,
+      items: Array.from({ length: PAGE_SIZE }, (_, i) => ({
+        idx: base + i + 1,
+        title: `Post ${base + i + 1}`,
+      })),
+    });
   });
 
   app.get("/api/orders/count", (c) => {

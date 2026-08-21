@@ -1,0 +1,25 @@
+{
+  "name": "page1-rejectBefore",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "page1",
+      "outcome": "reject",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "page2",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false,
+    "state": {
+      "items": 2
+    }
+  },
+  "modelSteps": 4
+}

@@ -35,6 +35,16 @@ export const PATTERNS = [
       "and has verified nothing either way.",
   },
   {
+    name: "pagination-order",
+    path: "/feed",
+    spec: "patterns/pagination-order/feed.qnt",
+    catches:
+      "page 2 overtaking page 1. Two \"load more\" clicks are two requests, and nothing about " +
+      "the network returns them in the order they left. An app that appends on arrival renders " +
+      "the right number of rows, under the right banner, in the wrong order — the one bug in " +
+      "this library that no per-plan expectation can see.",
+  },
+  {
     name: "timeout-ladder",
     path: "/slow",
     spec: "patterns/timeout-ladder/ladder.qnt",

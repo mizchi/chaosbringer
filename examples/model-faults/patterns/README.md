@@ -14,6 +14,7 @@ pnpm test:patterns                                          # all of them, both 
 | Pattern | Catches | Visible in the UI? |
 |---|---|---|
 | [`retry-idempotency`](./retry-idempotency/) | A retry that writes twice. The dangerous failure is the one where the server **committed** and the client could not read the reply — without one idempotency key per intent, the retry is a second order. | **No.** Same "Order placed" banner either way; only the server's order count differs. |
+| [`pagination-order`](./pagination-order/) | Page 2 overtaking page 1. Two "load more" clicks are two requests, and nothing about the network returns them in the order they left; an app that appends on arrival is correct exactly as long as the network is. | **Yes, and every signal says otherwise.** Four rows, a `ready` banner, no escaped rejection — the model's prediction met exactly, in the wrong order. |
 | [`timeout-ladder`](./timeout-ladder/) | A request with no bound. Slow and never are different failures: the first must still render, the second must give up. An unbounded app handles the slow case perfectly — which is why the missing bound survives review. | **Yes**, but only if you wait long enough — which is why this pattern's probe window is *solved*, not guessed. |
 | [`optimistic-rollback`](./optimistic-rollback/) | An optimistic row the server never took. "Roll back on error" is the wrong contract: a request that never arrived and a reply that could not be read need *opposite* corrections, and only asking the server tells them apart. | **Partly.** The row that should have vanished is visible — but the app that keeps a committed row *without asking* looks identical to one that knows, and only the missing read separates them. |
 | [`token-refresh`](./token-refresh/) | A refresh stampede. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload, and on a rotating refresh token the second invalidates the first and logs the user out. | **No.** Both variants render the account fine; only the refresh count differs. |
@@ -34,6 +35,28 @@ state assertion passes. What distinguishes it from an app that knows is a
 request — the reconcile read — so the model counts list reads and
 `--calls-var list=listCalls` lifts that count into `expect.calls`. A call the
 app owes the user is not always a call a fault can target.
+
+## Why one pattern needs a UI invariant instead
+
+`pagination-order` is the pattern where every per-plan expectation passes.
+Prompt page 1 and slow page 1 predict *identical* oracles — same label, same row
+count, same absence of rejections — and the plans say so, byte for byte. What
+differs is the order of the rows.
+
+That claim does not belong in a model. "Rows are in ascending order and none is
+repeated" is a rule about this app's DOM, and a model that enumerated orderings
+would be specifying an implementation and repeating itself in every plan. So the
+bridge declares it once as a `uiInvariants` entry, keyed by the label it applies
+to (or `"*"`), and the runner checks it wherever that label is predicted. The
+model says what state the app should reach; the invariant says what that state
+means on screen.
+
+The corollary is worth stating plainly: this needs one line of help from the
+app. The rows carry `data-idx`, which is what makes "in order" an assertion
+rather than an opinion. An app that renders bare strings exposes no correlation,
+and a stale or reordered response there is outside what any oracle can see —
+see the recipe's [What the oracle still cannot
+see](../../../docs/recipes/model-driven-faults.md).
 
 ## Anatomy of a pattern
 

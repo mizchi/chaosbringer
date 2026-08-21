@@ -1,0 +1,7 @@
+reachable    page1-fulfil
+reachable    page1-slow
+reachable    page1-rejectBefore
+unreachable  contract-forbids-partial-page
+unreachable  contract-forbids-green-over-gap
+unreachable  contract-forbids-unhandled
+unreachable  contract-forbids-phantom-rows

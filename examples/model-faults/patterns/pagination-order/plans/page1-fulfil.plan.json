@@ -1,0 +1,25 @@
+{
+  "name": "page1-fulfil",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "page1",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "page2",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "ready",
+    "unhandledRejection": false,
+    "state": {
+      "items": 4
+    }
+  },
+  "modelSteps": 4
+}
