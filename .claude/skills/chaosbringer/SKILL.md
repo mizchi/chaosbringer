@@ -211,6 +211,14 @@ once per scenario shares its module-level state, so scenario 2 inherits
 scenario 1's writes and a "duplicate write" may be two scenarios' writes. One
 app *process* per scenario, or a namespace the app honours.
 
+**Somebody else's server on your port.** An HTTP readiness probe cannot tell
+"my app came up" from "something was already listening". A run that lost the
+bind and then tested a neighbour's *already-fixed* copy of the same app came
+back green with a full fault-firing log behind it — proving nothing, and looking
+exactly like proof. Have the child report the port it actually bound, refuse a
+port already in use, and if you can, check that something you served matches
+what is on disk.
+
 ## Verifying your work
 
 Run it against a *correct* version of the app as well as the broken one, and

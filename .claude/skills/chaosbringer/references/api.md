@@ -210,12 +210,28 @@ It cannot take runtime faults.
 | `release()` | abort the parked ones, so the app's `catch` runs |
 | `dispose()` | release, then remove the route — page talks to the real origin again |
 
+`unfiredFaults` works on a session too, and is a better assertion than a
+number, because it says *which* of the two failures you have:
+
+```ts
+const problems = unfiredFaults({
+  faultInjections: session.stats(),
+  runtimeFaults: await session.runtimeStats(),
+});
+if (problems.length > 0) throw new Error(problems.join("\n"));
+```
+
 `firings()` and `runtimeStats()` return **arrays**, in the order you passed the
 faults, and each row is labelled by the `name` you gave the fault — so give
 them names, or an unnamed network rule is labelled with its stringified regex.
 Both are safe to call after `dispose()`: the counters are snapshotted on the way
 out, because a post-teardown read that returned zeros would be
 indistinguishable from "the fault never fired".
+
+Your own `page.route` coexists with the applier's `**/*` route: the applier
+calls `route.fallback()` for anything no rule claims, which hands the request to
+the next matching handler — so a `page.route("**/app.js", …)` override serving a
+fixed variant works whether you register it before or after `applyFaults`.
 
 No crawl, no driver, no report: you navigate and click. The fault decision is
 the crawler's own (`pickFaultRule`), so schedules and occurrence numbering mean

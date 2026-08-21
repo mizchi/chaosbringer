@@ -74,12 +74,18 @@ export interface TimingProfile {
 }
 
 /**
- * Pessimistic stand-in for an unmeasured environment.
+ * Pessimistic stand-in for an unmeasured environment. A *bound*, not an
+ * estimate — do not read these as a description of your machine.
  *
- * Chosen as roughly 2× the envelope measured on a warm container (floor 4ms,
- * delay tail 59ms, tight tail 36ms, fixed 696ms) because the cold run of that
- * same calibration measured a 107ms delay tail. Safe, and wasteful — measure
- * your own.
+ * Chosen as roughly 2× the **cold** run of a calibration on one container,
+ * whose delay tail was 107ms where the same calibration warm measured 59ms.
+ * How far above a given machine that lands varies enormously: measured on a
+ * fast container here (`model calibrate --runs 3`,
+ * `{ floor 4, delayTail 14, tightTail 4, fixed 660 }`) the shipped numbers are
+ * 2.5x the floor and 2.3x the fixed cost but **18x the delay tail and 25x the
+ * tight tail**. So a plan built on this profile is correct and slow, and a
+ * window solved from it can be seconds longer than the machine needs. Measure
+ * your own — that is what `model calibrate` is for.
  */
 export const DEFAULT_TIMING_PROFILE: TimingProfile = {
   delayFloorMs: 10,

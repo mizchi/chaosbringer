@@ -27,8 +27,14 @@ describe("applyFaultRules on a page you drive yourself", () => {
         return;
       }
       if (path === "/api/slow") return; // never answered by the origin either
+      if (path === "/app.js") {
+        res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
+        res.end('window.__variant = "stock";');
+        return;
+      }
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(`<!doctype html><title>app</title><body>
+<script src="/app.js"></script>
 <button id="save">Save</button><div id="state">idle</div>
 <script>
   const state = document.getElementById("state");
@@ -264,6 +270,46 @@ describe("applyFaultRules on a page you drive yourself", () => {
       expect(await session.firings()).toMatchObject([{ name: "too-late", matched: 0, fired: 0 }]);
     } finally {
       await page.close();
+    }
+  }, 60_000);
+
+  it("lets a page.route override serve a fixed variant, registered either side", async () => {
+    // The documented way to test both directions without touching the original
+    // file: serve a fixed bundle over a route. It works because the applier
+    // calls `route.fallback()` for anything no rule claims — which is stated in
+    // a source comment and, until now, nowhere a reader would look.
+    for (const order of ["before", "after"] as const) {
+      const page = await browser.newPage();
+      try {
+        const install = async () => {
+          await page.route("**/app.js", async (route) => {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/javascript",
+              body: 'window.__variant = "fixed";',
+            });
+          });
+        };
+        // Without an override the page reports the stock bundle, so "the
+        // override won" below is a comparison rather than a tautology.
+        if (order === "before") await install();
+        const session = await applyFaults(page, {
+          network: [faults.status(500, { name: "save-500", urlPattern: /\/api\/save$/ })],
+        });
+        if (order === "after") await install();
+        await page.goto(base + "/");
+        // The override won for its URL…
+        expect(await page.evaluate("window.__variant")).toBe("fixed");
+        // …and it really is an override: the origin serves "stock".
+        expect(await (await fetch(base + "/app.js")).text()).toContain("stock");
+        // …and the fault rule still owns its own.
+        await page.click("#save");
+        await expect.poll(() => page.textContent("#state")).toBe("error 500");
+        expect(session.stats()[0]).toMatchObject({ matched: 1, injected: 1 });
+        await session.dispose();
+      } finally {
+        await page.close();
+      }
     }
   }, 60_000);
 

@@ -69,10 +69,18 @@ import { DEFAULT_TIMING_PROFILE, solveTiming } from "chaosbringer";
 const solved = solveTiming(DEFAULT_TIMING_PROFILE, { deadlineMs: 700 });
 ```
 
-It is deliberately pessimistic — roughly twice a warm envelope — so plans built
-on it are slower than they need to be but not flakier. Say in a comment that
-the profile is a default rather than a measurement, because the next person
-will otherwise assume the numbers describe their machine.
+It is a *bound*, not an estimate, and the gap is bigger than "roughly twice":
+the shipped `{ floor 10, delayTail 250, tightTail 100, fixed 1500 }` is about
+2× the **cold** tail of the container it was chosen on, and measured against a
+fast machine (`model calibrate --runs 3` here gave
+`{ 4, 14, 4, 660 }`) it is 2.5× the floor, 2.3× the fixed cost, and **18× the
+delay tail, 25× the tight tail**. So plans built on it are correct and slow —
+a solved window can be seconds longer than your machine needs. Say in a comment
+that the profile is a default rather than a measurement, because the next person
+will otherwise read the numbers as a description of their machine.
+
+`model calibrate --runs 3` takes roughly two minutes and prints nothing until a
+run completes, so it looks hung. Give it a 5-minute timeout, not a 2-minute one.
 
 `solveTiming(profile, request)` is the call the whole file is about, and it
 returns a union: `status: "sat"` carries `settleMs`, `slowMs`, `fastMs`,
