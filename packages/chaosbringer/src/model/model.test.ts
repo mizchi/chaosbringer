@@ -1,8 +1,11 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
+import { compilePlansFromTraces } from "./cli.js";
 import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
 import {
   checkUiInvariants,
@@ -121,6 +124,92 @@ describe("compilePlan", () => {
       { order: 1, rule: "A", outcome: "pass", occurrence: 1 },
       { order: 2, rule: "B", outcome: "reject", occurrence: 0 },
     ]);
+  });
+
+  it("lifts a call count into expect.calls, which no state probe could report", () => {
+    // `expect.state` is compared against the bridge's stateProbe — something
+    // the page or its server can report. "How many times was this endpoint
+    // called" is not such an observable, so it needs its own field, compared
+    // against what the fault layers counted.
+    const trace = parseItfTrace({
+      vars: ["log", "ui", "listCalls", "shown"],
+      states: [
+        {
+          "#meta": { index: 0 },
+          ui: "error",
+          listCalls: { "#bigint": "2" },
+          shown: { "#bigint": "0" },
+          log: [
+            { kind: "fulfil", op: "list" },
+            { kind: "reject", op: "note" },
+          ],
+        },
+      ],
+    });
+    const plan = compilePlan(trace, {
+      name: "write-rejected",
+      stateVars: ["shown"],
+      callsVars: { list: "listCalls" },
+    });
+    expect(plan.expect.calls).toEqual({ list: 2 });
+    expect(plan.expect.state).toEqual({ shown: 0 });
+    // The schedule still describes only occurrence 0 — the reconcile read is
+    // app behaviour, not an injection point. That gap between "what a fault
+    // can target" and "how many calls there are" is the whole reason the field
+    // exists.
+    expect(plan.schedule.filter((step) => step.rule === "list")).toHaveLength(1);
+  });
+
+  it("forwards every compile option through compilePlansFromTraces", () => {
+    // Regression: that function used to restate CompilePlanOptions by hand, so
+    // `callsVars` was accepted by the CLI, typechecked (a spread argument
+    // suppresses excess-property checking) and then dropped — a bound nobody
+    // applied. The type is derived now; this pins it.
+    const dir = mkdtempSync(join(tmpdir(), "chaosbringer-compile-"));
+    try {
+      writeFileSync(
+        join(dir, "write-rejected.itf.json"),
+        JSON.stringify({
+          vars: ["log", "ui", "listCalls"],
+          states: [
+            {
+              "#meta": { index: 0 },
+              ui: "error",
+              listCalls: { "#bigint": "2" },
+              log: [
+                { kind: "fulfil", op: "list" },
+                { kind: "reject", op: "note" },
+              ],
+            },
+          ],
+        }),
+      );
+      const [plan] = compilePlansFromTraces([join(dir, "write-rejected.itf.json")], {
+        callsVars: { list: "listCalls" },
+      });
+      expect(plan!.expect.calls).toEqual({ list: 2 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a call count that is not a non-negative integer", () => {
+    const trace = parseItfTrace({
+      vars: ["log", "listCalls"],
+      states: [
+        {
+          "#meta": { index: 0 },
+          listCalls: "two",
+          log: [{ kind: "reject", op: "note" }],
+        },
+      ],
+    });
+    expect(() => compilePlan(trace, { name: "bad", callsVars: { list: "listCalls" } })).toThrow(
+      /must be a non-negative integer/,
+    );
+    expect(() => compilePlan(trace, { name: "bad", callsVars: { list: "nope" } })).toThrow(
+      /not in the trace's final state/,
+    );
   });
 
   it("refuses an unmapped model action rather than dropping it silently", () => {
@@ -578,10 +667,17 @@ describe("compilePlanFaults: observing a plan that injects nothing", () => {
     expect(ruleOfFault.get(observationNameFor("A"))).toBe("A");
   });
 
-  it("does not require observation once anything is injected", () => {
-    // An injected failure can legitimately stop the app from issuing a later
-    // request (`await a; await b` never reaches b), so demanding that b was
-    // called would flag the model's own prediction as a bug.
+  it("counts a pass-only rule even when a sibling injects, but requires nothing of it", () => {
+    // Two different questions with two different answers.
+    //
+    // Requiring the call is unsound here: an injected failure can legitimately
+    // stop the app from issuing a later request (`await a; await b` never
+    // reaches b), so demanding that b was called would flag the model's own
+    // prediction as a bug.
+    //
+    // *Counting* it is not only sound but necessary — without a route there is
+    // no `matched` for B, and an `expect.calls` bound naming it would be
+    // accepted and then never enforced.
     const { expectedObservations, faultInjection } = compilePlanFaults(
       {
         name: "mixed",
@@ -594,7 +690,11 @@ describe("compilePlanFaults: observing a plan that injects nothing", () => {
       rules,
     );
     expect(expectedObservations.size).toBe(0);
-    expect(faultInjection).toHaveLength(0);
+    expect(faultInjection).toHaveLength(1);
+    expect(faultInjection[0]!.name).toBe(observationNameFor("B"));
+    // Behaviourally neutral: nothing but `pass`, so `route.fallback()` runs
+    // for it exactly as if the rule were absent.
+    expect(faultInjection[0]!.schedule).toEqual({ decisions: ["pass"], afterEnd: "pass" });
   });
 
   it("keeps the method filter, so a counting rule cannot claim a sibling verb", () => {

@@ -101,6 +101,26 @@ No probabilities, no seeds, no Quint concepts — reviewable JSON:
 pins the outcome of call 0 and call 1; it has no way to state that call 2 does
 not exist. `{ "calls": { "telemetry": 1 } }` does.
 
+It also says what must happen where no fault can. Some calls an app owes the
+user are not injection points at all — the extra read after an ambiguous
+failure, for instance: the app has to ask the server what it actually
+committed, and nothing about that read can be faulted, so no schedule step
+describes it. The model counts it and states the total:
+
+```bash
+chaosbringer model compile --traces traces --out plans \
+  --state-var committed --state-var shown \
+  --calls-var list=listCalls
+```
+
+`--state-var` and `--calls-var` are not interchangeable. `expect.state` is
+compared against the bridge's `stateProbe`, so it can only carry things the
+page or its server can report about themselves; "how many times was this
+endpoint called" is not one of those, and is compared against what the fault
+layers counted. That is also why a rule whose steps are all `pass` still gets
+a counting-only route: without one there is no count to compare, and a bound
+nobody applies is worse than no bound.
+
 Outcomes are model-level, and the runner maps them onto fault kinds:
 
 | Outcome | Realised as | Layer |
@@ -183,6 +203,10 @@ The requirement is deliberately limited to plans whose schedule is entirely
 stop the app from issuing a later request — `await a; await b` never reaches
 `b` — so demanding that `b` was called would flag the model's own prediction as
 a bug. A plan that does know an operation's totals says so with `expect.calls`.
+
+Count always, require only when nothing was injected: those are two separate
+decisions, and conflating them is how `expect.calls` was briefly unenforceable
+on exactly the operations that needed it.
 
 ### A probe is an instant; a bug is not
 

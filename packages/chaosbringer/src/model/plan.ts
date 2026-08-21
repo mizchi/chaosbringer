@@ -166,6 +166,18 @@ export interface CompilePlanOptions {
    * rollback flags.
    */
   stateVars?: readonly string[];
+  /**
+   * Model variables holding an operation's *total* call count, keyed by the
+   * operation they belong to: `{ list: "listCalls" }` lifts `listCalls` from
+   * the final state into `expect.calls.list`.
+   *
+   * `stateVars` cannot carry these. `expect.state` is compared against the
+   * bridge's `stateProbe` — something the page or its server reports — and
+   * "how many times was this endpoint called" is not an observable the page
+   * has. It is compared against what the fault layers themselves counted,
+   * which is why it needs its own field and its own flag.
+   */
+  callsVars?: Readonly<Record<string, string>>;
   /** Extra / overriding action → outcome mappings. */
   actionOutcomes?: Record<string, PlanOutcome>;
   /** Action names to drop. Defaults to `DEFAULT_IGNORED_ACTIONS`. */
@@ -296,6 +308,24 @@ export function compilePlan(trace: ItfTrace, opts: CompilePlanOptions = {}): Fau
     }
     plan.expect.state ??= {};
     plan.expect.state[name] = value;
+  }
+
+  for (const [rule, varName] of Object.entries(opts.callsVars ?? {})) {
+    const value = last.vars[varName];
+    if (value === undefined) {
+      throw new Error(
+        `chaosbringer/model: callsVar "${varName}" (for operation "${rule}") is not in the ` +
+          `trace's final state — check the spelling, or that the model declares it as a state variable`,
+      );
+    }
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+      throw new Error(
+        `chaosbringer/model: callsVar "${varName}" is ${JSON.stringify(value)}; a call count ` +
+          `must be a non-negative integer`,
+      );
+    }
+    plan.expect.calls ??= {};
+    plan.expect.calls[rule] = value;
   }
   return plan;
 }

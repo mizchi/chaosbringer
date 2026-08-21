@@ -425,16 +425,25 @@ export function compilePlanFaults(
       }
     }
 
-    if (allPass) {
-      // A rule with a decision table of nothing but `pass` still *counts*
-      // every request it matches, which is all we need: the request either
-      // happened or it did not. `route.fallback()` runs for it exactly as if
-      // the rule were absent, so the page is not perturbed — and unlike a
-      // counter installed after page load, this one sees the fetch a page
-      // issues on mount, which is occurrence 0 of most read operations.
+    // A rule that injects nothing still needs its requests counted. Without a
+    // route there is no `matched` for it, so an `expect.calls` bound naming it
+    // would be accepted, typechecked, and then never enforced — the exact
+    // failure mode this pipeline exists to remove. Counting is behaviourally
+    // neutral: every decision is `pass`, so `route.fallback()` runs for it
+    // exactly as if the rule were absent. And unlike a counter installed after
+    // page load, this one sees the fetch a page issues on mount, which is
+    // occurrence 0 of most read operations.
+    //
+    // *Requiring* those calls is a separate question with a different answer,
+    // which is why only the plan-level `allPass` case sets an expectation: in a
+    // plan that injects something, an injected failure can legitimately stop
+    // the app from issuing a later request (`await a; await b` never reaches
+    // `b`), so demanding the call would flag the model's own prediction as a
+    // bug. Count always, require only when nothing was injected.
+    if (byOutcome.size === 0) {
       const name = observationNameFor(rule);
       ruleOfFault.set(name, rule);
-      expectedObservations.set(rule, steps.length);
+      if (allPass) expectedObservations.set(rule, steps.length);
       faultInjection.push({
         name,
         urlPattern,

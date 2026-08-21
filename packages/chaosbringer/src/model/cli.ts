@@ -30,6 +30,7 @@ import {
   markOrderSensitivePlans,
   validatePlan,
   DEFAULT_IGNORED_ACTIONS,
+  type CompilePlanOptions,
   type FaultPlan,
 } from "./plan.js";
 import { runPlans, type RunPlanOptions } from "./runner.js";
@@ -55,6 +56,12 @@ Commands:
                              compared against the bridge's stateProbe. Repeatable.
                              Use for observables the UI does not show: write
                              counts, refresh counts, rollback flags.
+      --calls-var <op>=<var> Model variable holding an operation's TOTAL call
+                             count, lifted into expect.calls.<op>. Repeatable.
+                             The schedule says what happens to call 0 and call
+                             1; only this can say that call 2 does not exist.
+                             Compared against what the fault layers counted,
+                             page-load calls included.
       --ignore-action <name> A model action that is app behaviour rather than an
                              injection (a token refresh the app performs on its
                              own, say). Repeatable; added to the built-in list
@@ -110,25 +117,24 @@ function stemOf(path: string): string {
   return base.replace(/\.itf\.json$/, "").replace(/\.plan\.json$/, "").replace(/\.json$/, "");
 }
 
+/**
+ * Compile every trace in `tracePaths`, then flag the order-sensitive ones.
+ *
+ * `opts` is `CompilePlanOptions` minus the per-trace name, and it is forwarded
+ * whole. It used to be a hand-written mirror of those fields, which is exactly
+ * how `callsVars` came to be accepted by the CLI, typechecked, and then
+ * dropped on the floor — a spread argument suppresses excess-property
+ * checking, so nothing complained. Derive the type; do not restate it.
+ */
 export function compilePlansFromTraces(
   tracePaths: readonly string[],
-  opts: {
-    logVar?: string;
-    uiVar?: string;
-    unhandledVar?: string;
-    stateVars?: readonly string[];
-    /** Extended with the built-in ignore list, not replacing it. */
-    ignoreActions?: readonly string[];
-  } = {},
+  opts: Omit<CompilePlanOptions, "name"> = {},
 ): FaultPlan[] {
   const plans = tracePaths.map((path) => {
     const trace = parseItfTrace(JSON.parse(readFileSync(path, "utf8")));
     return compilePlan(trace, {
+      ...opts,
       name: stemOf(path),
-      ...(opts.logVar !== undefined ? { logVar: opts.logVar } : {}),
-      ...(opts.uiVar !== undefined ? { uiVar: opts.uiVar } : {}),
-      ...(opts.unhandledVar !== undefined ? { unhandledVar: opts.unhandledVar } : {}),
-      ...(opts.stateVars !== undefined ? { stateVars: opts.stateVars } : {}),
       // Extend rather than replace: a caller naming one app-behaviour action
       // does not mean init/start should suddenly become injections.
       ...(opts.ignoreActions !== undefined
@@ -149,6 +155,7 @@ async function runCompile(argv: string[]): Promise<void> {
       "ui-var": { type: "string" },
       "unhandled-var": { type: "string" },
       "state-var": { type: "string", multiple: true },
+      "calls-var": { type: "string", multiple: true },
       "ignore-action": { type: "string", multiple: true },
       help: { type: "boolean", short: "h" },
     },
@@ -158,6 +165,20 @@ async function runCompile(argv: string[]): Promise<void> {
     console.log(HELP);
     if (!values.help) process.exitCode = 1;
     return;
+  }
+
+  // `--calls-var list=listCalls`: the operation on the left, the model
+  // variable on the right. Malformed input is an error rather than a silently
+  // ignored flag — a call bound nobody applied is worse than no bound.
+  const callsVars: Record<string, string> = {};
+  for (const pair of values["calls-var"] ?? []) {
+    const eq = pair.indexOf("=");
+    if (eq < 1 || eq === pair.length - 1) {
+      console.error(`model compile: --calls-var expects <operation>=<variable>, got "${pair}"`);
+      process.exitCode = 1;
+      return;
+    }
+    callsVars[pair.slice(0, eq)] = pair.slice(eq + 1);
   }
 
   const tracePaths = listFiles(resolve(values.traces), ".itf.json");
@@ -171,6 +192,7 @@ async function runCompile(argv: string[]): Promise<void> {
     ...(values["ui-var"] !== undefined ? { uiVar: values["ui-var"] } : {}),
     ...(values["unhandled-var"] !== undefined ? { unhandledVar: values["unhandled-var"] } : {}),
     ...(values["state-var"] !== undefined ? { stateVars: values["state-var"] } : {}),
+    ...(Object.keys(callsVars).length > 0 ? { callsVars } : {}),
     ...(values["ignore-action"] !== undefined ? { ignoreActions: values["ignore-action"] } : {}),
   });
 
@@ -187,8 +209,13 @@ async function runCompile(argv: string[]): Promise<void> {
     const state = plan.expect.state
       ? ` ${Object.entries(plan.expect.state).map(([k, v]) => `${k}=${v}`).join(" ")}`
       : "";
+    // Every expectation the plan carries goes in the line. A field that is
+    // emitted but never printed is a field nobody notices is missing.
+    const calls = plan.expect.calls
+      ? ` ${Object.entries(plan.expect.calls).map(([k, v]) => `calls.${k}=${v}`).join(" ")}`
+      : "";
     console.log(
-      `  ${plan.name}: [${steps}] -> ui=${plan.expect.ui ?? "?"} unhandled=${plan.expect.unhandledRejection ?? "?"}${state}${plan.orderSensitive ? "  (order-sensitive)" : ""}`,
+      `  ${plan.name}: [${steps}] -> ui=${plan.expect.ui ?? "?"} unhandled=${plan.expect.unhandledRejection ?? "?"}${state}${calls}${plan.orderSensitive ? "  (order-sensitive)" : ""}`,
     );
   }
   if (flagged.length > 0) {
