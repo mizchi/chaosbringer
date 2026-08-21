@@ -7,3 +7,6 @@ flake.json
 heatmap.json
 failure-artifacts/
 _apalache-out/
+# `wrangler dev` bundle output — regenerated on every run of the
+# cloudflare-worker example, and once committed by accident.
+.wrangler/
