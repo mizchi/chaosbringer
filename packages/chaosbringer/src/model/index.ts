@@ -47,6 +47,7 @@ export {
   resolvePlanTiming,
   runPlan,
   runPlans,
+  validateCallCountRules,
   type MismatchField,
   type PlanMismatch,
   type PlanOracleInput,

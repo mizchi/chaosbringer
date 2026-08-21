@@ -14,6 +14,7 @@ import {
   faultNameFor,
   observationNameFor,
   resolvePlanTiming,
+  validateCallCountRules,
   type PlanOracleInput,
   type PlanRunResult,
 } from "./runner.js";
@@ -327,14 +328,19 @@ describe("validatePlan", () => {
     expect(() => validatePlan(plan({ A: 0 }))).not.toThrow();
   });
 
-  it("rejects a call count on an operation the schedule never pins", () => {
+  it("accepts a call count on an operation the schedule never pins", () => {
+    // It used to be refused as unattributable, and that was the weaker
+    // reading: `compilePlanFaults` gives such an operation a counting-only
+    // rule, so `{ refresh: 0 }` on a control plan — "and this endpoint is
+    // never touched at all" — is compared like any other count instead of
+    // being rejected at the door.
     expect(() =>
       validatePlan({
-        name: "unattributable",
+        name: "counted-but-unpinned",
         schedule: [{ order: 0, rule: "A", outcome: "pass", occurrence: 0 }],
-        expect: { calls: { B: 1 } },
+        expect: { calls: { B: 0 } },
       }),
-    ).toThrow(/schedule never mentions operation "B"/);
+    ).not.toThrow();
   });
 
   it("rejects an unknown outcome", () => {
@@ -530,8 +536,13 @@ describe("resolvePlanTiming", () => {
   it("accepts a hand-written window that is generous enough", () => {
     const t = resolvePlanTiming({ settleMs: 6000, appDeadlineMs: 5000, timingProfile: MEASURED });
     expect(t.settleMs).toBe(6000);
-    // …and still exposes the solved delays, so timing plans work.
-    expect(t.delays?.slowMs).toBe(5118);
+    // …and still exposes the solved delays, so timing plans work — but the
+    // tripping delay is re-derived from the *declared* window, not the solved
+    // one. 5118ms would land 882ms before this probe, and against an app with
+    // no bound at all (the thing a timing plan is trying to detect) a response
+    // that lands before the probe reads as healthy.
+    expect(t.delays?.slowMs).toBe(6021);
+    expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs);
   });
 
   it("refuses an observation window too short to see the app's own follow-up", () => {
@@ -555,6 +566,92 @@ describe("resolvePlanTiming", () => {
     expect(() =>
       resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
     ).toThrow(/budget is too small/);
+  });
+
+  describe("an app that retries: the window has to outlast the ladder", () => {
+    // F7. `appDeadlineMs` describes one request; a client with a budget of
+    // three reaches its terminal state three rounds and two backoffs later,
+    // and the window solved for one round reports it as an endless spinner.
+    const ladder = { attempts: 3, backoffsMs: [60, 120] };
+
+    it("refuses a window that only covers one round", () => {
+      expect(() =>
+        resolvePlanTiming({ settleMs: 700, appDeadlineMs: 500, appLadder: ladder, timingProfile: MEASURED }),
+      ).toThrow(/settle_outlasts_app_ladder/);
+    });
+
+    it("accepts one that covers the whole ladder", () => {
+      const t = resolvePlanTiming({
+        settleMs: 3000,
+        appDeadlineMs: 500,
+        appLadder: ladder,
+        timingProfile: MEASURED,
+      });
+      // 3 x (500 + 72 + 25) + 180 = 1971, so 3000 is enough.
+      expect(t.settleMs).toBe(3000);
+      // A declared window moves the probe, so "too slow" is re-derived from
+      // it: a delay solved for the 597ms probe would land mid-window and an
+      // unbounded app would read as healthy.
+      expect(t.delays!.slowMs).toBe(3021);
+      expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs);
+    });
+
+    it("names the number to write when the ladder is declared without a window", () => {
+      expect(() =>
+        resolvePlanTiming({ appDeadlineMs: 500, appLadder: ladder, timingProfile: MEASURED }),
+      ).toThrow(/terminal state is 1971ms away.*Set settleMs to at least 1971/s);
+    });
+
+    it("refuses a ladder that cannot describe an app", () => {
+      expect(() => resolvePlanTiming({ appDeadlineMs: 500, appLadder: { attempts: 0, backoffsMs: [] } })).toThrow(
+        /attempts must be a positive integer/,
+      );
+      expect(() =>
+        resolvePlanTiming({ appDeadlineMs: 500, appLadder: { attempts: 2, backoffsMs: [60, 120] } }),
+      ).toThrow(/at most attempts-1 waits/);
+      expect(() => resolvePlanTiming({ appLadder: ladder })).toThrow(/appLadder needs appDeadlineMs/);
+    });
+  });
+});
+
+describe("validateCallCountRules", () => {
+  // F2. A `$`-anchored rule under `expect.calls` is not a narrow selector, it
+  // is a wrong number: the resume request carrying `?cursor=…` is neither
+  // faulted nor counted, so 58 requests can be reported as the 9 the model
+  // predicted.
+  const plan = {
+    name: "budget-exhausted",
+    schedule: [{ order: 0, rule: "stream", outcome: "reject" as const, occurrence: 0 }],
+    expect: { calls: { stream: 3 } },
+  };
+
+  it("refuses the anchored pattern and names the fix", () => {
+    expect(() => validateCallCountRules(plan, { stream: /\/api\/stream$/ })).toThrow(
+      /expect\.calls on operation "stream".*Widen it to \/\\\/api\\\/stream\(\\\?\|\$\)\//s,
+    );
+    // …including through the object form, where the pattern is one field.
+    expect(() =>
+      validateCallCountRules(plan, { stream: { urlPattern: /\/api\/stream$/, methods: ["GET"] } }),
+    ).toThrow(/\$`-anchored pattern/);
+  });
+
+  it("accepts a pattern that can see a query string", () => {
+    expect(() => validateCallCountRules(plan, { stream: /\/api\/stream(\?|$)/ })).not.toThrow();
+    // An escaped dollar is a literal, not an anchor.
+    expect(() => validateCallCountRules(plan, { stream: /\/api\/stream\$/ })).not.toThrow();
+    // A string matcher has no anchor to get wrong.
+    expect(() => validateCallCountRules(plan, { stream: "/api/stream" })).not.toThrow();
+  });
+
+  it("leaves an anchored rule alone when no plan counts it", () => {
+    // Everywhere else the regex is a selector, and narrow is the author's
+    // business — `pagination-order` anchors `?page=1$` on purpose.
+    expect(() =>
+      validateCallCountRules(
+        { name: "p", schedule: [], expect: { ui: "ready" } },
+        { page1: /\/api\/feed\?page=1$/ },
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -695,6 +792,44 @@ describe("compilePlanFaults: observing a plan that injects nothing", () => {
     // Behaviourally neutral: nothing but `pass`, so `route.fallback()` runs
     // for it exactly as if the rule were absent.
     expect(faultInjection[0]!.schedule).toEqual({ decisions: ["pass"], afterEnd: "pass" });
+  });
+
+  it("counts an operation named only by expect.calls, so a zero is enforceable", () => {
+    // token-refresh's both-tokens-fresh control says calls.refresh = 0. With
+    // no route nothing counts the refresh endpoint, `matched.refresh` comes
+    // back undefined and the oracle skips the comparison — so the strongest
+    // claim a control plan makes would be the one thing nobody checked.
+    const { faultInjection, expectedObservations, ruleOfFault } = compilePlanFaults(
+      {
+        name: "no-refresh",
+        schedule: [{ order: 0, rule: "me", outcome: "pass", occurrence: 0 }],
+        expect: { calls: { refresh: 0 } },
+      },
+      { me: /\/api\/me$/, refresh: { urlPattern: /\/api\/refresh(\?|$)/, methods: ["POST"] } },
+    );
+    const counting = faultInjection.find((f) => f.name === observationNameFor("refresh"))!;
+    expect(counting).toBeDefined();
+    expect(counting.methods).toEqual(["POST"]);
+    // Nothing is pinned, so nothing is decided: every request falls through
+    // and is counted on the way past.
+    expect(counting.schedule).toEqual({ decisions: ["pass"], afterEnd: "pass" });
+    expect(ruleOfFault.get(observationNameFor("refresh"))).toBe("refresh");
+    // …and the call is counted, never *required*: nothing was injected that
+    // could have prevented it, and the model says it must not happen at all.
+    expect(expectedObservations.has("refresh")).toBe(false);
+  });
+
+  it("names the missing rule when only expect.calls mentions it", () => {
+    expect(() =>
+      compilePlanFaults(
+        {
+          name: "no-rule",
+          schedule: [{ order: 0, rule: "me", outcome: "pass", occurrence: 0 }],
+          expect: { calls: { refresh: 0 } },
+        },
+        { me: /\/api\/me$/ },
+      ),
+    ).toThrow(/expects calls on operation "refresh" with no entry in `rules`/);
   });
 
   it("keeps the method filter, so a counting rule cannot claim a sibling verb", () => {
@@ -980,6 +1115,91 @@ describe("evaluatePlanOracle", () => {
         }),
       );
       expect(mismatches.map((m) => m.field)).toEqual(["unhandledRejection"]);
+    });
+  });
+
+  describe("the label is read again after the window", () => {
+    // F4: `ui` and `uiInvariants` used to be read at exactly one instant, so a
+    // `Promise.race` "timeout" — which bounds the banner and cancels nothing —
+    // passed every rung and then rendered the report it claimed to have given
+    // up on, 400ms after the only look the oracle took.
+    const plan = {
+      name: "report-tooSlow",
+      schedule: [{ order: 0, rule: "report", outcome: "slow-trip" as const, occurrence: 0 }],
+      expect: { ui: "error" },
+    };
+    const seen = (over: Partial<PlanRunResult["observed"]>) => ({
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: { "report:slow-trip": 1 },
+      matched: { report: 1 },
+      ...over,
+    });
+
+    it("reports a label that was right at the probe and moved afterwards", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan,
+          observed: seen({ ui: "error", uiSettled: "ready" }),
+          expectedInjections: new Map([["report:slow-trip", 1]]),
+          settleMs: 731,
+          quiescenceMs: 731,
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["ui@late"]);
+      expect(mismatches[0]).toMatchObject({ expected: "error", actual: "ready" });
+      expect(mismatches[0]!.detail).toMatch(/predicted ui="error" at settleMs=731/);
+      expect(mismatches[0]!.detail).toMatch(/moved to "ready" 731ms later/);
+    });
+
+    it("does not report a label that started wrong and converged", () => {
+      // The same soundness rule the settled state read follows: a spinner
+      // resolving into the predicted state is a page catching up, and failing
+      // it would make every slow render a mismatch. One `ui` mismatch, with
+      // the convergence named in the detail — not two.
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan,
+          observed: seen({ ui: "stuck", uiSettled: "error" }),
+          expectedInjections: new Map([["report:slow-trip", 1]]),
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["ui"]);
+      expect(mismatches[0]!.detail).toMatch(/still catching up/);
+    });
+
+    it("says nothing when the label held", () => {
+      expect(fields(base({ plan, observed: seen({ ui: "error", uiSettled: "error" }) }))).toEqual(
+        [],
+      );
+    });
+
+    it("reports an invariant that only broke during the window", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan: { name: "feed", schedule: [], expect: { ui: "ready" } },
+          observed: seen({ ui: "ready", uiSettled: "ready" }),
+          uiInvariantFailuresLate: [{ key: "*", message: "rows are out of order: 3,4,1,2" }],
+          settleMs: 400,
+          quiescenceMs: 900,
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["uiInvariant@late"]);
+      expect(mismatches[0]!.detail).toMatch(/held at settleMs=400 and stopped holding 900ms later/);
+    });
+
+    it("reports an invariant that was already broken exactly once", () => {
+      // Same key at both reads is one finding, not two: a doubled report makes
+      // a single bug look like a spreading one.
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan: { name: "feed", schedule: [], expect: { ui: "ready" } },
+          observed: seen({ ui: "ready", uiSettled: "ready" }),
+          uiInvariantFailures: [{ key: "*", message: "rows are out of order" }],
+          uiInvariantFailuresLate: [{ key: "*", message: "rows are out of order" }],
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["uiInvariant"]);
     });
   });
 

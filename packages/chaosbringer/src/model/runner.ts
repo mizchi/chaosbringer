@@ -6,7 +6,9 @@
  * are involved, so a plan either reproduces or reports why it could not:
  *
  *   - the UI ended somewhere the model didn't predict        → `ui` mismatch
+ *   - …or ended there and then moved on                      → `ui@late`
  *   - the page violated an invariant its own label promises  → `uiInvariant`
+ *   - …or violated it only after the probe                   → `uiInvariant@late`
  *   - a rejection escaped (or failed to escape) every handler → `unhandledRejection`
  *   - …and did so only after the probe                       → `unhandledRejection@late`
  *   - an observable the model named came out wrong            → `state`
@@ -29,8 +31,10 @@ import { chaos } from "../chaos.js";
 import {
   checkTiming,
   formatTimingCheck,
+  ladderSettleMs,
   solveTiming,
   DEFAULT_TIMING_PROFILE,
+  type AppLadder,
   type TimingProfile,
   type TimingSolution,
 } from "../timing.js";
@@ -98,6 +102,12 @@ export interface RunPlanOptions {
    * settle window shorter than the app's own deadline reports a correctly
    * bounded request as stuck, which is a harness bug wearing an app bug's
    * clothes.
+   *
+   * Declaring both is allowed and is how an author who knows their app
+   * retries states the window while still getting solved `slow-ok` /
+   * `slow-trip` delays — those are then re-derived from the *declared*
+   * window, since a tripping delay that lands before the probe reads as
+   * healthy however the probe instant was chosen.
    */
   settleMs?: number;
   /**
@@ -108,6 +118,22 @@ export interface RunPlanOptions {
    * value.
    */
   appDeadlineMs?: number;
+  /**
+   * The app's own retry ladder, when it has one: `{ attempts, backoffsMs }`.
+   *
+   * `appDeadlineMs` describes *one* request, and the window solved from it
+   * covers one round. A client that retries three times before it gives up
+   * reaches its terminal state three rounds and two backoffs later, so that
+   * window reports a correctly budgeted client as an endless spinner. Declare
+   * the ladder together with a `settleMs` that covers it and the pre-flight
+   * checks the pair (`settle_outlasts_app_ladder`) instead of letting the run
+   * find out.
+   *
+   * Declared, not derived: only the bridge author knows how many rungs their
+   * client climbs. Requires `appDeadlineMs` and `settleMs` — the error names
+   * the smallest window that works.
+   */
+  appLadder?: AppLadder;
   /**
    * Measured environment profile from `chaosbringer model calibrate`.
    * Defaults to `DEFAULT_TIMING_PROFILE`, which is pessimistic on purpose.
@@ -186,7 +212,15 @@ export interface RunPlanOptions {
 
 export type MismatchField =
   | "ui"
+  /**
+   * The label was right at the probe and wrong afterwards — see
+   * `quiescenceMs`. A `Promise.race` "timeout" renders `error` on schedule and
+   * then renders the response it claimed to have given up on.
+   */
+  | "ui@late"
   | "uiInvariant"
+  /** An invariant that held at the probe and stopped holding during the window. */
+  | "uiInvariant@late"
   | "unhandledRejection"
   /** A rejection that escaped only after the probe — see `quiescenceMs`. */
   | "unhandledRejection@late"
@@ -210,6 +244,18 @@ export interface PlanRunResult {
   skipped?: "order-sensitive";
   observed: {
     ui?: string;
+    /**
+     * The same `uiProbe` re-read after the observation window. Present only
+     * when the plan named a `ui` label (or the bridge declared invariants) and
+     * `quiescenceMs > 0`.
+     *
+     * Deliberately *not* authoritative, unlike `stateSettled`: a label that
+     * started wrong and converged is a page catching up, and the settled read
+     * is what a state count needs because the count is cumulative. A label is
+     * not — the user sees both — so what is reported is the *move away* from a
+     * prediction the page had already met.
+     */
+    uiSettled?: string;
     unhandledRejection: boolean;
     /**
      * A rejection escaped only *after* the probe, during the observation
@@ -456,7 +502,94 @@ export function compilePlanFaults(
     }
   }
 
+  // An `expect.calls` entry on an operation the schedule never pins is the
+  // model saying "and this endpoint is called exactly n times", most usefully
+  // with n = 0: token-refresh's both-tokens-fresh control claims the refresh
+  // endpoint is never touched at all. Without a route nothing counts it, so
+  // the oracle would skip the comparison and the claim would be decoration —
+  // so give it the same counting-only rule a pass-only operation gets. The
+  // count is required (it is an equality against the model's own number); the
+  // *call* is not, because nothing was injected to require it of.
+  for (const rule of Object.keys(plan.expect.calls ?? {})) {
+    if (byRule.has(rule)) continue;
+    const target = rules[rule];
+    if (target === undefined) {
+      throw new Error(
+        `chaosbringer/model: plan "${plan.name}" expects calls on operation "${rule}" with no entry in \`rules\``,
+      );
+    }
+    const isTargetObject =
+      typeof target === "object" && target !== null && !(target instanceof RegExp);
+    const name = observationNameFor(rule);
+    ruleOfFault.set(name, rule);
+    faultInjection.push({
+      name,
+      urlPattern: isTargetObject ? target.urlPattern : target,
+      ...(isTargetObject && target.methods !== undefined ? { methods: target.methods } : {}),
+      // No occurrence is pinned, so there is nothing to decide — one `pass`
+      // and `afterEnd: "pass"` is every request falling through and being
+      // counted on the way past. (A table has to have at least one row.)
+      schedule: { decisions: ["pass"], afterEnd: "pass" },
+      fault: { kind: "status", status: 599 },
+    });
+  }
+
   return { runtimeFaults, faultInjection, expectedInjections, expectedObservations, ruleOfFault };
+}
+
+/**
+ * Is this matcher a regex anchored at the end of the URL string?
+ *
+ * `/\/api\/stream$/` is one; `/\/api\/stream(\?|$)/` is not, and neither is a
+ * literal `\$`. A trailing `$` is only an anchor when an even number of
+ * backslashes precedes it.
+ */
+function isEndAnchored(matcher: UrlMatcher): boolean {
+  if (!(matcher instanceof RegExp)) return false;
+  const src = matcher.source;
+  if (!src.endsWith("$")) return false;
+  let backslashes = 0;
+  for (let i = src.length - 2; i >= 0 && src[i] === "\\"; i--) backslashes += 1;
+  return backslashes % 2 === 0;
+}
+
+/**
+ * Refuse a `$`-anchored `urlPattern` on an operation whose plan states
+ * `expect.calls`.
+ *
+ * Everywhere else a rule's regex is a *selector*: too narrow and you inject
+ * less than you meant, which shows up as a missing injection. Under
+ * `expect.calls` it is the definition of the number being asserted — the
+ * count is compared against what the fault layers matched, so a request the
+ * regex misses is neither faulted nor counted, and a resumable endpoint
+ * (`?cursor=…`, `Last-Event-ID`, `?_=Date.now()`) can be hit fifty times
+ * while the asserted count stays exactly right. A pattern whose whole
+ * contract is a number cannot afford that, so it is a pre-flight error rather
+ * than a comment.
+ */
+export function validateCallCountRules(
+  plan: FaultPlan,
+  rules: Record<string, PlanRuleTarget>,
+): void {
+  for (const rule of Object.keys(plan.expect.calls ?? {})) {
+    const target = rules[rule];
+    if (target === undefined) continue; // reported by compilePlanFaults
+    const isTargetObject =
+      typeof target === "object" && target !== null && !(target instanceof RegExp);
+    const urlPattern = isTargetObject ? target.urlPattern : target;
+    if (!isEndAnchored(urlPattern)) continue;
+    const source = (urlPattern as RegExp).source;
+    const flags = (urlPattern as RegExp).flags;
+    const widened = `/${source.slice(0, -1)}(\\?|$)/${flags}`;
+    throw new Error(
+      `chaosbringer/model: plan "${plan.name}" states expect.calls on operation "${rule}", whose ` +
+        `rule is the \`$\`-anchored pattern /${source}/${flags}. Under expect.calls the regex is ` +
+        `not a selector, it is the definition of the number being asserted: every request that ` +
+        `carries a query string — a resume cursor, a cache-buster, a page token — is neither ` +
+        `faulted nor counted, so the asserted count can be exactly right while the traffic is not. ` +
+        `Widen it to ${widened}, or stop asserting calls on that operation.`,
+    );
+  }
 }
 
 /** What the runner ended up using, and why. */
@@ -488,9 +621,37 @@ export function resolvePlanTiming(opts: {
   settleMs?: number;
   quiescenceMs?: number;
   appDeadlineMs?: number;
+  appLadder?: AppLadder;
   timingProfile?: TimingProfile;
   timeout?: number;
 }): ResolvedPlanTiming {
+  if (opts.appLadder !== undefined) {
+    const ladder = opts.appLadder;
+    if (!Number.isInteger(ladder.attempts) || ladder.attempts < 1) {
+      throw new Error(
+        `chaosbringer/model: appLadder.attempts must be a positive integer, got ` +
+          `${JSON.stringify(ladder.attempts)} — it counts bounded attempts including the first`,
+      );
+    }
+    if (ladder.backoffsMs.length > ladder.attempts - 1) {
+      throw new Error(
+        `chaosbringer/model: appLadder declares ${ladder.attempts} attempt(s) but ` +
+          `${ladder.backoffsMs.length} backoff(s); there are at most attempts-1 waits between them`,
+      );
+    }
+    if (ladder.backoffsMs.some((b) => !(b >= 0))) {
+      throw new Error(
+        `chaosbringer/model: appLadder.backoffsMs must all be >= 0, got ` +
+          `[${ladder.backoffsMs.join(", ")}]`,
+      );
+    }
+    if (opts.appDeadlineMs === undefined) {
+      throw new Error(
+        `chaosbringer/model: appLadder needs appDeadlineMs — a ladder is a number of the app's ` +
+          `own bounded rounds, and without the bound there is nothing to multiply`,
+      );
+    }
+  }
   if (opts.appDeadlineMs === undefined) {
     const settleMs = opts.settleMs ?? 500;
     // No declared app deadline means no derivation is available, so the
@@ -503,6 +664,7 @@ export function resolvePlanTiming(opts: {
   const profile = opts.timingProfile ?? DEFAULT_TIMING_PROFILE;
   const request = {
     deadlineMs: opts.appDeadlineMs,
+    ...(opts.appLadder !== undefined ? { ladder: opts.appLadder } : {}),
     ...(opts.timeout !== undefined ? { budgetMs: opts.timeout } : {}),
   };
   const solved = solveTiming(profile, request);
@@ -529,20 +691,59 @@ export function resolvePlanTiming(opts: {
     }
   }
   if (opts.settleMs !== undefined) {
-    const check = checkTiming(profile, request, { settleMs: opts.settleMs });
+    // A declared window moves the probe, so it also moves what "too slow"
+    // has to mean: `slow_outlasts_probe` is a statement about the probe
+    // instant, and a tripping delay solved for a 531ms probe lands mid-window
+    // when the author declared 1800ms — against an unbounded app that reads
+    // as healthy. Re-derive it from the window actually being used.
+    const { marginMs: margin, delayFloorMs: floor } = solved.profile;
+    const slowMs = Math.max(solved.slowMs, opts.settleMs + margin - floor);
+    const check = checkTiming(profile, request, { settleMs: opts.settleMs, slowMs });
     if (!check.ok) {
       throw new Error(
         `chaosbringer/model: settleMs=${opts.settleMs} cannot decide anything against a ` +
-          `${opts.appDeadlineMs}ms app deadline.\n${formatTimingCheck(check)}\n` +
-          `Drop settleMs to use the solved ${solved.settleMs}ms, or raise it above that.`,
+          `${opts.appDeadlineMs}ms app deadline` +
+          (opts.appLadder !== undefined
+            ? ` and a ladder of ${opts.appLadder.attempts} attempt(s)`
+            : "") +
+          `.\n${formatTimingCheck(check)}\n` +
+          `Drop settleMs to use the solved ${solved.settleMs}ms, or raise it above ` +
+          `${
+            opts.appLadder !== undefined
+              ? ladderSettleMs(
+                  opts.appLadder,
+                  opts.appDeadlineMs,
+                  solved.profile.tightTailMs,
+                  margin,
+                )
+              : solved.settleMs
+          }ms.`,
       );
     }
     return {
       settleMs: opts.settleMs,
       quiescenceMs,
       solved,
-      delays: { fastMs: solved.fastMs, slowMs: solved.slowMs },
+      delays: { fastMs: solved.fastMs, slowMs },
     };
+  }
+  if (opts.appLadder !== undefined) {
+    // The ladder is a validator, not a second solver: solving it would put a
+    // window nobody asked for on every plan of a pattern that grew a retry.
+    // Naming the number instead keeps the declaration in the bridge, where a
+    // reviewer can see it next to the app's own constants.
+    const need = ladderSettleMs(
+      opts.appLadder,
+      opts.appDeadlineMs,
+      solved.profile.tightTailMs,
+      solved.profile.marginMs,
+    );
+    throw new Error(
+      `chaosbringer/model: appLadder declares ${opts.appLadder.attempts} attempt(s) with backoffs ` +
+        `[${opts.appLadder.backoffsMs.join(", ")}], so the app's terminal state is ${need}ms away — ` +
+        `but no settleMs is declared and the solved window (${solved.settleMs}ms) covers one round. ` +
+        `Set settleMs to at least ${need} on the bridge, next to appDeadlineMs.`,
+    );
   }
   return {
     settleMs: solved.settleMs,
@@ -764,6 +965,12 @@ export interface PlanOracleInput {
   expectedObservations: ReadonlyMap<string, number>;
   /** Violations reported by the bridge's `uiInvariants` at probe time. */
   uiInvariantFailures?: ReadonlyArray<{ key: string; message: string }>;
+  /**
+   * The same invariants re-run after the observation window. A key that was
+   * already failing at probe time is reported once, as `uiInvariant`; one that
+   * only fails here is `uiInvariant@late`.
+   */
+  uiInvariantFailuresLate?: ReadonlyArray<{ key: string; message: string }>;
   /** Whether the bridge supplied a `uiProbe` — without one `expect.ui` is skipped. */
   hasUiProbe: boolean;
   /** Whether the bridge supplied a `stateProbe`. */
@@ -871,9 +1078,17 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
     }
   }
 
-  // 2. The model's UI prediction.
+  // 2. The model's UI prediction — at the probe, and again after the window.
+  //    The two are not symmetric, and the asymmetry is the soundness rule: a
+  //    label that started wrong and converged is a page catching up (a
+  //    spinner resolving, a 202 landing), so it stays one `ui` mismatch with
+  //    the convergence in the detail. A label that started *right* and moved
+  //    is the `Promise.race` bug: the user is told the report failed and then
+  //    shown the report, from a request the app believes it abandoned.
   if (plan.expect.ui !== undefined && hasUiProbe) {
     if (observed.ui !== plan.expect.ui) {
+      const converged =
+        observed.uiSettled !== undefined && observed.uiSettled === plan.expect.ui;
       mismatches.push({
         plan: plan.name,
         field: "ui",
@@ -881,6 +1096,11 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
         actual: observed.probeError !== undefined ? `probe error: ${observed.probeError}` : observed.ui,
         detail:
           `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"` +
+          (converged
+            ? ` (and "${observed.uiSettled}" — the predicted label — ${quiescenceMs}ms later, so ` +
+              `the page was still catching up when the probe fired; raise settleMs if that is the ` +
+              `state you meant to judge)`
+            : "") +
           (plan.schedule.every((s) => s.outcome === "pass")
             ? ` (this plan injects nothing — if "${plan.expect.ui}" is a transient state, ` +
               `it is not observable after the settle window; drop it from the target list)`
@@ -889,6 +1109,18 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
             ? ` (settleMs=${settleMs}: if the app bounds this request with a longer ` +
               `timeout, the probe fires before the timeout does — raise settleMs above the app's deadline)`
             : ""),
+      });
+    } else if (observed.uiSettled !== undefined && observed.uiSettled !== plan.expect.ui) {
+      mismatches.push({
+        plan: plan.name,
+        field: "ui@late",
+        expected: plan.expect.ui,
+        actual: observed.uiSettled,
+        detail:
+          `page reported the predicted ui="${plan.expect.ui}" at settleMs=${settleMs} and then ` +
+          `moved to "${observed.uiSettled}" ${quiescenceMs}ms later — the label the user ends up ` +
+          `with is not the one the oracle judged, so whatever the app "gave up on" is still ` +
+          `running (an unbounded request behind a bounded banner)`,
       });
     }
   }
@@ -906,6 +1138,25 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
       detail:
         `page reported ui="${observed.ui ?? "?"}" but the bridge's "${failure.key}" invariant ` +
         `does not hold: ${failure.message}`,
+    });
+  }
+  // …and the same invariants one window later. A key already failing at the
+  // probe is reported once, above: re-reporting it would double every hit for
+  // no new information. What lands here is an invariant the page satisfied
+  // when it was judged and broke afterwards — a late response overwriting a
+  // list, a second render arriving after the label settled.
+  const failedAtProbe = new Set(uiInvariantFailures.map((f) => f.key));
+  for (const failure of input.uiInvariantFailuresLate ?? []) {
+    if (failedAtProbe.has(failure.key)) continue;
+    mismatches.push({
+      plan: plan.name,
+      field: "uiInvariant@late",
+      expected: `${failure.key} invariant holds`,
+      actual: failure.message,
+      detail:
+        `the bridge's "${failure.key}" invariant held at settleMs=${settleMs} and stopped holding ` +
+        `${quiescenceMs}ms later, with ui="${observed.uiSettled ?? observed.ui ?? "?"}": ` +
+        `${failure.message}`,
     });
   }
 
@@ -996,7 +1247,9 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
   }
 
   // Resolve timing first: an impossible configuration should fail before a
-  // browser is launched, not after a plan has produced a bogus verdict.
+  // browser is launched, not after a plan has produced a bogus verdict. Same
+  // for a rule whose regex cannot see the requests its own count is about.
+  validateCallCountRules(plan, opts.rules);
   const timing = resolvePlanTiming(opts);
   const settleMs = timing.settleMs;
 
@@ -1011,11 +1264,18 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
   };
 
   const asyncDrainCapMs = opts.asyncDrainCapMs ?? 3000;
-  // The window is only spent where a second read can change a verdict, so a
-  // suite of label-only plans pays nothing for it.
+  // The window is only spent where a second read can change a verdict. For
+  // state that is a plan naming `expect.state`; for the UI it is a plan naming
+  // `expect.ui` (or a bridge with invariants), because a label the model does
+  // not predict has nothing to move away from. A plan that names neither pays
+  // nothing.
   const wantsSettledState = plan.expect.state !== undefined && opts.stateProbe !== undefined;
-  const quiescenceMs = wantsSettledState ? timing.quiescenceMs : 0;
+  const wantsSettledUi =
+    (plan.expect.ui !== undefined && opts.uiProbe !== undefined) ||
+    opts.uiInvariants !== undefined;
+  const quiescenceMs = wantsSettledState || wantsSettledUi ? timing.quiescenceMs : 0;
   let uiInvariantFailures: Array<{ key: string; message: string }> = [];
+  let uiInvariantFailuresLate: Array<{ key: string; message: string }> = [];
 
   // The action and the probe run as an `afterLoad` invariant: that is the one
   // hook with a live page, and rejections raised here are still drained and
@@ -1049,6 +1309,14 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
         if (wantsSettledState && opts.stateProbe) {
           observed.stateSettled = await opts.stateProbe(page);
         }
+        if (wantsSettledUi) {
+          if (opts.uiProbe) observed.uiSettled = await opts.uiProbe(page);
+          uiInvariantFailuresLate = await checkUiInvariants(
+            page,
+            observed.uiSettled ?? observed.ui,
+            opts.uiInvariants,
+          );
+        }
         observed.lateUnhandledRejection = (await peekEscapedRejections(page)) > rejectionsAtProbe;
       } catch (err) {
         observed.probeError = err instanceof Error ? err.message : String(err);
@@ -1072,9 +1340,15 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     invariants: [oracleHook],
   });
 
+  // Every counting-only rule, not just the ones an all-`pass` plan requires:
+  // a `refresh:observe = 0` entry in a map called `fired` reads like a failure.
   observed.fired = firedCounts(
     report,
-    new Set([...expectedObservations.keys()].map(observationNameFor)),
+    new Set(
+      [...ruleOfFault]
+        .filter(([name, rule]) => name === observationNameFor(rule))
+        .map(([name]) => name),
+    ),
   );
   observed.matched = matchedCounts(report, ruleOfFault);
   observed.unhandledRejection = report.summary.unhandledRejections > 0;
@@ -1088,6 +1362,7 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     expectedInjections,
     expectedObservations,
     uiInvariantFailures,
+    uiInvariantFailuresLate,
     hasUiProbe: opts.uiProbe !== undefined,
     hasStateProbe: opts.stateProbe !== undefined,
     ...(opts.checkAmplification !== undefined ? { checkAmplification: opts.checkAmplification } : {}),

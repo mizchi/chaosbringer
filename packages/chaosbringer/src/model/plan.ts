@@ -94,6 +94,11 @@ export interface PlanExpectation {
    * matched on that rule — page-load calls included, since the layers cannot
    * tell them apart from action-driven ones. State it only for operations
    * whose total count the model actually knows.
+   *
+   * May name an operation the `schedule` never pins, and `0` is the most
+   * useful case: "this endpoint is never touched at all" is the strongest
+   * thing a control plan says. Such an operation gets a counting-only rule so
+   * the number is actually compared.
    */
   calls?: Record<string, number>;
 }
@@ -449,12 +454,11 @@ export function validatePlan(plan: FaultPlan): void {
             `a call count must be a non-negative integer`,
         );
       }
-      if (!scheduled.has(rule)) {
-        throw new Error(
-          `chaosbringer/model: ${where} expects calls.${rule} but its schedule never mentions ` +
-            `operation "${rule}" — an expectation on an operation the plan does not pin cannot be attributed`,
-        );
-      }
+      // An operation the schedule never pins is fine — `compilePlanFaults`
+      // gives it a counting-only rule so the number is still compared. That
+      // is the only way a model can say "and this endpoint is never called",
+      // which is the strongest thing a control plan has to say.
+      void scheduled;
     }
   }
 }

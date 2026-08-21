@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkTiming,
   formatTimingCheck,
+  ladderSettleMs,
   solveTiming,
   timingLadder,
   DEFAULT_TIMING_PROFILE,
@@ -153,6 +154,32 @@ describe("checkTiming", () => {
         { settleMs: solved.settleMs, quiescenceMs: solved.quiescenceMs },
       ).ok,
     ).toBe(true);
+  });
+
+  it("catches a window solved for one request against an app that retries", () => {
+    // F7: reconnect-budget declares appDeadlineMs 500 and its contract is a
+    // ladder of three of them plus [60, 120] of backoff. The solved 597ms
+    // window ends before the client has made its third attempt, so a correct,
+    // budgeted client is reported as an endless spinner.
+    const ladder = { attempts: 3, backoffsMs: [60, 120] };
+    const solved = solveTiming(MEASURED, { deadlineMs: 500 });
+    if (solved.status !== "sat") throw new Error("sat expected");
+    const check = checkTiming(
+      MEASURED,
+      { deadlineMs: 500, ladder },
+      { settleMs: solved.settleMs },
+    );
+    expect(check.ok).toBe(false);
+    const row = check.violations.find((v) => v.constraint === "settle_outlasts_app_ladder")!;
+    // 3 x (500 + 72 + 25) + 180 = 1971, against the 597 solved for one round.
+    expect(row.slackMs).toBe(solved.settleMs - 1971);
+    expect(row.detail).toMatch(/climbing its own retry ladder/);
+    expect(ladderSettleMs(ladder, 500, 72, 25)).toBe(1971);
+    // …and a declared window past the ladder satisfies it.
+    expect(checkTiming(MEASURED, { deadlineMs: 500, ladder }, { settleMs: 2000 }).ok).toBe(true);
+    // With one attempt and no backoff the ladder *is* the one-round window,
+    // so the new constraint cannot contradict the old one.
+    expect(ladderSettleMs({ attempts: 1, backoffsMs: [] }, 500, 72, 25)).toBe(solved.settleMs);
   });
 
   it("rejects the value that empirically flaked (590ms under a 600ms deadline)", () => {

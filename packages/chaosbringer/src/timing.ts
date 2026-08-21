@@ -17,6 +17,9 @@
  *   fast    = deadline − delayTail − margin     a delay the app must still tolerate
  *   slow    = deadline + tightTail + margin − floor   a delay that must trip it
  *   release = settle + margin                   a hang outlasts the probe
+ *   ladder  = attempts × (deadline + tightTail + margin) + Σ backoffs
+ *                                               a declared window must outlast
+ *                                               the app's whole retry ladder
  *   page    = fixed + settle + delayTail + margin     the run fits its timeout
  *
  * That system is difference logic, so it has a closed form — no solver at
@@ -95,6 +98,19 @@ export type TimingConstraint =
   /** A hung request outlasts the probe, so "stuck" is observable. */
   | "stuck_observable"
   /**
+   * The probe fires after the app's whole retry *ladder* has run, not merely
+   * after one bounded request.
+   *
+   * `probe_after_deadline` bounds one round. An app that retries a dropped
+   * request three times with backoffs between them reaches its terminal state
+   * three rounds later, and a window solved for one of them reports a
+   * correctly budgeted client as an endless spinner — three false mismatches
+   * against an app that is doing exactly what its contract says. Only checked
+   * when a bridge declares `appLadder`, because only the bridge author knows
+   * how many rungs their client climbs.
+   */
+  | "settle_outlasts_app_ladder"
+  /**
    * The observation window after the probe is long enough for one more
    * app-bounded round of work to run and be drained.
    *
@@ -114,12 +130,52 @@ export type TimingConstraint =
   /** The page timeout fits the operator's budget. */
   | "within_budget";
 
+/**
+ * The app's own retry ladder: how many bounded attempts it makes before it
+ * gives up, and how long it waits between them.
+ *
+ * `deadlineMs` describes one request. A client that retries has a *terminal*
+ * state that is several requests away, and the probe has to outlast the whole
+ * climb — `settleMs` solved for one round reports a correct client as stuck.
+ * Only the bridge author knows the ladder, so it is declared rather than
+ * derived.
+ */
+export interface AppLadder {
+  /** Bounded attempts, including the first. `1` means no retry ladder. */
+  attempts: number;
+  /** Waits between attempts, in ms. At most `attempts - 1` of them. */
+  backoffsMs: readonly number[];
+}
+
+/** Worst-case wall clock of the app's own ladder, tails and margins included. */
+export function ladderSettleMs(
+  ladder: AppLadder,
+  deadline: number,
+  tightTailMs: number,
+  marginMs: number,
+): number {
+  // One round is `deadline + tightTail + margin` — the same unit `settleMs`
+  // already uses — and every rung pays its own tail, because every rung has
+  // its own abort to observe. With `attempts: 1` and no backoffs this is
+  // exactly the one-round window, so the ladder generalises the existing
+  // arithmetic instead of competing with it.
+  const perRound = deadline + tightTailMs + marginMs;
+  const waiting = ladder.backoffsMs.reduce((a, b) => a + b, 0);
+  return ladder.attempts * perRound + waiting;
+}
+
 export interface TimingRequest {
   /**
    * The app's own request bound — `AbortSignal.timeout(n)`, a `Promise.race`
    * deadline, a server-side timeout. Everything else is derived from it.
    */
   deadlineMs: number;
+  /**
+   * The app's retry ladder, when it has one. Used to validate a declared
+   * `settleMs` against the terminal state the app actually reaches, never to
+   * override it.
+   */
+  ladder?: AppLadder;
   /** Required slack on every separation. Default 25ms. */
   marginMs?: number;
   /**
@@ -324,6 +380,19 @@ export function checkTiming(
       constraint: "probe_after_deadline",
       slackMs: proposed.settleMs - need,
       detail: `settleMs=${proposed.settleMs} must be >= deadline ${deadline} + tightTail ${tight} + margin ${margin} = ${need}`,
+    });
+  }
+  if (proposed.settleMs !== undefined && request.ladder !== undefined) {
+    const ladder = request.ladder;
+    const need = ladderSettleMs(ladder, deadline, tight, margin);
+    rows.push({
+      constraint: "settle_outlasts_app_ladder",
+      slackMs: proposed.settleMs - need,
+      detail:
+        `settleMs=${proposed.settleMs} must be >= ${ladder.attempts} attempt(s) x (deadline ` +
+        `${deadline} + tightTail ${tight} + margin ${margin}) + backoffs ` +
+        `[${ladder.backoffsMs.join(", ")}] = ${need}, or the probe fires while the app is still ` +
+        `climbing its own retry ladder and a correctly budgeted client reads as an endless spinner`,
     });
   }
   if (proposed.quiescenceMs !== undefined) {
