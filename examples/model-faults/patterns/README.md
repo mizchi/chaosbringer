@@ -32,6 +32,7 @@ reported as a mismatch rather than passing quietly.
 patterns/<name>/
   <name>.qnt      the contract: what a correct implementation must do
   enumerate.sh    witness per target state (dev-time: Quint + a JVM)
+  compile.sh      witnesses -> plans, carrying this pattern's compile options
   targets.txt     what was asked, including what came back unreachable
   traces/         ITF witnesses
   plans/          compiled plans (committed; replay needs no Quint)
@@ -54,6 +55,13 @@ Two conventions that keep them honest:
   variants — otherwise the pattern would be flagging refreshes in general
   rather than the stampede. The enumeration gives you those controls for free;
   a hand-written test usually skips them.
+- **The `enumerate.sh` + `compile.sh` + `plans/` triple is what CI looks for.**
+  [`model-plans.yml`](../../../.github/workflows/model-plans.yml) globs for it
+  and gives each match its own matrix leg, so a new pattern is regenerated and
+  drift-checked without anyone editing the workflow — and it parallelises
+  instead of extending one job's wall clock. A pattern that owns its compile
+  options in `compile.sh` needs no CI change at all; one that leaves them in a
+  README needs a human to remember, which is the same as not having them.
 - **Model actions that are not injections get `--ignore-action`.** The refresh
   in `token-refresh` is something the app does, not something a fault does.
 - **Never put milliseconds in a plan.** `timeout-ladder` uses the `slow-ok` /
