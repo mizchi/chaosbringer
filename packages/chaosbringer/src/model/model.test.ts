@@ -353,13 +353,22 @@ describe("resolvePlanTiming", () => {
   const MEASURED = { delayFloorMs: 4, delayTailMs: 59, tightTailMs: 36, fixedPerPlanMs: 696 };
 
   it("keeps the historical behaviour when no app deadline is given", () => {
-    expect(resolvePlanTiming({})).toEqual({ settleMs: 500 });
-    expect(resolvePlanTiming({ settleMs: 1600 })).toEqual({ settleMs: 1600 });
+    // No declared deadline means nothing to derive from, so the observation
+    // window falls back to the one number the author did commit to.
+    expect(resolvePlanTiming({})).toEqual({ settleMs: 500, quiescenceMs: 500 });
+    expect(resolvePlanTiming({ settleMs: 1600 })).toEqual({ settleMs: 1600, quiescenceMs: 1600 });
+    // …and an explicit 0 opts out of the second read entirely.
+    expect(resolvePlanTiming({ settleMs: 400, quiescenceMs: 0 })).toEqual({
+      settleMs: 400,
+      quiescenceMs: 0,
+    });
   });
 
   it("solves the settle window and the timing delays from the profile", () => {
     const t = resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED });
     expect(t.settleMs).toBe(5097);
+    // The post-probe window is one more app-bounded round, same arithmetic.
+    expect(t.quiescenceMs).toBe(5097);
     // slowMs outlasts the probe, not merely the deadline: settle 5097 + 25 - 4.
     expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5118 });
     expect(t.solved?.pageTimeoutMs).toBe(5936);

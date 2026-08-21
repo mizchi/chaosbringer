@@ -41,6 +41,7 @@ export {
   compilePlanFaults,
   faultNameFor,
   fingerprintsOf,
+  observationNameFor,
   resolvePlanTiming,
   runPlan,
   runPlans,
@@ -50,6 +51,7 @@ export {
   type PlanRunResult,
   type ResolvedPlanTiming,
   type RunPlanOptions,
+  type UiInvariant,
 } from "./runner.js";
 
 export {

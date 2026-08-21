@@ -1,13 +1,14 @@
 /**
- * FINDING G — `markOrderSensitivePlans` ignores `expect.state`.
+ * FINDING G — `markOrderSensitivePlans` and `expect.state`.
  *
  * Two plans with the same step multiset but different expectations are the
  * definition of an order-dependent verdict, and the runner refuses to replay
- * them. But `expectationKey` is built from `ui` and `unhandledRejection`
- * only (plan.ts), so two plans that differ *only* in `expect.state` — which
- * is where every server-side observable lives: order counts, refresh counts —
- * are not flagged, get replayed, and one of the two is a coin flip on
- * settlement order.
+ * them. `expectationKey` used to be built from `ui` and `unhandledRejection`
+ * only, so two plans that differ *only* in `expect.state` — which is where
+ * every server-side observable lives: order counts, refresh counts — were not
+ * flagged, got replayed, and one of the two was a coin flip on settlement
+ * order. It now serialises every expectation field, and this file asserts it,
+ * `expect.calls` included.
  */
 import { markOrderSensitivePlans, type FaultPlan } from "chaosbringer";
 
@@ -28,12 +29,31 @@ const stateDivergent: FaultPlan[] = [
   { name: "state-B", schedule: steps(), expect: { ui: "placed", state: { orders: 2 } } },
 ];
 
-for (const [label, plans] of [
-  ["ui-divergent (control)", uiDivergent],
-  ["state-divergent", stateDivergent],
+/** Same multiset, same label, different predicted call count. */
+const callsDivergent: FaultPlan[] = [
+  { name: "calls-A", schedule: steps(), expect: { ui: "placed", calls: { order: 1 } } },
+  { name: "calls-B", schedule: steps(), expect: { ui: "placed", calls: { order: 2 } } },
+];
+
+/** Same multiset, same expectation written in a different key order. */
+const sameExpectation: FaultPlan[] = [
+  { name: "same-A", schedule: steps(), expect: { ui: "placed", state: { orders: 1, tries: 2 } } },
+  { name: "same-B", schedule: steps(), expect: { ui: "placed", state: { tries: 2, orders: 1 } } },
+];
+
+let failed = 0;
+for (const [label, plans, want] of [
+  ["ui-divergent (control)", uiDivergent, true],
+  ["state-divergent", stateDivergent, true],
+  ["calls-divergent", callsDivergent, true],
+  ["same expectation, key order", sameExpectation, false],
 ] as const) {
   const marked = markOrderSensitivePlans(plans);
+  const flags = marked.map((p) => p.orderSensitive ?? false);
+  const ok = flags.every((f) => f === want);
+  if (!ok) failed += 1;
   console.log(
-    `${label.padEnd(24)} orderSensitive=${JSON.stringify(marked.map((p) => p.orderSensitive ?? false))}`,
+    `${ok ? "ok  " : "FAIL"} ${label.padEnd(28)} orderSensitive=${JSON.stringify(flags)} (want ${want})`,
   );
 }
+if (failed > 0) process.exitCode = 1;

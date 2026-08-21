@@ -80,6 +80,22 @@ export interface PlanExpectation {
    * so a model can name any observable, and the bridge says how to read it.
    */
   state?: Record<string, string | number | boolean>;
+  /**
+   * How many times the model says each operation is invoked, in total.
+   *
+   * The occurrence-indexed `schedule` says what happens to call 0 and call 1;
+   * it cannot say that call 2 must not exist. A units bug in an interval
+   * (`setInterval(beat, 60)` where the author meant 60 seconds) fires the
+   * planned outcome on the first call exactly as predicted and then floods
+   * the endpoint, which is why the runner reports observed call counts and
+   * compares them against this when a plan states it.
+   *
+   * Compared for equality against the number of requests the fault layers
+   * matched on that rule — page-load calls included, since the layers cannot
+   * tell them apart from action-driven ones. State it only for operations
+   * whose total count the model actually knows.
+   */
+  calls?: Record<string, number>;
 }
 
 export interface FaultPlan {
@@ -295,8 +311,37 @@ function multisetKey(plan: FaultPlan): string {
     .join(",");
 }
 
+/**
+ * Canonical serialization of a record, so two expectations that differ only
+ * in key order are the same key. Keys are sorted; values go through
+ * `String()` because the probe comparison is loose on shape too (a probe
+ * reading JSON gets numbers, one reading the DOM gets strings).
+ */
+function canonicalRecord(record: Record<string, unknown> | undefined): string {
+  if (record === undefined) return "";
+  return Object.keys(record)
+    .sort()
+    .map((k) => `${k}=${String(record[k])}`)
+    .join(";");
+}
+
+/**
+ * Everything the oracle will compare, in one string.
+ *
+ * Every expectation field has to appear here. `expect.state` was added after
+ * this function and was not: two plans injecting the same multiset of
+ * outcomes but predicting a different *number of writes* — one order versus
+ * two, one refresh versus two, exactly what the shipped patterns assert on —
+ * were therefore never flagged `orderSensitive`, and one of the pair was a
+ * coin flip presented as a verdict.
+ */
 function expectationKey(plan: FaultPlan): string {
-  return `${plan.expect.ui ?? ""}|${plan.expect.unhandledRejection ?? ""}`;
+  return [
+    plan.expect.ui ?? "",
+    plan.expect.unhandledRejection ?? "",
+    canonicalRecord(plan.expect.state),
+    canonicalRecord(plan.expect.calls),
+  ].join("|");
 }
 
 /**
@@ -364,5 +409,22 @@ export function validatePlan(plan: FaultPlan): void {
   }
   if (plan.expect === undefined || typeof plan.expect !== "object") {
     throw new Error(`chaosbringer/model: ${where} is missing an "expect" object`);
+  }
+  if (plan.expect.calls !== undefined) {
+    const scheduled = new Set(plan.schedule.map((s) => s.rule));
+    for (const [rule, count] of Object.entries(plan.expect.calls)) {
+      if (!Number.isInteger(count) || count < 0) {
+        throw new Error(
+          `chaosbringer/model: ${where} expects calls.${rule}=${JSON.stringify(count)} — ` +
+            `a call count must be a non-negative integer`,
+        );
+      }
+      if (!scheduled.has(rule)) {
+        throw new Error(
+          `chaosbringer/model: ${where} expects calls.${rule} but its schedule never mentions ` +
+            `operation "${rule}" — an expectation on an operation the plan does not pin cannot be attributed`,
+        );
+      }
+    }
   }
 }

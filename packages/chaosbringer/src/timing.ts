@@ -13,6 +13,7 @@
  * So the values are *solved* instead, against a measured profile:
  *
  *   settle  = deadline + tightTail + margin     probe after the app's bound resolves
+ *   quiesce = deadline + tightTail + margin     keep watching one round longer
  *   fast    = deadline − delayTail − margin     a delay the app must still tolerate
  *   slow    = deadline + tightTail + margin − floor   a delay that must trip it
  *   release = settle + margin                   a hang outlasts the probe
@@ -93,6 +94,21 @@ export type TimingConstraint =
   | "probe_after_deadline"
   /** A hung request outlasts the probe, so "stuck" is observable. */
   | "stuck_observable"
+  /**
+   * The observation window after the probe is long enough for one more
+   * app-bounded round of work to run and be drained.
+   *
+   * The probe is an instant, and an instant cannot decide "no rejection
+   * escaped" or "the write happened exactly once": a retry scheduled on the
+   * error path, or a backend that acknowledges now and commits later, lands
+   * *after* it. So the runner keeps watching for `quiescenceMs` and reads the
+   * state observables a second time. One app deadline plus the tight tail is
+   * the unit — it is how long one more bounded operation can take here.
+   *
+   * This bounds one further round, not an arbitrarily deep retry chain; see
+   * the recipe's "What the oracle still cannot see".
+   */
+  | "rejections_drained_after_last_timer"
   /** Fixed cost + probe + jitter fits the page timeout. */
   | "fits_page_timeout"
   /** The page timeout fits the operator's budget. */
@@ -130,6 +146,12 @@ export interface TimingSolution {
   slowMs: number;
   /** How long to wait after the action before probing the UI. */
   settleMs: number;
+  /**
+   * How much longer to keep watching after the probe, before re-reading the
+   * state observables. Same arithmetic as `settleMs`: one more app-bounded
+   * round of work, tail included.
+   */
+  quiescenceMs: number;
   /** When a hung request is finally released. */
   releaseMs: number;
   /** Page timeout the run needs. */
@@ -182,6 +204,10 @@ export function solveTiming(
   const budget = request.budgetMs ?? 15000;
 
   const settleMs = deadline + tight + margin;
+  // The post-probe observation window. Same unit as the settle window,
+  // because it has the same job one round later: outlast whatever the app
+  // scheduled in response to the outcomes the plan injected.
+  const quiescenceMs = deadline + tight + margin;
   const fastMs = deadline - tail - margin;
   // Two requirements, and the second is the one that is easy to miss: the
   // tripping delay must miss the deadline (settle >= deadline + tight + margin
@@ -214,6 +240,7 @@ export function solveTiming(
     fastMs,
     slowMs,
     settleMs,
+    quiescenceMs,
     releaseMs,
     pageTimeoutMs,
     wallClockMs: fixed + settleMs,
@@ -267,6 +294,7 @@ export interface TimingCheck {
 /** A config to validate — anything omitted is skipped rather than assumed. */
 export interface ProposedTiming {
   settleMs?: number;
+  quiescenceMs?: number;
   fastMs?: number;
   slowMs?: number;
   releaseMs?: number;
@@ -296,6 +324,16 @@ export function checkTiming(
       constraint: "probe_after_deadline",
       slackMs: proposed.settleMs - need,
       detail: `settleMs=${proposed.settleMs} must be >= deadline ${deadline} + tightTail ${tight} + margin ${margin} = ${need}`,
+    });
+  }
+  if (proposed.quiescenceMs !== undefined) {
+    const need = deadline + tight + margin;
+    rows.push({
+      constraint: "rejections_drained_after_last_timer",
+      slackMs: proposed.quiescenceMs - need,
+      detail:
+        `quiescenceMs=${proposed.quiescenceMs} must be >= deadline ${deadline} + tightTail ${tight} + ` +
+        `margin ${margin} = ${need}, or a retry the app scheduled on the error path settles after the run ended`,
     });
   }
   if (proposed.fastMs !== undefined) {

@@ -6,11 +6,16 @@
  *
  * For each hole: replay the plan(s) through the real oracle (`runPlans` +
  * `aggregateCoverage` + `modelRunPassed`) and print the verdict, then print
- * independent evidence that the app is nevertheless wrong — server-side
- * counters read from the Node process, or DOM facts the oracle never looks at.
+ * independent evidence about the app — server-side counters read from the Node
+ * process, or DOM facts the oracle never looked at when this file was written.
  *
  * The buggy and fixed variants are both run wherever the divergence is the
- * proof: identical oracle verdict, different ground truth.
+ * proof. Originally that divergence was the finding: identical oracle verdict,
+ * different ground truth. Every hole is now closed, so the expectation is
+ * inverted and *asserted* — `EXPECT` lines are checks, and the process exits
+ * non-zero if the oracle stops catching a hole or starts failing a correct
+ * app. The independent proofs are untouched: they are what keeps the
+ * assertions honest, because they do not go through the oracle at all.
  */
 
 import { readFileSync } from "node:fs";
@@ -56,6 +61,29 @@ function verdict(results: PlanRunResult[]): string {
   ].join("\n");
 }
 
+const failures: string[] = [];
+
+/**
+ * Assert the oracle's verdict on one run.
+ *
+ * `fields` is the exact multiset of mismatch fields expected, sorted — not a
+ * subset, so a fix that starts reporting something extra shows up here rather
+ * than hiding behind a passing "at least this failed".
+ */
+function expectVerdict(label: string, results: PlanRunResult[], fields: string[]): void {
+  const coverage = aggregateCoverage(results);
+  const got = results.flatMap((r) => r.mismatches.map((m) => m.field)).sort();
+  const want = [...fields].sort();
+  const passed = modelRunPassed(coverage);
+  const wantPassed = fields.length === 0 && coverage.plansNotExercised.length === 0;
+  const ok = JSON.stringify(got) === JSON.stringify(want) && passed === wantPassed;
+  console.log(
+    `  EXPECT  ${ok ? "ok" : "FAILED"}  ${label}: fields=${JSON.stringify(got)} ` +
+      `(want ${JSON.stringify(want)}), modelRunPassed=${passed}`,
+  );
+  if (!ok) failures.push(`${label}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+}
+
 function firedStats(r: PlanRunResult): string {
   const rows = [
     ...(r.report?.runtimeFaults ?? []).map((s) => `runtime ${s.rule} matched=${s.matched} fired=${s.fired}`),
@@ -90,9 +118,9 @@ const bridgeA = {
     return state === "loading" ? "stuck" : (state ?? "unknown");
   },
   /**
-   * EVIDENCE ONLY. The plan expects no state, so nothing here is compared —
-   * the runner just records it. That is the hole: the model's vocabulary is
-   * labels, so there is nothing for it to assert about the rendered page.
+   * Recorded either way, and still the raw evidence the report quotes. What
+   * changed is that the label no longer stands alone: `uiInvariants.error`
+   * below says what `error` *means* on this page, and the runner checks it.
    */
   stateProbe: async (page: import("playwright").Page) =>
     page.evaluate(() => ({
@@ -100,6 +128,24 @@ const bridgeA = {
       summaryText: document.getElementById("summary")!.textContent!.replace(/\s+/g, " ").trim(),
       payEnabled: !(document.getElementById("pay") as HTMLButtonElement).disabled,
     })),
+  /**
+   * The app's own contract for its error state, written once in the bridge
+   * rather than per plan: a price we could not revalidate is not a price, so
+   * it must not be on screen and must not be payable.
+   */
+  uiInvariants: {
+    error: async (page: import("playwright").Page) =>
+      page.evaluate(() => {
+        const problems: string[] = [];
+        if (document.getElementById("summary")!.textContent!.trim() !== "") {
+          problems.push("#summary still shows the quote from before the failed refresh");
+        }
+        if (!(document.getElementById("pay") as HTMLButtonElement).disabled) {
+          problems.push("#pay is still enabled");
+        }
+        return problems.join("; ");
+      }),
+  },
   settleMs: 400,
 };
 
@@ -113,7 +159,9 @@ async function holeA(): Promise<void> {
     });
     console.log(`\n  variant=${fixed ? "fixed" : "buggy"}`);
     console.log(verdict(results));
-    console.log(`  EVIDENCE observed(uncompared)=${JSON.stringify(results[0]!.observed.state)}`);
+    console.log(`  EVIDENCE observed=${JSON.stringify(results[0]!.observed.state)}`);
+    // The label was always right; what the label *promises* is what fails.
+    expectVerdict(`A ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["uiInvariant"]);
   }
 
   // Independent proof, no chaosbringer involved: drive the page with raw
@@ -160,9 +208,17 @@ const bridgeB = {
     const state = await page.locator("#app").getAttribute("data-state");
     return state === "loading" ? "stuck" : (state ?? "unknown");
   },
-  /** EVIDENCE ONLY: the plan expects no state, so nothing here is compared. */
+  /** Carries the session id so the harness can read the server's own counter. */
   stateProbe: async (page: import("playwright").Page) =>
     page.evaluate(() => ({ session: (window as unknown as { __SESSION__: string }).__SESSION__ })),
+  /**
+   * This model accounts for every call on both URLs (the feed is fetched once
+   * per Start, the beacon once per heartbeat), so the schedule's occurrence
+   * span is a real upper bound and comparing against it is sound. Opt-in,
+   * because against a model written for one action on a page that also
+   * fetches on load it would not be.
+   */
+  checkAmplification: true,
   settleMs: 700,
 };
 
@@ -179,6 +235,26 @@ async function holeB(): Promise<void> {
     console.log(verdict(results));
     console.log(firedStats(results[0]!));
     console.log(`  PROOF   POST /api/telemetry reached the server ${effects.telemetry}x in one settle window`);
+    expectVerdict(`B ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["amplification"]);
+  }
+
+  // The same thing without the bridge flag: a plan that states the call count
+  // itself. `expect.calls` is always checked, because it is the model talking.
+  console.log("\n  same hole via the plan's own `expect.calls`, no bridge flag:");
+  for (const fixed of [false, true]) {
+    const server = await boot(fixed);
+    const base = plan("B-telemetry-first-500.plan.json");
+    const withCalls: FaultPlan = {
+      ...base,
+      name: `${base.name}+calls`,
+      expect: { ...base.expect, calls: { telemetry: 1 } },
+    };
+    validatePlan(withCalls);
+    const { checkAmplification: _off, ...bridge } = bridgeB;
+    const results = await runPlans([withCalls], { ...bridge, baseUrl: `${server.url}/poll` });
+    console.log(`\n  variant=${fixed ? "fixed" : "buggy"}`);
+    console.log(verdict(results));
+    expectVerdict(`B/calls ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["amplification"]);
   }
 }
 
@@ -195,7 +271,11 @@ async function holeC(): Promise<void> {
   console.log(`\n  plan=${happy.name} (both steps "pass") against a page that issues zero requests`);
   console.log(verdict(results));
   console.log(`  EVIDENCE requests seen by the app's own endpoints: /api/cart and /api/shipping do not exist on this server`);
-  console.log(`           observed.fired=${JSON.stringify(results[0]!.observed.fired)} ui=${results[0]!.observed.ui}`);
+  console.log(
+    `           observed.matched=${JSON.stringify(results[0]!.observed.matched)} ui=${results[0]!.observed.ui}`,
+  );
+  // Two rules the plan says pass, neither of them ever called.
+  expectVerdict("C fake page", results, ["injection", "injection"]);
 
   // Control: every plan that actually injects something does catch it.
   const others = ["cart-rejected__shipping-fulfilled", "cart-hung__shipping-fulfilled"].map(gridPlan);
@@ -245,6 +325,16 @@ async function holeD(): Promise<void> {
       `  PROOF   after the backend finished committing: orders=${effects.orders.size} ` +
         `(POSTs accepted=${effects.orderPosts}) — the contract is exactly 1 order per intent`,
     );
+    expectVerdict(`D ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["state"]);
+    // …and the divergence the oracle used to miss is now in the report: the
+    // probe read the predicted value, the settled read did not.
+    if (!fixed) {
+      const observed = results[0]!.observed;
+      console.log(
+        `  DETAIL  probe=${JSON.stringify(observed.state?.orders)} ` +
+          `settled=${JSON.stringify(observed.stateSettled?.orders)}`,
+      );
+    }
   }
 }
 
@@ -262,13 +352,29 @@ const bridgeE = {
     const state = await page.locator("#app").getAttribute("data-state");
     return state === "loading" ? "stuck" : (state ?? "unknown");
   },
-  /** EVIDENCE ONLY, as in hole A: the plan expects no state. */
   stateProbe: async (page: import("playwright").Page) =>
     page.evaluate(() => ({
       typed: (document.getElementById("q") as HTMLInputElement).value,
       rendered: document.getElementById("shown")!.dataset.q,
       text: document.getElementById("shown")!.textContent,
     })),
+  /**
+   * What `ready` means on a search page: the results on screen belong to the
+   * query in the box. The oracle cannot name *which response's body* must be
+   * rendered — that is still outside its vocabulary — but the app exposes the
+   * correlation itself (`#shown[data-q]`), and an app that does can have it
+   * checked.
+   */
+  uiInvariants: {
+    ready: async (page: import("playwright").Page) =>
+      page.evaluate(() => {
+        const typed = (document.getElementById("q") as HTMLInputElement).value;
+        const rendered = document.getElementById("shown")!.dataset.q;
+        return typed === rendered
+          ? ""
+          : `showing results for "${rendered}" while the input reads "${typed}"`;
+      }),
+  },
   appDeadlineMs: 600,
   timingProfile: profile,
 };
@@ -288,7 +394,8 @@ async function holeE(): Promise<void> {
     });
     console.log(`\n  variant=${fixed ? "fixed" : "buggy"}`);
     console.log(verdict(results));
-    console.log(`  PROOF   observed(uncompared)=${JSON.stringify(results[0]!.observed.state)}`);
+    console.log(`  PROOF   observed=${JSON.stringify(results[0]!.observed.state)}`);
+    expectVerdict(`E ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["uiInvariant"]);
   }
 }
 
@@ -319,8 +426,10 @@ async function holeF(): Promise<void> {
     console.log(verdict(results));
     console.log(
       `  observed.unhandledRejection=${results[0]!.observed.unhandledRejection} ` +
+        `late=${results[0]!.observed.lateUnhandledRejection} ` +
         `(retry fires 900ms after the action; settleMs=400)`,
     );
+    expectVerdict(`F ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["unhandledRejection@late"]);
   }
 
   // Independent proof: same page, same fault, a tab that stays open.
@@ -369,6 +478,9 @@ async function refutationXhr(): Promise<void> {
   });
   console.log(verdict(results));
   console.log(firedStats(results[0]!));
+  // Unchanged by the fixes, and it must stay that way: an app the plan cannot
+  // drive is reported as not exercised, never as a pass.
+  expectVerdict("R xhr", results, ["injection", "ui"]);
 }
 
 const holes: Array<[string, () => Promise<void>]> = [
@@ -388,4 +500,12 @@ try {
   }
 } finally {
   await Promise.all(servers.map((s) => s.close()));
+}
+
+if (failures.length > 0) {
+  console.error(`\n${failures.length} expectation(s) failed:`);
+  for (const f of failures) console.error(`  - ${f}`);
+  process.exitCode = 1;
+} else {
+  console.log("\nall expectations held");
 }

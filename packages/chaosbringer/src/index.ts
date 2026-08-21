@@ -52,6 +52,7 @@ export {
   markOrderSensitivePlans,
   modelRunPassed,
   parseItfJson,
+  observationNameFor,
   parseItfTrace,
   readBool,
   readString,
@@ -82,6 +83,7 @@ export {
   type ResolvedPlanTiming,
   type RunPlanOptions,
   type TargetOutcome,
+  type UiInvariant,
 } from "./model/index.js";
 export {
   buildDecisionHelperSource,
