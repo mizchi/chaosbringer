@@ -72,11 +72,17 @@ Commands:
 
   run --plans <dir> --url <url> --config <file>
       Replay every plan and check its oracle. Exits 1 on any mismatch,
-      skipped plan, or plan whose faults never fired.
+      skipped plan, or plan whose faults never fired — including a plan whose
+      every step is \`pass\` and whose operation the app never called.
 
       --config <file>   JS/TS module default-exporting the bridge:
-                        { rules, action?, uiProbe?, settleMs?, timeout? }
+                        { rules, action?, uiProbe?, stateProbe?, uiInvariants?,
+                          settleMs?, quiescenceMs?, appDeadlineMs?,
+                          asyncDrainCapMs?, checkAmplification?, timeout? }
                         \`rules\` maps model operation ids to URL matchers.
+                        \`uiInvariants\` says what each ui label promises about
+                        the page, keyed by label (\`"*"\` for all of them):
+                        a right label over a wrong page is otherwise a pass.
       --allow-order-sensitive  Run flagged plans anyway.
       --output <file>    Write the coverage report (JSON) here.
       --json             Print the coverage report instead of the summary.

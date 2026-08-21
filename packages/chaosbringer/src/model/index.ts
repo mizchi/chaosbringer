@@ -38,7 +38,9 @@ export {
 } from "./plan.js";
 
 export {
+  checkUiInvariants,
   compilePlanFaults,
+  evaluatePlanOracle,
   faultNameFor,
   fingerprintsOf,
   observationNameFor,
@@ -47,6 +49,7 @@ export {
   runPlans,
   type MismatchField,
   type PlanMismatch,
+  type PlanOracleInput,
   type PlanRuleTarget,
   type PlanRunResult,
   type ResolvedPlanTiming,

@@ -504,6 +504,21 @@ export function resolvePlanTiming(opts: {
     );
   }
   const quiescenceMs = opts.quiescenceMs ?? solved.quiescenceMs;
+  // A hand-written window gets the same pre-flight as a hand-written settle
+  // window: one too short to outlast the app's own follow-up work reports
+  // "nothing escaped" about a page it stopped watching. 0 is the explicit
+  // opt-out and is left alone.
+  if (opts.quiescenceMs !== undefined && opts.quiescenceMs > 0) {
+    const check = checkTiming(profile, request, { quiescenceMs: opts.quiescenceMs });
+    if (!check.ok) {
+      throw new Error(
+        `chaosbringer/model: quiescenceMs=${opts.quiescenceMs} cannot outlast one more ` +
+          `${opts.appDeadlineMs}ms round of work in this environment.\n${formatTimingCheck(check)}\n` +
+          `Drop quiescenceMs to use the solved ${solved.quiescenceMs}ms, raise it above that, ` +
+          `or set it to 0 to skip the settled re-read entirely.`,
+      );
+    }
+  }
   if (opts.settleMs !== undefined) {
     const check = checkTiming(profile, request, { settleMs: opts.settleMs });
     if (!check.ok) {
@@ -708,7 +723,7 @@ async function peekEscapedRejections(page: Page): Promise<number> {
 }
 
 /** Run the `"*"` invariant and the one for this label. First violation wins per key. */
-async function checkUiInvariants(
+export async function checkUiInvariants(
   page: Page,
   label: string | undefined,
   invariants: Record<string, UiInvariant> | undefined,
@@ -727,6 +742,235 @@ async function checkUiInvariants(
     }
   }
   return out;
+}
+
+
+/** Everything `evaluatePlanOracle` needs that is not in the plan itself. */
+export interface PlanOracleInput {
+  plan: FaultPlan;
+  observed: PlanRunResult["observed"];
+  /** Fault name → planned injection count, from `compilePlanFaults`. */
+  expectedInjections: ReadonlyMap<string, number>;
+  /** Operation → planned call count for an all-`pass` plan, from `compilePlanFaults`. */
+  expectedObservations: ReadonlyMap<string, number>;
+  /** Violations reported by the bridge's `uiInvariants` at probe time. */
+  uiInvariantFailures?: ReadonlyArray<{ key: string; message: string }>;
+  /** Whether the bridge supplied a `uiProbe` — without one `expect.ui` is skipped. */
+  hasUiProbe: boolean;
+  /** Whether the bridge supplied a `stateProbe`. */
+  hasStateProbe: boolean;
+  /** Opt-in span comparison; see `RunPlanOptions.checkAmplification`. */
+  checkAmplification?: boolean;
+  /** Reported in the details, so a failure names the window it was judged in. */
+  settleMs: number;
+  quiescenceMs: number;
+}
+
+/**
+ * The oracle itself: plan + observations in, mismatches out.
+ *
+ * Pure and browser-free on purpose. Every check here used to live inside
+ * `runPlan`, which meant the only way to test "does a duplicate write that
+ * commits after the probe get caught" was to boot Chromium — so the checks
+ * that were missing stayed missing. Splitting it out is what makes each of
+ * them a unit test.
+ */
+export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
+  const {
+    plan,
+    observed,
+    expectedInjections,
+    expectedObservations,
+    hasUiProbe,
+    hasStateProbe,
+    settleMs,
+    quiescenceMs,
+  } = input;
+  const uiInvariantFailures = input.uiInvariantFailures ?? [];
+  const mismatches: PlanMismatch[] = [];
+
+  // 1. Did every planned injection actually happen? A plan whose operation
+  //    the app never calls proves nothing.
+  for (const [name, expectedCount] of expectedInjections) {
+    const actual = observed.fired[name] ?? 0;
+    if (actual < expectedCount) {
+      mismatches.push({
+        plan: plan.name,
+        field: "injection",
+        expected: expectedCount,
+        actual,
+        detail:
+          `${name} was scheduled ${expectedCount}× but fired ${actual}× — ` +
+          `the app never issued that request, so this state was not actually exercised`,
+      });
+    }
+  }
+
+  // 1b. …and the same question for a plan that injects nothing. An all-`pass`
+  //     schedule has no injections to check, so until now it asserted only
+  //     that the page ended up with the right label — which a page serving a
+  //     cache and never revalidating satisfies by doing nothing.
+  for (const [rule, expectedCount] of expectedObservations) {
+    const actual = observed.matched[rule] ?? 0;
+    if (actual < expectedCount) {
+      mismatches.push({
+        plan: plan.name,
+        field: "injection",
+        expected: expectedCount,
+        actual,
+        detail:
+          `operation "${rule}" was scheduled to pass ${expectedCount}× but the app issued ` +
+          `${actual} request(s) on it — nothing was injected, so this plan asserted only a label`,
+      });
+    }
+  }
+
+  // 1c. Too *many* calls. One-sided counting is how a units bug in an
+  //     interval (60ms where the author meant 60s) fires the planned outcome
+  //     on call 0 exactly as predicted and then floods the endpoint forever.
+  //     `expect.calls` is the model's own statement and is always checked;
+  //     the span comparison needs a model that accounts for every call on
+  //     that URL, so it is opt-in.
+  for (const [rule, want] of Object.entries(plan.expect.calls ?? {})) {
+    const actual = observed.matched[rule];
+    if (actual === undefined) continue;
+    if (actual !== want) {
+      mismatches.push({
+        plan: plan.name,
+        field: "amplification",
+        expected: want,
+        actual,
+        detail: `model predicted ${want} call(s) on "${rule}", the app made ${actual}`,
+      });
+    }
+  }
+  if (input.checkAmplification) {
+    for (const [rule, span] of occurrenceSpans(plan)) {
+      if (plan.expect.calls?.[rule] !== undefined) continue; // already checked, exactly
+      const actual = observed.matched[rule] ?? 0;
+      if (actual > span) {
+        mismatches.push({
+          plan: plan.name,
+          field: "amplification",
+          expected: span,
+          actual,
+          detail:
+            `the plan describes ${span} call(s) on "${rule}" but the app made ${actual} — ` +
+            `requests the model never accounted for, all of them reaching the endpoint`,
+        });
+      }
+    }
+  }
+
+  // 2. The model's UI prediction.
+  if (plan.expect.ui !== undefined && hasUiProbe) {
+    if (observed.ui !== plan.expect.ui) {
+      mismatches.push({
+        plan: plan.name,
+        field: "ui",
+        expected: plan.expect.ui,
+        actual: observed.probeError !== undefined ? `probe error: ${observed.probeError}` : observed.ui,
+        detail:
+          `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"` +
+          (plan.schedule.every((s) => s.outcome === "pass")
+            ? ` (this plan injects nothing — if "${plan.expect.ui}" is a transient state, ` +
+              `it is not observable after the settle window; drop it from the target list)`
+            : "") +
+          (plan.schedule.some((s) => s.outcome === "hang")
+            ? ` (settleMs=${settleMs}: if the app bounds this request with a longer ` +
+              `timeout, the probe fires before the timeout does — raise settleMs above the app's deadline)`
+            : ""),
+      });
+    }
+  }
+
+  // 2b. …and the invariants that label promises. A correct label over a wrong
+  //     page is the most common shape of this whole class of bug: the banner
+  //     says the price could not be revalidated, the old price is still on
+  //     screen, and Pay is still enabled.
+  for (const failure of uiInvariantFailures) {
+    mismatches.push({
+      plan: plan.name,
+      field: "uiInvariant",
+      expected: `${failure.key} invariant holds`,
+      actual: failure.message,
+      detail:
+        `page reported ui="${observed.ui ?? "?"}" but the bridge's "${failure.key}" invariant ` +
+        `does not hold: ${failure.message}`,
+    });
+  }
+
+  // 3. Observables the UI does not show: write counts, refresh counts, …
+  if (plan.expect.state !== undefined) {
+    if (!hasStateProbe) {
+      mismatches.push({
+        plan: plan.name,
+        field: "state",
+        expected: plan.expect.state,
+        actual: undefined,
+        detail:
+          `plan expects state ${JSON.stringify(plan.expect.state)} but the bridge has no ` +
+          `stateProbe, so nothing was read — an unchecked expectation is worse than none`,
+      });
+    } else {
+      // The *settled* read is authoritative. A backend that acknowledges a
+      // write and commits it later hands the probe the number the model
+      // wanted to see and the duplicate afterwards — so the value that
+      // decides is the one that is still true once the observation window has
+      // closed. A read that changed from a wrong value to the predicted one
+      // is not reported: a slow-but-correct commit is not a bug, and calling
+      // it one would make every 202-Accepted backend flake.
+      const settled = observed.stateSettled ?? observed.state;
+      for (const [key, want] of Object.entries(plan.expect.state)) {
+        const got = settled?.[key];
+        // Compare loosely on shape: a probe reading JSON gets numbers, a probe
+        // reading the DOM gets strings, and the model should not have to care.
+        if (String(got) !== String(want)) {
+          const atProbe = observed.state?.[key];
+          const drifted =
+            observed.stateSettled !== undefined && String(atProbe) !== String(got);
+          mismatches.push({
+            plan: plan.name,
+            field: "state",
+            expected: want,
+            actual: got,
+            detail:
+              `model predicted ${key}=${JSON.stringify(want)}, probe read ${JSON.stringify(got)}` +
+              (drifted
+                ? ` (the probe read ${JSON.stringify(atProbe)} at settleMs=${settleMs} — the ` +
+                  `value the model predicted — and ${JSON.stringify(got)} ${quiescenceMs}ms later, ` +
+                  `so the write was still in flight when the oracle used to decide)`
+                : ""),
+          });
+        }
+      }
+    }
+  }
+
+  // 4. Did a rejection escape when the model said it must not (or vice versa)?
+  //    A rejection that escaped only during the observation window gets its
+  //    own field: it is not a page that was broken when the oracle looked, it
+  //    is work the app scheduled and never guarded — and before the window
+  //    existed it simply outlived the run.
+  if (plan.expect.unhandledRejection !== undefined) {
+    if (plan.expect.unhandledRejection !== observed.unhandledRejection) {
+      const late = !plan.expect.unhandledRejection && observed.lateUnhandledRejection;
+      mismatches.push({
+        plan: plan.name,
+        field: late ? "unhandledRejection@late" : "unhandledRejection",
+        expected: plan.expect.unhandledRejection,
+        actual: observed.unhandledRejection,
+        detail: plan.expect.unhandledRejection
+          ? `model predicted an escaping rejection, none was observed`
+          : late
+            ? `a rejection escaped every handler after the probe, from work the app scheduled ` +
+              `itself (a retry, a queued write) — the model's contract forbids it, and a run ` +
+              `that stopped watching at settleMs=${settleMs} would have called this clean`
+            : `a rejection escaped every handler, which the model's contract forbids`,
+      });
+    }
+  }
+  return mismatches;
 }
 
 /** Replay one plan and compare the result against its oracle. */
@@ -829,189 +1073,18 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     observed.coverageFingerprint = report.coverageFingerprint;
   }
 
-  const mismatches: PlanMismatch[] = [];
-
-  // 1. Did every planned injection actually happen? A plan whose operation
-  //    the app never calls proves nothing.
-  for (const [name, expectedCount] of expectedInjections) {
-    const actual = observed.fired[name] ?? 0;
-    if (actual < expectedCount) {
-      mismatches.push({
-        plan: plan.name,
-        field: "injection",
-        expected: expectedCount,
-        actual,
-        detail:
-          `${name} was scheduled ${expectedCount}× but fired ${actual}× — ` +
-          `the app never issued that request, so this state was not actually exercised`,
-      });
-    }
-  }
-
-  // 1b. …and the same question for a plan that injects nothing. An all-`pass`
-  //     schedule has no injections to check, so until now it asserted only
-  //     that the page ended up with the right label — which a page serving a
-  //     cache and never revalidating satisfies by doing nothing.
-  for (const [rule, expectedCount] of expectedObservations) {
-    const actual = observed.matched[rule] ?? 0;
-    if (actual < expectedCount) {
-      mismatches.push({
-        plan: plan.name,
-        field: "injection",
-        expected: expectedCount,
-        actual,
-        detail:
-          `operation "${rule}" was scheduled to pass ${expectedCount}× but the app issued ` +
-          `${actual} request(s) on it — nothing was injected, so this plan asserted only a label`,
-      });
-    }
-  }
-
-  // 1c. Too *many* calls. One-sided counting is how a units bug in an
-  //     interval (60ms where the author meant 60s) fires the planned outcome
-  //     on call 0 exactly as predicted and then floods the endpoint forever.
-  //     `expect.calls` is the model's own statement and is always checked;
-  //     the span comparison needs a model that accounts for every call on
-  //     that URL, so it is opt-in.
-  for (const [rule, want] of Object.entries(plan.expect.calls ?? {})) {
-    const actual = observed.matched[rule];
-    if (actual === undefined) continue;
-    if (actual !== want) {
-      mismatches.push({
-        plan: plan.name,
-        field: "amplification",
-        expected: want,
-        actual,
-        detail: `model predicted ${want} call(s) on "${rule}", the app made ${actual}`,
-      });
-    }
-  }
-  if (opts.checkAmplification) {
-    for (const [rule, span] of occurrenceSpans(plan)) {
-      if (plan.expect.calls?.[rule] !== undefined) continue; // already checked, exactly
-      const actual = observed.matched[rule] ?? 0;
-      if (actual > span) {
-        mismatches.push({
-          plan: plan.name,
-          field: "amplification",
-          expected: span,
-          actual,
-          detail:
-            `the plan describes ${span} call(s) on "${rule}" but the app made ${actual} — ` +
-            `requests the model never accounted for, all of them reaching the endpoint`,
-        });
-      }
-    }
-  }
-
-  // 2. The model's UI prediction.
-  if (plan.expect.ui !== undefined && opts.uiProbe) {
-    if (observed.ui !== plan.expect.ui) {
-      mismatches.push({
-        plan: plan.name,
-        field: "ui",
-        expected: plan.expect.ui,
-        actual: observed.probeError !== undefined ? `probe error: ${observed.probeError}` : observed.ui,
-        detail:
-          `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"` +
-          (plan.schedule.every((s) => s.outcome === "pass")
-            ? ` (this plan injects nothing — if "${plan.expect.ui}" is a transient state, ` +
-              `it is not observable after the settle window; drop it from the target list)`
-            : "") +
-          (plan.schedule.some((s) => s.outcome === "hang")
-            ? ` (settleMs=${settleMs}: if the app bounds this request with a longer ` +
-              `timeout, the probe fires before the timeout does — raise settleMs above the app's deadline)`
-            : ""),
-      });
-    }
-  }
-
-  // 2b. …and the invariants that label promises. A correct label over a wrong
-  //     page is the most common shape of this whole class of bug: the banner
-  //     says the price could not be revalidated, the old price is still on
-  //     screen, and Pay is still enabled.
-  for (const failure of uiInvariantFailures) {
-    mismatches.push({
-      plan: plan.name,
-      field: "uiInvariant",
-      expected: `${failure.key} invariant holds`,
-      actual: failure.message,
-      detail:
-        `page reported ui="${observed.ui ?? "?"}" but the bridge's "${failure.key}" invariant ` +
-        `does not hold: ${failure.message}`,
-    });
-  }
-
-  // 3. Observables the UI does not show: write counts, refresh counts, …
-  if (plan.expect.state !== undefined) {
-    if (!opts.stateProbe) {
-      mismatches.push({
-        plan: plan.name,
-        field: "state",
-        expected: plan.expect.state,
-        actual: undefined,
-        detail:
-          `plan expects state ${JSON.stringify(plan.expect.state)} but the bridge has no ` +
-          `stateProbe, so nothing was read — an unchecked expectation is worse than none`,
-      });
-    } else {
-      // The *settled* read is authoritative. A backend that acknowledges a
-      // write and commits it later hands the probe the number the model
-      // wanted to see and the duplicate afterwards — so the value that
-      // decides is the one that is still true once the observation window has
-      // closed. A read that changed from a wrong value to the predicted one
-      // is not reported: a slow-but-correct commit is not a bug, and calling
-      // it one would make every 202-Accepted backend flake.
-      const settled = observed.stateSettled ?? observed.state;
-      for (const [key, want] of Object.entries(plan.expect.state)) {
-        const got = settled?.[key];
-        // Compare loosely on shape: a probe reading JSON gets numbers, a probe
-        // reading the DOM gets strings, and the model should not have to care.
-        if (String(got) !== String(want)) {
-          const atProbe = observed.state?.[key];
-          const drifted =
-            observed.stateSettled !== undefined && String(atProbe) !== String(got);
-          mismatches.push({
-            plan: plan.name,
-            field: "state",
-            expected: want,
-            actual: got,
-            detail:
-              `model predicted ${key}=${JSON.stringify(want)}, probe read ${JSON.stringify(got)}` +
-              (drifted
-                ? ` (the probe read ${JSON.stringify(atProbe)} at settleMs=${settleMs} — the ` +
-                  `value the model predicted — and ${JSON.stringify(got)} ${quiescenceMs}ms later, ` +
-                  `so the write was still in flight when the oracle used to decide)`
-                : ""),
-          });
-        }
-      }
-    }
-  }
-
-  // 4. Did a rejection escape when the model said it must not (or vice versa)?
-  //    A rejection that escaped only during the observation window gets its
-  //    own field: it is not a page that was broken when the oracle looked, it
-  //    is work the app scheduled and never guarded — and before the window
-  //    existed it simply outlived the run.
-  if (plan.expect.unhandledRejection !== undefined) {
-    if (plan.expect.unhandledRejection !== observed.unhandledRejection) {
-      const late = !plan.expect.unhandledRejection && observed.lateUnhandledRejection;
-      mismatches.push({
-        plan: plan.name,
-        field: late ? "unhandledRejection@late" : "unhandledRejection",
-        expected: plan.expect.unhandledRejection,
-        actual: observed.unhandledRejection,
-        detail: plan.expect.unhandledRejection
-          ? `model predicted an escaping rejection, none was observed`
-          : late
-            ? `a rejection escaped every handler after the probe, from work the app scheduled ` +
-              `itself (a retry, a queued write) — the model's contract forbids it, and a run ` +
-              `that stopped watching at settleMs=${settleMs} would have called this clean`
-            : `a rejection escaped every handler, which the model's contract forbids`,
-      });
-    }
-  }
+  const mismatches = evaluatePlanOracle({
+    plan,
+    observed,
+    expectedInjections,
+    expectedObservations,
+    uiInvariantFailures,
+    hasUiProbe: opts.uiProbe !== undefined,
+    hasStateProbe: opts.stateProbe !== undefined,
+    ...(opts.checkAmplification !== undefined ? { checkAmplification: opts.checkAmplification } : {}),
+    settleMs,
+    quiescenceMs,
+  });
 
   return { plan, observed, mismatches, report };
 }

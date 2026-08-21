@@ -37,6 +37,16 @@ describe("solveTiming", () => {
     expect(r.wallClockMs).toBe(5793); // fixed + settle
   });
 
+  it("derives the post-probe observation window the same way as the probe", () => {
+    const r = solveTiming(MEASURED, { deadlineMs: 5000 });
+    if (r.status !== "sat") throw new Error("sat expected");
+    // One more app-bounded round: the retry an error path schedules, or the
+    // commit a 202-Accepted backend does after answering, is bounded by the
+    // same deadline as the call that provoked it.
+    expect(r.quiescenceMs).toBe(5097); // 5000 + 72 + 25
+    expect(r.quiescenceMs).toBe(r.settleMs);
+  });
+
   it("reports infeasible when the deadline is inside the environment's own jitter", () => {
     const r = solveTiming(MEASURED, { deadlineMs: 120 });
     expect(r.status).toBe("unsat");
@@ -120,6 +130,28 @@ describe("checkTiming", () => {
     // The solved value satisfies both.
     expect(
       checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5118, settleMs: 5097 }).ok,
+    ).toBe(true);
+  });
+
+  it("catches an observation window too short to see the app's own follow-up", () => {
+    // The shape hole F had: a `void retry()` scheduled 900ms after the action,
+    // watched for 400ms. The window is not a guess to be trusted either.
+    const check = checkTiming(MEASURED, { deadlineMs: 900 }, { settleMs: 1000, quiescenceMs: 400 });
+    expect(check.ok).toBe(false);
+    const row = check.violations.find(
+      (v) => v.constraint === "rejections_drained_after_last_timer",
+    )!;
+    expect(row.slackMs).toBe(-597); // 400 - (900 + 72 + 25)
+    expect(row.detail).toMatch(/settles after the run ended/);
+    // …and the solved value satisfies it exactly.
+    const solved = solveTiming(MEASURED, { deadlineMs: 900 });
+    if (solved.status !== "sat") throw new Error("sat expected");
+    expect(
+      checkTiming(
+        MEASURED,
+        { deadlineMs: 900 },
+        { settleMs: solved.settleMs, quiescenceMs: solved.quiescenceMs },
+      ).ok,
     ).toBe(true);
   });
 

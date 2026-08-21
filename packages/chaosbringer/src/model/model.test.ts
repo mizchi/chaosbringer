@@ -5,9 +5,13 @@ import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPas
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
 import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
 import {
+  checkUiInvariants,
   compilePlanFaults,
+  evaluatePlanOracle,
   faultNameFor,
+  observationNameFor,
   resolvePlanTiming,
+  type PlanOracleInput,
   type PlanRunResult,
 } from "./runner.js";
 import { envelope, type CalibrationRun } from "./calibrate.js";
@@ -175,6 +179,38 @@ describe("markOrderSensitivePlans", () => {
     const marked = markOrderSensitivePlans([base("ab", "error"), other]);
     expect(marked.some((p) => p.orderSensitive)).toBe(false);
   });
+
+  it("flags a disagreement that lives only in expect.state", () => {
+    // The observable the shipped patterns assert on. `expectationKey` read
+    // `ui` and `unhandledRejection` only, so "one order" versus "two orders"
+    // from the same injections was replayed as if it were deterministic —
+    // a coin flip presented as a verdict rather than a skipped plan.
+    const withState = (name: string, orders: number): FaultPlan => ({
+      ...base(name, "placed"),
+      expect: { ui: "placed", state: { orders } },
+    });
+    const marked = markOrderSensitivePlans([withState("one", 1), withState("two", 2)]);
+    expect(marked.every((p) => p.orderSensitive)).toBe(true);
+  });
+
+  it("flags a disagreement that lives only in expect.calls", () => {
+    const withCalls = (name: string, calls: number): FaultPlan => ({
+      ...base(name, "ready"),
+      expect: { ui: "ready", calls: { A: calls } },
+    });
+    const marked = markOrderSensitivePlans([withCalls("one", 1), withCalls("two", 2)]);
+    expect(marked.every((p) => p.orderSensitive)).toBe(true);
+  });
+
+  it("is insensitive to key order in a state expectation", () => {
+    // Otherwise two plans that agree would be skipped as a coin flip, which
+    // is the same bug pointing the other way.
+    const marked = markOrderSensitivePlans([
+      { ...base("a", "placed"), expect: { ui: "placed", state: { orders: 1, tries: 2 } } },
+      { ...base("b", "placed"), expect: { ui: "placed", state: { tries: 2, orders: 1 } } },
+    ]);
+    expect(marked.some((p) => p.orderSensitive)).toBe(false);
+  });
 });
 
 describe("validatePlan", () => {
@@ -189,6 +225,27 @@ describe("validatePlan", () => {
         expect: {},
       }),
     ).toThrow(/two outcomes to A@0/);
+  });
+
+  it("rejects a call count that is not a non-negative integer", () => {
+    const plan = (calls: Record<string, number>): FaultPlan => ({
+      name: "calls",
+      schedule: [{ order: 0, rule: "A", outcome: "pass", occurrence: 0 }],
+      expect: { calls },
+    });
+    expect(() => validatePlan(plan({ A: -1 }))).toThrow(/non-negative integer/);
+    expect(() => validatePlan(plan({ A: 1.5 }))).toThrow(/non-negative integer/);
+    expect(() => validatePlan(plan({ A: 0 }))).not.toThrow();
+  });
+
+  it("rejects a call count on an operation the schedule never pins", () => {
+    expect(() =>
+      validatePlan({
+        name: "unattributable",
+        schedule: [{ order: 0, rule: "A", outcome: "pass", occurrence: 0 }],
+        expect: { calls: { B: 1 } },
+      }),
+    ).toThrow(/schedule never mentions operation "B"/);
   });
 
   it("rejects an unknown outcome", () => {
@@ -283,7 +340,7 @@ describe("coverage", () => {
     overrides: Partial<PlanRunResult> = {},
   ): PlanRunResult => ({
     plan: { name, schedule: [], expect: {} },
-    observed: { unhandledRejection: false, fired: {} },
+    observed: { unhandledRejection: false, lateUnhandledRejection: false, fired: {}, matched: {} },
     mismatches: [],
     ...overrides,
   });
@@ -388,6 +445,17 @@ describe("resolvePlanTiming", () => {
     expect(t.delays?.slowMs).toBe(5118);
   });
 
+  it("refuses an observation window too short to see the app's own follow-up", () => {
+    expect(() =>
+      resolvePlanTiming({ quiescenceMs: 200, appDeadlineMs: 5000, timingProfile: MEASURED }),
+    ).toThrow(/quiescenceMs=200 cannot outlast one more 5000ms round/);
+    // …and 0 is a deliberate opt-out, not a mistake to be corrected.
+    expect(
+      resolvePlanTiming({ quiescenceMs: 0, appDeadlineMs: 5000, timingProfile: MEASURED })
+        .quiescenceMs,
+    ).toBe(0);
+  });
+
   it("refuses a deadline this environment cannot resolve at all", () => {
     expect(() => resolvePlanTiming({ appDeadlineMs: 120, timingProfile: MEASURED })).toThrow(
       /no timing values can satisfy an app deadline of 120ms/,
@@ -478,3 +546,411 @@ describe("calibration envelope", () => {
   });
 });
 
+
+
+describe("compilePlanFaults: observing a plan that injects nothing", () => {
+  const rules = { A: /\/api\/a$/, B: /\/api\/b$/ };
+
+  it("counts the calls an all-`pass` plan claims will happen", () => {
+    const { faultInjection, runtimeFaults, expectedInjections, expectedObservations, ruleOfFault } =
+      compilePlanFaults(
+        {
+          name: "happy",
+          schedule: [
+            { order: 0, rule: "A", outcome: "pass", occurrence: 0 },
+            { order: 1, rule: "A", outcome: "pass", occurrence: 1 },
+            { order: 2, rule: "B", outcome: "pass", occurrence: 0 },
+          ],
+          expect: { ui: "ready" },
+        },
+        rules,
+      );
+    // Nothing is injected — that is the point — but every request is counted.
+    expect(expectedInjections.size).toBe(0);
+    expect(runtimeFaults).toHaveLength(0);
+    expect(expectedObservations.get("A")).toBe(2);
+    expect(expectedObservations.get("B")).toBe(1);
+    const counter = faultInjection.find((f) => f.name === observationNameFor("A"))!;
+    // All-`pass` decisions: the crawler advances the occurrence counter and
+    // falls through, so the page behaves exactly as if the rule were absent.
+    expect(counter.schedule!.decisions).toEqual(["pass", "pass"]);
+    expect(counter.schedule!.afterEnd).toBe("pass");
+    expect(ruleOfFault.get(observationNameFor("A"))).toBe("A");
+  });
+
+  it("does not require observation once anything is injected", () => {
+    // An injected failure can legitimately stop the app from issuing a later
+    // request (`await a; await b` never reaches b), so demanding that b was
+    // called would flag the model's own prediction as a bug.
+    const { expectedObservations, faultInjection } = compilePlanFaults(
+      {
+        name: "mixed",
+        schedule: [
+          { order: 0, rule: "A", outcome: "reject", occurrence: 0 },
+          { order: 1, rule: "B", outcome: "pass", occurrence: 0 },
+        ],
+        expect: {},
+      },
+      rules,
+    );
+    expect(expectedObservations.size).toBe(0);
+    expect(faultInjection).toHaveLength(0);
+  });
+
+  it("keeps the method filter, so a counting rule cannot claim a sibling verb", () => {
+    const { faultInjection } = compilePlanFaults(
+      {
+        name: "write-only",
+        schedule: [{ order: 0, rule: "post", outcome: "pass", occurrence: 0 }],
+        expect: {},
+      },
+      { post: { urlPattern: /\/api\/todos$/, methods: ["POST"] } },
+    );
+    expect(faultInjection[0]!.methods).toEqual(["POST"]);
+  });
+});
+
+describe("evaluatePlanOracle", () => {
+  const base = (over: Partial<PlanOracleInput> = {}): PlanOracleInput => ({
+    plan: { name: "p", schedule: [], expect: {} },
+    observed: {
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: {},
+      matched: {},
+    },
+    expectedInjections: new Map(),
+    expectedObservations: new Map(),
+    hasUiProbe: true,
+    hasStateProbe: true,
+    settleMs: 500,
+    quiescenceMs: 500,
+    ...over,
+  });
+  const fields = (input: PlanOracleInput): string[] =>
+    evaluatePlanOracle(input).map((m) => m.field).sort();
+
+  describe("an all-`pass` plan has to be observed, not merely not-failed", () => {
+    const plan = {
+      name: "happy",
+      schedule: [{ order: 0, rule: "cart", outcome: "pass" as const, occurrence: 0 }],
+      expect: { ui: "ready" },
+    };
+
+    it("reports the operation the app never called", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan,
+          observed: {
+            ui: "ready",
+            unhandledRejection: false,
+            lateUnhandledRejection: false,
+            fired: {},
+            matched: { cart: 0 },
+          },
+          expectedObservations: new Map([["cart", 1]]),
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["injection"]);
+      // `injection` on purpose: that is what `plansNotExercised` is keyed on,
+      // so a vacuous happy path stops counting as a reached state.
+      expect(aggregateCoverage([{ plan, observed: base().observed, mismatches }]).plansNotExercised)
+        .toEqual(["happy"]);
+      expect(mismatches[0]!.detail).toMatch(/asserted only a label/);
+    });
+
+    it("says nothing when the call actually happened", () => {
+      expect(
+        fields(
+          base({
+            plan,
+            observed: {
+              ui: "ready",
+              unhandledRejection: false,
+              lateUnhandledRejection: false,
+              fired: {},
+              matched: { cart: 1 },
+            },
+            expectedObservations: new Map([["cart", 1]]),
+          }),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  describe("amplification", () => {
+    const plan = {
+      name: "beat",
+      schedule: [{ order: 0, rule: "telemetry", outcome: "status" as const, occurrence: 0 }],
+      expect: {},
+    };
+    const observed = (matched: number) => ({
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: { "telemetry:status": 1 },
+      matched: { telemetry: matched },
+    });
+
+    it("is silent by default, however many calls were made", () => {
+      // Not a false negative by accident: a model written for one user action
+      // against a page that also fetches on load legitimately sees more
+      // requests than its schedule names, and failing that would be noise.
+      expect(fields(base({ plan, observed: observed(12) }))).toEqual([]);
+    });
+
+    it("reports calls past the schedule's span once asked to", () => {
+      const mismatches = evaluatePlanOracle(
+        base({ plan, observed: observed(12), checkAmplification: true }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["amplification"]);
+      expect(mismatches[0]).toMatchObject({ expected: 1, actual: 12 });
+    });
+
+    it("tolerates exactly as many calls as the plan describes", () => {
+      expect(fields(base({ plan, observed: observed(1), checkAmplification: true }))).toEqual([]);
+      const twoStep = {
+        name: "two",
+        schedule: [
+          { order: 0, rule: "telemetry", outcome: "pass" as const, occurrence: 0 },
+          { order: 1, rule: "telemetry", outcome: "status" as const, occurrence: 1 },
+        ],
+        expect: {},
+      };
+      expect(
+        fields(base({ plan: twoStep, observed: observed(2), checkAmplification: true })),
+      ).toEqual([]);
+    });
+
+    it("checks `expect.calls` always, and exactly", () => {
+      const stated = { ...plan, expect: { calls: { telemetry: 1 } } };
+      expect(fields(base({ plan: stated, observed: observed(12) }))).toEqual(["amplification"]);
+      expect(fields(base({ plan: stated, observed: observed(1) }))).toEqual([]);
+      // Too *few* is a finding as well: the model said the beacon fires.
+      expect(fields(base({ plan: stated, observed: observed(0) }))).toEqual(["amplification"]);
+    });
+
+    it("skips a rule nothing counted rather than guessing zero", () => {
+      // An all-`pass` rule inside a plan that injects elsewhere has no
+      // counter, so `matched` has no entry for it. Reading that as 0 would
+      // turn a blind spot into a false failure.
+      const stated = { ...plan, expect: { calls: { telemetry: 1 } } };
+      expect(
+        fields(
+          base({
+            plan: stated,
+            observed: {
+              unhandledRejection: false,
+              lateUnhandledRejection: false,
+              fired: {},
+              matched: {},
+            },
+          }),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  describe("state is judged on the settled read", () => {
+    const plan = {
+      name: "order-once",
+      schedule: [{ order: 0, rule: "order", outcome: "reject-body" as const, occurrence: 0 }],
+      expect: { state: { orders: 1 } },
+    };
+
+    it("catches a duplicate write that commits after the probe", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan,
+          observed: {
+            unhandledRejection: false,
+            lateUnhandledRejection: false,
+            fired: { "order:reject-body": 1 },
+            matched: { order: 2 },
+            state: { orders: 1 },
+            stateSettled: { orders: 2 },
+          },
+          expectedInjections: new Map([["order:reject-body", 1]]),
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["state"]);
+      expect(mismatches[0]).toMatchObject({ expected: 1, actual: 2 });
+      // The detail has to name both reads, or the failure looks like a flake.
+      expect(mismatches[0]!.detail).toMatch(/read 1 at settleMs=500/);
+      expect(mismatches[0]!.detail).toMatch(/2 500ms later/);
+    });
+
+    it("does not report a slow-but-correct commit", () => {
+      // Probe too early, settled read right: a 202-Accepted backend, not a
+      // bug. Failing this is how the second read would turn into a flake
+      // generator on every queue-backed API.
+      expect(
+        fields(
+          base({
+            plan,
+            observed: {
+              unhandledRejection: false,
+              lateUnhandledRejection: false,
+              fired: { "order:reject-body": 1 },
+              matched: {},
+              state: { orders: 0 },
+              stateSettled: { orders: 1 },
+            },
+            expectedInjections: new Map([["order:reject-body", 1]]),
+          }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("falls back to the probe read when no window was spent", () => {
+      expect(
+        fields(
+          base({
+            plan,
+            quiescenceMs: 0,
+            observed: {
+              unhandledRejection: false,
+              lateUnhandledRejection: false,
+              fired: {},
+              matched: {},
+              state: { orders: 2 },
+            },
+          }),
+        ),
+      ).toEqual(["state"]);
+    });
+
+    it("still refuses an expectation the bridge cannot read", () => {
+      const mismatches = evaluatePlanOracle(base({ plan, hasStateProbe: false }));
+      expect(mismatches.map((m) => m.field)).toEqual(["state"]);
+      expect(mismatches[0]!.detail).toMatch(/unchecked expectation is worse than none/);
+    });
+  });
+
+  describe("a rejection that escaped after the probe", () => {
+    const plan = {
+      name: "late",
+      schedule: [{ order: 0, rule: "quote", outcome: "reject" as const, occurrence: 0 }],
+      expect: { unhandledRejection: false },
+    };
+
+    it("gets its own field, so it is not confused with one that raced the probe", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan,
+          observed: {
+            unhandledRejection: true,
+            lateUnhandledRejection: true,
+            fired: { "quote:reject": 1 },
+            matched: { quote: 1 },
+          },
+          expectedInjections: new Map([["quote:reject", 1]]),
+          settleMs: 400,
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["unhandledRejection@late"]);
+      expect(mismatches[0]!.detail).toMatch(/stopped watching at settleMs=400/);
+    });
+
+    it("keeps the plain field for one that was already there", () => {
+      expect(
+        fields(
+          base({
+            plan,
+            observed: {
+              unhandledRejection: true,
+              lateUnhandledRejection: false,
+              fired: {},
+              matched: {},
+            },
+          }),
+        ),
+      ).toEqual(["unhandledRejection"]);
+    });
+
+    it("still reports a predicted rejection that never came", () => {
+      const mismatches = evaluatePlanOracle(
+        base({
+          plan: { ...plan, expect: { unhandledRejection: true } },
+          observed: {
+            unhandledRejection: false,
+            lateUnhandledRejection: false,
+            fired: {},
+            matched: {},
+          },
+        }),
+      );
+      expect(mismatches.map((m) => m.field)).toEqual(["unhandledRejection"]);
+    });
+  });
+
+  it("reports a label whose own invariant does not hold", () => {
+    const mismatches = evaluatePlanOracle(
+      base({
+        plan: { name: "quote", schedule: [], expect: { ui: "error" } },
+        observed: {
+          ui: "error",
+          unhandledRejection: false,
+          lateUnhandledRejection: false,
+          fired: {},
+          matched: {},
+        },
+        uiInvariantFailures: [{ key: "error", message: "#pay is still enabled" }],
+      }),
+    );
+    // The label matched the model exactly; what it promises did not.
+    expect(mismatches.map((m) => m.field)).toEqual(["uiInvariant"]);
+    expect(mismatches[0]!.detail).toMatch(/ui="error".*"error" invariant does not hold/);
+  });
+});
+
+describe("checkUiInvariants", () => {
+  const page = {} as never;
+
+  it("runs the wildcard and the label's own, and nothing else", () => {
+    const seen: string[] = [];
+    const invariants = {
+      "*": () => {
+        seen.push("*");
+        return "";
+      },
+      error: () => {
+        seen.push("error");
+        return "stale summary";
+      },
+      ready: () => {
+        seen.push("ready");
+        return "should not run";
+      },
+    };
+    return checkUiInvariants(page, "error", invariants).then((out) => {
+      expect(seen).toEqual(["*", "error"]);
+      expect(out).toEqual([{ key: "error", message: "stale summary" }]);
+    });
+  });
+
+  it("treats an empty string, null and undefined as passing", async () => {
+    expect(
+      await checkUiInvariants(page, "ready", {
+        "*": () => "",
+        ready: () => null,
+      }),
+    ).toEqual([]);
+    expect(await checkUiInvariants(page, "ready", { ready: () => undefined })).toEqual([]);
+  });
+
+  it("reports a throwing invariant instead of failing the run", async () => {
+    const out = await checkUiInvariants(page, "ready", {
+      ready: () => {
+        throw new Error("locator not found");
+      },
+    });
+    expect(out).toEqual([{ key: "ready", message: "invariant threw: locator not found" }]);
+  });
+
+  it("runs the wildcard even with no ui probe, and nothing at all without invariants", async () => {
+    expect(await checkUiInvariants(page, undefined, { "*": () => "always wrong" })).toEqual([
+      { key: "*", message: "always wrong" },
+    ]);
+    expect(await checkUiInvariants(page, "ready", undefined)).toEqual([]);
+  });
+});
