@@ -1,0 +1,31 @@
+{
+  "name": "budget-exhausted",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "stream",
+      "outcome": "reject",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "stream",
+      "outcome": "reject",
+      "occurrence": 1
+    },
+    {
+      "order": 2,
+      "rule": "stream",
+      "outcome": "reject",
+      "occurrence": 2
+    }
+  ],
+  "expect": {
+    "ui": "offline",
+    "unhandledRejection": false,
+    "calls": {
+      "stream": 3
+    }
+  },
+  "modelSteps": 4
+}

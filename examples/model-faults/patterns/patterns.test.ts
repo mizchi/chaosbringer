@@ -271,6 +271,56 @@ describe("pattern: pagination-order", () => {
   }, 300000);
 });
 
+describe("pattern: reconnect-budget", () => {
+  const pattern = PATTERNS.find((p) => p.name === "reconnect-budget")!;
+
+  it("puts the whole contract in a call count, because nothing on screen holds it", () => {
+    const plans = loadPlans(pattern.name);
+    expect(plans).toHaveLength(4); // connect on attempt 1 | 2 | 3 | budget spent
+    const byName = new Map(plans.map((p) => [p.name, p]));
+
+    // One rung per attempt that finally connects, and the rung where the
+    // budget runs out. The count is the assertion.
+    expect(byName.get("connect-on-1")!.expect.calls).toEqual({ stream: 1 });
+    expect(byName.get("connect-on-2")!.expect.calls).toEqual({ stream: 2 });
+    expect(byName.get("connect-on-3")!.expect.calls).toEqual({ stream: 3 });
+    expect(byName.get("budget-exhausted")!.expect.calls).toEqual({ stream: 3 });
+
+    // No plan asserts state, because there is none to read: a client with a
+    // budget and one without render the same spinner and the same connection.
+    for (const plan of plans) expect(plan.expect.state).toBeUndefined();
+  });
+
+  it("catches the runaway loop, and names it as a request count", async () => {
+    const results = await run(pattern, false);
+    const spent = results.find((r) => r.plan.name === "budget-exhausted")!;
+
+    // Both signals fire, and the pair is the finding. `ui` alone reads as a
+    // labelling quibble — "predicted offline, got live" — which is how an
+    // unbounded retry gets waved through. The call count is what says the
+    // client kept going.
+    expect(spent.mismatches.map((m) => m.field).sort()).toEqual(["amplification", "ui"]);
+    expect(spent.mismatches.find((m) => m.field === "amplification")!.detail).toMatch(
+      /predicted 3 call\(s\) on "stream", the app made 4/,
+    );
+    expect(spent.observed.ui).toBe("live");
+    expect(spent.observed.matched.stream).toBe(4);
+
+    // Controls: a client that connects inside the budget is indistinguishable
+    // from a correct one, and must pass. Without these the pattern would be
+    // flagging reconnection itself.
+    for (const name of ["connect-on-1", "connect-on-2", "connect-on-3"]) {
+      expect(results.find((r) => r.plan.name === name)!.mismatches).toEqual([]);
+    }
+  }, 300000);
+
+  it("passes every rung once the client gives up and says so", async () => {
+    const results = await run(pattern, true);
+    expect(keys(results)).toEqual([]);
+    expect(modelRunPassed(aggregateCoverage(results))).toBe(true);
+  }, 300000);
+});
+
 describe("pattern: timeout-ladder", () => {
   const pattern = PATTERNS.find((p) => p.name === "timeout-ladder")!;
 

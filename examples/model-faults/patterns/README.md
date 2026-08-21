@@ -15,6 +15,7 @@ pnpm test:patterns                                          # all of them, both 
 |---|---|---|
 | [`retry-idempotency`](./retry-idempotency/) | A retry that writes twice. The dangerous failure is the one where the server **committed** and the client could not read the reply — without one idempotency key per intent, the retry is a second order. | **No.** Same "Order placed" banner either way; only the server's order count differs. |
 | [`pagination-order`](./pagination-order/) | Page 2 overtaking page 1. Two "load more" clicks are two requests, and nothing about the network returns them in the order they left; an app that appends on arrival is correct exactly as long as the network is. | **Yes, and every signal says otherwise.** Four rows, a `ready` banner, no escaped rejection — the model's prediction met exactly, in the wrong order. |
+| [`reconnect-budget`](./reconnect-budget/) | A reconnect loop with no cap. Retrying a dropped stream is not the question; what the client does when the retry *also* fails is, because every client in the fleet is doing it at once against the service that is already failing. | **No, and worse than no.** The uncapped client eventually connects, so it renders a success. "It recovers" and "it hammers a failing service until it recovers" differ by one number. |
 | [`timeout-ladder`](./timeout-ladder/) | A request with no bound. Slow and never are different failures: the first must still render, the second must give up. An unbounded app handles the slow case perfectly — which is why the missing bound survives review. | **Yes**, but only if you wait long enough — which is why this pattern's probe window is *solved*, not guessed. |
 | [`optimistic-rollback`](./optimistic-rollback/) | An optimistic row the server never took. "Roll back on error" is the wrong contract: a request that never arrived and a reply that could not be read need *opposite* corrections, and only asking the server tells them apart. | **Partly.** The row that should have vanished is visible — but the app that keeps a committed row *without asking* looks identical to one that knows, and only the missing read separates them. |
 | [`token-refresh`](./token-refresh/) | A refresh stampede. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload, and on a rotating refresh token the second invalidates the first and logs the user out. | **No.** Both variants render the account fine; only the refresh count differs. |
@@ -57,6 +58,29 @@ rather than an opinion. An app that renders bare strings exposes no correlation,
 and a stale or reordered response there is outside what any oracle can see —
 see the recipe's [What the oracle still cannot
 see](../../../docs/recipes/model-driven-faults.md).
+
+## Why one pattern is only a number
+
+`reconnect-budget` has no `stateProbe` and asserts no state, because there is
+nothing to read. A client with a reconnect budget and one without render the
+same spinner and then the same connection; what separates them is how many
+requests they were willing to make, and no page can report that about itself.
+So the model counts attempts and `--calls-var stream=attempts` lifts the total
+into `expect.calls`.
+
+Its buggy variant is worth sitting with. Given three failures it makes a fourth
+attempt — which the schedule lets through, because a schedule describes the
+occurrences it enumerated — so it *connects*, and renders a success. Two
+mismatches fire, and the pair is the finding: `ui` alone says "predicted
+offline, got live", which reads like a labelling quibble and is exactly how an
+unbounded retry gets waved through review. The call count is what says the
+client kept going.
+
+The bridge does **not** set `checkAmplification: true`, and the reason is worth
+stating: that flag compares against the schedule's occurrence span and is a
+claim about the *model* covering every call to a URL. Here every plan already
+states an exact `expect.calls`, so the flag would only produce a second mismatch
+for the same fact. Redundant signals are not a demonstration.
 
 ## Anatomy of a pattern
 

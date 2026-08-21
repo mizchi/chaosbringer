@@ -45,6 +45,16 @@ export const PATTERNS = [
       "this library that no per-plan expectation can see.",
   },
   {
+    name: "reconnect-budget",
+    path: "/stream",
+    spec: "patterns/reconnect-budget/reconnect.qnt",
+    catches:
+      "a reconnect loop with no cap. Retrying a dropped stream is not the question; what the " +
+      "client does when the retry also fails is, because every client in the fleet is doing it " +
+      "at once against the service that is already failing. One tab reconnecting forever looks " +
+      "exactly like one tab being patient.",
+  },
+  {
     name: "timeout-ladder",
     path: "/slow",
     spec: "patterns/timeout-ladder/ladder.qnt",

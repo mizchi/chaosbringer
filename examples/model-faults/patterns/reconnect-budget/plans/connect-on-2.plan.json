@@ -1,0 +1,25 @@
+{
+  "name": "connect-on-2",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "stream",
+      "outcome": "reject",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "stream",
+      "outcome": "pass",
+      "occurrence": 1
+    }
+  ],
+  "expect": {
+    "ui": "live",
+    "unhandledRejection": false,
+    "calls": {
+      "stream": 2
+    }
+  },
+  "modelSteps": 3
+}

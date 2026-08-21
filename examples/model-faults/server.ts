@@ -42,6 +42,7 @@ export function createApp(fixed: boolean): Hono {
       `window.__SLOW_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__NOTES_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__FEED_FIXED__ = ${isFixed ? "true" : "false"};` +
+      `window.__STREAM_FIXED__ = ${isFixed ? "true" : "false"};` +
       `window.__SESSION__ = ${JSON.stringify(session)};</script>`;
     return html.replace(/<script src="\/([\w.-]+)"><\/script>/, `${flags}\n    <script src="/$1"></script>`);
   }
@@ -197,6 +198,18 @@ export function createApp(fixed: boolean): Hono {
       })),
     });
   });
+
+  // --- reconnect-budget pattern ----------------------------------------
+  //
+  // The endpoint is always healthy; the failures are injected. What the plan
+  // measures is not whether the client reconnects but how many times it is
+  // willing to, which is why the model states a call bound rather than a state.
+  app.get("/stream", (c) => c.html(pageWithFlags("stream.html", fixed)));
+  app.get("/stream.js", (c) => {
+    c.header("content-type", "text/javascript; charset=utf-8");
+    return c.body(readFileSync(join(publicDir, "stream.js"), "utf8"));
+  });
+  app.get("/api/stream", (c) => c.json({ events: 3, cursor: "c-1" }));
 
   app.get("/api/orders/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";
