@@ -1,0 +1,26 @@
+{
+  "skill_name": "chaosbringer",
+  "evals": [
+    {
+      "id": 0,
+      "name": "double-write-regression",
+      "prompt": "We had an incident last week — a customer clicked Save once and ended up with two identical notes. I'm fairly sure it's the retry in public/app.js but I want a test that actually reproduces it before I touch the code. Can you write one with chaosbringer?",
+      "expected_output": "A runnable test that fails against the current app because two notes are committed for one intent, and would pass once the retry carries one idempotency key. Should assert on the server-side count, not on the banner text.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "unbounded-request",
+      "prompt": "If /api/report is slow the Load report button just spins forever. I want a test that fails now and passes once I put a timeout on that fetch. Use chaosbringer.",
+      "expected_output": "A test that injects a slow or never-settling response and asserts the page does NOT stay in the loading state. Must not hard-code a fragile millisecond value, and must distinguish slow-but-fine from never.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "error-path-coverage",
+      "prompt": "This app has basically no coverage of what happens when the API misbehaves. Set up chaosbringer for it so we catch error-handling regressions in CI — I care most about requests failing and returning 500s.",
+      "expected_output": "A working setup (test file or script) that injects failures across the app's endpoints and asserts something meaningful about the outcome, including that the injected fault actually fired.",
+      "files": []
+    }
+  ]
+}
