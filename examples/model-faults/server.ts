@@ -169,9 +169,17 @@ export function createApp(fixed: boolean): Hono {
     return c.json({ id });
   });
 
+  // The count *and* the ids. A count answers "how many did you take"; the ids
+  // answer "which ones", which is the only way a screen can be checked against
+  // the server rather than against itself: an app that issues the reconcile
+  // read and discards the body keeps its own `local-1` row and reports the
+  // right count. Deliberately on `/api/notes/count`, which neither bridge rule
+  // matches — a probe that read `/api/notes?session=…` would be counted as a
+  // list read and break the very `expect.calls` bound this pattern rests on.
   app.get("/api/notes/count", (c) => {
     const session = c.req.query("session") ?? "anonymous";
-    return c.json({ notes: notes.get(session)?.length ?? 0 });
+    const rows = notes.get(session) ?? [];
+    return c.json({ notes: rows.length, ids: rows.map((n) => n.id) });
   });
 
   // --- pagination-order pattern ----------------------------------------

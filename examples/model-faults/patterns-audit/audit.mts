@@ -22,6 +22,26 @@
  * identical on both variants (the hole). `REFUTED` means the pattern caught the
  * bug and the hypothesis was wrong; those are printed with the output that
  * refuted them rather than deleted.
+ *
+ * ## After the fixes — what this file asserts now
+ *
+ * Six of the eight findings are closed, so this harness asserts the *closure*:
+ * the same app shapes, the same committed plans, and now a mismatch where there
+ * used to be none. `CLOSED` marks a finding whose two variants the oracle can
+ * finally tell apart. What is deliberately unchanged:
+ *
+ *   - **F5 stands.** The probe is still parameterised by a value the page
+ *     supplies, and no fix here was sound: reading a run-scoped ledger needs
+ *     the app under test to expose one. It is documented as a limit in
+ *     `docs/recipes/model-driven-faults.md` instead, and this file keeps
+ *     reproducing it.
+ *   - **R1 and R2 stay refuted**, with their output.
+ *   - **F2's two variants still produce the same *shape* of verdict**, and that
+ *     is the closure: both now fail. The escape was "extra traffic, correct
+ *     count", and the count now moves with the traffic (249 vs 12 where it was
+ *     9 vs 9). The red team's own "fixed" page resumes with a cursor too, just
+ *     boundedly, and those requests are requests the model never described — so
+ *     it fails honestly rather than passing blindly.
  */
 
 import { execFileSync } from "node:child_process";
@@ -33,6 +53,7 @@ import {
   modelRunPassed,
   resolvePlanTiming,
   runPlans,
+  validateCallCountRules,
   validatePlan,
   type FaultPlan,
   type PlanRunResult,
@@ -107,6 +128,28 @@ function expectIndistinguishable(label: string, a: PlanRunResult[], b: PlanRunRe
   if (!ok) failures.push(`${label}: verdicts differed (${fa} vs ${fb})`);
 }
 
+/**
+ * The closure: the same two apps, and now the oracle separates them. The
+ * opposite assertion to `expectIndistinguishable`, kept next to it on purpose —
+ * a finding is closed when the verdicts diverge, and if they ever collapse back
+ * into agreement this process exits non-zero again.
+ */
+function expectDistinguishable(
+  label: string,
+  a: PlanRunResult[],
+  b: PlanRunResult[],
+  names: [string, string] = ["buggy", "fixed"],
+): void {
+  const fa = JSON.stringify(fields(a));
+  const fb = JSON.stringify(fields(b));
+  const ok = fa !== fb && fields(a).length > 0;
+  console.log(
+    `  CLOSED  ${ok ? "yes" : "NO — THE HOLE IS BACK"}  ${label}: ` +
+      `${names[0]}=${fa} ${names[1]}=${fb}`,
+  );
+  if (!ok) failures.push(`${label}: the oracle still cannot tell the two apps apart (${fa} vs ${fb})`);
+}
+
 function assert(label: string, cond: boolean, detail: string): void {
   console.log(`  PROOF   ${cond ? "ok" : "FAILED"}  ${label}: ${detail}`);
   if (!cond) failures.push(`${label}: ${detail}`);
@@ -119,7 +162,11 @@ async function F1(): Promise<void> {
   console.log(
     "\n=== F1  optimistic-rollback: the reconcile read that nobody reads ===\n" +
       "    the pattern's own four plans, its own bridge, against an app whose\n" +
-      "    reconcile GET is issued and discarded",
+      "    reconcile GET is issued and discarded\n" +
+      "    CLOSED: the bridge now compares the rows' data-id against the server's\n" +
+      "    own ids (/api/notes/count, which neither rule matches, so the check\n" +
+      "    cannot inflate the count it sits next to). expect.calls proves the\n" +
+      "    request; only identity proves the app read the answer.",
   );
   const plans = shippedPlans("optimistic-rollback", [
     "write-fulfil",
@@ -153,9 +200,20 @@ async function F1(): Promise<void> {
     dom[label] = await ambiguousByHand(server.url);
   }
 
-  expectFields("F1 buggy (all four plans)", runs.buggy!, []);
+  // write-rejectAfter only: the other three plans roll the row back and then
+  // read the list, so screen and server agree in both variants — which is what
+  // keeps this from being a check that fires on any failure.
+  expectFields("F1 buggy (all four plans)", runs.buggy!, ["uiInvariant"]);
   expectFields("F1 fixed (all four plans)", runs.fixed!, []);
-  expectIndistinguishable("F1 optimistic-rollback", runs.buggy!, runs.fixed!);
+  expectDistinguishable("F1 optimistic-rollback", runs.buggy!, runs.fixed!);
+  assert(
+    "F1 the mismatch names the id nobody else can address",
+    runs.buggy!.some((r) =>
+      r.mismatches.some((m) => /screen shows note id\(s\) \[local-1\]/.test(m.detail)),
+    ),
+    runs.buggy!.flatMap((r) => r.mismatches.map((m) => `${r.plan.name}: ${m.detail}`)).join(" | ") ||
+      "(no mismatch)",
+  );
 
   const b = dom.buggy as { rows: Array<{ text: string; id: string | null }>; server: unknown };
   const f = dom.fixed as { rows: Array<{ text: string; id: string | null }>; server: unknown };
@@ -217,8 +275,13 @@ async function ambiguousByHand(
 async function F2(): Promise<void> {
   console.log(
     "\n=== F2  reconnect-budget: an anchored rule, and a resume loop with a cursor ===\n" +
-      "    rules.stream is /\\/api\\/stream$/ — every request carrying a query\n" +
-      "    string is neither faulted nor counted",
+      "    rules.stream WAS /\\/api\\/stream$/ — every request carrying a query\n" +
+      "    string was neither faulted nor counted\n" +
+      "    CLOSED: the rule is /\\/api\\/stream(\\?|$)/, and a `$`-anchored pattern on\n" +
+      "    an operation a plan counts is now a pre-flight error. Note BOTH variants\n" +
+      "    fail now: the red team's 'fixed' page resumes with a cursor too, just\n" +
+      "    boundedly, and those are requests the model never described. The hole was\n" +
+      "    'extra traffic, correct count'; the count now moves with the traffic.",
   );
   const plans = shippedPlans("reconnect-budget", [
     "connect-on-1",
@@ -255,15 +318,44 @@ async function F2(): Promise<void> {
     );
   }
 
-  expectFields("F2 buggy (all four plans)", runs.buggy!, []);
-  expectFields("F2 fixed (all four plans)", runs.fixed!, []);
-  expectIndistinguishable("F2 reconnect-budget", runs.buggy!, runs.fixed!);
+  // Three of the four plans each report the resume loop as amplification; the
+  // fourth (budget-exhausted) is the plan whose count the loop happened to
+  // make come out right, and it is the reason the escape was dangerous.
+  expectFields("F2 buggy (all four plans)", runs.buggy!, [
+    "amplification",
+    "amplification",
+    "amplification",
+  ]);
+  expectFields("F2 fixed (all four plans)", runs.fixed!, [
+    "amplification",
+    "amplification",
+    "amplification",
+  ]);
   assert(
-    "F2 the counted number is identical while the real one is not",
-    seen.buggy!.matched === seen.fixed!.matched && seen.buggy!.withQuery > seen.fixed!.withQuery + 5,
-    `matched ${seen.buggy!.matched} vs ${seen.fixed!.matched}; ` +
+    "F2 the counted number now moves with the real one",
+    // It used to be 9 against 9 while the wire carried 58 against 6.
+    seen.buggy!.matched > seen.fixed!.matched + 20 &&
+      // …and each count is within a client-side reject or two of the traffic
+      // the server actually saw, rather than of the model's number.
+      seen.buggy!.matched >= seen.buggy!.bare + seen.buggy!.withQuery &&
+      seen.buggy!.matched <= seen.buggy!.bare + seen.buggy!.withQuery + 9,
+    `matched ${seen.buggy!.matched} vs ${seen.fixed!.matched} (was 9 vs 9); ` +
       `real requests to /api/stream ${seen.buggy!.bare + seen.buggy!.withQuery} vs ` +
       `${seen.fixed!.bare + seen.fixed!.withQuery}`,
+  );
+  assert(
+    "F2 the anchored form is refused before a browser launches",
+    (() => {
+      try {
+        validateCallCountRules(shippedPlan("reconnect-budget", "budget-exhausted"), {
+          stream: { urlPattern: /\/api\/stream$/, methods: ["GET"] },
+        });
+        return false;
+      } catch (err) {
+        return /\$`-anchored pattern/.test(err instanceof Error ? err.message : "");
+      }
+    })(),
+    "validateCallCountRules refuses a $-anchored urlPattern on an operation a plan counts",
   );
 }
 
@@ -273,7 +365,12 @@ async function F2(): Promise<void> {
 async function F3(): Promise<void> {
   console.log(
     "\n=== F3  pagination-order: data-idx written from the render position ===\n" +
-      "    the bridge's uiInvariants['*'] compares data-idx against its own sort",
+      "    the bridge's uiInvariants['*'] compared data-idx against its own sort\n" +
+      "    CLOSED: it now correlates two independent sources first — the attribute\n" +
+      "    against the row's own rendered `Post <idx>`, which comes from the\n" +
+      "    payload — and only then checks ascending/unique. A position-derived\n" +
+      "    attribute fails the first check wherever it disagrees with the content,\n" +
+      "    which on this page is every plan whose pages did not arrive in order.",
   );
   const plans = shippedPlans("pagination-order", ["page1-fulfil", "page1-slow", "page1-rejectBefore"]);
   const timing = resolvePlanTiming({
@@ -312,9 +409,23 @@ async function F3(): Promise<void> {
     console.log(`          page1-slow observed: ${JSON.stringify(raced.observed.state)}`);
   }
 
-  expectFields("F3 buggy (all three plans)", runs.buggy!, []);
-  expectFields("F3 fixed (all three plans)", runs.fixed!, []);
-  expectIndistinguishable("F3 pagination-order", runs.buggy!, runs.fixed!);
+  // buggy: page1-slow (rows 3,4,1,2 labelled 1,2,3,4) and page1-rejectBefore
+  // (rows 3,4 labelled 1,2). fixed: page1-rejectBefore only — page 1 failed, so
+  // even a correct render labels page 2's rows 1 and 2. That row is a true
+  // violation of the corollary, not a false positive: this app's data-idx is
+  // not derived from the response, so the ordering claim is unfalsifiable on it
+  // either way. The shipped page passes both checks in both variants.
+  expectFields("F3 buggy (all three plans)", runs.buggy!, ["uiInvariant", "uiInvariant"]);
+  expectFields("F3 fixed (all three plans)", runs.fixed!, ["uiInvariant"]);
+  expectDistinguishable("F3 pagination-order", runs.buggy!, runs.fixed!);
+  assert(
+    "F3 the mismatch says which row disagrees with its own content",
+    runs.buggy!.some((r) =>
+      r.mismatches.some((m) => /index does not match its own content/.test(m.detail)),
+    ),
+    runs.buggy!.flatMap((r) => r.mismatches.map((m) => `${r.plan.name}: ${m.detail}`)).join(" | ") ||
+      "(no mismatch)",
+  );
   const b = rendered.buggy as { idx: string; text: string };
   const f = rendered.fixed as { idx: string; text: string };
   assert(
@@ -331,7 +442,12 @@ async function F4(): Promise<void> {
   console.log(
     "\n=== F4  timeout-ladder: Promise.race passes all three rungs ===\n" +
       "    the pattern's fixed direction is 'every rung passes once the request\n" +
-      "    is bounded'; this bounds the UI and never cancels the request",
+      "    is bounded'; this bounds the UI and never cancels the request\n" +
+      "    CLOSED: `ui` and `uiInvariants` get the symmetric second read after the\n" +
+      "    observation window, and a label that was RIGHT at the probe and moved\n" +
+      "    afterwards is reported as ui@late. A label that started wrong and\n" +
+      "    converged is still not a bug — the unbound control below proves the\n" +
+      "    rule is not just 'read it twice and complain'.",
   );
   const plans = shippedPlans("timeout-ladder", ["report-quick", "report-slow", "report-tooSlow"]);
   const timing = resolvePlanTiming({
@@ -356,9 +472,26 @@ async function F4(): Promise<void> {
     console.log(verdict(runs[fixed ? "fixed" : "buggy"]!));
   }
 
-  // The control must still be caught, or this page proves nothing.
+  // The control must still be caught, or this page proves nothing — and it must
+  // be caught as ONE `ui` mismatch, not as `ui` plus `ui@late`: that page reads
+  // "stuck" at the probe and "ready" afterwards, and doubling it up would make
+  // one bug look like two.
   expectFields("F4 unbound control (report-tooSlow)", runs.buggy!, ["ui"]);
-  expectFields("F4 Promise.race variant (all three rungs)", runs.fixed!, []);
+  expectFields("F4 Promise.race variant (all three rungs)", runs.fixed!, ["ui@late"]);
+  expectDistinguishable("F4 timeout-ladder", runs.fixed!, runs.buggy!, [
+    "race-bound (the app under audit)",
+    "unbound control",
+  ]);
+  assert(
+    "F4 the late mismatch names both labels and the window",
+    runs.fixed!.some((r) =>
+      r.mismatches.some(
+        (m) => m.field === "ui@late" && /moved to "ready"/.test(m.detail) && r.observed.ui === "error",
+      ),
+    ),
+    runs.fixed!.flatMap((r) => r.mismatches.map((m) => `${m.field}: ${m.detail}`)).join(" | ") ||
+      "(no mismatch)",
+  );
 
   // Independent: the same too-slow response, watched past the probe.
   const server = await boot(true);
@@ -471,9 +604,56 @@ async function F5(): Promise<void> {
 // =====================================================================
 async function F6(): Promise<void> {
   console.log(
-    "\n=== F6  the contract-forbids targets a model checker can only answer one way ===",
+    "\n=== F6  the contract-forbids targets a model checker can only answer one way ===\n" +
+      "    CLOSED as tooling: the mechanism below is promoted into\n" +
+      "    patterns/vacuity.mjs, every enumerate.sh calls it, and targets.txt now\n" +
+      "    records `unreachable-live` or `unreachable-by-construction` per target\n" +
+      "    instead of one word for both. The 9 remaining by-construction rows are\n" +
+      "    labelled rather than deleted — each is a prompt to write the knob or\n" +
+      "    drop the query, and reconnect-budget's headline property got the knob.",
   );
+  // The red team's own script, unmodified: it is the measurement, and it still
+  // reports which targets a witness could ever have answered.
   run(new URL("./model-vacuity.mts", import.meta.url));
+
+  // …and the assertion the finding turns into: no `contract-forbids-*` row may
+  // be recorded with the same word as its neighbours any more.
+  const unclassified: string[] = [];
+  const headline: string[] = [];
+  for (const pattern of [
+    "retry-idempotency",
+    "token-refresh",
+    "timeout-ladder",
+    "optimistic-rollback",
+    "pagination-order",
+    "reconnect-budget",
+  ]) {
+    const txt = readFileSync(
+      fileURLToPath(new URL(`../patterns/${pattern}/targets.txt`, import.meta.url)),
+      "utf8",
+    );
+    for (const line of txt.split("\n")) {
+      const m = /^(\S+)\s+(contract-forbids-\S+)/.exec(line);
+      if (!m) continue;
+      if (m[1] === "unreachable") unclassified.push(`${pattern}/${m[2]}`);
+      if (pattern === "reconnect-budget" && m[2] === "contract-forbids-runaway") {
+        headline.push(m[1]!);
+      }
+    }
+  }
+  assert(
+    "F6 every contract-forbids target records whether a witness was possible",
+    unclassified.length === 0,
+    unclassified.length === 0
+      ? "all rows classified live / by-construction"
+      : `still unclassified: ${unclassified.join(", ")}`,
+  );
+  assert(
+    "F6 reconnect-budget's headline property can now fail",
+    headline[0] === "unreachable-live",
+    `contract-forbids-runaway is recorded as ${headline[0] ?? "(missing)"} ` +
+      `(it was a restatement of its own assignment until BUDGETED existed)`,
+  );
 }
 
 // =====================================================================
@@ -488,10 +668,14 @@ async function F7(): Promise<void> {
       "    it gets away with 531ms only because every enumerated failure is an\n" +
       "    instantaneous client-side reject. The dropped stream the README names\n" +
       "    ('a reconnect loop', 'the retry also fails') takes the app's own\n" +
-      "    500ms deadline to fail, three times over.",
+      "    500ms deadline to fail, three times over.\n" +
+      "    CLOSED: the bridge declares appLadder { attempts: 3, backoffsMs: [60,120] }\n" +
+      "    alongside appDeadlineMs and a settleMs that covers it, validated by the\n" +
+      "    settle_outlasts_app_ladder constraint. The same hand-written hang plan\n" +
+      "    now passes against the correct client it always described.",
   );
-  // Hand-written, and NOT a plan the shipped model can compile to: reconnect.qnt
-  // has fulfil/reject actions only, so there is no `hang` rung in the ladder.
+  // Hand-written, and still NOT a plan the shipped model can compile to:
+  // reconnect.qnt has fulfil/reject actions only, so there is no `hang` rung.
   // That absence is the finding — the rung a model of a dropped stream would
   // obviously add is the one the solved window cannot survive. The app under it
   // is the shipped page in its FIXED variant: a correct, budgeted client.
@@ -529,10 +713,28 @@ async function F7(): Promise<void> {
       `    attempts the client actually made: ${seen.attempts}`,
   );
   assert(
-    "F7 a correct, budgeted client is reported as an endless spinner",
-    fields(results).includes("ui") && seen.after.state === "offline" && seen.attempts === 3,
-    `oracle said ui="${r.observed.ui}" at settleMs=531; the app reached ` +
-      `"${seen.after.state}" after ${seen.attempts} attempts`,
+    "F7 the correct, budgeted client is no longer reported as an endless spinner",
+    fields(results).length === 0 && seen.after.state === "offline" && seen.attempts === 3,
+    `oracle said ui="${r.observed.ui}" with ${fields(results).length} mismatch(es) at ` +
+      `settleMs=${reconnectBridge.settleMs}; the app reached "${seen.after.state}" after ` +
+      `${seen.attempts} attempts (it used to be judged at 531ms, one attempt in)`,
+  );
+  assert(
+    "F7 the window solved for one round is refused, not silently used",
+    (() => {
+      try {
+        resolvePlanTiming({
+          settleMs: 531,
+          appDeadlineMs: reconnectBridge.appDeadlineMs,
+          appLadder: reconnectBridge.appLadder,
+          timingProfile: reconnectBridge.timingProfile,
+        });
+        return false;
+      } catch (err) {
+        return /settle_outlasts_app_ladder/.test(err instanceof Error ? err.message : "");
+      }
+    })(),
+    "resolvePlanTiming rejects settleMs=531 against a ladder of 3 x 500ms + [60, 120]",
   );
 }
 
@@ -565,16 +767,22 @@ async function watchLadder(
 async function F8(): Promise<void> {
   console.log(
     "\n=== F8  token-refresh: the rung the model has no action for ===\n" +
-      "    rules = { me, prefs }; /api/refresh is not an operation, and\n" +
-      "    refreshAndReplay is one atomic action that always succeeds. So no\n" +
-      "    plan can make the refresh fail — and a client that retries a failed\n" +
-      "    refresh forever satisfies all four committed plans.",
+      "    rules WERE { me, prefs }; /api/refresh was not an operation, and\n" +
+      "    refreshAndReplay was one atomic action that always succeeded. So no\n" +
+      "    plan could make the refresh fail — and a client that retries a failed\n" +
+      "    refresh forever satisfied all four committed plans.\n" +
+      "    CLOSED: /api/refresh is an operation, refreshAndReplay is split into\n" +
+      "    refresh + replay, and `refresh-failed` is a COMMITTED plan — the fifth\n" +
+      "    below is loaded from plans/ like every other one, not hand-written.",
   );
   const plans = shippedPlans("token-refresh", [
     "me-fresh__prefs-fresh",
     "me-fresh__prefs-replayed",
     "me-replayed__prefs-fresh",
     "me-replayed__prefs-replayed",
+    // The rung. Its schedule 401s the refresh itself, which nothing in the old
+    // model could express.
+    "refresh-failed",
   ]);
 
   const runs: Record<string, PlanRunResult[]> = {};
@@ -588,14 +796,32 @@ async function F8(): Promise<void> {
     });
     console.log(`\n  variant=${label} (failed refresh: ${fixed ? "give up" : "retry forever"})`);
     console.log(verdict(runs[label]!));
+    const rung = runs[label]!.find((r) => r.plan.name === "refresh-failed")!;
     console.log(
-      `          POST /api/refresh seen by the server across the four plans: ` +
-        `${callsOn("/api/refresh", "POST").length}`,
+      `          POST /api/refresh seen by the server across the five plans: ` +
+        `${callsOn("/api/refresh", "POST").length}; on refresh-failed the fault layers ` +
+        `counted ${rung.observed.matched.refresh} and the page reported ui=${rung.observed.ui}`,
     );
   }
-  expectFields("F8 buggy (all four plans)", runs.buggy!, []);
-  expectFields("F8 fixed (all four plans)", runs.fixed!, []);
-  expectIndistinguishable("F8 token-refresh", runs.buggy!, runs.fixed!);
+  // The four old plans still pass in both variants — they must, or the rung
+  // would be flagging refreshes in general. What separates the two apps is the
+  // fifth plan, and it separates them by three signals at once.
+  expectFields("F8 buggy (five plans)", runs.buggy!, ["amplification", "state", "ui"]);
+  // The red team's "fixed" page gives up — and says "Could not load your
+  // account", not "you are signed out". Under the rung the model now states,
+  // giving up silently is still a violation: one `ui` mismatch, no
+  // amplification, no state. That the two apps differ by exactly the retry loop
+  // is the closure; that this page is not clean is the rung having content.
+  expectFields("F8 fixed (five plans)", runs.fixed!, ["ui"]);
+  expectDistinguishable("F8 token-refresh", runs.buggy!, runs.fixed!);
+  const rung = (label: string) =>
+    runs[label]!.find((r) => r.plan.name === "refresh-failed")!.observed.matched.refresh ?? 0;
+  assert(
+    "F8 the retry loop is now a number the plan states, not an unreachable branch",
+    rung("buggy") > 1 && rung("fixed") === 1,
+    `refresh calls on the refresh-failed plan: buggy=${rung("buggy")} fixed=${rung("fixed")} ` +
+      `(the plan states exactly 1)`,
+  );
 
   // Independent: the rung itself, driven by hand because no plan can express it.
   const stampede: Record<string, number> = {};

@@ -31,7 +31,18 @@ emit "connect-on-3" 'a1 == "reject" and a2 == "reject" and a3 == "fulfil"'
 emit "budget-exhausted" 'a1 == "reject" and a2 == "reject" and a3 == "reject"'
 
 # The states the contract forbids. A witness here means the SPEC is wrong.
+#
+# `vacuity.mjs` below re-asks each of these against a knob-inverted copy of the
+# model, so the file records which of them a witness could ever have answered:
+# `unreachable-live` is a verification result, `unreachable-by-construction` is
+# a predicate the model's own arithmetic makes an identity. All four here are
+# live because of `BUDGETED` — before that knob existed, three of them restated
+# their own assignments and `contract-forbids-runaway`, this pattern's headline
+# property, could only ever come back one way.
 emit "contract-forbids-runaway" "not(withinBudget)"
 emit "contract-forbids-endless-spinner" "not(noEndlessSpinner)"
 emit "contract-forbids-unhandled" "unhandled"
 emit "contract-forbids-phantom-live" "not(noPhantomLive)"
+
+# Classify the contract-forbids rows above (quint run, ~3s, no JVM).
+node ../vacuity.mjs reconnect-budget --annotate

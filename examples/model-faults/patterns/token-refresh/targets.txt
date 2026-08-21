@@ -2,6 +2,8 @@ reachable    me-fresh__prefs-fresh
 reachable    me-fresh__prefs-replayed
 reachable    me-replayed__prefs-fresh
 reachable    me-replayed__prefs-replayed
-unreachable  contract-forbids-stampede
-unreachable  contract-forbids-error
-unreachable  contract-forbids-unhandled
+reachable    refresh-failed
+unreachable-live            contract-forbids-stampede
+unreachable-live            contract-forbids-error
+unreachable-live            contract-forbids-unhandled
+unreachable-live            contract-forbids-refresh-loop

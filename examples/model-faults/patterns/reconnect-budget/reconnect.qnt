@@ -33,9 +33,15 @@ module reconnect {
   // --- the contract -----------------------------------------------------
   /// Three tries, then say so. The number is arbitrary; having one is not.
   pure val MAX_ATTEMPTS = 3
+  /// …and *having* one is the knob. Without it `withinBudget` below would be a
+  /// restatement of the only assignment to `attempts` — true by construction,
+  /// reported as `unreachable` because no arithmetic could contradict it rather
+  /// than because a contract forbids anything. With it the query has two
+  /// possible answers, which is what makes it a query. See `vacuity.mjs`.
+  pure val BUDGETED = true
   pure val HANDLES_EVERY_REJECTION = true
 
-  pure def budgetSpent(n: int): bool = n >= MAX_ATTEMPTS
+  pure def budgetSpent(n: int): bool = BUDGETED and n >= MAX_ATTEMPTS
 
   action init = all {
     attempts' = 0,
@@ -99,7 +105,8 @@ module reconnect {
 
   // --- properties -------------------------------------------------------
   /// The whole point. A client that keeps trying is not being patient, it is
-  /// participating in a retry storm.
+  /// participating in a retry storm. Falsifiable exactly when `BUDGETED` is
+  /// false, which is the implementation this pattern exists to catch.
   val withinBudget = attempts <= MAX_ATTEMPTS
   /// The spinner does not outlive the budget.
   val noEndlessSpinner = not(a3 == "reject") or ui == "offline"

@@ -15,11 +15,28 @@ const timingProfile = JSON.parse(
 
 export default {
   rules: {
-    stream: { urlPattern: /\/api\/stream$/, methods: ["GET"] },
+    // `(\?|$)`, not `$`. Under `expect.calls` the regex is not a selector, it
+    // is the definition of the number being asserted: a resumable stream
+    // carries a cursor (`/api/stream?cursor=…`, `Last-Event-ID`), and an
+    // anchored pattern neither faults nor counts those — 58 requests would be
+    // reported as the 9 the model predicted. The runner refuses the anchored
+    // form here for exactly that reason.
+    stream: { urlPattern: /\/api\/stream(\?|$)/, methods: ["GET"] },
   },
 
   /** Must match DEADLINE_MS in public/stream.js — the test asserts it does. */
   appDeadlineMs: 500,
+  /**
+   * …and the ladder that deadline is climbed with, from the same file. This
+   * pattern's terminal state is MAX_ATTEMPTS rounds away, not one: 3 x 531ms
+   * plus BACKOFF_MS [60, 120] = 1773ms. The window solved from the deadline
+   * alone is 531ms, which is enough only because every enumerated failure is
+   * an instantaneous client-side reject — the moment the ladder grows a rung
+   * that costs the app its own timeout (a dropped stream, which is the failure
+   * this pattern is named for), that window ends before the client has made
+   * its third attempt and reports a correct client as an endless spinner.
+   */
+  appLadder: { attempts: 3, backoffsMs: [60, 120] },
   timingProfile,
 
   action: async (page) => {
@@ -29,7 +46,8 @@ export default {
   uiProbe: async (page) => {
     const state = await page.locator("#app").getAttribute("data-state");
     // Still connecting when the probe fires means the budget outlived the
-    // window the app's own deadline implies — a spinner with no end.
+    // whole ladder the app declares (see appLadder) — a spinner with no end,
+    // rather than a client that has not finished its second attempt yet.
     return state === "connecting" ? "stuck" : (state ?? "unknown");
   },
 
@@ -44,6 +62,12 @@ export default {
       ),
   },
 
-  // No settleMs: solved from appDeadlineMs + timingProfile. Three attempts and
-  // two backoffs (60ms + 120ms) finish well inside it.
+  /**
+   * Declared *alongside* appDeadlineMs, which is what appLadder is for: the
+   * solved delays for `slow-ok` / `slow-trip` still come from the profile,
+   * while the probe waits out the whole ladder. Validated against it
+   * (`settle_outlasts_app_ladder`) rather than trusted — 1773ms is the
+   * minimum, and this is that plus a round of slack.
+   */
+  settleMs: 1800,
 };

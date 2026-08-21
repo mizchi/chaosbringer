@@ -9,6 +9,12 @@
     },
     {
       "order": 1,
+      "rule": "refresh",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 2,
       "rule": "me",
       "outcome": "pass",
       "occurrence": 0
@@ -19,7 +25,10 @@
     "unhandledRejection": false,
     "state": {
       "refreshes": 1
+    },
+    "calls": {
+      "refresh": 1
     }
   },
-  "modelSteps": 4
+  "modelSteps": 5
 }

@@ -2,7 +2,7 @@ reachable    connect-on-1
 reachable    connect-on-2
 reachable    connect-on-3
 reachable    budget-exhausted
-unreachable  contract-forbids-runaway
-unreachable  contract-forbids-endless-spinner
-unreachable  contract-forbids-unhandled
-unreachable  contract-forbids-phantom-live
+unreachable-live            contract-forbids-runaway
+unreachable-live            contract-forbids-endless-spinner
+unreachable-live            contract-forbids-unhandled
+unreachable-live            contract-forbids-phantom-live

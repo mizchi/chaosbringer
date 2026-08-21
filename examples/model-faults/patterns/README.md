@@ -18,7 +18,7 @@ pnpm test:patterns                                          # all of them, both 
 | [`reconnect-budget`](./reconnect-budget/) | A reconnect loop with no cap. Retrying a dropped stream is not the question; what the client does when the retry *also* fails is, because every client in the fleet is doing it at once against the service that is already failing. | **No, and worse than no.** The uncapped client eventually connects, so it renders a success. "It recovers" and "it hammers a failing service until it recovers" differ by one number. |
 | [`timeout-ladder`](./timeout-ladder/) | A request with no bound. Slow and never are different failures: the first must still render, the second must give up. An unbounded app handles the slow case perfectly — which is why the missing bound survives review. | **Yes**, but only if you wait long enough — which is why this pattern's probe window is *solved*, not guessed. |
 | [`optimistic-rollback`](./optimistic-rollback/) | An optimistic row the server never took. "Roll back on error" is the wrong contract: a request that never arrived and a reply that could not be read need *opposite* corrections, and only asking the server tells them apart. | **Partly.** The row that should have vanished is visible — but the app that keeps a committed row *without asking* looks identical to one that knows, and only the missing read separates them. |
-| [`token-refresh`](./token-refresh/) | A refresh stampede. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload, and on a rotating refresh token the second invalidates the first and logs the user out. | **No.** Both variants render the account fine; only the refresh count differs. |
+| [`token-refresh`](./token-refresh/) | A refresh stampede, and the retry loop under it. Two requests hitting 401 together must share one in-flight refresh; one refresh per 401 hammers the endpoint you least want to overload. And when the *refresh* comes back 401 there is nothing left to try — retrying it is where an auth-loop outage comes from. | **No** for the stampede: both variants render the account fine and only the count differs. **Yes** for the failed refresh, and only because the fixed client says so out loud instead of spinning. |
 
 ## Why these need a state probe
 
@@ -36,6 +36,16 @@ state assertion passes. What distinguishes it from an app that knows is a
 request — the reconcile read — so the model counts list reads and
 `--calls-var list=listCalls` lifts that count into `expect.calls`. A call the
 app owes the user is not always a call a fault can target.
+
+That count proves the request, and a count of requests cannot prove that
+anybody read the answer. `void refetch()` / `invalidateQueries()` next to a
+local promotion issues the GET, drops the body, keeps the row under a
+`local-1` id no other client can address — and satisfies `expect.calls`,
+`committed == shown`, and every plan in both directions. So the bridge also
+declares a `uiInvariants` entry that compares the rows' `data-id`s against the
+server's own ids, read from `/api/notes/count` (an endpoint neither rule
+matches, so the check cannot inflate the count it sits next to). The count says
+the app asked; the ids say it listened.
 
 ## Why one pattern needs a UI invariant instead
 
@@ -59,6 +69,20 @@ and a stale or reordered response there is outside what any oracle can see —
 see the recipe's [What the oracle still cannot
 see](../../../docs/recipes/model-driven-faults.md).
 
+And the corollary's corollary, which is where this nearly went wrong: the
+attribute has to be **independently derivable** from the row's content or from
+the response it came from. `data-idx` is written by the app, so an invariant
+that compares it against its own sort is only an assertion while that holds. An
+app that writes the *render position* into it — `dataset.idx =
+list.children.length + 1`, which is the shape of every `key={i}` bug — is
+ascending and unique by construction: the check compares the render order
+against itself and cannot fail, on a page whose visible rows read
+`Post 3, Post 4, Post 1, Post 2`. So the invariant correlates two sources that
+come from different places first (the attribute against the row's own rendered
+`Post <idx>`, which comes from the payload) and only then asks whether the
+sequence is in order. One derived attribute is an opinion; two sources that have
+to agree is an assertion.
+
 ## Why one pattern is only a number
 
 `reconnect-budget` has no `stateProbe` and asserts no state, because there is
@@ -67,6 +91,21 @@ same spinner and then the same connection; what separates them is how many
 requests they were willing to make, and no page can report that about itself.
 So the model counts attempts and `--calls-var stream=attempts` lifts the total
 into `expect.calls`.
+
+Which puts all the weight on one regex, and that is worth saying out loud. When
+`expect.calls` is the only judge, the rule's `urlPattern` is not selecting
+requests for the assertion — it *is* the number being asserted. `/\/api\/stream$/`
+does not match `/api/stream?cursor=…`, so a client that resumes with a cursor
+every 25ms forever is neither faulted nor counted: 58 requests, reported as the
+9 the model predicted, in a pattern that has no state probe and no other
+assertion. The rule is `(\?|$)`-terminated for that reason, and the runner now
+*refuses* a `$`-anchored pattern on any operation a plan counts, before the
+browser launches. Anchoring elsewhere is fine — `pagination-order` anchors
+`?page=1$` on purpose — because there too narrow shows up as a missing
+injection rather than as a wrong number.
+
+Its window is declared rather than solved, for the same "the contract is a
+ladder" reason: see the timing note in [Anatomy](#anatomy-of-a-pattern) below.
 
 Its buggy variant is worth sitting with. Given three failures it makes a fourth
 attempt — which the schedule lets through, because a schedule describes the
@@ -89,10 +128,20 @@ patterns/<name>/
   <name>.qnt      the contract: what a correct implementation must do
   enumerate.sh    witness per target state (dev-time: Quint + a JVM)
   compile.sh      witnesses -> plans, carrying this pattern's compile options
-  targets.txt     what was asked, including what came back unreachable
+  targets.txt     what was asked, including what came back unreachable —
+                  and, for the contract-forbids rows, whether a witness was
+                  ever possible (`unreachable-live` vs
+                  `unreachable-by-construction`)
   traces/         ITF witnesses
   plans/          compiled plans (committed; replay needs no Quint)
   bridge.mjs      rules / action / uiProbe / stateProbe for the app
+```
+…plus one file shared by all of them, [`vacuity.mjs`](./vacuity.mjs), which
+every `enumerate.sh` calls at the end:
+
+```bash
+node patterns/vacuity.mjs                    # all seven models, ~21s, no JVM
+node patterns/vacuity.mjs reconnect-budget   # one of them
 ```
 …plus a page in [`../public/`](../public/), its routes in
 [`../server.ts`](../server.ts), and a row in [`index.mjs`](./index.mjs).
@@ -118,8 +167,29 @@ Two conventions that keep them honest:
   instead of extending one job's wall clock. A pattern that owns its compile
   options in `compile.sh` needs no CI change at all; one that leaves them in a
   README needs a human to remember, which is the same as not having them.
-- **Model actions that are not injections get `--ignore-action`.** The refresh
-  in `token-refresh` is something the app does, not something a fault does.
+- **A `contract-forbids-*` query has to be able to fail.** `quint verify`
+  answers "unreachable" the same way whether the contract forbids the state or
+  the predicate restates the model's own arithmetic, and both cost ~14s and a
+  JVM. `vacuity.mjs` re-asks each one against a knob-inverted copy of the model
+  and writes `unreachable-live` or `unreachable-by-construction` into
+  `targets.txt`. Where the *headline* property turns out to be a tautology,
+  give the model the knob that makes it falsifiable: `reconnect.qnt`'s
+  `withinBudget` was a restatement of its own assignment until `BUDGETED`
+  existed, and that one knob made all four of that pattern's targets live.
+- **Model actions that are not injections get `--ignore-action`** — but check
+  whether they should be actions instead. `token-refresh` used to ignore its
+  `refresh`: the endpoint was not in `rules`, `refreshAndReplay` was atomic and
+  always succeeded, and so *no plan could make the refresh fail* — the one rung
+  where a client that loops against a failing refresh differs from one that
+  gives up. Splitting it into `refresh` + `replay` and giving the endpoint a
+  rule of its own is what made that rung expressible; the flag went away with
+  the atomicity it was papering over.
+- **A window is one bounded round unless you say otherwise.** `appDeadlineMs`
+  describes one request, so the solved `settleMs` covers one. If your app
+  retries, declare the ladder — `appLadder: { attempts, backoffsMs }` plus a
+  `settleMs` that covers it — and the pre-flight validates the pair.
+  `reconnect-budget` got away with a 531ms window against a 1680ms ladder only
+  because every enumerated failure is an instantaneous client-side reject.
 - **Never put milliseconds in a plan.** `timeout-ladder` uses the `slow-ok` /
   `slow-trip` outcomes, which carry intent only: the bridge supplies
   `appDeadlineMs` and a calibration profile, and the runner solves the actual

@@ -199,7 +199,12 @@ async function holeA(): Promise<void> {
 const bridgeB = {
   rules: {
     feed: /\/api\/feed$/,
-    telemetry: { urlPattern: /\/api\/telemetry$/, methods: ["POST"] },
+    // `(\?|$)` rather than `$`: the `+calls` run below states expect.calls on
+    // this operation, and there the pattern defines the number being asserted
+    // rather than selecting requests for it — a beacon with a cache-buster
+    // would be neither faulted nor counted. The runner refuses the anchored
+    // form for exactly that reason.
+    telemetry: { urlPattern: /\/api\/telemetry(\?|$)/, methods: ["POST"] },
   },
   action: async (page: import("playwright").Page) => {
     await page.getByRole("button", { name: "Start" }).click();

@@ -37,3 +37,12 @@ done
 emit "contract-forbids-double-write" "orders >= 2"
 emit "contract-forbids-unhandled" "unhandled"
 emit "contract-forbids-phantom-success" 'ui == "placed" and orders == 0'
+
+# Classify the contract-forbids rows above: each one is re-asked against a
+# knob-inverted copy of the model, so `targets.txt` distinguishes "unreachable
+# because the contract forbids it" (`unreachable-live` — the checker could have
+# said either thing) from "unreachable because the predicate is an identity of
+# the model's own arithmetic" (`unreachable-by-construction` — a query with one
+# possible answer, which the ~14s Apalache run above cannot tell you).
+# quint run, ~3s, no JVM.
+node ../vacuity.mjs retry-idempotency --annotate

@@ -14,5 +14,5 @@ reachable    cart-hung__shipping-fulfilled  opState.get("cart") == "hung" and op
 reachable    cart-hung__shipping-rejected  opState.get("cart") == "hung" and opState.get("shipping") == "rejected"  (witness: 3 steps)
 reachable    cart-hung__shipping-bodyRejected  opState.get("cart") == "hung" and opState.get("shipping") == "bodyRejected"  (witness: 3 steps)
 reachable    cart-hung__shipping-hung  opState.get("cart") == "hung" and opState.get("shipping") == "hung"  (witness: 3 steps)
-unreachable  contract-forbids-stuck  ui == "stuck"
-unreachable  contract-forbids-unhandled  unhandled
+unreachable-live            contract-forbids-stuck  ui == "stuck"
+unreachable-live            contract-forbids-unhandled  unhandled

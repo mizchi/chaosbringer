@@ -19,6 +19,9 @@
     "unhandledRejection": false,
     "state": {
       "refreshes": 0
+    },
+    "calls": {
+      "refresh": 0
     }
   },
   "modelSteps": 3

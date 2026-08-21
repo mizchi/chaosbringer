@@ -45,9 +45,31 @@ export default {
   uiInvariants: {
     // "*" — the claim holds under every label the model can predict. A feed
     // with a failed page is still a feed in order.
+    //
+    // Two checks, and the first one is what makes the second mean anything.
+    // `data-idx` is written by the app, so comparing it against its own sort
+    // is only an assertion while the attribute is *independently derivable*
+    // from the row: an app that writes the render position into it
+    // (`dataset.idx = list.children.length + 1`, the shape of every
+    // `key={i}` bug) is ascending and unique by construction, and the
+    // ordering check compares the render order against itself. So correlate
+    // two sources that come from different places first — the attribute
+    // against the row's own rendered content, which comes from the payload —
+    // and only then ask whether the sequence is in order.
     "*": async (page) =>
       page.evaluate(() => {
-        const idx = [...document.querySelectorAll("#items li")].map((li) => Number(li.dataset.idx));
+        const rows = [...document.querySelectorAll("#items li")];
+        const mislabelled = rows
+          .filter((li) => li.textContent.trim() !== `Post ${li.dataset.idx}`)
+          .map((li) => `${li.dataset.idx}≠"${li.textContent.trim()}"`);
+        if (mislabelled.length > 0) {
+          return (
+            `a row's index does not match its own content: ${mislabelled.join(", ")} — ` +
+            `data-idx is not derived from the response, so "in order" is the app's ` +
+            `opinion of its own order`
+          );
+        }
+        const idx = rows.map((li) => Number(li.dataset.idx));
         const sorted = [...idx].sort((a, b) => a - b);
         if (idx.join() !== sorted.join()) {
           return `rows are out of order: rendered ${idx.join(",")}, expected ${sorted.join(",")}`;

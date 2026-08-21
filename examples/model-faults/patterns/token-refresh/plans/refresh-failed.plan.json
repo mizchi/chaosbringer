@@ -1,34 +1,34 @@
 {
-  "name": "me-replayed__prefs-fresh",
+  "name": "refresh-failed",
   "schedule": [
     {
       "order": 0,
-      "rule": "me",
+      "rule": "prefs",
       "outcome": "status",
       "occurrence": 0
     },
     {
       "order": 1,
       "rule": "refresh",
-      "outcome": "pass",
+      "outcome": "status",
       "occurrence": 0
     },
     {
       "order": 2,
-      "rule": "prefs",
-      "outcome": "pass",
+      "rule": "me",
+      "outcome": "status",
       "occurrence": 0
     }
   ],
   "expect": {
-    "ui": "ready",
+    "ui": "signedOut",
     "unhandledRejection": false,
     "state": {
-      "refreshes": 1
+      "refreshes": 0
     },
     "calls": {
       "refresh": 1
     }
   },
-  "modelSteps": 5
+  "modelSteps": 4
 }

@@ -113,24 +113,65 @@ describe("pattern: token-refresh", () => {
 
   it("asserts one refresh per expiry, whatever the 401 fan-out", () => {
     const plans = loadPlans(pattern.name);
-    expect(plans).toHaveLength(4); // {me fresh|expired} x {prefs fresh|expired}
+    // {me fresh|expired} x {prefs fresh|expired}, plus the rung where the
+    // refresh itself 401s — the one the model had no action for, so no plan
+    // could express it and a client that retries a failing refresh forever
+    // satisfied every one of the four.
+    expect(plans).toHaveLength(5);
+    const byName = new Map(plans.map((p) => [p.name, p]));
     for (const plan of plans) {
+      // The endpoint's own count, read back from /api/refresh/count…
       expect(Number(plan.expect.state!.refreshes)).toBeLessThanOrEqual(1);
-      // Every enumerated state ends ready: an expiry the app handles must
-      // never reach the user as an error.
-      expect(plan.expect.ui).toBe("ready");
+      // …and the client's, counted by the fault layers. Two numbers, because a
+      // refresh a plan 401s is a POST the server never sees: the load claim
+      // ("one refresh per expiry wave") only survives on this one.
+      expect(plan.expect.calls!.refresh).toBeLessThanOrEqual(1);
     }
+    for (const name of [
+      "me-fresh__prefs-fresh",
+      "me-fresh__prefs-replayed",
+      "me-replayed__prefs-fresh",
+      "me-replayed__prefs-replayed",
+    ]) {
+      // An expiry the app handles must never reach the user as an error.
+      expect(byName.get(name)!.expect.ui).toBe("ready");
+    }
+    // An expiry it *cannot* handle must reach the user as a terminal state
+    // rather than as a spinner over a retry loop.
+    expect(byName.get("refresh-failed")!.expect.ui).toBe("signedOut");
+    expect(byName.get("refresh-failed")!.expect.calls).toEqual({ refresh: 1 });
+    // …and the control says the endpoint is not touched at all, which is a
+    // claim only `expect.calls` can make: there is no failure to observe.
+    expect(byName.get("me-fresh__prefs-fresh")!.expect.calls).toEqual({ refresh: 0 });
   });
 
-  it("catches the stampede, and only when both requests hit 401 together", async () => {
+  it("catches the stampede, and the retry loop underneath it", async () => {
     const results = await run(pattern, false);
 
-    // Two concurrent 401s, one shared refresh required.
+    // Two concurrent 401s, one shared refresh required. Both counters move,
+    // and neither is redundant: `state` is what the endpoint served, and
+    // `amplification` is what the client issued.
     const both = results.find((r) => r.plan.name === "me-replayed__prefs-replayed")!;
-    expect(both.mismatches.map((m) => m.field)).toEqual(["state"]);
+    expect(both.mismatches.map((m) => m.field).sort()).toEqual(["amplification", "state"]);
     expect(both.observed.state).toEqual({ refreshes: 2 });
+    expect(both.observed.matched.refresh).toBe(2);
     // The user saw nothing wrong — hence the state probe.
     expect(both.observed.ui).toBe("ready");
+
+    // The rung no plan could reach before: /api/refresh itself comes back 401.
+    // A client that retries it hammers the endpoint that is already failing
+    // and then reports success, which is why all three signals fire.
+    const failed = results.find((r) => r.plan.name === "refresh-failed")!;
+    expect(failed.mismatches.map((m) => m.field).sort()).toEqual([
+      "amplification",
+      "state",
+      "ui",
+    ]);
+    expect(failed.observed.ui).toBe("ready"); // predicted "signedOut"
+    expect(failed.observed.matched.refresh!).toBeGreaterThan(1);
+    expect(
+      failed.mismatches.find((m) => m.field === "amplification")!.detail,
+    ).toMatch(/predicted 1 call\(s\) on "refresh"/);
 
     // One 401 needs one refresh in either variant: these are the controls, and
     // if they failed the pattern would be flagging refreshes in general.
@@ -139,10 +180,12 @@ describe("pattern: token-refresh", () => {
       expect(control.mismatches).toEqual([]);
       expect(control.observed.state).toEqual({ refreshes: 1 });
     }
-    // No expiry, no refresh.
-    expect(
-      results.find((r) => r.plan.name === "me-fresh__prefs-fresh")!.observed.state,
-    ).toEqual({ refreshes: 0 });
+    // No expiry, no refresh — and that zero is now compared rather than
+    // decoration: the operation gets a counting-only rule of its own.
+    const quiet = results.find((r) => r.plan.name === "me-fresh__prefs-fresh")!;
+    expect(quiet.observed.state).toEqual({ refreshes: 0 });
+    expect(quiet.observed.matched.refresh).toBe(0);
+    expect(quiet.mismatches).toEqual([]);
   }, 300000);
 
   it("passes every plan once the refresh is a single shared in-flight promise", async () => {
@@ -181,18 +224,32 @@ describe("pattern: optimistic-rollback", () => {
     // Nothing committed, row still on screen: the user believes it saved.
     for (const name of ["write-rejectBefore", "write-serverError"]) {
       const r = byName.get(name)!;
-      expect(r.mismatches.map((m) => m.field).sort()).toEqual(["amplification", "state"]);
+      expect(r.mismatches.map((m) => m.field).sort()).toEqual([
+        "amplification",
+        "state",
+        "uiInvariant",
+      ]);
       expect(r.observed.state).toEqual({ committed: 0, shown: 1 });
     }
 
     // The one that makes the pattern worth having. The server DID commit, so
     // the row on screen is correct and every state assertion passes — the app
-    // is right by luck, having verified nothing. Only the missing reconcile
-    // read separates it from an app that knows.
+    // is right by luck, having verified nothing. Two things separate it from an
+    // app that knows, and only together: the reconcile read it never made, and
+    // the row it is showing under an id no other client can address.
     const ambiguous = byName.get("write-rejectAfter")!;
-    expect(ambiguous.mismatches.map((m) => m.field)).toEqual(["amplification"]);
+    expect(ambiguous.mismatches.map((m) => m.field).sort()).toEqual([
+      "amplification",
+      "uiInvariant",
+    ]);
     expect(ambiguous.observed.state).toEqual({ committed: 1, shown: 1 });
     expect(ambiguous.observed.matched.list).toBe(1);
+    // …and that second signal is the one `expect.calls` cannot make. An app
+    // that issues the GET and drops the body — `void refetch()` next to a local
+    // promotion — satisfies the count and fails this.
+    expect(
+      ambiguous.mismatches.find((m) => m.field === "uiInvariant")!.detail,
+    ).toMatch(/screen shows note id\(s\) \[\(no id\)\] while the server holds \[note-1\]/);
 
     // The control: an optimistic update that succeeds must pass in both
     // variants, or the pattern would be flagging optimistic UI in general.
@@ -289,6 +346,40 @@ describe("pattern: reconnect-budget", () => {
     // No plan asserts state, because there is none to read: a client with a
     // budget and one without render the same spinner and the same connection.
     for (const plan of plans) expect(plan.expect.state).toBeUndefined();
+  });
+
+  it("waits out the app's whole ladder, not one attempt of it", async () => {
+    // The window used to be solved from appDeadlineMs alone — one bounded
+    // round, 531ms on this machine — while this pattern's contract is
+    // MAX_ATTEMPTS of them plus the backoffs. It got away with it only because
+    // every enumerated failure is an instantaneous client-side reject; the
+    // moment a rung costs the app its own timeout, the probe fires before the
+    // client has made its third attempt and a correct client reads as stuck.
+    const appSource = readFileSync(join(here, "..", "public", "stream.js"), "utf8");
+    const attempts = Number(appSource.match(/const MAX_ATTEMPTS = (\d+)/)![1]);
+    const backoffs = JSON.parse(appSource.match(/const BACKOFF_MS = (\[[^\]]*\])/)![1]) as number[];
+    const bridge = (await import("./reconnect-budget/bridge.mjs")).default;
+    expect(bridge.appLadder).toEqual({ attempts, backoffsMs: backoffs });
+
+    // The declared window covers the ladder…
+    const timing = resolvePlanTiming({
+      settleMs: bridge.settleMs,
+      appDeadlineMs: bridge.appDeadlineMs,
+      appLadder: bridge.appLadder,
+      timingProfile: bridge.timingProfile,
+    });
+    expect(timing.settleMs).toBe(bridge.settleMs);
+    expect(timing.settleMs).toBeGreaterThan(attempts * bridge.appDeadlineMs);
+    // …and the one solved for a single round is refused rather than silently
+    // used, which is the whole point of declaring the ladder.
+    expect(() =>
+      resolvePlanTiming({
+        settleMs: 600,
+        appDeadlineMs: bridge.appDeadlineMs,
+        appLadder: bridge.appLadder,
+        timingProfile: bridge.timingProfile,
+      }),
+    ).toThrow(/settle_outlasts_app_ladder/);
   });
 
   it("catches the runaway loop, and names it as a request count", async () => {

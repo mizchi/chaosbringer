@@ -28,7 +28,7 @@ artifacts, so CI needs neither Quint nor a JVM.
 |---|---|---|
 | Which combinations were attempted | unknown | enumerated, listed in the report |
 | Two-failure states | ~9% of actions at `p=0.3` per rule | one dedicated run, always |
-| "Cannot happen" | indistinguishable from "not seen" | reported as unreachable, with the depth bound |
+| "Cannot happen" | indistinguishable from "not seen" | reported as unreachable, with the depth bound — and classified `live` / `by-construction`, so a query with one possible answer does not read like a proof |
 | Expected outcome | generic invariants only | per-plan oracle from the model |
 | Reproduction | `--seed` plus the whole crawl | one plan file, one action |
 
@@ -73,6 +73,30 @@ queries the simulator already covered), and `quint run --mbt` stamps
 `mbt::actionTaken` onto each state so the compiler can read what fired without
 a model-side log variable.
 
+**"Unreachable" is only a result if a witness was possible.** These models are
+written as "set every contract knob to what a correct implementation must do,
+then the forbidden states are unreachable" — so a `contract-forbids-*` target
+is worth its ~14s of Apalache only if *some* setting of those knobs produces a
+witness. `not(attempts <= MAX_ATTEMPTS)` against
+`attempts' = if (budgetSpent(attempts)) attempts else attempts + 1` restates
+its own assignment: the query has one possible answer, and `targets.txt` used
+to record it exactly like the ones that had two.
+
+`examples/model-faults/patterns/vacuity.mjs` re-asks every such target against
+a knob-inverted copy of the model (`quint run --witnesses`, ~3s per model, no
+JVM) and each `enumerate.sh` calls it, so the row says which it was:
+
+```
+unreachable-live            contract-forbids-runaway
+unreachable-by-construction contract-forbids-partial-page
+```
+
+A `by-construction` row is a prompt, not a failure: either give the model the
+knob that makes the property falsifiable — that is what `BUDGETED` is for in
+`reconnect.qnt`, and it turned all four of that pattern's targets live — or drop
+the query and say why in the model's header. Do not leave a property claiming to
+be checked when it cannot fail.
+
 ### 3. Plans are the interchange format
 
 No probabilities, no seeds, no Quint concepts — reviewable JSON:
@@ -95,7 +119,7 @@ No probabilities, no seeds, no Quint concepts — reviewable JSON:
 | `ui` | the bridge's `uiProbe` | always — it is the model's terminal label |
 | `unhandledRejection` | the run's classified rejections | always |
 | `state` | the bridge's `stateProbe` | observables the UI does not show: write counts, refresh counts, rollback flags |
-| `calls` | requests seen per operation | when the model knows an operation's *total* call count, page-load calls included |
+| `calls` | requests seen per operation | when the model knows an operation's *total* call count, page-load calls included — including an operation the schedule never pins, where `0` states that the endpoint is not touched at all |
 
 `calls` exists because the schedule cannot say what must **not** happen. It
 pins the outcome of call 0 and call 1; it has no way to state that call 2 does
@@ -113,13 +137,29 @@ chaosbringer model compile --traces traces --out plans \
   --calls-var list=listCalls
 ```
 
-`--state-var` and `--calls-var` are not interchangeable. `expect.state` is
-compared against the bridge's `stateProbe`, so it can only carry things the
-page or its server can report about themselves; "how many times was this
-endpoint called" is not one of those, and is compared against what the fault
-layers counted. That is also why a rule whose steps are all `pass` still gets
-a counting-only route: without one there is no count to compare, and a bound
+`--state-var` and `--calls-var` are not interchangeable, and the two can
+disagree on purpose. `expect.state` is compared against the bridge's
+`stateProbe`, so it can only carry things the page or its server can report
+about themselves; "how many times was this endpoint called" is not one of
+those, and is compared against what the fault layers counted. `token-refresh`
+lifts both for the refresh endpoint — `refreshes` (what the server served,
+read from `/api/refresh/count`) and `refreshCalls` (what the client issued) —
+because a refresh whose 401 a plan injects is a request the client made and
+the server never saw, and the load claim only survives on the second number.
+
+That is also why a rule whose steps are all `pass` still gets a counting-only
+route, and why one named *only* by `expect.calls` gets one too: without a route
+there is no count to compare, so `{ "refresh": 0 }` — the strongest thing a
+control plan says — would be accepted, typechecked and never checked. A bound
 nobody applies is worse than no bound.
+
+One rule about the rule, learned the hard way: **a `$`-anchored `urlPattern` on
+an operation a plan counts is refused before the browser launches.** Everywhere
+else the regex is a selector, and too narrow shows up as a missing injection.
+Under `expect.calls` it *is* the number being asserted — `/\/api\/stream$/`
+neither faults nor counts `/api/stream?cursor=…`, so a client that resumed 58
+times reported exactly the 9 the model predicted. Write
+`/\/api\/stream(\?|$)/`.
 
 Outcomes are model-level, and the runner maps them onto fault kinds:
 
@@ -184,7 +224,9 @@ backend. The label was never wrong; what the label promised was.
 | field | what it catches |
 |---|---|
 | `ui` | the page ended somewhere the model did not predict |
+| `ui@late` | the page reported the predicted label *and then moved off it* during the observation window — the `Promise.race` "timeout" that bounds the banner and cancels nothing |
 | `uiInvariant` | the page reported the predicted label while breaking what that label promises (a `uiInvariants` entry returned a message) |
+| `uiInvariant@late` | the same invariant held at the probe and stopped holding during the window |
 | `unhandledRejection` | a rejection escaped every handler when the contract forbids it — or failed to escape when the model predicts one |
 | `unhandledRejection@late` | the same, but it escaped only *after* the probe, from work the app scheduled itself |
 | `state` | an observable the model named came out wrong, read once the run had settled |
@@ -218,9 +260,11 @@ commits it later, both land after it:
 action ──── settleMs ────▶ probe: ui, uiInvariants, state
                              │
                              ├── drain the timers the app scheduled itself
-                             ├── quiescenceMs (only when a plan names state)
+                             ├── quiescenceMs (when a plan names state, or a
+                             │                 ui label the page could move off)
                              ▼
-                           second state read, late-rejection classification
+                           second read: state, ui, uiInvariants;
+                           late-rejection classification
 ```
 
 - The runner instruments `setTimeout` / `setInterval` **before** firing the
@@ -239,6 +283,15 @@ action ──── settleMs ────▶ probe: ui, uiInvariants, state
   converged on the prediction is **not** reported: a 202-Accepted backend that
   commits late is not a bug, and failing that would make every queue-backed API
   flake.
+- `ui` and `uiInvariants` get the **symmetric** second look, under the same
+  soundness rule. A label that started wrong and converged is a page catching
+  up (the convergence goes in the `ui` detail, not into a second mismatch); a
+  label that started *right* and moved is `ui@late`. That is the whole shape of
+  a `Promise.race` "timeout": the banner says the report failed on schedule,
+  and 400ms later the report is on screen — from a request the app believes it
+  abandoned, which reached the server and consumed its work. The window is
+  only spent where it can pay: a plan that names no `ui` label and no state
+  observable, against a bridge with no invariants, pays nothing.
 
 Amplification is opt-in per bridge (`checkAmplification: true`) precisely
 because it is not sound by default. The span comparison asks "did the app make
@@ -273,6 +326,22 @@ guarantee.
   it. The window is a derived heuristic, not a proof of quiescence: what is
   still pending when the run ends is reported in
   `observed.pendingAsync` rather than silently dropped.
+- **A probe the app parameterises.** An `expect.state` probe that asks the app
+  *which bucket to read* can be lied to by the app. `retry-idempotency` reads
+  `/api/orders/count?session=window.__SESSION__` — the same value the page
+  sends as `x-session` — so the assertion is not "the server holds one order",
+  it is "the server holds one order in the bucket this page named". A client
+  that re-mints its session between attempts (a re-auth, a new client id, a
+  per-attempt tenant header) files the second write somewhere else, and the
+  probe reads the 1 the model predicted while the server holds 2. Both reads
+  agree, so the settled-read drift detail does not fire either: the value is
+  stable and wrong. The fix is not a smaller probe but a differently scoped
+  one — a server-side ledger scoped to the *run* rather than to a value the
+  page chose (`examples/model-faults/redteam/server.ts`'s `allSessions()` is
+  that shape) — and until the app under test exposes one, a bridge whose probe
+  reads a count should prefer the total to a slice. It is narrow: it needs the
+  write's scoping key to change between attempts. It is also the one place
+  where a passing `expect.state` proves nothing at all.
 - **Cross-operation settlement order.** Unchanged, and still the hard limit —
   see [Determinism boundary](#determinism-boundary).
 - **Non-fetch transports.** A `reject` outcome patches `fetch`, so an
@@ -299,6 +368,27 @@ export default {
 };
 ```
 
+An app that **retries** needs one more line, because `appDeadlineMs` describes
+one request and the app's terminal state is several away:
+
+```js
+export default {
+  appDeadlineMs: 500,                              // one bounded attempt
+  appLadder: { attempts: 3, backoffsMs: [60, 120] },  // …climbed three times
+  settleMs: 1800,          // declared, and validated against the ladder
+  timingProfile,
+};
+```
+
+`settleMs` and `appDeadlineMs` are not exclusive: declaring both is how an
+author who knows their app retries states the window while still getting solved
+`slow-ok` / `slow-trip` values. The ladder only *validates* — solving it would
+put a window nobody asked for on every plan — and the error names the number to
+write. Note the tripping delay is re-derived from the declared window rather
+than the solved one: `slow_outlasts_probe` is a statement about the probe
+instant, and a delay solved for a 531ms probe lands mid-window when the author
+declared 1800ms, where an unbounded app reads as healthy.
+
 What the solver derives, and why each one matters:
 
 | value | rule | what goes wrong without it |
@@ -309,6 +399,7 @@ What the solver derives, and why each one matters:
 | `quiescenceMs` | `>= deadline + tightTail + margin` | the run stops watching before the retry the app scheduled on the error path has run, so `unhandledRejection: false` describes a page nobody looked at |
 | `releaseMs` | `>= settleMs + margin` | a hang released before the probe is not observable as a hang |
 | `pageTimeout` | `>= fixed + settleMs + delayTail + margin` | the crawler kills the run mid-probe |
+| `settleMs`, when the bridge declares `appLadder` | `>= attempts × (deadline + tightTail + margin) + Σ backoffs` | `deadline` describes one request; a client that retries three times reaches its terminal state three rounds later, and a window solved for one of them reports a correctly budgeted client as an endless spinner |
 
 Infeasible is a first-class answer. A deadline smaller than the machine's own
 jitter cannot be tested at all, and the solver says so with the number to fix:
@@ -404,7 +495,8 @@ explicitly for exactly that reason.
 | `quint verify` (one target) | ~14s incl. JVM start | Quint + JVM |
 | `model compile` | milliseconds | Node |
 | `model run` (per plan) | ~2s (one browser, one action) | Node + Chromium |
-| …plus, for a plan naming `expect.state` | one `quiescenceMs` window | — |
+| `node patterns/vacuity.mjs` (all seven models) | ~21s, no JVM | Quint |
+| …plus, for a plan naming `expect.state` or an `expect.ui` label | one `quiescenceMs` window | — |
 | …plus, on a page with pending timers | up to `asyncDrainCapMs` (3s) | — |
 
 Enumerate at dev time or in a scheduled job, commit the plans, and re-check the
