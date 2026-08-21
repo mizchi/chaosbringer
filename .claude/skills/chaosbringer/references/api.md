@@ -213,6 +213,29 @@ the crawler's own (`pickFaultRule`), so schedules and occurrence numbering mean
 the same thing here. Nothing in this path uses exit codes or `strict` — those
 belong to `chaos()`.
 
+## Rejections the app let escape
+
+```ts
+import { watchUnhandledRejections } from "chaosbringer";
+
+const rejections = await watchUnhandledRejections(page);  // BEFORE page.goto
+await page.goto(url);
+await page.click("#save");
+// …wait settleMs…
+const escaped = await rejections.drain();     // [] if the app handled everything
+```
+
+Installed as an init script, so it must precede the navigation, and it survives
+navigation — one call covers a whole test. `drain()` empties as it reads, so a
+second probe after a quiescence window reports only what is new, and it returns
+`[]` rather than throwing once the page is closed.
+
+It claims each rejection with `preventDefault()`, which matters: without that,
+Chromium reports the same rejection a second time through
+`page.on("pageerror")`, so a harness listening to both counts one escape as two
+and files a rejection as a thrown exception. A real `throw` still reaches
+`pageerror` normally.
+
 ## The package is ESM-only
 
 `exports` declares `import` and no `require`, so from a directory without

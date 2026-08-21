@@ -461,6 +461,14 @@ export {
 // That subpath is unchanged. If you were importing those four names from the
 // package root, add `/fixture` — it is the only breaking edit here.
 
+// The rejections an app lets escape — the other half of an error-path oracle.
+export {
+  drainRejections,
+  watchUnhandledRejections,
+  type EscapedRejection,
+  type RejectionWatcher,
+} from "./rejections.js";
+
 // "Did my fault actually fire?", in one shape across all four layers.
 export {
   faultFirings,

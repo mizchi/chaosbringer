@@ -55,6 +55,7 @@ import {
   type CompiledFaultRule,
 } from "./fault-router.js";
 import { compileUrlMatcher } from "./url-matcher.js";
+import { drainRejections, watchUnhandledRejections } from "./rejections.js";
 import {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -629,18 +630,7 @@ export class ChaosCrawler {
 
   /** Pop and return any unhandled promise rejections captured since last call. */
   private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
-    try {
-      return await page.evaluate(() => {
-        // @ts-ignore
-        const bag = (window.__chaosRejections || []) as Array<{ message: string; stack?: string }>;
-        // @ts-ignore
-        window.__chaosRejections = [];
-        return bag;
-      });
-    } catch {
-      // Page may have navigated away; drop rejections rather than throwing.
-      return [];
-    }
+    return drainRejections(page);
   }
 
   /** Get the logger instance for external use */
@@ -1697,19 +1687,13 @@ export class ChaosCrawler {
       });
     }
 
-    // Capture unhandled promise rejections. Claim them via preventDefault so
-    // they don't also fire as `pageerror` (which we'd misclassify as exception).
-    await page.addInitScript(() => {
-      // @ts-ignore - custom bag attached to window
-      window.__chaosRejections = [];
-      window.addEventListener("unhandledrejection", (event) => {
-        const message = event.reason?.message || String(event.reason);
-        const stack = event.reason?.stack;
-        // @ts-ignore
-        window.__chaosRejections.push({ message, stack });
-        event.preventDefault();
-      });
-    });
+    // Capture unhandled promise rejections. The install claims them via
+    // `preventDefault` so they don't also fire as `pageerror` (which we'd
+    // misclassify as an exception). Shared with the exported
+    // `watchUnhandledRejections` rather than inlined twice — a harness written
+    // against this library needs exactly the same mechanism, and two copies is
+    // how one of them ends up without the `preventDefault`.
+    await watchUnhandledRejections(page);
 
     // Capture SPA route changes that go through the History API
     // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,

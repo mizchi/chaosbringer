@@ -27,6 +27,34 @@ probe side is where that bites — `page.waitForTimeout` goes through a CDP roun
 trip and overshoots by ~100ms under single-core contention where it overshoots
 by 3ms idle.
 
+## Driving the page yourself: which number goes where
+
+The rest of this file is written around a model bridge, but the arithmetic is
+the same when you own the page. `solveTiming` returns the whole set; here is
+what each one is for in a hand-written test.
+
+```js
+import { solveTiming, DEFAULT_TIMING_PROFILE } from "chaosbringer";
+const t = solveTiming(profile ?? DEFAULT_TIMING_PROFILE, { deadlineMs: 800 });
+if (t.status !== "sat") throw new Error(t.explanation);
+```
+
+| field | what you do with it |
+|---|---|
+| `settleMs` | wait this long after the click, then read the page. Long enough that the app's own bound has certainly expired, so "still loading" means unbounded rather than merely slow |
+| `quiescenceMs` | wait this much *again* and read a second time. Catches the label that moves after you looked, the retry scheduled on the error path, the write that commits late |
+| `slowMs` | the delay to inject when you want the response to arrive **past** the app's bound (`faults.delay(t.slowMs, …)`) |
+| `fastMs` | the delay for "slow but tolerable" — the control that stops an over-eager fix from passing |
+| `releaseMs` | `faults.hang({ releaseAfterMs: t.releaseMs })` when you want the parked request to let go on its own instead of calling `release()` |
+| `pageTimeoutMs` | `page.goto(url, { timeout: t.pageTimeoutMs })` — navigation only, sized for the largest delay a plan can inject |
+| `wallClockMs` | the whole thing end to end, for a per-test timeout |
+| `profile` | your input **after the safety factor** — so the numbers differ from what you passed in. Not a bug; read invariants off this one, not off your original |
+
+Generosity is cheap for a terminal-state oracle and expensive for a
+does-it-still-move one: waiting too long only slows a suite whose question is
+"did the app reach a terminal state", but it can hide a bug whose symptom is
+transient. Wait long for the first, and be careful about the second.
+
 ## When you cannot calibrate
 
 `model calibrate` launches a browser, so it needs one. If the CLI's own

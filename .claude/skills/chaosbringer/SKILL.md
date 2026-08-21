@@ -182,6 +182,12 @@ The ways this goes wrong, in rough order of how often:
 that shows an error banner *and leaves the stale total on screen with the Pay
 button enabled*. Check what the label promises about the page.
 
+**Forgetting what escaped.** "The spinner stopped" and "the spinner stopped and
+nothing escaped" are different findings, and the second is usually the bug.
+`watchUnhandledRejections(page)` before you navigate, then `drain()` at each
+read — it claims the rejections via `preventDefault`, so they do not also
+arrive as `pageerror` and get counted twice.
+
 **One instant.** A probe fires once. A backend that acknowledges now and
 commits 450ms later, a retry scheduled on the error path, a revalidation
 arriving after you looked — a single read calls all of them clean. If your bug
