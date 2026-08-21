@@ -25,6 +25,13 @@ jobs:
       - name: Lint — no NUL bytes in source (all workspace packages)
         run: pnpm -r lint:nul
 
+      # The skill's snippets are the first thing a new reader runs, and a
+      # snippet naming an export that does not exist was the most-reported
+      # friction across twelve evaluation runs. Reads `src/`, not `dist/`, so it
+      # does not depend on the build step below.
+      - name: Check the chaosbringer skill's docs against the real exports
+        run: pnpm check:skill-docs
+
       - name: Build
         run: pnpm -F chaosbringer build
 
