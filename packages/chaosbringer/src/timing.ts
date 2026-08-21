@@ -393,11 +393,21 @@ export function solveTiming(
   // scheduled in response to the outcomes the plan injected.
   const quiescenceMs = deadline + tight + margin;
   const fastMs = deadline - tail - margin;
-  // Two requirements, and the second is the one that is easy to miss: the
-  // tripping delay must miss the deadline (settle >= deadline + tight + margin
-  // covers that) *and* outlast the probe, or an unbounded app answers
-  // mid-probe and reads as healthy.
-  const slowMs = settleMs + margin - floor;
+  // Three requirements, and the third is the one that shipped wrong. The
+  // tripping delay must miss the app's deadline (`settle >= deadline + tight +
+  // margin` covers that), outlast the probe, and outlast the probe *as the
+  // probe actually fires*. That last clause is not pedantry: the probe is
+  // `page.waitForTimeout(settle)`, itself a tight wait, so it overshoots by up
+  // to `tight`. Separating `slow` from the NOMINAL probe instant by
+  // `margin - floor` leaves the same 22ms of room whatever `tight` is — raising
+  // `tightTailMs` moved both sides equally and changed nothing — and a loaded
+  // machine eats 22ms without noticing. Then the tripping response lands
+  // *before* the probe and an app with no bound at all reads healthy, which is
+  // the one verdict a timing plan must never produce.
+  //
+  // Proven optimal against z3 over the same 192-combination sweep as the rest
+  // of this closed form; see ../../../docs/superpowers/specs/2026-08-20-timing-solver/.
+  const slowMs = settleMs + tight + margin - floor;
   const releaseMs = settleMs + margin;
   // Navigation only: `timeout` reaches `page.goto` and nothing else. What can
   // legitimately stretch a `waitUntil: "networkidle"` load is a delay injected

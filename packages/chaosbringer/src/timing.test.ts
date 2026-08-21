@@ -31,12 +31,12 @@ describe("solveTiming", () => {
     // safety 2 => delayTail 118, tightTail 72; margin 25.
     expect(r.settleMs).toBe(5097); // 5000 + 72 + 25
     expect(r.fastMs).toBe(4857); // 5000 - 118 - 25
-    expect(r.slowMs).toBe(5118); // settle 5097 + margin 25 - floor 4
+    expect(r.slowMs).toBe(5190); // settle 5097 + tight 72 + margin 25 - floor 4
     expect(r.releaseMs).toBe(5122); // settle + margin
     // The navigation timeout has to survive the slowest delay a plan can put
     // on a load-time request, which is `slow` — not the probe window, which
     // `timeout` does not bound at all.
-    expect(r.pageTimeoutMs).toBe(5957); // fixed 696 + slow 5118 + tail 118 + margin 25
+    expect(r.pageTimeoutMs).toBe(6029); // fixed 696 + slow 5190 + tail 118 + margin 25
     // …and the wall clock includes the observation window, because a run
     // spends it. Omitting it under-reported this plan by 5097ms — the number
     // `model calibrate` prints for sizing a suite.
@@ -102,7 +102,7 @@ describe("solveTiming", () => {
     // The budget is measured against the wall clock the plan really spends,
     // so the explanation quotes that number and not the navigation timeout.
     expect(r.explanation).toMatch(/one plan costs ~10890ms/);
-    // …and a budget between the two used to pass: 5957 fits, 10890 does not.
+    // …and a budget between the two used to pass: 6029 fits, 10890 does not.
     expect(solveTiming(MEASURED, { deadlineMs: 5000, budgetMs: 8000 }).status).toBe("unsat");
     expect(solveTiming(MEASURED, { deadlineMs: 5000, budgetMs: 11000 }).status).toBe("sat");
   });
@@ -170,7 +170,7 @@ describe("checkTiming", () => {
     expect(outlasts.slackMs).toBe(-25);
     // The solved value satisfies both.
     expect(
-      checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5118, settleMs: 5097 }).ok,
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5190, settleMs: 5097 }).ok,
     ).toBe(true);
   });
 
@@ -260,13 +260,13 @@ describe("checkTiming", () => {
     const tight = checkTiming(
       MEASURED,
       { deadlineMs: 5000 },
-      { pageTimeoutMs: 3000, slowMs: 5118 },
+      { pageTimeoutMs: 3000, slowMs: 5190 },
     );
     expect(tight.ok).toBe(false);
     const row = tight.violations.find((v) => v.constraint === "fits_navigation_timeout")!;
-    expect(row.slackMs).toBe(-2957); // 3000 - (696 + 5118 + 118 + 25)
+    expect(row.slackMs).toBe(-3029); // 3000 - (696 + 5190 + 118 + 25)
     expect(
-      checkTiming(MEASURED, { deadlineMs: 5000 }, { pageTimeoutMs: 5957, slowMs: 5118 }).ok,
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { pageTimeoutMs: 6029, slowMs: 5190 }).ok,
     ).toBe(true);
   });
 

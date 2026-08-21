@@ -832,8 +832,13 @@ export function resolvePlanTiming(opts: {
     // instant, and a tripping delay solved for a 531ms probe lands mid-window
     // when the author declared 1800ms — against an unbounded app that reads
     // as healthy. Re-derive it from the window actually being used.
-    const { marginMs: margin, delayFloorMs: floor } = solved.profile;
-    const slowMs = Math.max(solved.slowMs, opts.settleMs + margin - floor);
+    // Same separation the solver uses, for the same reason: the probe is a
+    // tight wait that can arrive up to `tightTailMs` late, so separating from
+    // the declared window by `margin - floor` alone would hand a declaring
+    // bridge back the 22ms gap the solved path just stopped shipping. The bug
+    // one field over, through the other door.
+    const { marginMs: margin, delayFloorMs: floor, tightTailMs: tight } = solved.profile;
+    const slowMs = Math.max(solved.slowMs, opts.settleMs + tight + margin - floor);
     const check = checkTiming(profile, request, { settleMs: opts.settleMs, slowMs });
     if (!check.ok) {
       throw new Error(

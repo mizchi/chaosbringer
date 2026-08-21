@@ -545,12 +545,12 @@ describe("resolvePlanTiming", () => {
     // The post-probe window is one more app-bounded round, same arithmetic.
     expect(t.quiescenceMs).toBe(5097);
     // slowMs outlasts the probe, not merely the deadline: settle 5097 + 25 - 4.
-    expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5118 });
+    expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5190 });
     // The navigation timeout survives the slowest delay a plan can put on a
-    // load-time request (fixed 696 + slow 5118 + tail 118 + margin 25); the
+    // load-time request (fixed 696 + slow 5190 + tail 118 + margin 25); the
     // probe is not bounded by it at all.
-    expect(t.solved?.pageTimeoutMs).toBe(5957);
-    expect(t.pageTimeoutMs).toBe(5957);
+    expect(t.solved?.pageTimeoutMs).toBe(6029);
+    expect(t.pageTimeoutMs).toBe(6029);
     // …and the wall clock counts both windows, which is what a plan spends.
     expect(t.wallClockMs).toBe(10890); // 696 + 5097 + 5097
   });
@@ -561,11 +561,14 @@ describe("resolvePlanTiming", () => {
     // is not using, and `runPlan` forwarded that number to the crawler.
     const t = resolvePlanTiming({ settleMs: 12000, appDeadlineMs: 600, timingProfile: MEASURED });
     expect(t.settleMs).toBe(12000);
-    expect(t.delays!.slowMs).toBe(12021); // declared window + margin - floor
-    expect(t.pageTimeoutMs).toBe(696 + 12021 + 118 + 25);
+    // Declared window + tight + margin - floor — the same separation the solved
+    // path uses. Deriving it as `declared + margin - floor` would give a
+    // declaring bridge the 22ms probe gap back, which is the whole bug.
+    expect(t.delays!.slowMs).toBe(12093);
+    expect(t.pageTimeoutMs).toBe(696 + 12093 + 118 + 25);
     // The solved solution still answers for the *solved* window, so the two
     // are visibly different numbers rather than one silently wrong one.
-    expect(t.solved!.pageTimeoutMs).toBe(696 + 718 + 118 + 25);
+    expect(t.solved!.pageTimeoutMs).toBe(696 + 790 + 118 + 25);
   });
 
   it("checks a declared per-plan budget against both windows", () => {
@@ -597,11 +600,13 @@ describe("resolvePlanTiming", () => {
     expect(t.settleMs).toBe(6000);
     // …and still exposes the solved delays, so timing plans work — but the
     // tripping delay is re-derived from the *declared* window, not the solved
-    // one. 5118ms would land 882ms before this probe, and against an app with
+    // one. 5190ms would land 810ms before this probe, and against an app with
     // no bound at all (the thing a timing plan is trying to detect) a response
     // that lands before the probe reads as healthy.
-    expect(t.delays?.slowMs).toBe(6021);
-    expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs);
+    expect(t.delays?.slowMs).toBe(6093); // declared 6000 + tight 72 + margin 25 - floor 4
+    // Strictly later than the probe *including* the probe's own overshoot —
+    // `> settleMs` alone was satisfied by the 22ms gap that flaked.
+    expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs + MEASURED.tightTailMs * 2);
   });
 
   it("refuses an observation window too short to see the app's own follow-up", () => {
@@ -625,14 +630,14 @@ describe("resolvePlanTiming", () => {
     // It used to be passed through as `budgetMs` and compared against
     // `pageTimeoutMs`, i.e. a wall-clock claim measured against a navigation
     // number. Both halves are checked now, each against its own quantity: a
-    // 3000ms navigation timeout cannot survive the 5118ms delay a plan may
+    // 3000ms navigation timeout cannot survive the 5190ms delay a plan may
     // inject into a load-time request.
     expect(() =>
       resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
     ).toThrow(/fits_navigation_timeout/);
     expect(() =>
       resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
-    ).toThrow(/navigation needs 5957ms to survive a 5118ms injected delay/);
+    ).toThrow(/navigation needs 6029ms to survive a 5190ms injected delay/);
     // A timeout that does survive it is accepted and forwarded unchanged.
     expect(
       resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 9000 }).settleMs,
@@ -675,8 +680,8 @@ describe("resolvePlanTiming", () => {
       // A declared window moves the probe, so "too slow" is re-derived from
       // it: a delay solved for the 597ms probe would land mid-window and an
       // unbounded app would read as healthy.
-      expect(t.delays!.slowMs).toBe(3021);
-      expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs);
+      expect(t.delays!.slowMs).toBe(3093); // declared 3000 + tight 72 + margin 25 - floor 4
+      expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs + MEASURED.tightTailMs * 2);
     });
 
     it("names the number to write when the ladder is declared without a window", () => {
