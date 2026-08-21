@@ -428,11 +428,11 @@ export function solveTiming(
   // `explain()` has no words for and a "violation" no caller could act on; a
   // throw means a future edit to the closed form fails loudly here rather than
   // shipping an unexplainable unsat.
-  if (slowMs + floor < settleMs + margin) {
+  if (slowMs + floor < settleMs + tight + margin) {
     throw new Error(
       `chaosbringer internal: solveTiming's closed form broke slow_outlasts_probe ` +
-        `(slow ${slowMs} + floor ${floor} < settle ${settleMs} + margin ${margin}). ` +
-        `The tripping delay must outlast the probe by construction.`,
+        `(slow ${slowMs} + floor ${floor} < settle ${settleMs} + tightTail ${tight} + margin ${margin}). ` +
+        `The tripping delay must outlast the probe *as the probe actually fires* by construction.`,
     );
   }
 
@@ -621,11 +621,15 @@ export function checkTiming(
     });
     // Against an unbounded app the response still arrives; if it lands before
     // the probe, "no deadline at all" is indistinguishable from "handled".
+    // `+ tight` because the probe is itself a tight wait and can arrive that
+    // late: separating from the nominal probe instant alone is what let a
+    // 22ms gap ship, and this validator is public, so it was still accepting
+    // the value the solver stopped producing.
     const settle = proposed.settleMs ?? deadline + tight + margin;
     rows.push({
       constraint: "slow_outlasts_probe",
-      slackMs: proposed.slowMs + floor - (settle + margin),
-      detail: `slowMs=${proposed.slowMs} + floor ${floor} must be >= settleMs ${settle} + margin ${margin}, or an unbounded app answers mid-probe and reads as ready`,
+      slackMs: proposed.slowMs + floor - (settle + tight + margin),
+      detail: `slowMs=${proposed.slowMs} + floor ${floor} must be >= settleMs ${settle} + tightTail ${tight} + margin ${margin}, or a probe that runs late lets an unbounded app answer first and read as ready`,
     });
   }
   if (proposed.releaseMs !== undefined && proposed.settleMs !== undefined) {
@@ -641,7 +645,7 @@ export function checkTiming(
   // navigation past it; the probe and the observation window cannot, because
   // they run inside an unbounded invariant.
   if (proposed.pageTimeoutMs !== undefined) {
-    const slow = proposed.slowMs ?? deadline + tight + 2 * margin - floor;
+    const slow = proposed.slowMs ?? deadline + 2 * tight + 2 * margin - floor;
     rows.push({
       constraint: "fits_navigation_timeout",
       slackMs: proposed.pageTimeoutMs - (fixed + slow + tail + margin),

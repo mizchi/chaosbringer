@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
 import { compilePlansFromTraces, coverageForRun } from "./cli.js";
@@ -12,6 +12,7 @@ import {
   compilePlanFaults,
   evaluatePlanOracle,
   faultNameFor,
+  drainScheduledWork,
   nextDrainWaitMs,
   observationNameFor,
   resolvePlanTiming,
@@ -829,22 +830,54 @@ describe("nextDrainWaitMs", () => {
   // The drain exists to wait out the app's *own* follow-up work — a `void
   // retry()` inside a 900ms backoff. Which timer it waits for decides whether
   // it costs what it drains or costs the whole cap.
-  it("waits for the earliest pending timer, not the latest", () => {
-    // A page with a 200ms retry and a 300s session-refresh timer. Waiting for
-    // the latest one spends `min(300025, 3000)` = the entire cap and comes
-    // back with that timer still pending: measured at +3097ms per plan of
-    // pure sleep on a page whose only timer was irrelevant.
-    expect(
-      nextDrainWaitMs({ timers: 2, intervals: 0, earliestDueInMs: 200, latestDueInMs: 300000 }, 3000),
-    ).toBe(225);
+  it("waits for the latest timer that fits, not the latest and not the earliest", () => {
+    // Both extremes are wrong, in opposite directions.
+    //
+    // Latest regardless: a page with a 200ms retry and a 300s session-refresh
+    // timer spends `min(300025, 3000)` = the entire cap and comes back with
+    // that timer still pending — measured at +3097ms per plan of pure sleep on
+    // a page whose only far timer was irrelevant.
+    //
+    // Earliest: it advances one timer per round, so four ordinary timers ahead
+    // of an interesting one exhaust the loop and the interesting one never
+    // runs. That shipped, and it turned an escaping rejection into a clean
+    // run — the one output this tool must never produce.
+    const decoysThenTheInterestingOne = {
+      timers: 5,
+      intervals: 0,
+      earliestDueInMs: 150,
+      latestDueInMs: 900,
+      dueInMs: [150, 300, 450, 600, 900],
+    };
+    expect(nextDrainWaitMs(decoysThenTheInterestingOne, 3000)).toBe(925);
+
+    // …and when the far one does not fit, the answer is the latest that does,
+    // so the decoys still drain instead of the round being wasted on 150ms.
+    const withASessionTimer = {
+      timers: 6,
+      intervals: 0,
+      earliestDueInMs: 150,
+      latestDueInMs: 300000,
+      dueInMs: [150, 300, 450, 600, 900, 300000],
+    };
+    expect(nextDrainWaitMs(withASessionTimer, 3000)).toBe(925);
   });
 
-  it("stops instead of sleeping when the earliest timer is past the budget", () => {
+  it("stops instead of sleeping when nothing pending fits the budget", () => {
     // The whole defect in one case: one `setTimeout(fn, 300000)` and nothing
     // else. There is nothing to drain inside the cap, so the answer is to
     // stop — the timer is reported in `observed.pendingAsync`, not slept on.
     expect(
-      nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 295328, latestDueInMs: 295328 }, 3000),
+      nextDrainWaitMs(
+        { timers: 1, intervals: 0, earliestDueInMs: 295328, latestDueInMs: 295328, dueInMs: [295328] },
+        3000,
+      ),
+    ).toBeNull();
+    // Reading a page that predates the `dueInMs` field falls back to the
+    // earliest, which is the safe direction: it under-drains rather than
+    // over-sleeping.
+    expect(
+      nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 295328 }, 3000),
     ).toBeNull();
     // Exactly on the boundary is still worth waiting for; one ms over is not.
     expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 2975 }, 3000)).toBe(3000);
@@ -862,6 +895,123 @@ describe("nextDrainWaitMs", () => {
     // difference between "became due" and "ran".
     expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 0 }, 3000)).toBe(25);
     expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: -40 }, 3000)).toBe(25);
+  });
+});
+
+describe("aggregateCoverage: a plan whose bridge threw", () => {
+  it("counts a probeError as not exercised", () => {
+    // `probeError` suppresses the derived checks, so the `injection` mismatch
+    // that normally carries "the app never issued that request" is absent —
+    // and `plansNotExercised` was keyed on that field alone. The effect was a
+    // broken bridge reporting a state as reached by a run whose action never
+    // ran, in the one field whose docstring says it answers "did a run
+    // actually get there".
+    const threw = aggregateCoverage([
+      {
+        plan: { name: "checkout-retry", schedule: [], expect: {} },
+        mismatches: [
+          {
+            plan: "checkout-retry",
+            field: "probeError" as const,
+            detail: 'locator.click: Timeout 30000ms exceeded waiting for locator("#submitt")',
+          },
+        ],
+        observed: { matched: {}, lateUnhandledRejection: false, fired: {} },
+      },
+    ] as unknown as Parameters<typeof aggregateCoverage>[0]);
+    expect(threw.plansNotExercised).toEqual(["checkout-retry"]);
+    expect(modelRunPassed(threw)).toBe(false);
+  });
+});
+
+describe("drainScheduledWork", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A page whose timers actually elapse. `waitForTimeout` advances a virtual
+   * clock and anything due by then "runs" — enough to test the loop, which is
+   * the part that had no test and the part that broke: `nextDrainWaitMs` was
+   * unit-tested in isolation while the loop around it silently capped at four
+   * rounds.
+   */
+  function fakePage(dueAtMs: readonly number[]) {
+    let now = 0;
+    const waits: number[] = [];
+    const page = {
+      waitForTimeout: async (ms: number) => {
+        waits.push(ms);
+        now += ms;
+        // The drain budgets itself against the wall clock, so a fake that only
+        // advanced its own timers would let it loop for free — which is
+        // exactly what the first version of this helper did, and it reported a
+        // 50-second drain as if the cap did not exist. Advance both.
+        vi.setSystemTime(new Date(Date.now() + ms));
+      },
+      evaluate: async () => {
+        const due = dueAtMs.filter((d) => d > now).map((d) => d - now).sort((a, b) => a - b);
+        return due.length > 0
+          ? {
+              timers: due.length,
+              intervals: 0,
+              earliestDueInMs: due[0],
+              latestDueInMs: due[due.length - 1],
+              dueInMs: due,
+            }
+          : { timers: 0, intervals: 0 };
+      },
+    };
+    return { page: page as unknown as Parameters<typeof drainScheduledWork>[0], waits, elapsed: () => now };
+  }
+
+  it("drains a timer sitting behind four ordinary ones", async () => {
+    // The regression, as a test. A debounce, a toast, an analytics flush and a
+    // focus restore, then the `void retry()` whose rejection is the whole
+    // reason the drain exists. A four-round loop that advanced to the earliest
+    // timer each round returned here with the 900ms one still pending and
+    // reported "no rejection escaped".
+    const { page, elapsed } = fakePage([150, 300, 450, 600, 900]);
+    const pending = await drainScheduledWork(page, 3000);
+    expect(pending.timers).toBe(0);
+    expect(elapsed()).toBeLessThan(1000); // one wait, not four rounds of sleeping
+  });
+
+  it("does not sleep out the cap for a timer that cannot arrive", async () => {
+    // The cost defect the round-bound was introduced to fix, still fixed: a
+    // 300s session timer and nothing else means there is nothing to drain.
+    const { page, waits } = fakePage([300000]);
+    const pending = await drainScheduledWork(page, 3000);
+    expect(waits).toEqual([]);
+    expect(pending.timers).toBe(1);
+    expect(pending.latestDueInMs).toBe(300000);
+  });
+
+  it("drains what fits and reports what does not", async () => {
+    const { page, elapsed } = fakePage([200, 500, 300000]);
+    const pending = await drainScheduledWork(page, 3000);
+    expect(pending.timers).toBe(1); // the session timer
+    expect(elapsed()).toBeLessThan(600);
+  });
+
+  it("follows a chain of timers that each schedule the next", async () => {
+    // Re-arming is why this iterates at all. Four rounds was enough for this
+    // case and not enough for the one above, which is what made the round
+    // count look adequate.
+    const { page } = fakePage([100, 250, 400, 550, 700, 850, 1000]);
+    expect((await drainScheduledWork(page, 3000)).timers).toBe(0);
+  });
+
+  it("stops at the cap rather than following a poller forever", async () => {
+    // A recursive `setTimeout(poll, 100)` cannot be drained, only bounded.
+    const poller = Array.from({ length: 500 }, (_, i) => (i + 1) * 100);
+    const { page, elapsed } = fakePage(poller);
+    const pending = await drainScheduledWork(page, 3000);
+    expect(elapsed()).toBeLessThanOrEqual(3000);
+    expect(pending.timers).toBeGreaterThan(0); // reported, not failed on
   });
 });
 
@@ -1269,9 +1419,13 @@ describe("evaluatePlanOracle", () => {
       const mismatches = evaluatePlanOracle(broken);
       const coverage = aggregateCoverage([{ plan, observed: broken.observed, mismatches }]);
       expect(modelRunPassed(coverage)).toBe(false);
-      // …and it is not filed as "the planned fault never fired", which is a
-      // claim about the app.
-      expect(coverage.plansNotExercised).toEqual([]);
+      // …and the plan *is* filed as not exercised. The first version of this
+      // asserted the opposite, on the reasoning that "the planned fault never
+      // fired" is a claim about the app — true of the *wording*, and wrong
+      // about the field: `plansNotExercised` is what answers "did a run
+      // actually get there", and a run whose action threw did not. Leaving it
+      // out let a broken bridge report a state as reached.
+      expect(coverage.plansNotExercised).toEqual([plan.name]);
     });
   });
 

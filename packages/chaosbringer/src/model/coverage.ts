@@ -42,7 +42,12 @@ export interface ModelCoverage {
   statesUnreachableInBound: number;
   plansRun: number;
   plansSkipped: number;
-  /** Plans that ran but whose planned faults never fired. */
+  /**
+   * Plans that ran without exercising what they were for: the planned fault
+   * never fired (`injection`), or the bridge threw before it could
+   * (`probeError`). Either way this run did not reach the state, which is why
+   * `modelRunPassed` refuses on it.
+   */
   plansNotExercised: string[];
   mismatches: PlanMismatch[];
   /**
@@ -94,8 +99,13 @@ export function aggregateCoverage(
 ): ModelCoverage {
   const ran = results.filter((r) => r.skipped === undefined);
   const skipped = results.length - ran.length;
+  // `probeError` counts too, and it is easy to miss why: a thrown bridge action
+  // suppresses the other checks, so the `injection` mismatch that would
+  // otherwise have said "the app never issued that request" is not emitted. A
+  // plan whose action never ran is the definition of not exercised, and
+  // omitting it here made a broken bridge read as a state this run reached.
   const notExercised = ran
-    .filter((r) => r.mismatches.some((m) => m.field === "injection"))
+    .filter((r) => r.mismatches.some((m) => m.field === "injection" || m.field === "probeError"))
     .map((r) => r.plan.name);
 
   const targets = opts.targets ?? [];
@@ -134,7 +144,9 @@ export function formatModelCoverage(coverage: ModelCoverage): string {
   );
   lines.push(`Plans run: ${coverage.plansRun}${coverage.plansSkipped > 0 ? `, skipped: ${coverage.plansSkipped} (order-sensitive)` : ""}`);
   if (coverage.plansNotExercised.length > 0) {
-    lines.push(`Not exercised (planned fault never fired): ${coverage.plansNotExercised.join(", ")}`);
+    // "never fired" was accurate while this only counted `injection`; a
+    // `probeError` plan lands here too and its fault never got the chance.
+    lines.push(`Not exercised (the planned fault never fired, or the bridge threw before it could): ${coverage.plansNotExercised.join(", ")}`);
   }
   if (coverage.collapsedPlans.length > 0) {
     lines.push("Collapsed plans (distinct model states, identical code coverage):");

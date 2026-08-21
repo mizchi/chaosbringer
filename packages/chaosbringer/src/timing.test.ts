@@ -160,14 +160,23 @@ describe("checkTiming", () => {
     expect(check.rows.some((r) => r.slackMs === 0)).toBe(true);
   });
 
-  it("requires the tripping delay to outlast the probe, not just the deadline", () => {
+  it("requires the tripping delay to outlast the probe as the probe actually fires", () => {
     // 5093ms misses a 5000ms deadline, so a bounded app fails as intended —
     // but an UNBOUNDED app answers at ~5093ms, before the 5097ms probe, and
     // reads as ready. That is precisely the app a timing plan is hunting.
     const check = checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5093, settleMs: 5097 });
     expect(check.rows.find((r) => r.constraint === "slow_trips")!.slackMs).toBeGreaterThanOrEqual(0);
     const outlasts = check.violations.find((r) => r.constraint === "slow_outlasts_probe")!;
-    expect(outlasts.slackMs).toBe(-25);
+    expect(outlasts.slackMs).toBe(-97); // 5093 + 4 - (5097 + 72 + 25)
+
+    // The value the solver used to produce. It clears the nominal probe
+    // instant by exactly `margin - floor` and this validator used to accept it
+    // — a public checker still enforcing the rule the solver had abandoned,
+    // which is how "checked" and "safe" came apart.
+    const preFix = checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5118, settleMs: 5097 });
+    expect(preFix.ok).toBe(false);
+    expect(preFix.violations.find((r) => r.constraint === "slow_outlasts_probe")!.slackMs).toBe(-72);
+
     // The solved value satisfies both.
     expect(
       checkTiming(MEASURED, { deadlineMs: 5000 }, { slowMs: 5190, settleMs: 5097 }).ok,

@@ -1035,6 +1035,14 @@ export interface PendingAsync {
   intervals: number;
   earliestDueInMs?: number;
   latestDueInMs?: number;
+  /**
+   * Every pending timer's due time, ascending. The drain needs the whole set,
+   * not the extremes: waiting for the earliest advances one timer per round,
+   * and waiting for the latest sleeps out the cap for a timer that will never
+   * arrive. What it wants is the *latest one that fits* in the remaining
+   * budget, which neither extreme can answer.
+   */
+  dueInMs?: readonly number[];
 }
 
 /**
@@ -1103,23 +1111,20 @@ async function readPendingAsync(page: Page): Promise<PendingAsync> {
       const state = w.__cbModelAsync;
       if (!state) return { timers: 0, intervals: 0 };
       const now = Date.now();
-      let timers = 0;
-      let latest = -1;
-      let earliest = Number.POSITIVE_INFINITY;
-      state.timers.forEach((due) => {
-        if (due <= now) return;
-        timers += 1;
-        if (due > latest) latest = due;
-        if (due < earliest) earliest = due;
+      const due: number[] = [];
+      state.timers.forEach((at) => {
+        if (at > now) due.push(at - now);
       });
-      return latest >= 0
+      due.sort((a, b) => a - b);
+      return due.length > 0
         ? {
-            timers,
+            timers: due.length,
             intervals: state.intervals,
-            earliestDueInMs: earliest - now,
-            latestDueInMs: latest - now,
+            earliestDueInMs: due[0],
+            latestDueInMs: due[due.length - 1],
+            dueInMs: due,
           }
-        : { timers, intervals: state.intervals };
+        : { timers: 0, intervals: state.intervals };
     });
   } catch {
     return { timers: 0, intervals: 0 };
@@ -1140,25 +1145,42 @@ async function readPendingAsync(page: Page): Promise<PendingAsync> {
  * `+25ms` so the callback has actually run, not merely become due.
  */
 export function nextDrainWaitMs(pending: PendingAsync, remainingMs: number): number | null {
-  if (pending.earliestDueInMs === undefined) return null;
   if (remainingMs <= 0) return null;
-  const wait = Math.max(pending.earliestDueInMs, 0) + 25;
-  return wait > remainingMs ? null : wait;
+  const due = pending.dueInMs ?? (pending.earliestDueInMs !== undefined ? [pending.earliestDueInMs] : []);
+  // The latest timer that fits. Waiting for the earliest instead drains one
+  // timer per round, so four ordinary timers (a debounce, a toast, an
+  // analytics flush) ahead of an interesting one used up a four-round loop and
+  // returned with the interesting one still pending — a rejection that escaped
+  // reported as none, with most of the budget unspent. Waiting for the latest
+  // regardless sleeps out the whole cap for a session timer 30 minutes away.
+  // The latest that *fits* is neither: it drains everything reachable inside
+  // the budget in one wait, and returns immediately when nothing is reachable.
+  let best: number | null = null;
+  for (const d of due) {
+    const wait = Math.max(d, 0) + 25;
+    if (wait <= remainingMs) best = wait;
+  }
+  return best;
 }
 
 /**
  * Wait for the timers the app scheduled, up to `capMs`.
  *
- * A timer can schedule another timer, so this iterates — bounded, because the
- * point is to drain the app's own follow-up work, not to wait out a polling
- * loop. Each round waits for the *earliest* pending timer only (see
- * `nextDrainWaitMs`). What is still pending when it returns is reported, not
+ * A timer can schedule another timer, so this iterates. The bound is the
+ * remaining budget, not a round count: a round count is a bound on how many
+ * timers the drain will tolerate, which is not a property anyone wants to
+ * assert — and capping it at four meant four uninteresting timers could hide a
+ * fifth. Each round waits for the latest timer that fits in what is left, so
+ * every round either drains something or returns. Since each wait consumes
+ * real time, `remaining` shrinks monotonically and the loop terminates; the
+ * generous round cap is a backstop against a clock that does not advance, not
+ * a semantic limit. What is still pending when it returns is reported, not
  * failed on.
  */
-async function drainScheduledWork(page: Page, capMs: number): Promise<PendingAsync> {
+export async function drainScheduledWork(page: Page, capMs: number): Promise<PendingAsync> {
   const startedAt = Date.now();
   let pending = await readPendingAsync(page);
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < 64; round++) {
     const wait = nextDrainWaitMs(pending, capMs - (Date.now() - startedAt));
     if (wait === null) return pending;
     await page.waitForTimeout(wait);
