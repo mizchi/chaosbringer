@@ -224,6 +224,32 @@ describe("mergeRuntimeStats", () => {
     expect(compiled[0]!.fired).toBe(3);
   });
 
+  it("accumulates `suppressed`, and omits it from the report when it is zero", () => {
+    const compiled = compileRuntimeFaults([
+      { name: "loser", action: { kind: "never-settle-fetch" } },
+      { name: "clean", action: { kind: "flaky-fetch" } },
+    ]);
+    const out = mergeRuntimeStats(compiled, {
+      "0": { matched: 4, fired: 1, suppressed: 3 },
+      "1": { matched: 2, fired: 2 },
+    });
+    expect(out).toEqual([
+      { rule: "loser", matched: 4, fired: 1, suppressed: 3 },
+      // Absent, not zero: the field exists to say something happened, and a
+      // `suppressed: 0` on every row is noise a reader learns to skip.
+      { rule: "clean", matched: 2, fired: 2 },
+    ]);
+  });
+
+  it("reads a page that reported no `suppressed` as zero, not as undefined", () => {
+    // An older init script in a cached frame reports only matched/fired. It
+    // could not tell the case apart, so 0 is the honest reading.
+    const compiled = compileRuntimeFaults([{ name: "f1", action: { kind: "flaky-fetch" } }]);
+    const out = mergeRuntimeStats(compiled, { "0": { matched: 2, fired: 1 } });
+    expect(out).toEqual([{ rule: "f1", matched: 2, fired: 1 }]);
+    expect(compiled[0]!.suppressed).toBe(0);
+  });
+
   it("does not collapse counters when two faults share a name", () => {
     // Both default to name="flaky-fetch"; index keys keep them apart.
     const compiled = compileRuntimeFaults([

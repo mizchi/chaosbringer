@@ -355,13 +355,7 @@ export class ChaosCrawler {
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
   /** Fault injection rules compiled once at construction time. */
-  private compiledFaultRules: Array<{
-    rule: FaultRule;
-    pattern: RegExp;
-    methods?: string[];
-    matched: number;
-    injected: number;
-  }> = [];
+  private compiledFaultRules: CompiledFaultRule[] = [];
   /**
    * Routes held open by a `hang` fault with no `releaseAfterMs`. Drained
    * (aborted with "timedout") when the page that issued them is torn down,
@@ -1487,8 +1481,15 @@ export class ChaosCrawler {
         if (compiled.rule.schedule) {
           const occurrence = compiled.matched;
           compiled.matched++;
-          if (decideFault(compiled.rule, occurrence, this.rng) === "inject" && !winner) {
-            winner = compiled;
+          if (decideFault(compiled.rule, occurrence, this.rng) === "inject") {
+            // The decision is consumed either way — that is what keeps two
+            // rules on one URL agreeing about occurrence numbers — but only
+            // one rule can answer the request. Record the loss instead of
+            // dropping it: `injected` alone cannot tell "the schedule said
+            // pass" from "the schedule said inject and somebody else got
+            // there first".
+            if (winner) compiled.suppressed++;
+            else winner = compiled;
           }
           continue;
         }
@@ -2908,6 +2909,7 @@ export class ChaosCrawler {
       rule: c.rule.name ?? c.pattern.toString(),
       matched: c.matched,
       injected: c.injected,
+      ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
     }));
   }
 
@@ -3349,21 +3351,27 @@ function toRegExp(m: UrlMatcher): RegExp | null {
   }
 }
 
-function compileFaultRules(rules: FaultRule[] | undefined): Array<{
+/** A `FaultRule` with its pattern compiled once and its counters. */
+type CompiledFaultRule = {
   rule: FaultRule;
   pattern: RegExp;
   methods?: string[];
   matched: number;
   injected: number;
-}> {
+  /**
+   * Times this rule's schedule said "inject" and an earlier rule had already
+   * claimed the request. The decision was consumed — the occurrence advanced —
+   * and could not be acted on. Without this counter such a rule reports
+   * `matched=3 injected=0`, byte-identical to an all-`pass` schedule, and the
+   * one thing a reader needs (a planned fault that did not happen, and why) is
+   * the thing the report drops.
+   */
+  suppressed: number;
+};
+
+function compileFaultRules(rules: FaultRule[] | undefined): CompiledFaultRule[] {
   if (!rules || rules.length === 0) return [];
-  const compiled: Array<{
-    rule: FaultRule;
-    pattern: RegExp;
-    methods?: string[];
-    matched: number;
-    injected: number;
-  }> = [];
+  const compiled: CompiledFaultRule[] = [];
   for (const rule of rules) {
     const pattern = toRegExp(rule.urlPattern);
     if (!pattern) {
@@ -3376,6 +3384,7 @@ function compileFaultRules(rules: FaultRule[] | undefined): Array<{
       methods: rule.methods?.map((m) => m.toUpperCase()),
       matched: 0,
       injected: 0,
+      suppressed: 0,
     });
   }
   return compiled;
@@ -3507,11 +3516,13 @@ export function coverageFingerprintOf(covered: ReadonlySet<string>): string {
 /**
  * Realise one `Fault` on a matched route.
  *
- * `hold` is the crawler's held-route registry, used only by `hang`: a hung
- * request must stay in flight, so the handler returns without responding and
- * the registry aborts it later (page teardown, or `releaseAfterMs`). Without
- * that registry a hung route would keep the browser context from closing
- * cleanly.
+ * `hold` is the crawler's held-route registry, used only by an *unbounded*
+ * `hang`: a hung request must stay in flight, so the handler returns without
+ * responding and the registry aborts it when the run is done with the page.
+ * Without that registry a hung route would keep the browser context from
+ * closing cleanly. A `hang` with `releaseAfterMs` never enters the registry —
+ * it aborts itself on its own timer — which is also why `report.heldRequests`
+ * counts only the unbounded kind.
  */
 async function applyFault(
   route: Route,
@@ -3544,11 +3555,17 @@ async function applyFault(
       // request in flight, which is the whole point of the fault.
       if (fault.releaseAfterMs !== undefined) {
         const ms = fault.releaseAfterMs;
-        setTimeout(() => {
+        // `unref` so the timer cannot outlive the work. A library consumer —
+        // vitest, `playwright test` — has a worker process that would
+        // otherwise linger for the whole release window after the run is
+        // finished; a 15s hang held one for 15s past the last assertion. The
+        // CLI never noticed because it calls `process.exit`.
+        const timer = setTimeout(() => {
           void route.abort("timedout").catch(() => {
             /* page may already be gone */
           });
         }, ms);
+        timer.unref?.();
         return;
       }
       hold?.(route);

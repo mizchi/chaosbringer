@@ -22,6 +22,13 @@
  * Node (`decideFault`) and two inside the page, so the in-page evaluator is
  * generated from `buildDecisionHelperSource()` here rather than hand-written
  * twice.
+ *
+ * What the layers do *not* all share is who gets to advance an occurrence.
+ * The network, runtime-`fetch` and lifecycle layers consult every matching
+ * rule, so two faults on one URL agree about what "occurrence 1" means. The
+ * iframe layer and the load path are single-pass — the first fault to claim
+ * the event returns — so a scheduled fault behind a claiming one never
+ * advances, and its occurrences count only the events it was asked about.
  */
 
 import type { FaultDecision, FaultSchedule, Rng } from "./types.js";

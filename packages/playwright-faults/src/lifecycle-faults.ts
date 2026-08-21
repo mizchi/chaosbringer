@@ -85,9 +85,15 @@ export function lifecycleMatchesUrl(
 
 /**
  * Roll the seeded RNG against `probability`. Returns true when the fault
- * should fire. Ignores `schedule` — callers supporting deterministic
- * schedules must use `decideFault` from `./schedule.js` instead. `prob >= 1` (or undefined) always fires; `prob <= 0` never
+ * should fire. `prob >= 1` (or undefined) always fires; `prob <= 0` never
  * fires; anything in between samples one number from `rng`.
+ *
+ * Ignores `schedule` entirely, which is why nothing in either package calls
+ * it any more: every layer needs the occurrence-indexed decision and uses
+ * `decideFault` from `./schedule.js`. It stays exported because it is the
+ * probability half on its own, which is what a consumer building a fifth
+ * layer with no schedule support wants — and because removing a public export
+ * to tidy up is a breaking change for a saving of nine lines.
  *
  * RNG consumption is deliberately conditional on `prob < 1` so that adding
  * a probability-1 fault to a config doesn't shift the seed sequence for

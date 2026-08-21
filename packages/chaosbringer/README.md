@@ -195,6 +195,18 @@ await chaos({
 > place. Nothing else about seed stability changed: RNG is consumed only for a
 > `probability` strictly inside `(0, 1)`.
 
+> **Behaviour change, the second one:** every rule's `urlPattern` is now
+> `test()`ed against every request, where before the handler returned as soon
+> as a rule injected. This is what lets two rules on the same URL agree about
+> occurrence numbers, and it is invisible for a stateless pattern — but a
+> RegExp carrying `g` or `y` has a `lastIndex` that `test()` writes, so an
+> extra test used to renumber it. Those flags are now stripped when a matcher
+> is compiled (your own RegExp object is left alone), which means a `/g`
+> pattern matches what it reads as matching rather than firing on alternating
+> requests. If you have a pinned expectation recorded against the old
+> alternating behaviour, it will change — in the direction of what the pattern
+> says.
+
 ### Deterministic schedules
 
 `probability` cannot say "fail the first call, let the retry through". `schedule` can: a decision table indexed by how many times the rule has already matched.
@@ -211,11 +223,13 @@ faultInjection: [
 - `afterEnd` decides what happens past the table: `"pass"` (default — spent), `"inject"` (keep firing), `"repeat"` (cycle it).
 - Available on all four layers (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`). `probability` + `schedule` together is a validation error.
 - A schedule consumes no RNG, so adding one leaves the seed sequence — and therefore chaos action selection — untouched.
-- Faults watching the same URL share occurrence numbering, so occurrence 0 can get one fault kind and occurrence 2 another. Don't split one endpoint across the network and runtime layers this way: a client-side rejection issues no request, so the network counter never advances.
+- Faults watching the same URL share occurrence numbering on the layers that evaluate every matching rule — the network layer, the runtime `fetch` layer and the lifecycle layer — so occurrence 0 can get one fault kind and occurrence 2 another. The **iframe layer and the load path are single-pass**: the first fault to claim an assignment returns, and a scheduled fault sitting behind it does not advance. Numbering there is per-rule, so don't write a two-fault occurrence split on those layers. Don't split one endpoint across the network and runtime layers either: a client-side rejection issues no request, so the network counter never advances.
 
 To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](../../docs/recipes/model-driven-faults.md).
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
+
+A third counter, `suppressed`, appears on a row only when it is non-zero. Rules are first-match-wins, but a *scheduled* rule advances its occurrence whenever its pattern matches — that is what lets two rules on one URL agree about what "occurrence 1" means. So a scheduled rule can decide `inject` and still not act, because a rule ahead of it answered the request. Without `suppressed` that reads as `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule reports: a planned fault that did not happen, indistinguishable from one that was never planned. `RuntimeFaultStats` carries the same field for the same reason, and there `fired` counts effects, not decisions.
 
 ### Rule order: first match wins
 
@@ -438,6 +452,8 @@ Promise-shaped kinds, for the failure modes a network mock cannot express:
 The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
 
 Since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
+
+Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws, and that throw is recorded as a page error of type `exception` — so `summary.jsExceptions` reads 1 and an error cluster appears carrying Playwright's own timeout message. **The page threw nothing.** The classification is the crawler's, not the app's, and it is the expected outcome of the fault rather than a finding. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
 
 The probability roll is deterministic given the same `(seed, runtimeFaults)` pair — the in-page LCG is seeded from `seed` so two runs roll identically.
 

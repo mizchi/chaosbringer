@@ -258,3 +258,37 @@ describe("saveReport", () => {
     }
   });
 });
+
+describe("formatReport: fault injection block", () => {
+  it("names a suppressed decision, and says nothing when there was none", () => {
+    const text = formatReport(
+      makeReport({
+        faultInjections: [
+          { rule: "first", matched: 3, injected: 2 },
+          { rule: "second", matched: 3, injected: 0, suppressed: 1 },
+        ],
+      }),
+    );
+    expect(text).toContain("first: matched=3 injected=2");
+    expect(text).toContain("second: matched=3 injected=0 suppressed=1");
+    // Not a column on every row: `suppressed=0` everywhere is a column a
+    // reader learns to skip, which is the opposite of the point.
+    expect(text).not.toContain("first: matched=3 injected=2 suppressed=0");
+  });
+
+  it("shows held requests, which used to be JSON-only", () => {
+    // The parked request is the point of an unbounded hang *and* the reason
+    // for whatever navigation timeout is printed above it.
+    const held = formatReport(
+      makeReport({
+        faultInjections: [{ rule: "hang", matched: 1, injected: 1 }],
+        heldRequests: 2,
+      }),
+    );
+    expect(held).toMatch(/requests held open.*: 2/);
+    const none = formatReport(
+      makeReport({ faultInjections: [{ rule: "x", matched: 1, injected: 1 }] }),
+    );
+    expect(none).not.toMatch(/requests held open/);
+  });
+});

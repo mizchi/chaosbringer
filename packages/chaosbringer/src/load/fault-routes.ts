@@ -6,7 +6,7 @@
  * shared abstraction here would over-couple two evolving callers.
  */
 import type { BrowserContext, Route, Request } from "playwright";
-import { decideFault } from "../schedule.js";
+import { decideFault, validateFaultSchedule } from "../schedule.js";
 import type { Fault, FaultRule, FaultInjectionStats, UrlMatcher } from "../types.js";
 
 interface CompiledRule {
@@ -51,6 +51,12 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
     // FaultRule has `urlPattern` + `fault`; bare Fault would be a programmer
     // error here, so just skip with a 0-row entry rather than crash.
     if (!("fault" in r)) continue;
+    // The other four layers validate here, and this one did not: a rule
+    // setting both `probability` and `schedule` threw everywhere except on
+    // the load path, where the schedule silently won, and a malformed
+    // `decisions` entry silently never fired. A firing policy that is wrong
+    // in a way nothing reports is the worst kind of fault config.
+    validateFaultSchedule(`load fault rule "${r.name ?? String(r.urlPattern)}"`, r);
     const pattern = toRegExp(r.urlPattern);
     if (!pattern) continue;
     out.push({
@@ -90,20 +96,29 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
       // LOAD_HANG_RELEASE_MS. Until then the request stays in flight, which
       // is the fault.
       const ms = fault.releaseAfterMs ?? LOAD_HANG_RELEASE_MS;
-      setTimeout(() => {
+      // `unref`: the default bound is 30s, and without this a load run with
+      // an unbounded `hang` holds the process open for 30s after its report
+      // is printed.
+      const timer = setTimeout(() => {
         void route.abort("timedout").catch(() => {
           /* context already gone */
         });
       }, ms);
+      timer.unref?.();
       return;
     }
   }
 }
 
 /**
- * Install a single `**` route on the context that runs the compiled
- * fault rules. Rolls probability for each match. Stats are mutated on
- * the compiled rule objects — drain via `faultStatsFrom` at run end.
+ * Install a single `**` route on the context that runs the compiled fault
+ * rules. A rule with a `schedule` is decided by occurrence; otherwise the
+ * probability is rolled per match. Stats are mutated on the compiled rule
+ * objects — drain via `faultStatsFrom` at run end.
+ *
+ * Single pass, first claim wins: unlike the network and runtime layers, a
+ * later rule is not consulted once one has answered, so occurrence numbering
+ * here is per-rule rather than shared.
  */
 export async function installFaultRoutes(
   context: BrowserContext,

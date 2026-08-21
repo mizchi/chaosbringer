@@ -38,6 +38,8 @@ export interface CompiledRuntimeFault {
   name: string;
   matched: number;
   fired: number;
+  /** Decided "inject" while an earlier fault was already answering the call. */
+  suppressed: number;
 }
 
 /** Auto-derive a stats label when the user didn't set `fault.name`. */
@@ -77,6 +79,7 @@ export function compileRuntimeFaults(
       name: runtimeFaultName(fault),
       matched: 0,
       fired: 0,
+      suppressed: 0,
     };
   });
 }
@@ -159,7 +162,7 @@ export function buildRuntimeFaultsScript(
 
   const faults = ${JSON.stringify(serialized)};
   const stats = window.__chaosbringerRuntimeStats;
-  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
+  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0, suppressed: 0 };
 
   const matchUrl = (pattern, url) => {
     if (!pattern) return true;
@@ -187,6 +190,13 @@ export function buildRuntimeFaultsScript(
   };
   const fire = (f) => {
     stats[String(f.id)].fired++;
+  };
+  // Decided "inject", lost the call to an earlier fault. Recorded rather than
+  // dropped: with only \`matched\` and \`fired\`, a scheduled fault that decided
+  // to act and could not is indistinguishable from one whose schedule said
+  // pass.
+  const suppress = (f) => {
+    stats[String(f.id)].suppressed++;
   };
 
   // --- fetch-scoped faults (Promise-level failure modes) ---
@@ -233,8 +243,11 @@ export function buildRuntimeFaultsScript(
         if (!matchUrl(f.pattern, url)) continue;
         if (!matchMethod(f, method)) continue;
         if (f.schedule) {
-          const fired = roll(f);
-          if (fired && !chosen) chosen = f;
+          const decided = roll(f);
+          if (decided) {
+            if (chosen) suppress(f);
+            else chosen = f;
+          }
         } else if (!chosen) {
           if (roll(f)) chosen = f;
         }
@@ -359,7 +372,10 @@ export function buildRuntimeFaultsScript(
  */
 export function mergeRuntimeStats(
   compiled: CompiledRuntimeFault[],
-  pageStats: Record<string, { matched: number; fired: number }>,
+  // `suppressed` is optional on the way in: a page that installed an older
+  // script reports only `matched` and `fired`, and reading it as 0 there is
+  // right — that script could not distinguish the case.
+  pageStats: Record<string, { matched: number; fired: number; suppressed?: number }>,
 ): RuntimeFaultStats[] {
   for (let i = 0; i < compiled.length; i++) {
     const c = compiled[i]!;
@@ -368,6 +384,7 @@ export function mergeRuntimeStats(
     if (ps) {
       c.matched += ps.matched;
       c.fired += ps.fired;
+      c.suppressed += ps.suppressed ?? 0;
       continue;
     }
     // Backwards-compat: name-keyed (one slot per distinct name only;
@@ -376,11 +393,13 @@ export function mergeRuntimeStats(
     if (byName && !compiled.slice(0, i).some((c2) => c2.name === c.name)) {
       c.matched += byName.matched;
       c.fired += byName.fired;
+      c.suppressed += byName.suppressed ?? 0;
     }
   }
   return compiled.map((c) => ({
     rule: c.name,
     matched: c.matched,
     fired: c.fired,
+    ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
   }));
 }

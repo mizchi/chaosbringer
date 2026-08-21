@@ -88,7 +88,7 @@ describe("the generated runtime script", () => {
     await fetch("/api/save").catch(() => {});
     await fetch("/api/save").catch(() => {});
     await fetch("/api/other").catch(() => {});
-    expect(stats()["0"]).toEqual({ matched: 2, fired: 1 });
+    expect(stats()["0"]).toEqual({ matched: 2, fired: 1, suppressed: 0 });
   });
 
   it("rejects only the body consumers named, and leaves the rest of the Response real", async () => {
@@ -183,10 +183,12 @@ describe("the generated runtime script, less-travelled paths", () => {
       },
     ]);
     await expect(fetch("/api/save")).rejects.toThrow();
-    expect(stats()["0"]).toEqual({ matched: 1, fired: 1 });
+    expect(stats()["0"]).toEqual({ matched: 1, fired: 1, suppressed: 0 });
     // Occurrence still advanced — two faults watching one URL must agree on
-    // what "occurrence 1" means — but nothing fired.
-    expect(stats()["1"]).toEqual({ matched: 1, fired: 0 });
+    // what "occurrence 1" means — and the decision it could not act on is
+    // reported as `suppressed`, so it is not mistaken for a schedule that
+    // said pass.
+    expect(stats()["1"]).toEqual({ matched: 1, fired: 0, suppressed: 1 });
   });
 
   it("rejects a resolve-rejected-thenable with a TypeError, one microtask late", async () => {

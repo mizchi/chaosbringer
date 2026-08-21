@@ -61,7 +61,11 @@ export type Fault =
    * `releaseAfterMs` aborts with `"timedout"` after that long. Omit it to
    * hold until the page closes — but note the crawler navigates with
    * `waitUntil: "networkidle"`, so a hang on a request issued *during*
-   * navigation costs one `timeout` per page visit. Prefer hanging requests
+   * navigation costs one `timeout` per page visit — and the resulting
+   * `page.goto` rejection is recorded as a page error of type `exception`,
+   * which shows up in `summary.jsExceptions` even though the page threw
+   * nothing. That is the expected outcome of this fault, not a finding.
+   * Prefer hanging requests
    * that an action fires after load, or set `releaseAfterMs`.
    */
   | { kind: "hang"; releaseAfterMs?: number };
@@ -90,6 +94,19 @@ export interface FaultInjectionStats {
   rule: string;
   matched: number;
   injected: number;
+  /**
+   * Times this rule's schedule said "inject" and an earlier rule had already
+   * claimed the request. Present only when non-zero.
+   *
+   * Rules are first-match-wins, but a *scheduled* rule advances its
+   * occurrence whenever its pattern matches — two rules watching one URL have
+   * to agree on what occurrence 1 means. So a scheduled rule can decide
+   * "inject" and still do nothing. Without this number that shows up as
+   * `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule
+   * reports: a planned fault that did not happen, indistinguishable from one
+   * that was never planned.
+   */
+  suppressed?: number;
 }
 
 // =====================================================================
@@ -312,8 +329,21 @@ export interface RuntimeFaultStats {
   rule: string;
   /** Times the fault was tested (URL matched, probability about to roll). */
   matched: number;
-  /** Times the fault actually fired. */
+  /**
+   * Times the fault actually took effect — the call it answered. A scheduled
+   * fault that decided "inject" while an earlier fault was already answering
+   * the call is counted in `suppressed`, not here: it decided, it did not act,
+   * and a consumer reading `fired` on a `never-settle-fetch` concludes the
+   * page is hanging.
+   */
   fired: number;
+  /**
+   * Times this fault decided "inject" and another fault answered the call
+   * instead. Present only when non-zero. See `FaultInjectionStats.suppressed`
+   * — the network layer's counterpart — for why the decision is consumed even
+   * when it cannot be acted on.
+   */
+  suppressed?: number;
 }
 
 // =====================================================================

@@ -71,3 +71,35 @@ describe("compileLoadFaultRules", () => {
     expect(faultStatsFrom(compiled)).toEqual([{ rule: "api-500", matched: 5, injected: 3 }]);
   });
 });
+
+describe("compileLoadFaultRules validates the firing policy", () => {
+  it("refuses a rule that sets both probability and schedule", () => {
+    // The other four layers throw on this; the load path used to let the
+    // schedule silently win, so a config that is ambiguous everywhere else
+    // was quietly reinterpreted here.
+    expect(() =>
+      compileLoadFaultRules([
+        {
+          name: "both",
+          urlPattern: /\/api\/x/,
+          fault: { kind: "abort" },
+          probability: 0.5,
+          schedule: { decisions: ["inject"] },
+        },
+      ]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("names the offending rule so the error is actionable", () => {
+    expect(() =>
+      compileLoadFaultRules([
+        {
+          name: "empty-table",
+          urlPattern: /\/api\/x/,
+          fault: { kind: "abort" },
+          schedule: { decisions: [] },
+        },
+      ]),
+    ).toThrow(/empty-table/);
+  });
+});
