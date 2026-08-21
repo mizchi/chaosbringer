@@ -163,6 +163,15 @@ async function oneRun(opts: CalibrateOptions): Promise<CalibrationRun> {
   }
 }
 
+/**
+ * Smallest delay-path jitter worth believing, in ms.
+ *
+ * Route interception plus a `setTimeout` plus `route.fallback()` does not cost
+ * single-digit milliseconds reliably; a profile claiming it does was measured
+ * on an idle box and will not hold under CI load.
+ */
+const MIN_CREDIBLE_TAIL_MS = 10;
+
 /** Run the calibration `runs` times and return the conservative envelope. */
 export async function calibrateTiming(opts: CalibrateOptions): Promise<CalibrationResult> {
   const runCount = opts.runs ?? 3;
@@ -175,7 +184,22 @@ export async function calibrateTiming(opts: CalibrateOptions): Promise<Calibrati
   // A warm, idle machine flatters the tail: the container this was written
   // against measured 13ms over two warm runs and 107ms on a cold one. Say so,
   // rather than letting an optimistic profile turn into flaky plans.
-  if (profile.delayTailMs < profile.delayFloorMs * 4 || runCount < 3) {
+  //
+  // The floor is a `min` over every nominal, so on a fast box with a large
+  // nominal it rounds to 0 — and `tail < 0 * 4` is `tail < 0`, which never
+  // fires. The machine most likely to produce an optimistic tail was the one
+  // suppressing the warning, so the floor comparison gets a floor of its own.
+  const rawFloor = Math.min(...runs.flatMap((r) => r.delay).map((d) => d.overheadMin));
+  if (rawFloor < 0) {
+    opts.onProgress?.(
+      `note: the measured injection floor came out at ${rawFloor}ms — negative, i.e. the ` +
+        `measurement noise on this machine is larger than the quantity being measured. Clamped ` +
+        `to 0. Treat the whole profile as approximate and re-measure on a quieter box; the ` +
+        `tails from the same sweep are suspect for the same reason.`,
+    );
+  }
+  const suspiciousTail = Math.max(profile.delayFloorMs, MIN_CREDIBLE_TAIL_MS) * 4;
+  if (profile.delayTailMs < suspiciousTail || runCount < 3) {
     opts.onProgress?.(
       `note: a ${profile.delayTailMs}ms tail over ${runCount} run(s) is probably optimistic — ` +
         `a cold run measures several times that. Take at least 3 runs, and keep the solver's ` +
@@ -189,13 +213,21 @@ export async function calibrateTiming(opts: CalibrateOptions): Promise<Calibrati
  * The envelope: floors at their minimum (the best case is the real floor),
  * tails and fixed costs at their maximum across runs. Pure, so the
  * aggregation is testable without a browser.
+ *
+ * The floor is clamped at 0. `overheadMin` is `observed - nominal`, and on a
+ * contended box that goes *negative* — a measured -101ms floor is not a
+ * mechanism that returns responses before they were asked for, it is
+ * measurement noise larger than the quantity being measured. A negative floor
+ * is worse than a wrong one: it makes `slow = settle + margin - floor` grow
+ * without bound and `fast >= floor` unfalsifiable, and `solveTiming` now
+ * refuses such a profile outright rather than solving it into nonsense.
  */
 export function envelope(runs: readonly CalibrationRun[]): TimingProfile {
   if (runs.length === 0) throw new Error("chaosbringer: no calibration runs to aggregate");
   const delays = runs.flatMap((r) => r.delay);
   const tights = runs.flatMap((r) => r.tight);
   return {
-    delayFloorMs: Math.min(...delays.map((d) => d.overheadMin)),
+    delayFloorMs: Math.max(0, Math.min(...delays.map((d) => d.overheadMin))),
     delayTailMs: Math.max(...delays.map((d) => d.overheadMax)),
     tightTailMs: Math.max(...tights.map((t) => t.overheadMax)),
     fixedPerPlanMs: Math.max(...runs.map((r) => r.fixedPerPlanMs)),

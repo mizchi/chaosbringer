@@ -399,15 +399,18 @@ export function markOrderSensitivePlans(plans: readonly FaultPlan[]): FaultPlan[
     if (bucket) bucket.push(plan);
     else byMultiset.set(key, [plan]);
   }
-  const sensitive = new Set<string>();
+  // Keyed by *identity*, not by `plan.name`. Names come from filenames, so
+  // they are unique within one directory — but `runPlans` takes a flat array
+  // and nothing stops a caller merging two plan directories. Keyed by name, a
+  // third plan that merely shares a name with a flagged one, and has a
+  // completely different multiset, was flagged too.
+  const sensitive = new Set<FaultPlan>();
   for (const bucket of byMultiset.values()) {
     if (bucket.length < 2) continue;
     const expectations = new Set(bucket.map(expectationKey));
-    if (expectations.size > 1) for (const p of bucket) sensitive.add(p.name);
+    if (expectations.size > 1) for (const p of bucket) sensitive.add(p);
   }
-  return plans.map((p) =>
-    sensitive.has(p.name) ? { ...p, orderSensitive: true } : p,
-  );
+  return plans.map((p) => (sensitive.has(p) ? { ...p, orderSensitive: true } : p));
 }
 
 /** Structural validation of a hand-written or round-tripped plan. */
@@ -446,7 +449,11 @@ export function validatePlan(plan: FaultPlan): void {
     throw new Error(`chaosbringer/model: ${where} is missing an "expect" object`);
   }
   if (plan.expect.calls !== undefined) {
-    const scheduled = new Set(plan.schedule.map((s) => s.rule));
+    // Note what is deliberately *not* checked here: that the operation
+    // appears in the schedule. `compilePlanFaults` gives an unpinned
+    // operation a counting-only rule, so the number is still compared — and
+    // that is the only way a model can say "and this endpoint is never
+    // called", which is the strongest thing a control plan has to say.
     for (const [rule, count] of Object.entries(plan.expect.calls)) {
       if (!Number.isInteger(count) || count < 0) {
         throw new Error(
@@ -454,11 +461,6 @@ export function validatePlan(plan: FaultPlan): void {
             `a call count must be a non-negative integer`,
         );
       }
-      // An operation the schedule never pins is fine — `compilePlanFaults`
-      // gives it a counting-only rule so the number is still compared. That
-      // is the only way a model can say "and this endpoint is never called",
-      // which is the strongest thing a control plan has to say.
-      void scheduled;
     }
   }
 }

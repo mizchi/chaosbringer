@@ -5,13 +5,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
-import { compilePlansFromTraces } from "./cli.js";
+import { compilePlansFromTraces, coverageForRun } from "./cli.js";
 import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
 import {
   checkUiInvariants,
   compilePlanFaults,
   evaluatePlanOracle,
   faultNameFor,
+  nextDrainWaitMs,
   observationNameFor,
   resolvePlanTiming,
   validateCallCountRules,
@@ -19,6 +20,7 @@ import {
   type PlanRunResult,
 } from "./runner.js";
 import { envelope, type CalibrationRun } from "./calibrate.js";
+import { solveTiming } from "../timing.js";
 
 /**
  * Fixtures are real `quint verify` / `quint run --mbt` output from the
@@ -260,6 +262,24 @@ describe("markOrderSensitivePlans", () => {
     expect(marked.some((p) => p.orderSensitive)).toBe(false);
   });
 
+  it("keys by plan identity, so a name collision is not a verdict", () => {
+    // Names come from filenames, unique within a directory — but `runPlans`
+    // takes a flat array and nothing stops a caller merging two plan dirs.
+    // Keyed by name, the third plan here was flagged too, on the strength of
+    // sharing a string with a pair it has nothing to do with.
+    const clash: FaultPlan[] = [
+      { ...base("dup", "error") },
+      { ...base("dup", "partial") },
+      {
+        name: "dup",
+        schedule: [{ order: 0, rule: "Z", outcome: "status", occurrence: 0 }],
+        expect: { ui: "ready" },
+      },
+    ];
+    const out = markOrderSensitivePlans(clash);
+    expect(out.map((p) => p.orderSensitive ?? false)).toEqual([true, true, false]);
+  });
+
   it("leaves distinct injection sets alone", () => {
     const other: FaultPlan = {
       name: "hang",
@@ -472,7 +492,10 @@ describe("coverage", () => {
       ],
     });
     expect(coverage.statesTargeted).toBe(3);
-    expect(coverage.statesReached).toBe(2);
+    // Named for what it counts: what the *enumerator* found reachable. The
+    // skipped plan below still contributes, which is exactly why the old name
+    // (`statesReached`) was wrong.
+    expect(coverage.statesReachable).toBe(2);
     expect(coverage.statesUnreachableInBound).toBe(1);
     expect(formatModelCoverage(coverage)).toContain("depth <= 5");
   });
@@ -523,7 +546,43 @@ describe("resolvePlanTiming", () => {
     expect(t.quiescenceMs).toBe(5097);
     // slowMs outlasts the probe, not merely the deadline: settle 5097 + 25 - 4.
     expect(t.delays).toEqual({ fastMs: 4857, slowMs: 5118 });
-    expect(t.solved?.pageTimeoutMs).toBe(5936);
+    // The navigation timeout survives the slowest delay a plan can put on a
+    // load-time request (fixed 696 + slow 5118 + tail 118 + margin 25); the
+    // probe is not bounded by it at all.
+    expect(t.solved?.pageTimeoutMs).toBe(5957);
+    expect(t.pageTimeoutMs).toBe(5957);
+    // …and the wall clock counts both windows, which is what a plan spends.
+    expect(t.wallClockMs).toBe(10890); // 696 + 5097 + 5097
+  });
+
+  it("re-derives the navigation timeout from a declared window, not the solved one", () => {
+    // The bug shape already fixed one field over for the tripping delay: a
+    // bridge that declares settleMs got a page timeout solved for a window it
+    // is not using, and `runPlan` forwarded that number to the crawler.
+    const t = resolvePlanTiming({ settleMs: 12000, appDeadlineMs: 600, timingProfile: MEASURED });
+    expect(t.settleMs).toBe(12000);
+    expect(t.delays!.slowMs).toBe(12021); // declared window + margin - floor
+    expect(t.pageTimeoutMs).toBe(696 + 12021 + 118 + 25);
+    // The solved solution still answers for the *solved* window, so the two
+    // are visibly different numbers rather than one silently wrong one.
+    expect(t.solved!.pageTimeoutMs).toBe(696 + 718 + 118 + 25);
+  });
+
+  it("checks a declared per-plan budget against both windows", () => {
+    // `budgetMs` is documented as the wall clock the operator will tolerate,
+    // so it is compared against fixed + settle + quiesce. 6000 covers the old
+    // (probe-only) figure of 5793 and not the 10890 a plan really costs.
+    // The solver rejects it outright — `within_budget` is one of its own
+    // constraints — and the message carries the arithmetic.
+    expect(() =>
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, budgetMs: 6000 }),
+    ).toThrow(/within_budget/);
+    expect(() =>
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, budgetMs: 6000 }),
+    ).toThrow(/one plan costs ~10890ms/);
+    expect(
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, budgetMs: 11000 }).settleMs,
+    ).toBe(5097);
   });
 
   it("refuses a settle window that cannot decide anything", () => {
@@ -562,10 +621,34 @@ describe("resolvePlanTiming", () => {
     );
   });
 
-  it("treats the crawler timeout as the budget", () => {
+  it("checks the crawler timeout against navigation, which is what it bounds", () => {
+    // It used to be passed through as `budgetMs` and compared against
+    // `pageTimeoutMs`, i.e. a wall-clock claim measured against a navigation
+    // number. Both halves are checked now, each against its own quantity: a
+    // 3000ms navigation timeout cannot survive the 5118ms delay a plan may
+    // inject into a load-time request.
     expect(() =>
       resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
-    ).toThrow(/budget is too small/);
+    ).toThrow(/fits_navigation_timeout/);
+    expect(() =>
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 3000 }),
+    ).toThrow(/navigation needs 5957ms to survive a 5118ms injected delay/);
+    // A timeout that does survive it is accepted and forwarded unchanged.
+    expect(
+      resolvePlanTiming({ appDeadlineMs: 5000, timingProfile: MEASURED, timeout: 9000 }).settleMs,
+    ).toBe(5097);
+  });
+
+  it("refuses an app deadline that is not a number", () => {
+    // `appDeadlineMs: Number(process.env.APP_DEADLINE)` with the variable
+    // unset. Before, this solved `sat` with every field NaN and the run
+    // reached `page.waitForTimeout(NaN)`.
+    expect(() =>
+      resolvePlanTiming({ appDeadlineMs: Number.NaN, timingProfile: MEASURED }),
+    ).toThrow(/inputs_well_formed/);
+    expect(() => resolvePlanTiming({ appDeadlineMs: 0, timingProfile: MEASURED })).toThrow(
+      /deadlineMs must be greater than 0/,
+    );
   });
 
   describe("an app that retries: the window has to outlast the ladder", () => {
@@ -639,8 +722,33 @@ describe("validateCallCountRules", () => {
     expect(() => validateCallCountRules(plan, { stream: /\/api\/stream(\?|$)/ })).not.toThrow();
     // An escaped dollar is a literal, not an anchor.
     expect(() => validateCallCountRules(plan, { stream: /\/api\/stream\$/ })).not.toThrow();
-    // A string matcher has no anchor to get wrong.
+    // An unanchored string is fine, in either spelling.
     expect(() => validateCallCountRules(plan, { stream: "/api/stream" })).not.toThrow();
+    expect(() => validateCallCountRules(plan, { stream: "/api/stream(\\?|$)" })).not.toThrow();
+  });
+
+  it("refuses the string spelling of the same anchor", () => {
+    // `UrlMatcher = string | RegExp` and every layer compiles the string with
+    // `new RegExp(m)`, so `"/api/stream$"` *is* `/\/api\/stream$/` — and
+    // `new RegExp("/api/stream$").test("/api/stream?cursor=3") === false`
+    // exactly as for the RegExp. A pre-flight that fires for one of two
+    // equivalent spellings is a lint a user routes around by accident.
+    expect(new RegExp("/api/stream$").test("/api/stream?cursor=3")).toBe(false);
+    expect(() => validateCallCountRules(plan, { stream: "/api/stream$" })).toThrow(
+      /expect\.calls on operation "stream"/,
+    );
+    // The fix is echoed in the spelling the author actually wrote — a string,
+    // not a regex literal they never typed.
+    expect(() => validateCallCountRules(plan, { stream: "/api/stream$" })).toThrow(
+      /Widen it to "\/api\/stream\(\\\\\?\|\$\)"/,
+    );
+    // …and through the object form too.
+    expect(() =>
+      validateCallCountRules(plan, { stream: { urlPattern: "/api/stream$", methods: ["GET"] } }),
+    ).toThrow(/\$`-anchored pattern/);
+    // A string that is not a valid pattern is left to the layer that compiles
+    // it for real, rather than crashing the pre-flight.
+    expect(() => validateCallCountRules(plan, { stream: "/api/stream($" })).not.toThrow();
   });
 
   it("leaves an anchored rule alone when no plan counts it", () => {
@@ -652,6 +760,85 @@ describe("validateCallCountRules", () => {
         { page1: /\/api\/feed\?page=1$/ },
       ),
     ).not.toThrow();
+  });
+});
+
+describe("model run's coverage assembly", () => {
+  const plan = (name: string): FaultPlan => ({
+    name,
+    spec: "cart.qnt",
+    schedule: [{ order: 0, rule: "cart", outcome: "reject", occurrence: 0 }],
+    expect: {},
+  });
+  const result = (name: string, fingerprint?: string) => ({
+    plan: plan(name),
+    observed: {
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: {},
+      matched: {},
+      ...(fingerprint !== undefined ? { coverageFingerprint: fingerprint } : {}),
+    },
+    mismatches: [],
+  });
+
+  it("hands the collected fingerprints to aggregateCoverage", () => {
+    // `model run` collected a V8 coverage digest per plan and then dropped it,
+    // so `collapsedPlans` was unconditionally empty for every CLI user no
+    // matter what the bridge asked for. The digests being collected is not the
+    // claim; the report naming the collapsed pair is.
+    const plans = [plan("reject-first"), plan("reject-second")];
+    const coverage = coverageForRun(plans, [
+      result("reject-first", "sha256:aaa"),
+      result("reject-second", "sha256:aaa"),
+    ]);
+    expect(coverage.collapsedPlans).toEqual([["reject-first", "reject-second"]]);
+    expect(coverage.spec).toBe("cart.qnt");
+  });
+
+  it("stays empty when no fingerprints were collected", () => {
+    const coverage = coverageForRun([plan("a")], [result("a")]);
+    expect(coverage.collapsedPlans).toEqual([]);
+  });
+});
+
+describe("nextDrainWaitMs", () => {
+  // The drain exists to wait out the app's *own* follow-up work — a `void
+  // retry()` inside a 900ms backoff. Which timer it waits for decides whether
+  // it costs what it drains or costs the whole cap.
+  it("waits for the earliest pending timer, not the latest", () => {
+    // A page with a 200ms retry and a 300s session-refresh timer. Waiting for
+    // the latest one spends `min(300025, 3000)` = the entire cap and comes
+    // back with that timer still pending: measured at +3097ms per plan of
+    // pure sleep on a page whose only timer was irrelevant.
+    expect(
+      nextDrainWaitMs({ timers: 2, intervals: 0, earliestDueInMs: 200, latestDueInMs: 300000 }, 3000),
+    ).toBe(225);
+  });
+
+  it("stops instead of sleeping when the earliest timer is past the budget", () => {
+    // The whole defect in one case: one `setTimeout(fn, 300000)` and nothing
+    // else. There is nothing to drain inside the cap, so the answer is to
+    // stop — the timer is reported in `observed.pendingAsync`, not slept on.
+    expect(
+      nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 295328, latestDueInMs: 295328 }, 3000),
+    ).toBeNull();
+    // Exactly on the boundary is still worth waiting for; one ms over is not.
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 2975 }, 3000)).toBe(3000);
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 2976 }, 3000)).toBeNull();
+  });
+
+  it("stops when nothing is pending or the cap is spent", () => {
+    expect(nextDrainWaitMs({ timers: 0, intervals: 0 }, 3000)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 10 }, 0)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 10 }, -5)).toBeNull();
+  });
+
+  it("never waits less than the callback needs to actually run", () => {
+    // A timer already due reads as 0 or negative; the +25 is what makes the
+    // difference between "became due" and "ran".
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 0 }, 3000)).toBe(25);
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: -40 }, 3000)).toBe(25);
   });
 });
 
@@ -729,6 +916,28 @@ describe("calibration envelope", () => {
 
   it("refuses to aggregate nothing", () => {
     expect(() => envelope([])).toThrow(/no calibration runs/);
+  });
+
+  it("clamps a negative measured floor rather than writing an unusable profile", () => {
+    // Real output from a calibration run under 4-way CPU contention:
+    // `delayFloorMs: -101`. `overheadMin` is `observed - nominal`, so a
+    // negative value means the noise is larger than the quantity — not a
+    // mechanism that answers before it was asked. Left alone it makes
+    // `slow = settle + margin - floor` grow without bound and
+    // `fast >= floor` unfalsifiable, and `solveTiming` refuses the profile
+    // outright (`inputs_well_formed`), so `model calibrate` would write a
+    // file that no plan can be solved against.
+    const noisy: CalibrationRun = {
+      delay: [
+        { nominal: 300, observedMin: 199, observedMax: 366, overheadMin: -101, overheadMax: 66 },
+      ],
+      tight: [{ nominal: 200, observedMin: 200, observedMax: 252, overheadMin: 0, overheadMax: 52 }],
+      fixedPerPlanMs: 741,
+    };
+    const prof = envelope([noisy]);
+    expect(prof.delayFloorMs).toBe(0);
+    // …and the profile it writes is one the solver will accept.
+    expect(solveTiming(prof, { deadlineMs: 700 }).status).toBe("sat");
   });
 });
 
@@ -956,32 +1165,169 @@ describe("evaluatePlanOracle", () => {
       ).toEqual([]);
     });
 
-    it("checks `expect.calls` always, and exactly", () => {
+    it("checks `expect.calls` always, exactly, and in the direction it happened", () => {
       const stated = { ...plan, expect: { calls: { telemetry: 1 } } };
       expect(fields(base({ plan: stated, observed: observed(12) }))).toEqual(["amplification"]);
       expect(fields(base({ plan: stated, observed: observed(1) }))).toEqual([]);
-      // Too *few* is a finding as well: the model said the beacon fires.
-      expect(fields(base({ plan: stated, observed: observed(0) }))).toEqual(["amplification"]);
+      // Too *few* is a finding as well: the model said the beacon fires. But
+      // it is not `amplification` — that field is documented as "more calls
+      // than the model described", and a consumer switching on it exhaustively
+      // would be told the exact opposite of what happened. An under-count is
+      // the `injection` class: the app didn't make a call the model states.
+      const under = evaluatePlanOracle(base({ plan: stated, observed: observed(0) }));
+      expect(under.map((m) => m.field)).toEqual(["injection"]);
+      expect(under[0]).toMatchObject({ expected: 1, actual: 0 });
+      expect(under[0]!.detail).toMatch(/the app made 0/);
+      // …and it does not claim to know which of the two causes it was.
+      expect(under[0]!.detail).toMatch(/or an outcome injected earlier in this plan/);
     });
 
-    it("skips a rule nothing counted rather than guessing zero", () => {
-      // An all-`pass` rule inside a plan that injects elsewhere has no
-      // counter, so `matched` has no entry for it. Reading that as 0 would
-      // turn a blind spot into a false failure.
+    it("reports a rule nothing counted as undecided, not as satisfied", () => {
+      // `compilePlanFaults` always installs a counting route, so `matched`
+      // normally has an entry. If the crawl dies before the routes go on, the
+      // stats arrays are absent — and treating a missing count as "no news"
+      // turns an asserted number into a pass. An unmeasured assertion is not
+      // a satisfied one.
       const stated = { ...plan, expect: { calls: { telemetry: 1 } } };
+      const out = evaluatePlanOracle(
+        base({
+          plan: stated,
+          observed: {
+            unhandledRejection: false,
+            lateUnhandledRejection: false,
+            fired: {},
+            matched: {},
+          },
+        }),
+      );
+      expect(out.map((m) => m.field)).toEqual(["undecided"]);
+      expect(out[0]!.detail).toMatch(/nothing counted requests on operation "telemetry"/);
+    });
+  });
+
+  describe("a broken bridge is not a finding about the app", () => {
+    // A typo'd selector: `locator.click` times out, `observed.probeError` is
+    // set, and nothing after the throw ran. Every derived check then reads
+    // observations that were never made — and the `injection` message used to
+    // state, in the library's own confident prose, that *the app* never issued
+    // the request.
+    const plan = {
+      name: "checkout",
+      schedule: [{ order: 0, rule: "write", outcome: "reject" as const, occurrence: 0 }],
+      expect: { ui: "error", state: { orders: 1 }, calls: { write: 1 }, unhandledRejection: false },
+    };
+    const broken = base({
+      plan,
+      observed: {
+        unhandledRejection: false,
+        lateUnhandledRejection: false,
+        fired: {},
+        matched: {},
+        probeError: 'locator.click: Timeout 30000ms exceeded waiting for locator("#submitt")',
+      },
+      expectedInjections: new Map([["write:reject", 1]]),
+      uiInvariantFailures: [{ key: "*", message: "no #total on the page" }],
+    });
+
+    it("reports the throw as itself and suppresses everything derived from it", () => {
+      const out = evaluatePlanOracle(broken);
+      expect(out.map((m) => m.field)).toEqual(["probeError"]);
+      expect(out[0]!.actual).toMatch(/#submitt/);
+      expect(out[0]!.detail).toMatch(/decided nothing about the app/);
+      // The four findings this plan would otherwise have produced, none of
+      // which is evidence of anything.
+      expect(out.map((m) => m.field)).not.toContain("injection");
+      expect(out.map((m) => m.field)).not.toContain("state");
+      expect(out.map((m) => m.field)).not.toContain("ui");
+      expect(out.map((m) => m.field)).not.toContain("uiInvariant");
+    });
+
+    it("still fails the run — a broken bridge is not a pass", () => {
+      const mismatches = evaluatePlanOracle(broken);
+      const coverage = aggregateCoverage([{ plan, observed: broken.observed, mismatches }]);
+      expect(modelRunPassed(coverage)).toBe(false);
+      // …and it is not filed as "the planned fault never fired", which is a
+      // claim about the app.
+      expect(coverage.plansNotExercised).toEqual([]);
+    });
+  });
+
+  describe("a run that could not decide is not a run that passed", () => {
+    // The probe instant is the whole soundness argument for `slow-trip`: the
+    // injected response lands at `trippingResponseAtMs`, and only a probe that
+    // fires before it can tell an app that enforced its deadline from one with
+    // no deadline at all. Under single-core contention a
+    // `page.waitForTimeout(731)` overshoots its 21ms of headroom easily.
+    const plan = {
+      name: "report-tooSlow",
+      schedule: [{ order: 0, rule: "report", outcome: "slow-trip" as const, occurrence: 0 }],
+      expect: { ui: "error" },
+    };
+    const observed = (ui: string) => ({
+      ui,
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: { "report:slow-trip": 1 },
+      matched: { report: 1 },
+    });
+
+    it("refuses to call an unbounded app healthy when the probe fired too late", () => {
+      const out = evaluatePlanOracle(
+        base({
+          plan,
+          observed: observed("error"),
+          settleMs: 731,
+          probeElapsedMs: 760,
+          trippingResponseAtMs: 756, // slow 752 + delayFloor 4
+        }),
+      );
+      // The label matched the model — and means nothing, because the response
+      // had already landed. Reported as undecided instead of as a pass.
+      expect(out.map((m) => m.field)).toEqual(["undecided"]);
+      expect(out[0]!.detail).toMatch(/began reading at 760ms/);
+      expect(out[0]!.detail).toMatch(/tightTailMs/);
+    });
+
+    it("suppresses the ui verdict rather than narrating it from a bad instant", () => {
+      const out = evaluatePlanOracle(
+        base({
+          plan,
+          observed: observed("ready"),
+          settleMs: 731,
+          probeElapsedMs: 900,
+          trippingResponseAtMs: 756,
+        }),
+      );
+      // "predicted error, got ready" would be the right field for the wrong
+      // reason: on this run "ready" is what a *correct* app looks like too.
+      expect(out.map((m) => m.field)).toEqual(["undecided"]);
+    });
+
+    it("says nothing when the probe was early enough, in either direction", () => {
+      const early = { settleMs: 731, probeElapsedMs: 740, trippingResponseAtMs: 756 };
+      expect(fields(base({ plan, observed: observed("error"), ...early }))).toEqual([]);
+      expect(fields(base({ plan, observed: observed("ready"), ...early }))).toEqual(["ui"]);
+    });
+
+    it("only applies to plans whose verdict depends on that instant", () => {
+      // A plan with no tripping delay has no such window, so a late probe is
+      // not a reason to refuse a verdict.
+      const noTiming = {
+        name: "write-rejected",
+        schedule: [{ order: 0, rule: "write", outcome: "reject" as const, occurrence: 0 }],
+        expect: { ui: "error" },
+      };
       expect(
         fields(
           base({
-            plan: stated,
-            observed: {
-              unhandledRejection: false,
-              lateUnhandledRejection: false,
-              fired: {},
-              matched: {},
-            },
+            plan: noTiming,
+            observed: observed("ready"),
+            settleMs: 731,
+            probeElapsedMs: 5000,
+            trippingResponseAtMs: 756,
           }),
         ),
-      ).toEqual([]);
+      ).toEqual(["ui"]);
     });
   });
 

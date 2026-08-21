@@ -110,6 +110,13 @@ decideFault(rule, 1, rng); // "pass"
 `validateFaultSchedule` from your own compile step if you accept user config.
 A schedule draws no random numbers, so it never shifts a seeded sequence.
 
+`decideFault` also draws nothing for `probability: 0` — a rule that can never
+fire has nothing to roll for. **This changed:** the inline roll it replaced on
+`chaosbringer`'s network layer drew first and then passed, so an existing seeded
+config containing a `probability: 0` rule now produces a different action
+sequence. Re-record any pinned seed/action-order pair that has one.
+`probability: 1` and values in `(0, 1)` are unaffected.
+
 ## RNG contract
 
 Functions that need randomness (`shouldFireProbability`, etc.) accept any object with `next(): number` returning `[0, 1)`. Bring your own — chaosbringer uses its seeded mulberry32; vitest tests can pass `Math.random`-flavor stubs.

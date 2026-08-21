@@ -2970,10 +2970,14 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
   for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
-  for (const rule of options.faultInjection ?? []) {
-    const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
+  for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {
+    // The index when there is no name: "faultInjection rule" alone, in a
+    // config with twenty of them, does not tell you which one to fix.
+    const label = rule.name
+      ? `faultInjection rule "${rule.name}"`
+      : `faultInjection rule #${ruleIndex}`;
     assertMatcher(`${label} urlPattern`, rule.urlPattern);
-    validateFaultSchedule(label, rule);
+    validateFaultSchedule(label, rule, "chaosbringer");
     if (rule.probability !== undefined) {
       const p = rule.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -2999,17 +3003,17 @@ export function validateOptions(options: CrawlerOptions): void {
     "betweenActions",
   ]);
   const VALID_SCOPES = new Set(["localStorage", "sessionStorage", "cookies", "indexedDB"]);
-  for (const fault of options.lifecycleFaults ?? []) {
+  for (const [faultIndex, fault] of (options.lifecycleFaults ?? []).entries()) {
     const label = fault.name
       ? `lifecycleFaults entry "${fault.name}"`
-      : `lifecycleFaults entry`;
+      : `lifecycleFaults entry #${faultIndex}`;
     if (!VALID_STAGES.has(fault.when)) {
       throw new Error(
         `chaosbringer: ${label} "when" must be one of beforeNavigation/afterLoad/beforeActions/betweenActions (got ${JSON.stringify(fault.when)})`
       );
     }
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
-    validateFaultSchedule(label, fault);
+    validateFaultSchedule(label, fault, "chaosbringer");
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -3055,12 +3059,12 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   }
 
-  for (const fault of options.runtimeFaults ?? []) {
+  for (const [faultIndex, fault] of (options.runtimeFaults ?? []).entries()) {
     const label = fault.name
       ? `runtimeFaults entry "${fault.name}"`
-      : `runtimeFaults entry`;
+      : `runtimeFaults entry #${faultIndex}`;
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
-    validateFaultSchedule(label, fault);
+    validateFaultSchedule(label, fault, "chaosbringer");
     if (fault.methods !== undefined) {
       if (!Array.isArray(fault.methods) || fault.methods.length === 0) {
         throw new Error(`chaosbringer: ${label} methods must be a non-empty array of HTTP methods`);
@@ -3130,14 +3134,14 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   }
 
-  for (const fault of options.iframeFaults ?? []) {
+  for (const [faultIndex, fault] of (options.iframeFaults ?? []).entries()) {
     const label = fault.name
       ? `iframeFaults entry "${fault.name}"`
-      : `iframeFaults entry`;
+      : `iframeFaults entry #${faultIndex}`;
     if (typeof fault.selector !== "string" || fault.selector.length === 0) {
       throw new Error(`chaosbringer: ${label} selector must be a non-empty string`);
     }
-    validateFaultSchedule(label, fault);
+    validateFaultSchedule(label, fault, "chaosbringer");
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {

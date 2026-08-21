@@ -14,9 +14,17 @@
  *   - an observable the model named came out wrong            → `state`
  *   - the app never issued a request the plan was waiting for → `injection`
  *   - the app issued requests the model never described       → `amplification`
+ *   - the bridge's own action or probe threw                   → `probeError`
+ *   - the run could not tell the two outcomes apart            → `undecided`
  *
  * The `injection` one matters most: without it a plan whose operation is
  * never called looks like a pass, and the coverage claim becomes a lie.
+ *
+ * The last two are about the *harness*, not the app, and they exist because
+ * the only output this tool cannot afford is a confident sentence about an
+ * app when the sentence is really about a typo'd selector or a probe that
+ * fired too late. Both suppress the checks they invalidate rather than
+ * letting them narrate.
  *
  * Two of these exist because **a probe is an instant and a bug is not**. A
  * retry scheduled on the error path, or a backend that acknowledges a write
@@ -32,6 +40,8 @@ import {
   checkTiming,
   formatTimingCheck,
   ladderSettleMs,
+  navigationTimeoutMs,
+  planWallClockMs,
   solveTiming,
   DEFAULT_TIMING_PROFILE,
   type AppLadder,
@@ -139,8 +149,27 @@ export interface RunPlanOptions {
    * Defaults to `DEFAULT_TIMING_PROFILE`, which is pessimistic on purpose.
    */
   timingProfile?: TimingProfile;
-  /** Page timeout, forwarded to the crawler. Default 15000ms. */
+  /**
+   * Navigation timeout, forwarded to the crawler.
+   *
+   * Bounds `page.goto(url, { waitUntil: "networkidle" })` and nothing else —
+   * the action, the settle window, the probe and the observation window run
+   * inside an unbounded invariant, so this cannot kill a run mid-probe.
+   * Defaults to the solved `pageTimeoutMs` for the window actually in use,
+   * else 15000ms; a declared value is pre-flighted against the slowest delay
+   * a plan can inject into a load-time request.
+   */
   timeout?: number;
+  /**
+   * Per-plan wall clock the operator will tolerate, in ms.
+   *
+   * Checked against `fixed + settleMs + quiescenceMs` — what a plan actually
+   * spends — before the browser launches, so "this suite is too slow" is an
+   * error with the arithmetic in it rather than a discovery in CI. Distinct
+   * from `timeout`, which bounds navigation only; conflating the two is how a
+   * budget got compared against a number that omitted the observation window.
+   */
+  budgetMs?: number;
   /**
    * Per-`ui`-label DOM invariants: what the page must *also* be true of when
    * it reports that label.
@@ -159,14 +188,18 @@ export interface RunPlanOptions {
   /**
    * Extra observation window after the probe, in ms.
    *
-   * Only spent when a plan names state observables (`expect.state`), because
-   * that is the only check a second read can change: the settled value is
-   * what the model predicted, and a probe that reads a count before the
-   * backend has committed the duplicate write reports the number the model
-   * wanted to see. Solved from `appDeadlineMs` + `timingProfile` when those
-   * are given (one more app-bounded round), else defaults to `settleMs` —
-   * the same "one more round" unit the bridge author already chose. `0`
-   * disables it.
+   * Spent whenever a *second read can change a verdict*: a plan naming state
+   * observables (`expect.state`), a plan naming a `ui` label, or a bridge
+   * declaring `uiInvariants`. A probe that reads a count before the backend
+   * has committed the duplicate write reports the number the model wanted to
+   * see; a label read at the moment a bounded request gives up misses the
+   * response the app claims to have abandoned arriving afterwards. A plan
+   * that names none of the three pays nothing.
+   *
+   * Solved from `appDeadlineMs` + `timingProfile` when those are given (one
+   * more app-bounded round), else defaults to `settleMs` — the same "one more
+   * round" unit the bridge author already chose. `0` disables it, which also
+   * disables the settled re-read and the `@late` checks built on it.
    */
   quiescenceMs?: number;
   /**
@@ -177,8 +210,22 @@ export interface RunPlanOptions {
    * it is what makes `unhandledRejection: false` a fact rather than a
    * coincidence of when the probe fired: a `void retry()` inside a 900ms
    * backoff escapes every handler, and a run that ends at 400ms never sees
-   * it. Costs nothing on a page with no pending timers. `0` disables both
-   * the instrumentation and the wait.
+   * it. `0` disables both the instrumentation and the wait.
+   *
+   * What it costs is bounded by what it can *finish*: each round waits for
+   * the **earliest** pending timer, and stops as soon as that timer cannot
+   * fire inside the remaining budget. So a page with nothing pending costs
+   * nothing, and a page with one session-refresh timer five minutes out also
+   * costs nothing — the timer is reported in `observed.pendingAsync`, not
+   * slept on. (Waiting for the *latest* pending timer instead spent the whole
+   * cap and returned with that timer still pending: +3s per plan of pure
+   * sleep for any page with a stray `setTimeout`.)
+   *
+   * Blind spot worth knowing: the instrumentation is installed from the
+   * `afterLoad` hook, so timers scheduled *during page load* are invisible to
+   * it. For a plan with no `action` — operations issued by page load itself —
+   * the drain is therefore inert, and `unhandledRejection: false` on such a
+   * plan carries none of the guarantee described above.
    */
   asyncDrainCapMs?: number;
   /**
@@ -225,9 +272,46 @@ export type MismatchField =
   /** A rejection that escaped only after the probe — see `quiescenceMs`. */
   | "unhandledRejection@late"
   | "injection"
-  /** More calls on an operation than the model described. */
+  /**
+   * *More* calls on an operation than the model described — and only more.
+   *
+   * An under-count is the `injection` class ("the app didn't make a call the
+   * model says it makes"), so `expect.calls` failures split by direction
+   * rather than all landing here under a name that means the opposite of half
+   * of them. A consumer switching on this field can trust it.
+   */
   | "amplification"
-  | "state";
+  | "state"
+  /**
+   * The bridge's own `action` / `uiProbe` / `stateProbe` threw.
+   *
+   * Not a statement about the app: a typo'd selector, a probe pointed at the
+   * wrong URL, a bridge that never navigated. Everything a plan would
+   * otherwise report is derived from observations that never happened, so
+   * this is the only mismatch the run emits — a broken bridge announced as
+   * "the app never issued that request" is worse than no verdict at all.
+   */
+  | "probeError"
+  /**
+   * The run could not distinguish the outcomes the plan is about.
+   *
+   * A `slow-trip` plan only decides anything while the probe still fires
+   * *before* the injected response lands: past that instant an app with no
+   * bound at all has already answered, and reads exactly like one that
+   * enforced its deadline. When the measured probe instant overshoots the
+   * tripping delay the label checks are suppressed and this is reported
+   * instead — an unmeasurable run is an error, not a verdict, and above all
+   * not a pass.
+   *
+   * The headroom is exactly `marginMs` (25ms by default), and that falls out
+   * of the closed form rather than being a second guess at it: the response
+   * cannot land before `slow + delayFloor`, and `slow + delayFloor =
+   * settle + margin`. So this fires when the probe overshot the window it
+   * asked for by a full margin — an environment whose jitter the timing
+   * profile does not describe. Measured on this container: 1–20ms of
+   * overshoot on an idle box and under 8-way single-core contention alike.
+   */
+  | "undecided";
 
 export interface PlanMismatch {
   plan: string;
@@ -287,8 +371,19 @@ export interface PlanRunResult {
      * failed on: a session-expiry timer 30 minutes out is not a bug, and an
      * uncleared interval is a fact about the app rather than a verdict.
      */
-    pendingAsync?: { timers: number; intervals: number; latestDueInMs?: number };
-    /** Thrown by `action` / `uiProbe` / `stateProbe`, if any did. */
+    pendingAsync?: PendingAsync;
+    /**
+     * Wall clock from the end of the action to the moment the label was read,
+     * in ms. `settleMs` is what was asked for; this is what the machine
+     * delivered, and the difference is what decides whether a `slow-trip`
+     * plan measured anything (see the `undecided` mismatch).
+     */
+    probeElapsedMs?: number;
+    /**
+     * Thrown by `action` / `uiProbe` / `stateProbe`, if any did. Reported as
+     * a `probeError` mismatch; nothing else on the plan is reported, because
+     * nothing observed after a thrown action is evidence.
+     */
     probeError?: string;
     /** V8 coverage digest, when `coverageFingerprints` was set. */
     coverageFingerprint?: string;
@@ -538,15 +633,32 @@ export function compilePlanFaults(
 }
 
 /**
- * Is this matcher a regex anchored at the end of the URL string?
+ * Compile a matcher the way every layer that consumes one does.
+ *
+ * `UrlMatcher = string | RegExp`, and both fault layers turn the string into
+ * `new RegExp(m)` (`crawler.ts`, `runtime-faults.ts`) — so `"/api/stream$"`
+ * and `/\/api\/stream$/` are the *same* matcher, and any check that inspects
+ * one spelling has to inspect the other. Returns `null` for a string that is
+ * not a valid pattern; the layer that compiles it for real reports that.
+ */
+function toRegExp(matcher: UrlMatcher): RegExp | null {
+  if (matcher instanceof RegExp) return matcher;
+  try {
+    return new RegExp(matcher);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this pattern anchored at the end of the URL string?
  *
  * `/\/api\/stream$/` is one; `/\/api\/stream(\?|$)/` is not, and neither is a
  * literal `\$`. A trailing `$` is only an anchor when an even number of
  * backslashes precedes it.
  */
-function isEndAnchored(matcher: UrlMatcher): boolean {
-  if (!(matcher instanceof RegExp)) return false;
-  const src = matcher.source;
+function isEndAnchored(pattern: RegExp): boolean {
+  const src = pattern.source;
   if (!src.endsWith("$")) return false;
   let backslashes = 0;
   for (let i = src.length - 2; i >= 0 && src[i] === "\\"; i--) backslashes += 1;
@@ -577,13 +689,23 @@ export function validateCallCountRules(
     const isTargetObject =
       typeof target === "object" && target !== null && !(target instanceof RegExp);
     const urlPattern = isTargetObject ? target.urlPattern : target;
-    if (!isEndAnchored(urlPattern)) continue;
-    const source = (urlPattern as RegExp).source;
-    const flags = (urlPattern as RegExp).flags;
-    const widened = `/${source.slice(0, -1)}(\\?|$)/${flags}`;
+    // Compile *first*: a string matcher is end-anchored in exactly the same
+    // way as the RegExp it becomes, and a pre-flight that fires for only one
+    // of two equivalent spellings is a lint users route around by accident.
+    const compiled = toRegExp(urlPattern);
+    if (compiled === null || !isEndAnchored(compiled)) continue;
+    const source = compiled.source;
+    const flags = compiled.flags;
+    // Echo the fix in the spelling the author actually wrote.
+    const written =
+      urlPattern instanceof RegExp ? `/${source}/${flags}` : JSON.stringify(urlPattern);
+    const widened =
+      urlPattern instanceof RegExp
+        ? `/${source.slice(0, -1)}(\\?|$)/${flags}`
+        : JSON.stringify(`${urlPattern.slice(0, -1)}(\\?|$)`);
     throw new Error(
       `chaosbringer/model: plan "${plan.name}" states expect.calls on operation "${rule}", whose ` +
-        `rule is the \`$\`-anchored pattern /${source}/${flags}. Under expect.calls the regex is ` +
+        `rule is the \`$\`-anchored pattern ${written}. Under expect.calls the regex is ` +
         `not a selector, it is the definition of the number being asserted: every request that ` +
         `carries a query string — a resume cursor, a cache-buster, a page token — is neither ` +
         `faulted nor counted, so the asserted count can be exactly right while the traffic is not. ` +
@@ -605,6 +727,14 @@ export interface ResolvedPlanTiming {
   solved?: TimingSolution;
   /** Milliseconds for `slow-ok` / `slow-trip`, when solvable. */
   delays?: { fastMs: number; slowMs: number };
+  /**
+   * Navigation timeout for the window *actually* in use, declared `settleMs`
+   * included. `solved.pageTimeoutMs` answers for the solved window, which is
+   * the wrong number for a bridge that declared its own.
+   */
+  pageTimeoutMs?: number;
+  /** Per-plan wall clock for the window actually in use. */
+  wallClockMs?: number;
 }
 
 /**
@@ -624,6 +754,7 @@ export function resolvePlanTiming(opts: {
   appLadder?: AppLadder;
   timingProfile?: TimingProfile;
   timeout?: number;
+  budgetMs?: number;
 }): ResolvedPlanTiming {
   if (opts.appLadder !== undefined) {
     const ladder = opts.appLadder;
@@ -662,10 +793,15 @@ export function resolvePlanTiming(opts: {
     return { settleMs, quiescenceMs: opts.quiescenceMs ?? settleMs };
   }
   const profile = opts.timingProfile ?? DEFAULT_TIMING_PROFILE;
+  // `budgetMs` is the operator's per-plan wall clock; `timeout` is the
+  // crawler's *navigation* bound. They used to be the same input, which is how
+  // a budget ended up compared against a number that omitted the observation
+  // window entirely. They are checked separately now, against the two
+  // different quantities they are about.
   const request = {
     deadlineMs: opts.appDeadlineMs,
     ...(opts.appLadder !== undefined ? { ladder: opts.appLadder } : {}),
-    ...(opts.timeout !== undefined ? { budgetMs: opts.timeout } : {}),
+    ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
   };
   const solved = solveTiming(profile, request);
   if (solved.status === "unsat") {
@@ -720,11 +856,14 @@ export function resolvePlanTiming(opts: {
           }ms.`,
       );
     }
+    checkBudgetAndNavigation(opts, profile, request, solved, opts.settleMs, quiescenceMs, slowMs);
     return {
       settleMs: opts.settleMs,
       quiescenceMs,
       solved,
       delays: { fastMs: solved.fastMs, slowMs },
+      pageTimeoutMs: navigationTimeoutMs(solved.profile, slowMs),
+      wallClockMs: planWallClockMs(solved.profile, opts.settleMs, quiescenceMs),
     };
   }
   if (opts.appLadder !== undefined) {
@@ -745,12 +884,61 @@ export function resolvePlanTiming(opts: {
         `Set settleMs to at least ${need} on the bridge, next to appDeadlineMs.`,
     );
   }
+  checkBudgetAndNavigation(
+    opts,
+    profile,
+    request,
+    solved,
+    solved.settleMs,
+    quiescenceMs,
+    solved.slowMs,
+  );
   return {
     settleMs: solved.settleMs,
     quiescenceMs,
     solved,
     delays: { fastMs: solved.fastMs, slowMs: solved.slowMs },
+    pageTimeoutMs: navigationTimeoutMs(solved.profile, solved.slowMs),
+    wallClockMs: planWallClockMs(solved.profile, solved.settleMs, quiescenceMs),
   };
+}
+
+/**
+ * Pre-flight the two numbers the *caller* declares about cost, against the
+ * window the run will really use.
+ *
+ * `budgetMs` is a statement about wall clock and is checked against
+ * `fixed + settle + quiesce`; `timeout` is a statement about navigation and is
+ * checked against the slowest delay a plan can inject into a load-time
+ * request. A declared `settleMs` or `quiescenceMs` moves the first and a
+ * re-derived `slowMs` moves the second, which is why neither can be read off
+ * the solved solution.
+ */
+function checkBudgetAndNavigation(
+  opts: { timeout?: number; budgetMs?: number },
+  profile: TimingProfile,
+  request: { deadlineMs: number; ladder?: AppLadder; budgetMs?: number },
+  solved: TimingSolution,
+  settleMs: number,
+  quiescenceMs: number,
+  slowMs: number,
+): void {
+  const proposed = {
+    ...(opts.budgetMs !== undefined ? { settleMs, quiescenceMs } : {}),
+    ...(opts.timeout !== undefined ? { pageTimeoutMs: opts.timeout, slowMs } : {}),
+  };
+  if (Object.keys(proposed).length === 0) return;
+  const check = checkTiming(profile, request, proposed);
+  if (check.ok) return;
+  const wall = planWallClockMs(solved.profile, settleMs, quiescenceMs);
+  throw new Error(
+    `chaosbringer/model: the declared cost limits cannot hold for a ${request.deadlineMs}ms app ` +
+      `deadline in this environment. One plan costs ${wall}ms here (fixed ` +
+      `${solved.profile.fixedPerPlanMs} + settleMs ${settleMs} + quiescenceMs ${quiescenceMs}) and ` +
+      `navigation needs ${navigationTimeoutMs(solved.profile, slowMs)}ms to survive a ${slowMs}ms ` +
+      `injected delay on a load-time request.
+${formatTimingCheck(check)}`,
+  );
 }
 
 /**
@@ -804,12 +992,18 @@ function occurrenceSpans(plan: FaultPlan): Map<string, number> {
 
 
 /**
- * What the page still has scheduled. `latestDueInMs` is how far out the last
- * pending `setTimeout` is; absent means nothing is due.
+ * What the page still has scheduled.
+ *
+ * `earliestDueInMs` is the one the drain acts on — it is the only timer that
+ * can be waited for cheaply. `latestDueInMs` is reported so a reader can see
+ * *why* something is still pending (a 30-minute session timer is a fact about
+ * the app, not a verdict); it is never waited on. Both absent means nothing
+ * is due.
  */
-interface PendingAsync {
+export interface PendingAsync {
   timers: number;
   intervals: number;
+  earliestDueInMs?: number;
   latestDueInMs?: number;
 }
 
@@ -881,13 +1075,20 @@ async function readPendingAsync(page: Page): Promise<PendingAsync> {
       const now = Date.now();
       let timers = 0;
       let latest = -1;
+      let earliest = Number.POSITIVE_INFINITY;
       state.timers.forEach((due) => {
         if (due <= now) return;
         timers += 1;
         if (due > latest) latest = due;
+        if (due < earliest) earliest = due;
       });
       return latest >= 0
-        ? { timers, intervals: state.intervals, latestDueInMs: latest - now }
+        ? {
+            timers,
+            intervals: state.intervals,
+            earliestDueInMs: earliest - now,
+            latestDueInMs: latest - now,
+          }
         : { timers, intervals: state.intervals };
     });
   } catch {
@@ -896,21 +1097,41 @@ async function readPendingAsync(page: Page): Promise<PendingAsync> {
 }
 
 /**
+ * How long the next drain round should wait, or `null` to stop.
+ *
+ * The **earliest** pending timer is the only one worth waiting for. Waiting
+ * for the latest one instead — which is what this used to do — spends
+ * `min(latestDueInMs + 25, remaining)` on a page with a single
+ * `setTimeout(fn, 300000)`, i.e. the entire remaining cap, and returns with
+ * that timer still pending: a sleep that drained nothing, measured at +3097ms
+ * per plan. So a timer that cannot fire inside the remaining budget ends the
+ * loop rather than consuming it, and what is still pending is reported.
+ *
+ * `+25ms` so the callback has actually run, not merely become due.
+ */
+export function nextDrainWaitMs(pending: PendingAsync, remainingMs: number): number | null {
+  if (pending.earliestDueInMs === undefined) return null;
+  if (remainingMs <= 0) return null;
+  const wait = Math.max(pending.earliestDueInMs, 0) + 25;
+  return wait > remainingMs ? null : wait;
+}
+
+/**
  * Wait for the timers the app scheduled, up to `capMs`.
  *
  * A timer can schedule another timer, so this iterates — bounded, because the
  * point is to drain the app's own follow-up work, not to wait out a polling
- * loop. What is still pending when it returns is reported, not failed on.
+ * loop. Each round waits for the *earliest* pending timer only (see
+ * `nextDrainWaitMs`). What is still pending when it returns is reported, not
+ * failed on.
  */
 async function drainScheduledWork(page: Page, capMs: number): Promise<PendingAsync> {
   const startedAt = Date.now();
   let pending = await readPendingAsync(page);
   for (let round = 0; round < 4; round++) {
-    if (pending.latestDueInMs === undefined) return pending;
-    const remaining = capMs - (Date.now() - startedAt);
-    if (remaining <= 0) return pending;
-    // +25ms so the callback has actually run, not merely become due.
-    await page.waitForTimeout(Math.min(pending.latestDueInMs + 25, remaining));
+    const wait = nextDrainWaitMs(pending, capMs - (Date.now() - startedAt));
+    if (wait === null) return pending;
+    await page.waitForTimeout(wait);
     pending = await readPendingAsync(page);
   }
   return pending;
@@ -980,6 +1201,21 @@ export interface PlanOracleInput {
   /** Reported in the details, so a failure names the window it was judged in. */
   settleMs: number;
   quiescenceMs: number;
+  /**
+   * Wall clock actually spent between the end of the action and the instant
+   * the probe began reading, from `observed.probeElapsedMs`. `settleMs` is
+   * what was asked for; this is what the machine delivered.
+   */
+  probeElapsedMs?: number;
+  /**
+   * The earliest instant a `slow-trip` response can land, in ms after the end
+   * of the action: the injected delay plus the injection mechanism's own
+   * floor. This is the boundary the closed form budgets `marginMs` of probe
+   * jitter against (`slow + floor = settle + margin`), so comparing
+   * `probeElapsedMs` against it enforces exactly the separation the timing
+   * model claims — see the `undecided` mismatch.
+   */
+  trippingResponseAtMs?: number;
 }
 
 /**
@@ -1005,6 +1241,59 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   const uiInvariantFailures = input.uiInvariantFailures ?? [];
   const mismatches: PlanMismatch[] = [];
 
+  // 0. Did the *bridge* work? A thrown `action` / `uiProbe` / `stateProbe`
+  //    means the app may never have been driven at all, so every check below
+  //    would be reading observations that were never made — and reporting
+  //    them is how a typo'd selector becomes the authoritative sentence "the
+  //    app never issued that request, so this state was not actually
+  //    exercised". Nothing observed after a thrown action is evidence, so the
+  //    harness failure is reported as itself and nothing else is reported.
+  if (observed.probeError !== undefined) {
+    return [
+      {
+        plan: plan.name,
+        field: "probeError",
+        expected: "the bridge's action and probes complete",
+        actual: observed.probeError,
+        detail:
+          `the bridge's action or probe threw before this plan could be judged: ` +
+          `${observed.probeError} — so this run decided nothing about the app, and every other ` +
+          `check on this plan is suppressed rather than reported as an app defect (a missing ` +
+          `injection here means "the action never ran", not "the app never called")`,
+      },
+    ];
+  }
+
+  // 0b. Was the probe early enough to mean anything? A `slow-trip` plan is a
+  //     statement about an instant: the injected response lands at
+  //     `trippingResponseAtMs`, and only a probe that fires *before* that can tell
+  //     an app that enforced its deadline from one with no deadline at all.
+  //     Past it both read the same, so the label checks are dropped and the
+  //     run says so. It must not read as a pass.
+  const undecidedProbe =
+    input.probeElapsedMs !== undefined &&
+    input.trippingResponseAtMs !== undefined &&
+    plan.schedule.some((s) => s.outcome === "slow-trip") &&
+    input.probeElapsedMs >= input.trippingResponseAtMs;
+  if (undecidedProbe) {
+    mismatches.push({
+      plan: plan.name,
+      field: "undecided",
+      expected: `a label read before ${input.trippingResponseAtMs}ms, when the tripping response can land`,
+      actual: `the label was read ${input.probeElapsedMs}ms after the action`,
+      detail:
+        `this plan injects a delay so that an app with no bound answers only *after* the probe — ` +
+        `the earliest that response can land is ${input.trippingResponseAtMs}ms after the action. ` +
+        `The probe asked for settleMs=${settleMs} and actually began reading at ` +
+        `${input.probeElapsedMs}ms, i.e. at or past that instant. There a correctly bounded app ` +
+        `and one with no bound at all look identical, so no label read here decides anything and ` +
+        `the ui checks are suppressed. This is the environment overshooting the probe jitter the ` +
+        `timing profile budgets, not a finding about the app: re-run ` +
+        `\`chaosbringer model calibrate\` under the load this suite actually sees, raise the ` +
+        `profile's tightTailMs, or raise marginMs.`,
+    });
+  }
+
   // 1. Did every planned injection actually happen? A plan whose operation
   //    the app never calls proves nothing.
   for (const [name, expectedCount] of expectedInjections) {
@@ -1016,8 +1305,10 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
         expected: expectedCount,
         actual,
         detail:
-          `${name} was scheduled ${expectedCount}× but fired ${actual}× — ` +
-          `the app never issued that request, so this state was not actually exercised`,
+          `${name} was scheduled ${expectedCount}× but fired ${actual}× — so this state was ` +
+          `not actually exercised. Either the app never issues that request, or an outcome ` +
+          `injected earlier in this plan stopped it from getting that far; the run cannot tell ` +
+          `which, and it is not asserting either.`,
       });
     }
   }
@@ -1047,16 +1338,49 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   //     `expect.calls` is the model's own statement and is always checked;
   //     the span comparison needs a model that accounts for every call on
   //     that URL, so it is opt-in.
+  //     The two directions are two different findings and get two different
+  //     fields: more calls than the model described is `amplification`, which
+  //     is what the name says; *fewer* is the `injection` class — the app did
+  //     not make a call the model states it makes — and reporting that under
+  //     `amplification` hands a consumer switching on the field the exact
+  //     opposite of what happened.
   for (const [rule, want] of Object.entries(plan.expect.calls ?? {})) {
     const actual = observed.matched[rule];
-    if (actual === undefined) continue;
-    if (actual !== want) {
+    if (actual === undefined) {
+      // Unreachable while `compilePlanFaults` always installs a counting
+      // rule — but if the crawl died before the routes went on, the stats
+      // arrays are absent and treating that as "no news" turns an asserted
+      // count into a pass. An uncounted count is undecided, not satisfied.
+      mismatches.push({
+        plan: plan.name,
+        field: "undecided",
+        expected: want,
+        actual: undefined,
+        detail:
+          `plan states expect.calls.${rule}=${want} but nothing counted requests on operation ` +
+          `"${rule}" — no fault layer reported a \`matched\` figure for it, so the count was ` +
+          `never observed. An unmeasured assertion is not a satisfied one.`,
+      });
+      continue;
+    }
+    if (actual > want) {
       mismatches.push({
         plan: plan.name,
         field: "amplification",
         expected: want,
         actual,
         detail: `model predicted ${want} call(s) on "${rule}", the app made ${actual}`,
+      });
+    } else if (actual < want) {
+      mismatches.push({
+        plan: plan.name,
+        field: "injection",
+        expected: want,
+        actual,
+        detail:
+          `model predicted ${want} call(s) on "${rule}", the app made ${actual} — ` +
+          `either the app skips a request the model says it makes, or an outcome injected ` +
+          `earlier in this plan stopped it from getting that far`,
       });
     }
   }
@@ -1085,7 +1409,7 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   //    the convergence in the detail. A label that started *right* and moved
   //    is the `Promise.race` bug: the user is told the report failed and then
   //    shown the report, from a request the app believes it abandoned.
-  if (plan.expect.ui !== undefined && hasUiProbe) {
+  if (plan.expect.ui !== undefined && hasUiProbe && !undecidedProbe) {
     if (observed.ui !== plan.expect.ui) {
       const converged =
         observed.uiSettled !== undefined && observed.uiSettled === plan.expect.ui;
@@ -1093,7 +1417,7 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
         plan: plan.name,
         field: "ui",
         expected: plan.expect.ui,
-        actual: observed.probeError !== undefined ? `probe error: ${observed.probeError}` : observed.ui,
+        actual: observed.ui,
         detail:
           `model predicted ui="${plan.expect.ui}", page reported "${observed.ui ?? "?"}"` +
           (converged
@@ -1129,7 +1453,7 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   //     page is the most common shape of this whole class of bug: the banner
   //     says the price could not be revalidated, the old price is still on
   //     screen, and Pay is still enabled.
-  for (const failure of uiInvariantFailures) {
+  for (const failure of undecidedProbe ? [] : uiInvariantFailures) {
     mismatches.push({
       plan: plan.name,
       field: "uiInvariant",
@@ -1146,7 +1470,7 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   // when it was judged and broke afterwards — a late response overwriting a
   // list, a second render arriving after the label settled.
   const failedAtProbe = new Set(uiInvariantFailures.map((f) => f.key));
-  for (const failure of input.uiInvariantFailuresLate ?? []) {
+  for (const failure of undecidedProbe ? [] : input.uiInvariantFailuresLate ?? []) {
     if (failedAtProbe.has(failure.key)) continue;
     mismatches.push({
       plan: plan.name,
@@ -1289,7 +1613,20 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
       try {
         if (asyncDrainCapMs > 0) await installAsyncWatch(page);
         if (opts.action) await opts.action(page);
+        // The observation clock starts here, not at the top of the action: the
+        // action *issues* the request, so the injected delay's own clock and
+        // this one start within a round trip of each other. What is measured
+        // is therefore "how late the label read actually was", which is the
+        // quantity `tightTailMs` budgets — and the quantity a `slow-trip`
+        // plan's soundness depends on (see the `undecided` mismatch).
+        const observationStartedAt = Date.now();
         if (settleMs > 0) await page.waitForTimeout(settleMs);
+        // Stamped before the read, not after: what is being measured is how
+        // late the probe *began looking*, which is the quantity the closed
+        // form budgets `marginMs` of jitter for. The read's own round trip is
+        // covered by the other side of that separation — the injected
+        // response cannot land before `slow + delayFloor`.
+        observed.probeElapsedMs = Date.now() - observationStartedAt;
         if (opts.uiProbe) observed.ui = await opts.uiProbe(page);
         if (opts.stateProbe) observed.state = await opts.stateProbe(page);
         uiInvariantFailures = await checkUiInvariants(page, observed.ui, opts.uiInvariants);
@@ -1331,9 +1668,10 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     maxActionsPerPage: 0,
     headless: opts.headless ?? true,
     seed: opts.seed ?? 1,
-    // A solved page timeout beats the default: it is derived from the same
-    // profile as the settle window, so the run cannot be killed mid-probe.
-    timeout: opts.timeout ?? timing.solved?.pageTimeoutMs ?? 15000,
+    // A solved navigation timeout beats the default: it is derived from the
+    // same profile as the window actually in use, so a page that issues the
+    // delayed request during load still finishes navigating.
+    timeout: opts.timeout ?? timing.pageTimeoutMs ?? 15000,
     ...(runtimeFaults.length > 0 ? { runtimeFaults } : {}),
     ...(faultInjection.length > 0 ? { faultInjection } : {}),
     ...(opts.coverageFingerprints ? { coverageFeedback: { enabled: true } } : {}),
@@ -1368,6 +1706,12 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     ...(opts.checkAmplification !== undefined ? { checkAmplification: opts.checkAmplification } : {}),
     settleMs,
     quiescenceMs,
+    ...(observed.probeElapsedMs !== undefined ? { probeElapsedMs: observed.probeElapsedMs } : {}),
+    ...(timing.delays !== undefined && timing.solved !== undefined
+      ? {
+          trippingResponseAtMs: timing.delays.slowMs + timing.solved.profile.delayFloorMs,
+        }
+      : {}),
   });
 
   return { plan, observed, mismatches, report };

@@ -20,13 +20,25 @@
  *   ladder  = attempts × (deadline + tightTail + margin) + Σ backoffs
  *                                               a declared window must outlast
  *                                               the app's whole retry ladder
- *   page    = fixed + settle + delayTail + margin     the run fits its timeout
+ *   nav     = fixed + slow + delayTail + margin  navigation outlasts the
+ *                                               slowest delay a plan can
+ *                                               inject during load
+ *   wall    = fixed + settle + quiesce           what one plan really costs
  *
  * That system is difference logic, so it has a closed form — no solver at
  * runtime, the same way plans need no Quint at runtime. The closed form was
  * checked against a z3 optimum over 192 parameter combinations, including 66
  * infeasible ones; see
  * `docs/superpowers/specs/2026-08-20-timing-solver/verify-closed-form.py`.
+ *
+ * `wall` and `nav` changed when the post-probe observation window was
+ * introduced: a run spends `settle` **and then** `quiesce`, so a `wall` that
+ * omitted the second one under-reported every plan by an app deadline
+ * (measured: 6725ms claimed against ~11950ms real at a 5000ms deadline) and
+ * `budgetMs` — documented as the wall clock the operator will tolerate — was
+ * being compared against something else entirely. The verification fixtures
+ * are checks on this arithmetic, so they move with it; keeping a stale closed
+ * form to keep an artifact green is how the arithmetic stops being auditable.
  *
  * Measure the profile with `chaosbringer model calibrate`. Until then
  * `DEFAULT_TIMING_PROFILE` is deliberately pessimistic.
@@ -77,6 +89,17 @@ export const DEFAULT_TIMING_PROFILE: TimingProfile = {
 };
 
 export type TimingConstraint =
+  /**
+   * The request and the profile are made of usable numbers.
+   *
+   * `deadlineMs: Number(process.env.APP_DEADLINE)` with the variable unset is
+   * `NaN`, and `NaN` propagates through every comparison as `false` — so
+   * without this the solver answered `sat` with every field `NaN`, which
+   * reaches the browser as `page.waitForTimeout(NaN)` and
+   * `{ kind: "delay", ms: NaN }`. Infeasible is a first-class answer here, so
+   * an unusable input gets the same answer as an impossible one.
+   */
+  | "inputs_well_formed"
   /** Every value is at or above the mechanism's floor. */
   | "expressible"
   /** A "slow but acceptable" delay lands before the app's bound, worst tail included. */
@@ -125,9 +148,22 @@ export type TimingConstraint =
    * the recipe's "What the oracle still cannot see".
    */
   | "rejections_drained_after_last_timer"
-  /** Fixed cost + probe + jitter fits the page timeout. */
-  | "fits_page_timeout"
-  /** The page timeout fits the operator's budget. */
+  /**
+   * A declared page timeout outlasts the slowest delay a plan can inject
+   * while the page is still navigating.
+   *
+   * Named for what the option actually bounds. The crawler's `timeout` reaches
+   * `page.goto(url, { waitUntil: "networkidle" })` and the recovery
+   * navigation, and nothing else — `runInvariants`, where the action, the
+   * settle window, the probe and the observation window all live, is
+   * unbounded. So this is not "does the run fit its timeout" (it cannot fail
+   * that way); it is "can the page finish loading while a `slow-trip` delay
+   * is being injected into a load-time request". Only checked against a
+   * *declared* `pageTimeoutMs`, since the solved one satisfies it by
+   * construction.
+   */
+  | "fits_navigation_timeout"
+  /** The plan's real wall clock — settle *and* observation window — fits the operator's budget. */
   | "within_budget";
 
 /**
@@ -147,13 +183,42 @@ export interface AppLadder {
   backoffsMs: readonly number[];
 }
 
-/** Worst-case wall clock of the app's own ladder, tails and margins included. */
+/**
+ * Worst-case wall clock of the app's own ladder, tails and margins included.
+ *
+ * Enforces the shape `AppLadder` documents — `attempts` a positive integer,
+ * at most `attempts - 1` backoffs, all of them non-negative — because it is
+ * exported and reachable without going through `resolvePlanTiming`, which is
+ * where those checks used to live exclusively. Unvalidated,
+ * `{ attempts: 1, backoffsMs: [9999] }` returned 15224ms for a window whose
+ * real answer is 5225ms, and a caller comparing a declared `settleMs` against
+ * that number is being told to wait ten seconds for a ladder that has no
+ * rungs.
+ */
 export function ladderSettleMs(
   ladder: AppLadder,
   deadline: number,
   tightTailMs: number,
   marginMs: number,
 ): number {
+  if (!Number.isInteger(ladder.attempts) || ladder.attempts < 1) {
+    throw new Error(
+      `chaosbringer: appLadder.attempts must be a positive integer, got ` +
+        `${JSON.stringify(ladder.attempts)} — it counts bounded attempts including the first`,
+    );
+  }
+  if (ladder.backoffsMs.length > ladder.attempts - 1) {
+    throw new Error(
+      `chaosbringer: appLadder declares ${ladder.attempts} attempt(s) but ` +
+        `${ladder.backoffsMs.length} backoff(s); there are at most attempts-1 waits between them`,
+    );
+  }
+  if (ladder.backoffsMs.some((b) => !Number.isFinite(b) || b < 0)) {
+    throw new Error(
+      `chaosbringer: appLadder.backoffsMs must all be finite and >= 0, got ` +
+        `[${ladder.backoffsMs.join(", ")}]`,
+    );
+  }
   // One round is `deadline + tightTail + margin` — the same unit `settleMs`
   // already uses — and every rung pays its own tail, because every rung has
   // its own abort to observe. With `attempts: 1` and no backoffs this is
@@ -184,7 +249,15 @@ export interface TimingRequest {
    * taking the envelope at face value is not conservative.
    */
   safety?: number;
-  /** Per-plan wall clock the operator will tolerate. Default 15000ms. */
+  /**
+   * Per-plan wall clock the operator will tolerate. Default 15000ms.
+   *
+   * Compared against `wallClockMs` — fixed cost + settle window + observation
+   * window — which is what a plan actually spends. It used to be compared
+   * against `pageTimeoutMs`, a number that omitted the observation window
+   * entirely, so a `budgetMs` the run blew through by an app deadline still
+   * solved `sat`.
+   */
   budgetMs?: number;
 }
 
@@ -208,11 +281,33 @@ export interface TimingSolution {
    * round of work, tail included.
    */
   quiescenceMs: number;
-  /** When a hung request is finally released. */
+  /**
+   * When a hung request should be released, so that "stuck" is observable and
+   * the route does not outlive the run.
+   *
+   * Nothing in the model pipeline consumes it: `runPlan` realises the `hang`
+   * outcome client-side with `never-settle-fetch`, which has no release. This
+   * is the number to pass as `faults.hang({ releaseAfterMs })` when you drive
+   * the network layer yourself, and it is the value `checkTiming`'s
+   * `stuck_observable` row validates.
+   */
   releaseMs: number;
-  /** Page timeout the run needs. */
+  /**
+   * Navigation timeout the run needs — the crawler's `timeout` option.
+   *
+   * That option bounds `page.goto(url, { waitUntil: "networkidle" })` and the
+   * recovery navigation, and nothing else: the action, the settle window, the
+   * probe and the observation window run inside an unbounded invariant. So it
+   * is sized to outlast the slowest delay a plan can inject into a *load-time*
+   * request, not the whole run — `fixed + slow + delayTail + margin`.
+   */
   pageTimeoutMs: number;
-  /** Estimated per-plan wall clock, for budgeting a suite. */
+  /**
+   * Per-plan wall clock, for budgeting a suite: `fixed + settle + quiesce`.
+   *
+   * Both windows, because a run spends both. `asyncDrainCapMs` can add on top,
+   * bounded by the timers the page actually has due inside it.
+   */
   wallClockMs: number;
   profile: ResolvedProfile;
 }
@@ -242,6 +337,26 @@ function resolve(profile: TimingProfile, request: TimingRequest): ResolvedProfil
 }
 
 /**
+ * Navigation timeout a run needs, given the tripping delay it will inject.
+ *
+ * Exported so a caller who *declares* a settle window can re-derive it from
+ * the window actually in use instead of the solved one. Not part of the
+ * package's public surface — `solveTiming` and `resolvePlanTiming` are.
+ */
+export function navigationTimeoutMs(p: ResolvedProfile, slowMs: number): number {
+  return p.fixedPerPlanMs + slowMs + p.delayTailMs + p.marginMs;
+}
+
+/** Per-plan wall clock: fixed cost, then the probe window, then the observation window. */
+export function planWallClockMs(
+  p: ResolvedProfile,
+  settleMs: number,
+  quiescenceMs: number,
+): number {
+  return p.fixedPerPlanMs + settleMs + quiescenceMs;
+}
+
+/**
  * Solve for the tightest values this environment can honour.
  *
  * "Tightest" means: the smallest probe window (wall clock is dominated by it),
@@ -259,6 +374,19 @@ export function solveTiming(
   const deadline = request.deadlineMs;
   const budget = request.budgetMs ?? 15000;
 
+  // Nothing below this point can be trusted with a number that is not one:
+  // every comparison against `NaN` is `false`, so an unvalidated `NaN`
+  // deadline walked out of here as `status: "sat"` with every field `NaN`.
+  const malformed = malformedInputs(profile, request);
+  if (malformed !== null) {
+    return {
+      status: "unsat",
+      core: ["inputs_well_formed"],
+      explanation: malformed,
+      profile: p,
+    };
+  }
+
   const settleMs = deadline + tight + margin;
   // The post-probe observation window. Same unit as the settle window,
   // because it has the same job one round later: outlast whatever the app
@@ -271,22 +399,38 @@ export function solveTiming(
   // mid-probe and reads as healthy.
   const slowMs = settleMs + margin - floor;
   const releaseMs = settleMs + margin;
-  const pageTimeoutMs = fixed + settleMs + tail + margin;
+  // Navigation only: `timeout` reaches `page.goto` and nothing else. What can
+  // legitimately stretch a `waitUntil: "networkidle"` load is a delay injected
+  // into a request the page issues *during* load, and the largest one a plan
+  // can carry is `slow`.
+  const pageTimeoutMs = navigationTimeoutMs(p, slowMs);
+  // Both windows: a plan waits `settle`, probes, then waits `quiesce` and
+  // reads again.
+  const wallClockMs = planWallClockMs(p, settleMs, quiescenceMs);
 
   const core: TimingConstraint[] = [];
   if (fastMs < floor) core.push("expressible", "fast_tolerated");
   if (slowMs < floor) core.push("expressible", "slow_trips");
-  if (pageTimeoutMs > budget) core.push("fits_page_timeout", "within_budget");
+  if (wallClockMs > budget) core.push("within_budget");
 
-  // slowMs is derived from settleMs, so this cannot fail independently — but
-  // assert the relationship rather than trusting the algebra to stay right.
-  if (slowMs + floor < settleMs + margin) core.push("slow_outlasts_probe");
+  // slowMs is derived from settleMs, so this cannot fail — which makes it an
+  // assertion, not a constraint. Pushing it into `core` instead left a branch
+  // `explain()` has no words for and a "violation" no caller could act on; a
+  // throw means a future edit to the closed form fails loudly here rather than
+  // shipping an unexplainable unsat.
+  if (slowMs + floor < settleMs + margin) {
+    throw new Error(
+      `chaosbringer internal: solveTiming's closed form broke slow_outlasts_probe ` +
+        `(slow ${slowMs} + floor ${floor} < settle ${settleMs} + margin ${margin}). ` +
+        `The tripping delay must outlast the probe by construction.`,
+    );
+  }
 
   if (core.length > 0) {
     return {
       status: "unsat",
       core: [...new Set(core)],
-      explanation: explain(core, deadline, budget, p),
+      explanation: explain(core, deadline, budget, p, wallClockMs),
       profile: p,
     };
   }
@@ -299,9 +443,53 @@ export function solveTiming(
     quiescenceMs,
     releaseMs,
     pageTimeoutMs,
-    wallClockMs: fixed + settleMs,
+    wallClockMs,
     profile: p,
   };
+}
+
+/**
+ * Why these inputs cannot be solved at all, or `null` when they can.
+ *
+ * Separate from the constraints because it is a different kind of "no": the
+ * constraints say *this environment* cannot honour these values, this says the
+ * values are not values. Both come back as `unsat`, because a caller who has
+ * to handle one has to handle the other, and the alternative is a `sat`
+ * carrying `NaN`.
+ */
+function malformedInputs(profile: TimingProfile, request: TimingRequest): string | null {
+  const positive = (label: string, v: number | undefined): string | null => {
+    if (v === undefined) return null;
+    if (!Number.isFinite(v)) {
+      // `String`, not `JSON.stringify`: the latter renders NaN as `null`, and
+      // "got null" sends the reader looking for the wrong bug.
+      return (
+        `${label} must be a finite number, got ${String(v)}. ` +
+        `\`Number(process.env.X)\` on an unset variable is NaN, and NaN compares false against ` +
+        `every bound — so this would otherwise solve as a set of NaN delays and a NaN probe window.`
+      );
+    }
+    if (v <= 0) {
+      return `${label} must be greater than 0, got ${v} — there is no window to probe after.`;
+    }
+    return null;
+  };
+  const nonNegative = (label: string, v: number | undefined): string | null => {
+    if (v === undefined) return null;
+    if (!Number.isFinite(v)) return `${label} must be a finite number, got ${String(v)}.`;
+    if (v < 0) return `${label} must be >= 0, got ${v}.`;
+    return null;
+  };
+  return (
+    positive("deadlineMs", request.deadlineMs) ??
+    positive("budgetMs", request.budgetMs) ??
+    positive("safety", request.safety) ??
+    nonNegative("marginMs", request.marginMs) ??
+    nonNegative("profile.delayFloorMs", profile.delayFloorMs) ??
+    nonNegative("profile.delayTailMs", profile.delayTailMs) ??
+    nonNegative("profile.tightTailMs", profile.tightTailMs) ??
+    nonNegative("profile.fixedPerPlanMs", profile.fixedPerPlanMs)
+  );
 }
 
 function explain(
@@ -309,6 +497,7 @@ function explain(
   deadline: number,
   budget: number,
   p: ResolvedProfile,
+  wallClockMs: number,
 ): string {
   if (core.includes("fast_tolerated")) {
     const smallest = p.delayFloorMs + p.delayTailMs;
@@ -321,11 +510,13 @@ function explain(
     );
   }
   if (core.includes("within_budget")) {
-    const floorBudget = p.fixedPerPlanMs + deadline + p.tightTailMs + p.delayTailMs + 2 * p.marginMs;
     return (
-      `a ${budget}ms budget is too small: one plan cannot cost less than ~${floorBudget}ms ` +
-      `(${p.fixedPerPlanMs}ms fixed overhead, plus a probe that must outlast the app's ` +
-      `${deadline}ms deadline). Raise the budget, or shorten the app's own deadline.`
+      `a ${budget}ms budget is too small: one plan costs ~${wallClockMs}ms here — ` +
+      `${p.fixedPerPlanMs}ms fixed overhead, plus a ${deadline + p.tightTailMs + p.marginMs}ms ` +
+      `probe window that must outlast the app's ${deadline}ms deadline, plus the same again as ` +
+      `the observation window that watches for the retry the app schedules on the error path. ` +
+      `Raise the budget, shorten the app's own deadline, or set quiescenceMs: 0 on the bridge if ` +
+      `you accept that a late rejection or a late commit will not be seen.`
     );
   }
   return `constraints ${core.join(", ")} cannot hold together at deadline ${deadline}ms`;
@@ -434,12 +625,35 @@ export function checkTiming(
       detail: `releaseMs=${proposed.releaseMs} must be >= settleMs ${proposed.settleMs} + margin ${margin}`,
     });
   }
-  const pageTimeout = proposed.pageTimeoutMs ?? budget;
-  if (proposed.settleMs !== undefined) {
+  // Only against a *declared* page timeout, and only against what that option
+  // really bounds: `page.goto(..., { waitUntil: "networkidle" })`. A load-time
+  // request carrying the tripping delay is the thing that can stretch a
+  // navigation past it; the probe and the observation window cannot, because
+  // they run inside an unbounded invariant.
+  if (proposed.pageTimeoutMs !== undefined) {
+    const slow = proposed.slowMs ?? deadline + tight + 2 * margin - floor;
     rows.push({
-      constraint: "fits_page_timeout",
-      slackMs: pageTimeout - (fixed + proposed.settleMs + tail + margin),
-      detail: `pageTimeout=${pageTimeout} must be >= fixed ${fixed} + settleMs ${proposed.settleMs} + delayTail ${tail} + margin ${margin}`,
+      constraint: "fits_navigation_timeout",
+      slackMs: proposed.pageTimeoutMs - (fixed + slow + tail + margin),
+      detail:
+        `pageTimeoutMs=${proposed.pageTimeoutMs} must be >= fixed ${fixed} + slowMs ${slow} + ` +
+        `delayTail ${tail} + margin ${margin}, or a page that issues the delayed request during ` +
+        `load cannot finish navigating before the timeout fires`,
+    });
+  }
+  // Only against a budget the caller actually stated. Applying the 15000ms
+  // default here would turn "I declared a settle window" into "I accepted a
+  // per-plan budget I never wrote down".
+  if (proposed.settleMs !== undefined && request.budgetMs !== undefined) {
+    const quiescence = proposed.quiescenceMs ?? deadline + tight + margin;
+    rows.push({
+      constraint: "within_budget",
+      slackMs: budget - (fixed + proposed.settleMs + quiescence),
+      detail:
+        `budgetMs=${budget} must be >= fixed ${fixed} + settleMs ${proposed.settleMs} + ` +
+        `quiescenceMs ${quiescence} = ${fixed + proposed.settleMs + quiescence}, which is what ` +
+        `one plan spends: a run waits the settle window, probes, then waits the observation ` +
+        `window and reads again`,
     });
   }
 
@@ -456,42 +670,4 @@ export function formatTimingCheck(check: TimingCheck): string {
     if (row.slackMs < 0) lines.push(`       ${row.detail}`);
   }
   return lines.join("\n");
-}
-
-/**
- * A ladder of mutually distinguishable delays across `[loMs, hiMs]`.
- *
- * Two delays are distinguishable only when the *earliest* observation of the
- * larger exceeds the *latest* observation of the smaller — a separation of
- * `delayTail − floor + margin`. What bounds the ladder in practice is not the
- * arithmetic but the clock: each rung costs its own delay plus the fixed
- * per-plan overhead, so `budgetMs` decides how many rungs you can afford.
- *
- * Geometric spacing is usually what you want for a real timeout ladder, so
- * rungs are placed multiplicatively where the separation allows it.
- */
-export function timingLadder(
-  profile: TimingProfile,
-  opts: { loMs: number; hiMs: number; budgetMs: number; marginMs?: number; safety?: number; growth?: number },
-): { rungs: number[]; separationMs: number; estimatedTotalMs: number; truncatedBy: "budget" | "range" } {
-  const p = resolve(profile, { deadlineMs: opts.hiMs, marginMs: opts.marginMs, safety: opts.safety });
-  const separationMs = p.delayTailMs - p.delayFloorMs + p.marginMs;
-  const growth = opts.growth ?? 2;
-  const perRungOverhead = p.fixedPerPlanMs + p.marginMs;
-
-  const rungs: number[] = [];
-  let total = 0;
-  let next = Math.max(opts.loMs, p.delayFloorMs);
-  let truncatedBy: "budget" | "range" = "range";
-  while (next <= opts.hiMs) {
-    const cost = next + perRungOverhead;
-    if (total + cost > opts.budgetMs) {
-      truncatedBy = "budget";
-      break;
-    }
-    rungs.push(next);
-    total += cost;
-    next = Math.max(next + separationMs, Math.ceil(next * growth));
-  }
-  return { rungs, separationMs, estimatedTotalMs: total, truncatedBy };
 }

@@ -19,15 +19,17 @@ export {
 } from "./faults.js";
 export { profiles } from "./profiles.js";
 // Timing values this environment can keep (solved, not guessed).
+// `ProposedTiming` / `TimingSlack` stay internal: they are `checkTiming`'s
+// parameter and row shapes, and committing to them commits to the constraint
+// set's spelling forever. `checkTiming` itself, and `TimingCheck` for its
+// return value, are the useful surface.
 export {
   checkTiming,
   formatTimingCheck,
   ladderSettleMs,
   solveTiming,
-  timingLadder,
   DEFAULT_TIMING_PROFILE,
   type AppLadder,
-  type ProposedTiming,
   type ResolvedProfile,
   type TimingCheck,
   type TimingConstraint,
@@ -35,19 +37,23 @@ export {
   type TimingProfile,
   type TimingRequest,
   type TimingResult,
-  type TimingSlack,
   type TimingSolution,
 } from "./timing.js";
 // Model-driven fault coverage (Quint / ITF -> deterministic replay).
+//
+// `parseItfJson` / `parseItfTrace` / `compilePlan` are the pipeline. The ITF
+// decoding primitives (`decodeItfValue`, `unwrapVariant`, `readBool`,
+// `readString`, `finalState`) and the stat-naming conventions (`faultNameFor`,
+// `observationNameFor`) are how that pipeline is written, not an interface:
+// exporting them commits to the ITF decoding shape and the `rule:outcome`
+// string format for no known consumer. `observed.fired` / `observed.matched`
+// already come back keyed, which is what attribution actually needs.
 export {
   aggregateCoverage,
   calibrateTiming,
   compilePlan,
   compilePlanFaults,
-  decodeItfValue,
   failingPlans,
-  faultNameFor,
-  finalState,
   fingerprintsOf,
   findCollapsedPlans,
   formatModelCoverage,
@@ -56,14 +62,10 @@ export {
   parseItfJson,
   checkUiInvariants,
   evaluatePlanOracle,
-  observationNameFor,
   parseItfTrace,
-  readBool,
-  readString,
   resolvePlanTiming,
   runPlan,
   runPlans,
-  unwrapVariant,
   validateCallCountRules,
   validatePlan,
   DEFAULT_ACTION_OUTCOMES,
@@ -91,11 +93,15 @@ export {
   type TargetOutcome,
   type UiInvariant,
 } from "./model/index.js";
+// `scheduleDecisionAt` + `decideFault` are the useful pair. The codegen
+// internals (`buildDecisionHelperSource`, `serializeSchedule`) are not
+// re-exported here: their contract is written in terms of `__nextRoll()`, a
+// symbol that only exists inside a generated init script, so nobody outside
+// the package can use them correctly. They remain available from
+// `@mizchi/playwright-faults` for callers writing their own init-script layer.
 export {
-  buildDecisionHelperSource,
   decideFault,
   scheduleDecisionAt,
-  serializeSchedule,
   validateFaultSchedule,
   type ScheduledFaultLike,
 } from "./schedule.js";

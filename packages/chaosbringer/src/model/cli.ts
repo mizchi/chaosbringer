@@ -33,7 +33,7 @@ import {
   type CompilePlanOptions,
   type FaultPlan,
 } from "./plan.js";
-import { runPlans, type RunPlanOptions } from "./runner.js";
+import { fingerprintsOf, runPlans, type RunPlanOptions } from "./runner.js";
 
 const HELP = `Usage: chaosbringer model <command> [options]
 
@@ -78,14 +78,19 @@ Commands:
       --probe-path <p>  Path the probe fetches (default: the URL's own path).
 
   run --plans <dir> --url <url> --config <file>
-      Replay every plan and check its oracle. Exits 1 on any mismatch,
-      skipped plan, or plan whose faults never fired — including a plan whose
-      every step is \`pass\` and whose operation the app never called.
+      Replay every \`*.plan.json\` in <dir> and check its oracle. Exits 1 on
+      any mismatch, skipped plan, or plan whose faults never fired — including
+      a plan whose every step is \`pass\` and whose operation the app never
+      called.
 
       --config <file>   JS/TS module default-exporting the bridge:
                         { rules, action?, uiProbe?, stateProbe?, uiInvariants?,
                           settleMs?, quiescenceMs?, appDeadlineMs?,
-                          asyncDrainCapMs?, checkAmplification?, timeout? }
+                          asyncDrainCapMs?, checkAmplification?, timeout?,
+                          coverageFingerprints? }
+                        Set \`coverageFingerprints: true\` to have the report
+                        name plans the model calls distinct states but whose
+                        executed code was identical.
                         \`rules\` maps model operation ids to URL matchers.
                         \`uiInvariants\` says what each ui label promises about
                         the page, keyed by label (\`"*"\` for all of them):
@@ -109,6 +114,21 @@ function listFiles(dir: string, suffix: string): string[] {
     .filter((f) => f.endsWith(suffix))
     .sort()
     .map((f) => join(dir, f));
+}
+
+/**
+ * Parse a count flag, naming the flag and the value when it is not one.
+ *
+ * `--runs abc` used to reach `envelope([])` and die with "no calibration runs
+ * to aggregate", a message about an internal invariant rather than about the
+ * thing the operator typed.
+ */
+function positiveInt(raw: string, flag: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`model calibrate: ${flag} needs a positive integer, got "${raw}"`);
+  }
+  return n;
 }
 
 /** Strip the ITF / plan suffix so a plan's name matches its file stem. */
@@ -261,9 +281,12 @@ async function runRun(argv: string[]): Promise<void> {
     return;
   }
 
-  const planPaths = listFiles(resolve(values.plans), ".json");
+  // `.plan.json`, not `.json`: `model compile` writes that suffix and
+  // `stemOf` strips it, so a `profile.json` or `targets.json` living beside
+  // the plans is not a plan and must not die as `plan is missing a "name"`.
+  const planPaths = listFiles(resolve(values.plans), ".plan.json");
   if (planPaths.length === 0) {
-    console.error(`model run: no plan files in ${values.plans}`);
+    console.error(`model run: no *.plan.json files in ${values.plans}`);
     process.exitCode = 1;
     return;
   }
@@ -280,9 +303,7 @@ async function runRun(argv: string[]): Promise<void> {
     ...(values["allow-order-sensitive"] ? { allowOrderSensitive: true } : {}),
   });
 
-  const coverage = aggregateCoverage(results, {
-    ...(plans[0]?.spec !== undefined ? { spec: plans[0].spec } : {}),
-  });
+  const coverage = coverageForRun(plans, results);
   if (values.json) {
     console.log(JSON.stringify(coverage, null, 2));
   } else {
@@ -294,6 +315,28 @@ async function runRun(argv: string[]): Promise<void> {
     writeFileSync(out, `${JSON.stringify({ coverage, results: results.map(stripReport) }, null, 2)}\n`);
   }
   if (!modelRunPassed(coverage)) process.exitCode = 1;
+}
+
+/**
+ * Assemble the coverage report for a `model run`.
+ *
+ * Split out so the one thing that cannot be seen by reading the call — that
+ * the fingerprints the run collected are actually handed to
+ * `aggregateCoverage` — is a unit test rather than a browser run. Without
+ * that argument `collapsedPlans` is unconditionally empty for every CLI user
+ * however the bridge is configured: the digests get collected and the report
+ * drops them. That is the same defect as the one already found and fixed in
+ * `examples/model-faults/patterns/run-pattern.mts`, and it recurred here
+ * because nothing asserted the wiring.
+ */
+export function coverageForRun(
+  plans: readonly FaultPlan[],
+  results: readonly Awaited<ReturnType<typeof runPlans>>[number][],
+): ReturnType<typeof aggregateCoverage> {
+  return aggregateCoverage(results, {
+    ...(plans[0]?.spec !== undefined ? { spec: plans[0].spec } : {}),
+    fingerprints: fingerprintsOf(results),
+  });
 }
 
 /** Reports are large and already written elsewhere; keep the JSON readable. */
@@ -326,8 +369,8 @@ async function runCalibrate(argv: string[]): Promise<void> {
   const result = await calibrateTiming({
     url: values.url,
     ...(values["probe-path"] !== undefined ? { probePath: values["probe-path"] } : {}),
-    ...(values.runs !== undefined ? { runs: Number.parseInt(values.runs, 10) } : {}),
-    ...(values.samples !== undefined ? { samples: Number.parseInt(values.samples, 10) } : {}),
+    ...(values.runs !== undefined ? { runs: positiveInt(values.runs, "--runs") } : {}),
+    ...(values.samples !== undefined ? { samples: positiveInt(values.samples, "--samples") } : {}),
     onProgress: (m) => console.error(`  ${m}`),
   });
 

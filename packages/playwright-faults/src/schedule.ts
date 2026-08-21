@@ -69,6 +69,17 @@ export function scheduleDecisionAt(
  * Otherwise this is the historical probability roll, with the same
  * "don't draw for p >= 1" property as `shouldFireProbability`, so adding a
  * probability-1 rule to a config still cannot shift an existing seed.
+ *
+ * **Behaviour change, and it is a real one:** `p <= 0` returns `"pass"`
+ * *without* drawing. The inline roll this replaced on the network layer drew
+ * first and then passed, so a seeded config carrying a `probability: 0` rule —
+ * the ordinary way to park a rule without deleting it — consumes one fewer
+ * random number than it used to and therefore produces a different action
+ * sequence. Not drawing is the right behaviour (a rule that can never fire has
+ * nothing to roll for), but seed stability is this library's headline property,
+ * so it is stated here and in `chaosbringer`'s README rather than discovered.
+ * `probability: 1` and values in `(0, 1)` are unaffected, and the lifecycle
+ * layer already short-circuited `0` via `shouldFireProbability`.
  */
 export function decideFault(
   rule: ScheduledFaultLike,
@@ -86,31 +97,40 @@ export function decideFault(
  * Reject configurations whose firing policy is ambiguous or empty. Called by
  * every layer's compile step so the error surfaces at setup time, naming the
  * offending rule, rather than as a silently ignored field mid-run.
+ *
+ * `prefix` is the package the *caller* belongs to. `chaosbringer` validates
+ * its own options through here, and every other error from that function says
+ * `chaosbringer:` — a user who installed one package should not be handed the
+ * name of a transitive dependency they never chose.
  */
-export function validateFaultSchedule(label: string, rule: ScheduledFaultLike): void {
+export function validateFaultSchedule(
+  label: string,
+  rule: ScheduledFaultLike,
+  prefix = "playwright-faults",
+): void {
   const { schedule, probability } = rule;
   if (!schedule) return;
   if (probability !== undefined) {
     throw new Error(
-      `playwright-faults: ${label} sets both "probability" and "schedule" — they are mutually exclusive (drop one)`,
+      `${prefix}: ${label} sets both "probability" and "schedule" — they are mutually exclusive (drop one)`,
     );
   }
   if (!Array.isArray(schedule.decisions) || schedule.decisions.length === 0) {
     throw new Error(
-      `playwright-faults: ${label} has an empty "schedule.decisions" — list at least one "pass" / "inject"`,
+      `${prefix}: ${label} has an empty "schedule.decisions" — list at least one "pass" / "inject"`,
     );
   }
   for (const [i, d] of schedule.decisions.entries()) {
     if (d !== "pass" && d !== "inject") {
       throw new Error(
-        `playwright-faults: ${label} has an invalid "schedule.decisions[${i}]" (${JSON.stringify(d)}) — expected "pass" or "inject"`,
+        `${prefix}: ${label} has an invalid "schedule.decisions[${i}]" (${JSON.stringify(d)}) — expected "pass" or "inject"`,
       );
     }
   }
   const afterEnd = schedule.afterEnd;
   if (afterEnd !== undefined && afterEnd !== "pass" && afterEnd !== "inject" && afterEnd !== "repeat") {
     throw new Error(
-      `playwright-faults: ${label} has an invalid "schedule.afterEnd" (${JSON.stringify(afterEnd)}) — expected "pass", "inject" or "repeat"`,
+      `${prefix}: ${label} has an invalid "schedule.afterEnd" (${JSON.stringify(afterEnd)}) — expected "pass", "inject" or "repeat"`,
     );
   }
 }

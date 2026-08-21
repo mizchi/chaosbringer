@@ -184,6 +184,17 @@ await chaos({
 
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
 
+> **Behaviour change:** `probability: 0` no longer draws from the RNG. It is a
+> rule that can never fire, so rolling for it was a wasted draw — but the draw
+> was part of the sequence, so **any existing seeded config containing a
+> `probability: 0` fault rule now produces a different action sequence than it
+> did before.** Parking a rule with `probability: 0` instead of deleting it is
+> the ordinary way to do that, so if you have a pinned seed and a pinned
+> expected action order, re-record it. `probability: 1` and values in `(0, 1)`
+> are unaffected, and the lifecycle layer never drew for `0` in the first
+> place. Nothing else about seed stability changed: RNG is consumed only for a
+> `probability` strictly inside `(0, 1)`.
+
 ### Deterministic schedules
 
 `probability` cannot say "fail the first call, let the retry through". `schedule` can: a decision table indexed by how many times the rule has already matched.
@@ -368,7 +379,7 @@ Every lifecycle helper accepts the same overrides:
 | --- | --- |
 | `when` | Override the helper's default stage. |
 | `urlPattern` | Restrict the fault to URLs matching this regex / regex string. Omit to apply on every page. |
-| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 fault doesn't shift the seed sequence for chaos action selection. |
+| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 (or probability-0) fault doesn't shift the seed sequence for chaos action selection. Note that `probability: 0` **used to** consume a draw on the network layer; see the behaviour change above. |
 | `name` | Override the auto-derived stats label (e.g. `cpu-throttle:4x`). |
 
 ### Stats

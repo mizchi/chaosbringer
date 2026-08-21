@@ -28,7 +28,17 @@ export interface ModelCoverage {
   /** Bounded model checking depth the enumeration ran at. */
   depthBound?: number;
   statesTargeted: number;
-  statesReached: number;
+  /**
+   * Targets the *enumerator* proved reachable — `targets.length - unreachable`
+   * when a target list is given, else the number of plans that ran.
+   *
+   * Named for what it is. It was `statesReached`, which reads as "a run
+   * actually got there" and is not what it counts: a plan skipped as
+   * order-sensitive still contributes to it, and `formatModelCoverage` has
+   * always printed it as "reachable". `plansNotExercised` is the field that
+   * answers "did a run actually get there".
+   */
+  statesReachable: number;
   statesUnreachableInBound: number;
   plansRun: number;
   plansSkipped: number;
@@ -97,7 +107,7 @@ export function aggregateCoverage(
 
   const coverage: ModelCoverage = {
     statesTargeted: targeted,
-    statesReached: reached,
+    statesReachable: reached,
     statesUnreachableInBound: unreachable,
     plansRun: ran.length,
     plansSkipped: skipped,
@@ -117,7 +127,7 @@ export function formatModelCoverage(coverage: ModelCoverage): string {
   if (coverage.spec) lines.push(`Spec: ${coverage.spec}`);
   const bound = coverage.depthBound !== undefined ? ` (depth <= ${coverage.depthBound})` : "";
   lines.push(
-    `States: ${coverage.statesReached}/${coverage.statesTargeted} reachable${bound}` +
+    `States: ${coverage.statesReachable}/${coverage.statesTargeted} reachable${bound}` +
       (coverage.statesUnreachableInBound > 0
         ? `, ${coverage.statesUnreachableInBound} unreachable`
         : ""),

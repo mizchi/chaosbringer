@@ -167,10 +167,26 @@ describe("buildDecisionHelperSource", () => {
     return fn({ probability: 1, ...fault }, occurrence, () => rolls[i++ % rolls.length]!);
   };
 
+  // The occurrence-sanity values belong in *every* case, not in a Node-only
+  // test: deleting the in-page `occurrence < 0 || (occurrence | 0) !==
+  // occurrence` guard left all twenty tests green, because the parity table
+  // only ever asked about ordinary occurrences. A guard the two sides do not
+  // agree on is exactly the drift this table exists to prevent — `afterEnd:
+  // "inject"` plus a broken counter is the case that invents faults.
+  const BROKEN_OCCURRENCES = [-1, 1.5, Number.NaN];
   const cases: Array<{ schedule: FaultSchedule; occurrences: number[] }> = [
-    { schedule: { decisions: ["inject", "pass", "inject"] }, occurrences: [0, 1, 2, 3, 7] },
-    { schedule: { decisions: ["pass"], afterEnd: "inject" }, occurrences: [0, 1, 5] },
-    { schedule: { decisions: ["inject", "pass"], afterEnd: "repeat" }, occurrences: [0, 1, 2, 3] },
+    {
+      schedule: { decisions: ["inject", "pass", "inject"] },
+      occurrences: [0, 1, 2, 3, 7, ...BROKEN_OCCURRENCES],
+    },
+    { schedule: { decisions: ["pass"], afterEnd: "inject" }, occurrences: [0, 1, 5, ...BROKEN_OCCURRENCES] },
+    {
+      schedule: { decisions: ["inject", "pass"], afterEnd: "repeat" },
+      occurrences: [0, 1, 2, 3, ...BROKEN_OCCURRENCES],
+    },
+    // An empty table: both sides must pass rather than index into nothing.
+    { schedule: { decisions: [] }, occurrences: [0, 1, ...BROKEN_OCCURRENCES] },
+    { schedule: { decisions: [], afterEnd: "inject" }, occurrences: [0, 1, ...BROKEN_OCCURRENCES] },
   ];
 
   for (const [i, c] of cases.entries()) {

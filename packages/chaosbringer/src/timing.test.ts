@@ -4,7 +4,6 @@ import {
   formatTimingCheck,
   ladderSettleMs,
   solveTiming,
-  timingLadder,
   DEFAULT_TIMING_PROFILE,
   type TimingProfile,
 } from "./timing.js";
@@ -34,8 +33,43 @@ describe("solveTiming", () => {
     expect(r.fastMs).toBe(4857); // 5000 - 118 - 25
     expect(r.slowMs).toBe(5118); // settle 5097 + margin 25 - floor 4
     expect(r.releaseMs).toBe(5122); // settle + margin
-    expect(r.pageTimeoutMs).toBe(5936); // 696 + 5097 + 118 + 25
-    expect(r.wallClockMs).toBe(5793); // fixed + settle
+    // The navigation timeout has to survive the slowest delay a plan can put
+    // on a load-time request, which is `slow` — not the probe window, which
+    // `timeout` does not bound at all.
+    expect(r.pageTimeoutMs).toBe(5957); // fixed 696 + slow 5118 + tail 118 + margin 25
+    // …and the wall clock includes the observation window, because a run
+    // spends it. Omitting it under-reported this plan by 5097ms — the number
+    // `model calibrate` prints for sizing a suite.
+    expect(r.wallClockMs).toBe(10890); // fixed 696 + settle 5097 + quiesce 5097
+    expect(r.wallClockMs).toBe(r.profile.fixedPerPlanMs + r.settleMs + r.quiescenceMs);
+  });
+
+  it("refuses inputs that are not numbers instead of solving them into NaN", () => {
+    // `Number(process.env.APP_DEADLINE)` on an unset variable. Every
+    // comparison against NaN is false, so without an explicit check this
+    // answered `sat` with settleMs/fastMs/slowMs all NaN — which reaches the
+    // browser as `page.waitForTimeout(NaN)` and `{ kind: "delay", ms: NaN }`.
+    for (const bad of [Number.NaN, 0, -5, Number.POSITIVE_INFINITY]) {
+      const r = solveTiming(MEASURED, { deadlineMs: bad });
+      expect(r.status, `deadlineMs=${bad}`).toBe("unsat");
+      if (r.status !== "unsat") continue;
+      expect(r.core).toEqual(["inputs_well_formed"]);
+      expect(r.explanation).toMatch(/deadlineMs must be/);
+    }
+    // The same machinery for the other numeric inputs, so none of them can
+    // sneak a NaN into the closed form either.
+    expect(solveTiming(MEASURED, { deadlineMs: 5000, budgetMs: Number.NaN }).status).toBe("unsat");
+    expect(solveTiming(MEASURED, { deadlineMs: 5000, safety: Number.NaN }).status).toBe("unsat");
+    expect(solveTiming(MEASURED, { deadlineMs: 5000, marginMs: Number.NaN }).status).toBe("unsat");
+    expect(
+      solveTiming({ ...MEASURED, tightTailMs: Number.NaN }, { deadlineMs: 5000 }).status,
+    ).toBe("unsat");
+    // And a sat answer never carries one.
+    const ok = solveTiming(MEASURED, { deadlineMs: 5000 });
+    if (ok.status !== "sat") throw new Error("sat expected");
+    for (const [k, v] of Object.entries(ok)) {
+      if (typeof v === "number") expect(Number.isFinite(v), k).toBe(true);
+    }
   });
 
   it("derives the post-probe observation window the same way as the probe", () => {
@@ -65,6 +99,12 @@ describe("solveTiming", () => {
     if (r.status !== "unsat") return;
     expect(r.core).toContain("within_budget");
     expect(r.explanation).toMatch(/budget is too small/);
+    // The budget is measured against the wall clock the plan really spends,
+    // so the explanation quotes that number and not the navigation timeout.
+    expect(r.explanation).toMatch(/one plan costs ~10890ms/);
+    // …and a budget between the two used to pass: 5957 fits, 10890 does not.
+    expect(solveTiming(MEASURED, { deadlineMs: 5000, budgetMs: 8000 }).status).toBe("unsat");
+    expect(solveTiming(MEASURED, { deadlineMs: 5000, budgetMs: 11000 }).status).toBe("sat");
   });
 
   it("a trustworthy calibration buys a tighter solution via safety", () => {
@@ -191,34 +231,74 @@ describe("checkTiming", () => {
     expect(checkTiming(MEASURED, { deadlineMs: 600 }, { fastMs: 457 }).ok).toBe(true);
   });
 
+  it("catches a hang released before the probe, which makes stuck unobservable", () => {
+    // `stuck_observable` is the constraint that makes `hang` mean anything: a
+    // route released at 5000ms against a probe at 5097ms hands the app its
+    // answer *before* the oracle looks, so a client with no timeout at all
+    // reads exactly like one that handled the failure. Asserted in the
+    // violated direction, because the passing direction is satisfied by the
+    // solved values whatever the arithmetic says.
+    const check = checkTiming(MEASURED, { deadlineMs: 5000 }, { settleMs: 5097, releaseMs: 5000 });
+    expect(check.ok).toBe(false);
+    const row = check.violations.find((v) => v.constraint === "stuck_observable")!;
+    expect(row.slackMs).toBe(-122); // 5000 - (5097 + 25)
+    expect(row.detail).toMatch(/releaseMs=5000 must be >= settleMs 5097 \+ margin 25/);
+    // Exactly on the boundary passes; one ms under does not.
+    expect(
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { settleMs: 5097, releaseMs: 5122 }).ok,
+    ).toBe(true);
+    expect(
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { settleMs: 5097, releaseMs: 5121 }).ok,
+    ).toBe(false);
+  });
+
+  it("checks a declared page timeout against navigation, which is all it bounds", () => {
+    // The crawler's `timeout` reaches `page.goto(..., { waitUntil:
+    // "networkidle" })` and nothing else, so what can blow it is a delayed
+    // request issued *during* load — not the probe, which runs inside an
+    // unbounded invariant.
+    const tight = checkTiming(
+      MEASURED,
+      { deadlineMs: 5000 },
+      { pageTimeoutMs: 3000, slowMs: 5118 },
+    );
+    expect(tight.ok).toBe(false);
+    const row = tight.violations.find((v) => v.constraint === "fits_navigation_timeout")!;
+    expect(row.slackMs).toBe(-2957); // 3000 - (696 + 5118 + 118 + 25)
+    expect(
+      checkTiming(MEASURED, { deadlineMs: 5000 }, { pageTimeoutMs: 5957, slowMs: 5118 }).ok,
+    ).toBe(true);
+  });
+
+  it("checks a declared budget against both windows, not just the probe", () => {
+    // The regression this pair exists for: a budget compared against a number
+    // that omitted the observation window said `ok` about a plan that spends
+    // it. 6000 covers fixed + settle (5793) and not fixed + settle + quiesce.
+    const optimistic = checkTiming(
+      MEASURED,
+      { deadlineMs: 5000, budgetMs: 6000 },
+      { settleMs: 5097, quiescenceMs: 5097 },
+    );
+    expect(optimistic.ok).toBe(false);
+    const row = optimistic.violations.find((v) => v.constraint === "within_budget")!;
+    expect(row.slackMs).toBe(-4890); // 6000 - (696 + 5097 + 5097)
+    expect(row.detail).toMatch(/= 10890/);
+    // …and a budget that admits both windows passes. (`quiescenceMs: 0` is the
+    // other way out, but it is an opt-out `resolvePlanTiming` honours, not a
+    // value this constraint set considers legal — a 0 window fails
+    // `rejections_drained_after_last_timer` on purpose.)
+    expect(
+      checkTiming(
+        MEASURED,
+        { deadlineMs: 5000, budgetMs: 11000 },
+        { settleMs: 5097, quiescenceMs: 5097 },
+      ).ok,
+    ).toBe(true);
+  });
+
   it("skips constraints whose inputs were not proposed", () => {
     const check = checkTiming(MEASURED, { deadlineMs: 5000 }, {});
     expect(check.rows).toEqual([]);
     expect(check.ok).toBe(true);
-  });
-});
-
-describe("timingLadder", () => {
-  it("spaces rungs by the measured separation, geometrically where it can", () => {
-    const ladder = timingLadder(MEASURED, { loMs: 20, hiMs: 15000, budgetMs: 60000 });
-    expect(ladder.separationMs).toBe(139); // 118 - 4 + 25
-    expect(ladder.rungs[0]).toBe(20);
-    for (let i = 1; i < ladder.rungs.length; i++) {
-      expect(ladder.rungs[i]! - ladder.rungs[i - 1]!).toBeGreaterThanOrEqual(ladder.separationMs);
-    }
-    expect(ladder.estimatedTotalMs).toBeLessThanOrEqual(60000);
-  });
-
-  it("is bounded by the clock, not the arithmetic", () => {
-    const ladder = timingLadder(MEASURED, { loMs: 20, hiMs: 15000, budgetMs: 5000 });
-    expect(ladder.truncatedBy).toBe("budget");
-    // A 15s rung alone costs 15s, so a small budget stops well short of hi.
-    expect(Math.max(...ladder.rungs)).toBeLessThan(15000);
-  });
-
-  it("covers the range when the budget allows", () => {
-    const ladder = timingLadder(MEASURED, { loMs: 20, hiMs: 2000, budgetMs: 600000 });
-    expect(ladder.truncatedBy).toBe("range");
-    expect(Math.max(...ladder.rungs)).toBeLessThanOrEqual(2000);
   });
 });
