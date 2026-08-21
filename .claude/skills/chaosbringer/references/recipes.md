@@ -5,6 +5,64 @@ Each is a *contract*, a *seeded bug*, and — the part that is easy to get wrong
 the observable that actually separates them. Runnable versions live in
 `examples/model-faults/patterns/` in the chaosbringer repo.
 
+## Two harness patterns you will need first
+
+Both of these are what people actually spend their time on, and neither is
+about chaos.
+
+**One app process per scenario.** Calling an app's exported `start()` once per
+scenario shares its module-level state, so scenario 2 inherits scenario 1's
+writes and a "duplicate write" finding may be two scenarios' writes. Spawn it:
+
+```js
+import { spawn } from "node:child_process";
+
+async function startApp({ port, env = {} }) {
+  // `--import=tsx` only if your entry point is TypeScript and `tsx` is
+  // installed; a plain `["server.js"]` otherwise.
+  const proc = spawn(process.execPath, ["--import=tsx", "server.ts"], {
+    env: { ...process.env, PORT: String(port), ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const base = `http://127.0.0.1:${port}`;
+  for (let i = 0; i < 100; i++) {          // wait for it to answer, don't sleep blind
+    try {
+      await fetch(base + "/", { signal: AbortSignal.timeout(200) });
+      return { base, stop: () => new Promise((r) => (proc.on("exit", r), proc.kill())) };
+    } catch {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  proc.kill();
+  throw new Error(`app did not start on ${port}`);
+}
+```
+
+Serve a *fixed* variant the same way — an env seam the server reads
+(`APP_JS=public/app.fixed.js`), or a `page.route("**/app.js", …)` override — so
+the original file stays byte-identical and both directions stay re-runnable.
+
+**Reading server state the app cannot steer.** "Prefer a reader the app does not
+parameterise" is easy to say and awkward when the app's own endpoint is scoped
+by a session the page chose. Take the correlation key off the wire instead of
+out of the page:
+
+```js
+let sessionKey;
+page.on("request", (req) => {
+  const k = req.headers()["x-session"];
+  if (k !== undefined) sessionKey = k;      // what the browser actually sent
+});
+// …click…
+const { notes } = await fetch(`${base}/api/notes/count?session=${sessionKey}`)
+  .then((r) => r.json());                   // plain fetch: not routable, so your
+                                            // own rules cannot fault the oracle
+```
+
+The two halves matter separately: reading the key from the request means the app
+cannot lie about which bucket to count, and reading the count from the test
+process means a catch-all fault rule cannot intercept your own reader.
+
 ## Retry that writes twice
 
 **Contract:** one user intent produces one write, however many times the client
