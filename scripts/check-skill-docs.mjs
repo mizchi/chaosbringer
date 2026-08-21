@@ -9,7 +9,14 @@
  * signature written the wrong way round. Those are all decidable from the
  * package's own exports without launching anything.
  *
- * Usage: node check-skill-docs.mjs <skill-dir>
+ * Usage: `pnpm check:skill-docs` (from the repo root).
+ *
+ * That script runs it through `pnpm -F chaosbringer exec tsx`, rather than a
+ * bare `tsx`, because `tsx` is a dependency of that package and only reaches
+ * the root `node_modules/.bin` by way of `node-linker=hoisted` in `.npmrc`. A
+ * bare invocation works today and breaks as "command not found" the day that
+ * setting changes — and a lint step that cannot run looks exactly like one
+ * that passes.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
