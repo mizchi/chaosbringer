@@ -171,6 +171,17 @@ export interface RunPlanOptions {
    */
   budgetMs?: number;
   /**
+   * Multiplier on the profile's measured jitter tails. Default 2.
+   *
+   * Here because the infeasibility error tells the reader to lower it, and a
+   * remedy an error names has to be reachable from where the error is read.
+   * Lower it only against a profile measured under the load the run will see —
+   * `safety` stands in for the gap between a warm calibration and a busy
+   * machine, and trading it away on a warm profile buys flakes rather than
+   * speed.
+   */
+  safety?: number;
+  /**
    * Per-`ui`-label DOM invariants: what the page must *also* be true of when
    * it reports that label.
    *
@@ -755,6 +766,19 @@ export function resolvePlanTiming(opts: {
   timingProfile?: TimingProfile;
   timeout?: number;
   budgetMs?: number;
+  /**
+   * Multiplier on the profile's measured jitter tails. Default 2, which is
+   * what every solved value in this repo assumes.
+   *
+   * Reachable from a bridge because the infeasibility message tells the reader
+   * to "lower the safety factor if your calibration is trustworthy", and until
+   * now there was no way to do that from a bridge — one of three remedies the
+   * error offered and the only one that was not real. Lower it only against a
+   * profile measured under the load the run will actually see: `safety` is
+   * standing in for the difference between a warm calibration and a busy
+   * machine, so trading it away on a warm profile buys flakes.
+   */
+  safety?: number;
 }): ResolvedPlanTiming {
   if (opts.appLadder !== undefined) {
     const ladder = opts.appLadder;
@@ -802,6 +826,7 @@ export function resolvePlanTiming(opts: {
     deadlineMs: opts.appDeadlineMs,
     ...(opts.appLadder !== undefined ? { ladder: opts.appLadder } : {}),
     ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
+    ...(opts.safety !== undefined ? { safety: opts.safety } : {}),
   };
   const solved = solveTiming(profile, request);
   if (solved.status === "unsat") {

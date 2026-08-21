@@ -595,6 +595,24 @@ describe("resolvePlanTiming", () => {
     ).toThrow(/cannot decide anything against a 5000ms app deadline/);
   });
 
+  it("makes the remedy the infeasibility error names actually reachable", () => {
+    // The error says: "lower the safety factor if your calibration is
+    // trustworthy". It offered three remedies and this was the only one a
+    // bridge could not perform — `safety` lived on `TimingRequest` and nothing
+    // forwarded it. An error naming an unreachable fix is worse than an error
+    // naming none, because the reader spends time looking for the knob.
+    const infeasible = { appDeadlineMs: 120, timingProfile: MEASURED };
+    expect(() => resolvePlanTiming(infeasible)).toThrow(/lower the safety factor/);
+
+    // Same deadline, same profile, safety 1: the tails are the measurement
+    // rather than twice it, so 120ms becomes expressible.
+    const t = resolvePlanTiming({ ...infeasible, safety: 1 });
+    expect(t.solved!.profile.safety).toBe(1);
+    expect(t.solved!.profile.tightTailMs).toBe(MEASURED.tightTailMs); // not doubled
+    // …and the separation the flake was about still scales with it.
+    expect(t.delays!.slowMs).toBeGreaterThan(t.settleMs + MEASURED.tightTailMs);
+  });
+
   it("accepts a hand-written window that is generous enough", () => {
     const t = resolvePlanTiming({ settleMs: 6000, appDeadlineMs: 5000, timingProfile: MEASURED });
     expect(t.settleMs).toBe(6000);
