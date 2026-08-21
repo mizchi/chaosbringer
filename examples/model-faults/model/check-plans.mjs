@@ -72,8 +72,15 @@ for (const name of committed.keys()) {
 if (problems.length > 0) {
   console.error(`${problems.length} plan difference(s):`);
   for (const p of problems) console.error(`  - ${p}`);
+  // The remediation has to name the unit that drifted, not this example's
+  // scripts: `pnpm compile` is hardcoded to `model/traces` -> `model/plans`, so
+  // it is the wrong command for the eight other units this same file checks.
+  // The committed directory is `<unit>/plans`, which is where the unit is.
+  const unit = committedDir.replace(/[/\\]plans[/\\]?$/, "");
   console.error(
-    "\nRegenerate with model/enumerate.sh + `pnpm compile`, review, and commit.",
+    `\nRegenerate with \`${unit}/enumerate.sh && ${unit}/compile.sh\` ` +
+      `(needs Quint + a JVM, and \`pnpm -F chaosbringer build\` for the compile step), ` +
+      `review, and commit.`,
   );
   process.exit(1);
 }

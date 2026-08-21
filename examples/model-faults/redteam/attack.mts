@@ -14,8 +14,11 @@
  * different ground truth. Every hole is now closed, so the expectation is
  * inverted and *asserted* — `EXPECT` lines are checks, and the process exits
  * non-zero if the oracle stops catching a hole or starts failing a correct
- * app. The independent proofs are untouched: they are what keeps the
- * assertions honest, because they do not go through the oracle at all.
+ * app. The independent proofs still do not go through the oracle at all —
+ * that is what keeps the assertions honest — but they are no longer only
+ * printed: each one now states its own claim as an `assert`, because a
+ * `console.log` of the ground truth stops being true silently, and these are
+ * the lines a reader trusts most precisely because they bypass the oracle.
  */
 
 import { readFileSync } from "node:fs";
@@ -82,6 +85,21 @@ function expectVerdict(label: string, results: PlanRunResult[], fields: string[]
       `(want ${JSON.stringify(want)}), modelRunPassed=${passed}`,
   );
   if (!ok) failures.push(`${label}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+}
+
+/**
+ * The independent proofs, as checks. `expectVerdict` above judges the oracle;
+ * this judges the *evidence* — the server's own ledger, a DOM read, a raw
+ * Playwright run — so a hole whose ground truth quietly stops being true fails
+ * here instead of printing differently and passing.
+ */
+function proof(label: string, cond: boolean, detail: string): void {
+  console.log(`  PROOF   ${cond ? "ok" : "FAILED"}  ${label}: ${detail}`);
+  if (!cond) failures.push(`${label}: ${detail}`);
+}
+
+function fieldsOf(results: PlanRunResult[]): string[] {
+  return results.flatMap((r) => r.mismatches.map((m) => m.field)).sort();
 }
 
 function firedStats(r: PlanRunResult): string {
@@ -185,9 +203,16 @@ async function holeA(): Promise<void> {
     await page.waitForTimeout(200);
     const session = await page.evaluate(() => (window as unknown as { __SESSION__: string }).__SESSION__);
     const effects = readEffects(session);
-    console.log(
-      `  PROOF   variant=${fixed ? "fixed" : "buggy"} data-state=${state} payEnabled=${payEnabled} ` +
-        `charges=${JSON.stringify(effects.charges)}`,
+    // The whole point of hole A: the label was right and the money moved
+    // anyway. Both halves are asserted — a page that stops charging and a
+    // backend that stops recording the charge read identically in a print.
+    proof(
+      `A ${fixed ? "fixed" : "buggy"} the error banner ${fixed ? "disables" : "does not disable"} paying`,
+      state === "error" &&
+        payEnabled === !fixed &&
+        effects.charges.length === (fixed ? 0 : 1) &&
+        (fixed || effects.charges[0]!.appState === "error"),
+      `data-state=${state} payEnabled=${payEnabled} charges=${JSON.stringify(effects.charges)}`,
     );
     await browser.close();
   }
@@ -240,6 +265,14 @@ async function holeB(): Promise<void> {
     console.log(verdict(results));
     console.log(firedStats(results[0]!));
     console.log(`  PROOF   POST /api/telemetry reached the server ${effects.telemetry}x in one settle window`);
+    // The beacon flood is the phenomenon; without it the oracle's
+    // `amplification` verdict below is about nothing.
+    proof(
+      `B ${fixed ? "fixed" : "buggy"} the heartbeat ${fixed ? "does not flood" : "floods"} the endpoint`,
+      fixed ? effects.telemetry <= 1 : effects.telemetry > 1,
+      `${effects.telemetry} POST(s) in one ${bridgeB.settleMs}ms window at a ` +
+        `${fixed ? "60_000" : "60"}ms interval`,
+    );
     expectVerdict(`B ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["amplification"]);
   }
 
@@ -287,6 +320,17 @@ async function holeC(): Promise<void> {
   const controls = await runPlans(others, { ...gridBridge, baseUrl: `${server.url}/fake` });
   console.log("  CONTROL  the same page against plans that do inject:");
   console.log(verdict(controls));
+  // The control is what makes hole C a finding rather than a coincidence: the
+  // same silent page, and every plan that injects something is caught. It ran
+  // and printed for one round without asserting anything at all.
+  proof(
+    "C control: every injecting plan against the same silent page is caught",
+    controls.length === 2 &&
+      controls.every((r) => r.mismatches.some((m) => m.field === "injection")) &&
+      fieldsOf(controls).length === 4,
+    `fields=${JSON.stringify(fieldsOf(controls))} across ${controls.length} plan(s) — ` +
+      `an injection that never fired plus the label it therefore never produced`,
+  );
 }
 
 // =====================================================================
@@ -329,6 +373,14 @@ async function holeD(): Promise<void> {
     console.log(
       `  PROOF   after the backend finished committing: orders=${effects.orders.size} ` +
         `(POSTs accepted=${effects.orderPosts}) — the contract is exactly 1 order per intent`,
+    );
+    // Ground truth, read after the commit latency the probe cannot wait out:
+    // two POSTs in both variants, and the idempotency key is what decides
+    // whether they become one order or two.
+    proof(
+      `D ${fixed ? "fixed" : "buggy"} the retried write became ${fixed ? "one order" : "two"}`,
+      effects.orderPosts === 2 && effects.orders.size === (fixed ? 1 : 2),
+      `orders=${effects.orders.size} from ${effects.orderPosts} accepted POST(s)`,
     );
     expectVerdict(`D ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["state"]);
     // …and the divergence the oracle used to miss is now in the report: the
@@ -400,6 +452,15 @@ async function holeE(): Promise<void> {
     console.log(`\n  variant=${fixed ? "fixed" : "buggy"}`);
     console.log(verdict(results));
     console.log(`  PROOF   observed=${JSON.stringify(results[0]!.observed.state)}`);
+    // The phenomenon, independent of the verdict: what is on screen belongs to
+    // the earlier query in the buggy variant and to the typed one in the fixed
+    // variant. Both reads come from the page, not from the oracle.
+    const seen = results[0]!.observed.state as { typed: string; rendered: string };
+    proof(
+      `E ${fixed ? "fixed" : "buggy"} the results on screen are ${fixed ? "" : "not "}the ones asked for`,
+      seen.typed === "ab" && (fixed ? seen.rendered === "ab" : seen.rendered === "a"),
+      `typed="${seen.typed}" rendered="${seen.rendered}"`,
+    );
     expectVerdict(`E ${fixed ? "fixed" : "buggy"}`, results, fixed ? [] : ["uiInvariant"]);
   }
 }
@@ -458,6 +519,14 @@ async function holeF(): Promise<void> {
     console.log(
       `  PROOF   variant=${fixed ? "fixed" : "buggy"} escaping rejections at 400ms=${atProbe}, ` +
         `at 1800ms=${later.length} ${JSON.stringify(later)}`,
+    );
+    // The hole is the *timing*: nothing has escaped at the probe either way,
+    // and only the buggy page produces one afterwards. A run where the
+    // rejection already escaped at 400ms would be measuring something else.
+    proof(
+      `F ${fixed ? "fixed" : "buggy"} the rejection escapes ${fixed ? "never" : "after the probe"}`,
+      atProbe === 0 && later.length === (fixed ? 0 : 1),
+      `at 400ms=${atProbe}, at 1800ms=${later.length} ${JSON.stringify(later)}`,
     );
     await browser.close();
   }

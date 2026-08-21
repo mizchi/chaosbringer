@@ -166,12 +166,20 @@ patterns/<name>/
   bridge.mjs      rules / action / uiProbe / stateProbe for the app
 ```
 …plus one file shared by all of them, [`vacuity.mjs`](./vacuity.mjs), which
-every `enumerate.sh` calls at the end:
+every `enumerate.sh` calls at the end — in every example, not just this one:
 
 ```bash
-node patterns/vacuity.mjs                    # all seven models, ~21s, no JVM
-node patterns/vacuity.mjs reconnect-budget   # one of them
+node patterns/vacuity.mjs                       # all nine model units, ~32s, no JVM
+node patterns/vacuity.mjs reconnect-budget      # one of them
+node patterns/vacuity.mjs cloudflare-worker/model   # …including the other example's
 ```
+
+Nine units: the seven patterns here, [`../model/`](../model/), and
+[`../../cloudflare-worker/model/`](../../cloudflare-worker/model/) — discovered
+by the same glob CI regenerates from (`examples/*/model`,
+`examples/*/patterns/*`), because a unit nobody added to a list is a unit nobody
+classifies. `patterns-audit/model-vacuity.mts` runs this and *asserts* the
+result against every committed `targets.txt`.
 …plus a page in [`../public/`](../public/), its routes in
 [`../server.ts`](../server.ts), and a row in [`index.mjs`](./index.mjs).
 
@@ -222,7 +230,17 @@ Two conventions that keep them honest:
 - **Never put milliseconds in a plan.** `timeout-ladder` uses the `slow-ok` /
   `slow-trip` outcomes, which carry intent only: the bridge supplies
   `appDeadlineMs` and a calibration profile, and the runner solves the actual
-  delays for the machine it is on. The same committed plans work on a laptop
+  delays for the machine it is on. The same committed *plans* work on a laptop
   and on a slower CI runner. See
   [`docs/recipes/model-driven-faults.md`](../../../docs/recipes/model-driven-faults.md)
   and `chaosbringer model calibrate`.
+- **…but a committed profile is a foreign measurement.**
+  [`../model/profile.json`](../model/profile.json) is checked in and every bridge
+  loads it unconditionally, and nothing in CI regenerates it — so on a runner
+  that is not this container the solver is using *someone else's* envelope. It is
+  committed anyway because a reviewer can see the numbers and because the
+  alternative default is a guess, but treat it as an input to re-measure, not a
+  guarantee: `chaosbringer model calibrate --url … --runs 5`, under the load the
+  suite actually runs under. Measured warm, `tightTailMs` came out at 3ms here;
+  measured with every core busy, 52ms — and `tightTailMs` is the probe's own
+  jitter, so a warm number is not a bound. The file records which it is.

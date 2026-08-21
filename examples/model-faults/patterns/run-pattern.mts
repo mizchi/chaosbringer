@@ -1,7 +1,11 @@
 /**
  * Replay one pattern's plans against the checkout app.
  *
- *   npx tsx patterns/run-pattern.mts retry-idempotency [--fixed]
+ *   npx tsx patterns/run-pattern.mts retry-idempotency        # buggy variant
+ *   FIXED=1 npx tsx patterns/run-pattern.mts retry-idempotency  # corrected app
+ *
+ * `FIXED` is the switch (line ~33), the same convention as `pnpm start` /
+ * `pnpm start:fixed`; there is no `--fixed` flag.
  *
  * Every pattern is the same shape — a model, its committed plans, a bridge and
  * a page — so adding one needs no new runner.
@@ -19,6 +23,7 @@ import {
   type FaultPlan,
 } from "chaosbringer";
 import { startServer } from "../server.js";
+import { depthBoundOf, loadTargets } from "../targets.js";
 import { PATTERNS } from "./index.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,8 +53,15 @@ try {
   // nothing for the patterns that do not — and without it a bridge that sets
   // `coverageFingerprints` would collect the digests and report nothing, which
   // is the shape of bug this whole example exists to catch.
+  // `targets` and `depthBound` come from the unit's own enumeration
+  // bookkeeping. Without them the report says `N/N reachable` with no bound —
+  // structurally unable to mention the `unreachable-*` rows that are the whole
+  // point of enumerating instead of sampling.
+  const unitDir = join(here, pattern.name);
   const coverage = aggregateCoverage(results, {
     spec: pattern.spec,
+    depthBound: depthBoundOf(unitDir),
+    targets: loadTargets(unitDir),
     fingerprints: fingerprintsOf(results),
   });
   console.log(formatModelCoverage(coverage));

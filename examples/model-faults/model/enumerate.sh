@@ -58,4 +58,4 @@ emit "contract-forbids-unhandled" "unhandled"
 # the model's own arithmetic" (`unreachable-by-construction` — a query with one
 # possible answer, which the ~14s Apalache run above cannot tell you).
 # quint run, ~3s, no JVM.
-node ../patterns/vacuity.mjs model --annotate
+node ../patterns/vacuity.mjs model-faults/model --annotate

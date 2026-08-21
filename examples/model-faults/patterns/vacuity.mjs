@@ -2,9 +2,15 @@
 /**
  * Which `contract-forbids-*` targets could ever have come back reachable?
  *
- *   node patterns/vacuity.mjs                      # every pattern, report only
- *   node patterns/vacuity.mjs token-refresh        # one pattern
+ *   node patterns/vacuity.mjs                      # every model unit in examples/
+ *   node patterns/vacuity.mjs token-refresh        # one unit
  *   node patterns/vacuity.mjs token-refresh --annotate   # …and rewrite targets.txt
+ *   node patterns/vacuity.mjs --json=/tmp/v.json   # …and the same as data
+ *
+ * A unit is any directory CI regenerates: `examples/*\/model` or
+ * `examples/*\/patterns/*` with an `enumerate.sh`. Ids are relative to
+ * `examples/`, and any unique suffix names one (`token-refresh`,
+ * `cloudflare-worker/model`).
  *
  * Every `enumerate.sh` ends with a block whose comment says "a witness here
  * means the SPEC is wrong", and each of those lines lands in `targets.txt` as
@@ -43,6 +49,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const QUINT = process.env.QUINT_PKG ?? "@informalsystems/quint@0.32.0";
 const SAMPLES = process.env.SAMPLES ?? "400";
 
+/** Where the examples live: this file is `<root>/model-faults/patterns/`. */
+const examplesRoot = join(here, "..", "..");
+
 /**
  * Model unit → its directory and spec file, **discovered** rather than listed.
  *
@@ -50,37 +59,86 @@ const SAMPLES = process.env.SAMPLES ?? "400";
  * until the next pattern: a unit nobody added is a unit nobody classifies, and
  * an unclassified target looks the same as a checked one — which is the finding
  * this script exists for. The depth still comes from each unit's own
- * `enumerate.sh`, so the two cannot drift apart. `../model` is the 4x4
- * tutorial, which has contract-forbids targets for the same reason.
+ * `enumerate.sh`, so the two cannot drift apart.
+ *
+ * The glob is the same one CI regenerates from
+ * (`.github/workflows/model-plans.yml`: `examples/*\/model/enumerate.sh`
+ * plus `examples/*\/patterns/*\/enumerate.sh`), so "every unit CI regenerates"
+ * and "every unit this classifies" are the same set by construction. Narrowing
+ * it to this example's own `patterns/` is how `examples/cloudflare-worker/model`
+ * kept two bare `unreachable` rows while the assertion downstream reported
+ * "all rows classified" — F6 alive inside the tool written to close it.
+ *
+ * Unit ids are paths relative to the examples root, so they are unambiguous
+ * across examples; `resolveUnit` below accepts any unique suffix of one
+ * (`timeout-ladder`, `model-faults/model`).
  */
 function discoverModels() {
   const out = {};
-  for (const dir of ["../model", ...readdirSync(here, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
+  const dirs = [];
+  for (const example of readdirSync(examplesRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== "node_modules")
     .map((e) => e.name)
-    .sort()]) {
-    const abs = join(here, dir);
+    .sort()) {
+    dirs.push(join(example, "model"));
+    const patternsDir = join(examplesRoot, example, "patterns");
+    if (!existsSync(patternsDir)) continue;
+    for (const unit of readdirSync(patternsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== "node_modules")
+      .map((e) => e.name)
+      .sort()) {
+      dirs.push(join(example, "patterns", unit));
+    }
+  }
+  for (const id of dirs) {
+    const abs = join(examplesRoot, id);
     if (!existsSync(join(abs, "enumerate.sh"))) continue;
     const specs = readdirSync(abs).filter((f) => f.endsWith(".qnt"));
     if (specs.length !== 1) {
       // Zero or several: the convention is one spec per unit, and guessing
       // which one would be worse than saying so.
       console.error(
-        `vacuity: ${dir} has ${specs.length} .qnt files, expected exactly one — skipping`,
+        `vacuity: ${id} has ${specs.length} .qnt files, expected exactly one — skipping`,
       );
       continue;
     }
-    out[dir === "../model" ? "model" : dir] = { dir, file: specs[0] };
+    out[id] = { dir: abs, file: specs[0] };
   }
   return out;
 }
 
 const MODELS = discoverModels();
 
+/**
+ * `timeout-ladder`, `model-faults/model`, or the full id. Ambiguity is an
+ * error rather than a guess: `model` now names two units (this example's 4x4
+ * tutorial and cloudflare-worker's todo flow), and picking one silently is how
+ * the other stops being classified.
+ */
+function resolveUnit(name) {
+  if (name in MODELS) return name;
+  const hits = Object.keys(MODELS).filter(
+    (id) => id === name || id.endsWith(`/${name}`),
+  );
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) {
+    console.error(`vacuity: "${name}" is ambiguous — did you mean ${hits.join(" or ")}?`);
+    process.exitCode = 2;
+    return undefined;
+  }
+  console.error(`vacuity: unknown unit "${name}". Known: ${Object.keys(MODELS).join(", ")}`);
+  process.exitCode = 2;
+  return undefined;
+}
+
 const args = process.argv.slice(2);
 const annotate = args.includes("--annotate");
+// `--json=<file>` writes the classification as data, so a checker downstream
+// asserts on what this measured instead of re-deriving its own unit list.
+const jsonOut = args.find((a) => a.startsWith("--json="))?.slice("--json=".length);
 const picked = args.filter((a) => !a.startsWith("--"));
-const patterns = picked.length > 0 ? picked : Object.keys(MODELS);
+const patterns =
+  picked.length > 0 ? picked.map(resolveUnit).filter((u) => u !== undefined) : Object.keys(MODELS);
 const scratch = mkdtempSync(join(tmpdir(), "vacuity-"));
 
 /** The `emit "<name>" "<predicate>"` lines of a pattern's own enumerate.sh. */
@@ -170,16 +228,11 @@ function annotateTargets(dir, verdicts) {
 
 let live = 0;
 const vacuous = [];
+const report = { units: [] };
 
 for (const pattern of patterns) {
   const unit = MODELS[pattern];
-  if (unit === undefined) {
-    console.error(`vacuity: unknown unit "${pattern}". Known: ${Object.keys(MODELS).join(", ")}`);
-    process.exitCode = 2;
-    continue;
-  }
-  const { file } = unit;
-  const dir = join(here, unit.dir);
+  const { file, dir } = unit;
   const src = readFileSync(join(dir, file), "utf8");
   const depth = depthOf(dir);
   const flipped = join(scratch, `flipped-${file}`);
@@ -196,10 +249,19 @@ for (const pattern of patterns) {
       `   (${SAMPLES} random traces, depth ${depth})`,
   );
   const verdicts = new Map();
+  const row = { id: pattern, dir, spec: file, depth, targets: [] };
+  report.units.push(row);
   for (const t of targets) {
     const a = asIs[t.pred];
     const b = flip[t.pred];
     verdicts.set(t.name, b > 0);
+    row.targets.push({
+      name: t.name,
+      pred: t.pred,
+      shipped: a,
+      flipped: b,
+      verdict: b > 0 ? "live" : "by-construction",
+    });
     if (b > 0) live += 1;
     else vacuous.push(`${pattern}/${t.name}`);
     console.log(
@@ -222,9 +284,15 @@ for (const pattern of patterns) {
 }
 
 const total = live + vacuous.length;
+report.live = live;
+report.byConstruction = vacuous.length;
+report.total = total;
+report.unitCount = report.units.length;
+report.allUnits = Object.keys(MODELS);
+if (jsonOut !== undefined) writeFileSync(jsonOut, `${JSON.stringify(report, null, 2)}\n`);
 console.log(
   `\nSUMMARY  ${live} of ${total} contract-forbids target(s) live (a knob setting produces a ` +
-    `witness)` +
+    `witness) across ${report.unitCount} model unit(s)` +
     (vacuous.length > 0
       ? `; ${vacuous.length} unreachable by construction:\n${vacuous.map((v) => `  - ${v}`).join("\n")}`
       : ""),

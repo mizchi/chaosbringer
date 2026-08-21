@@ -35,3 +35,15 @@ done
 # States the contract forbids. A witness here means the SPEC is wrong.
 emit "contract-forbids-stuck" 'ui == "stuck"'
 emit "contract-forbids-unhandled" "unhandled"
+
+# Classify the contract-forbids rows above: each one is re-asked against a
+# knob-inverted copy of the model, so `targets.txt` distinguishes "unreachable
+# because the contract forbids it" (`unreachable-live` — the checker could have
+# said either thing) from "unreachable because the predicate is an identity of
+# the model's own arithmetic" (`unreachable-by-construction`). quint run, ~3s,
+# no JVM.
+#
+# The script lives in the sibling example because it is one implementation for
+# every unit in `examples/`, and a second copy is exactly how this unit ended up
+# with two unclassified rows while the tooling reported "all rows classified".
+node ../../model-faults/patterns/vacuity.mjs cloudflare-worker/model --annotate

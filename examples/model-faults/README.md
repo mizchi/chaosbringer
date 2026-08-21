@@ -25,14 +25,34 @@ Sixteen states enumerated, two proved unreachable, every one exercised — not
 ```bash
 pnpm install
 
-pnpm start          # buggy variant  -> 13 mismatches, exit 1
-pnpm start:fixed    # corrected app  -> clean sheet,   exit 0
-pnpm test           # both, as assertions
-pnpm dev            # just the app, at http://127.0.0.1:5173
+pnpm start            # buggy variant  -> 13 mismatches over 11 plans, exit 1
+pnpm start:fixed      # corrected app  -> clean sheet,                 exit 0
+pnpm test             # both, as assertions
+pnpm dev              # just the app, at http://127.0.0.1:5173
+
+pnpm test:patterns    # the seven patterns in patterns/, both variants each
+pnpm pattern <name>   # one pattern, printing its coverage report
+                      #   FIXED=1 pnpm pattern timeout-ladder
+pnpm test:adversarial # redteam/ + patterns-audit/: the suites that attack the
+                      # oracle and the patterns rather than the app
 ```
 
-Neither `start` nor `test` needs Quint or a JVM: the plans in `model/plans/`
-are committed build artifacts.
+Nothing above needs Quint or a JVM: the plans in `model/plans/` and every
+`patterns/<name>/plans/` are committed build artifacts. Enumeration (the step
+that produces them) does — see *Regenerating*, and
+[`patterns/README.md`](./patterns/README.md).
+
+## What else is in here
+
+This directory is four things, not one. The 4x4 checkout grid below is the
+tutorial; the other three are where the work went.
+
+| Directory | What it is |
+|---|---|
+| `model/` + `public/` + `run.ts` | **The tutorial.** One page, two operations, a 4x4 grid of failure states, two seeded bugs. Everything below is the same machinery pointed at harder shapes. |
+| [`patterns/`](./patterns/) | **Seven real-world async shapes**, each a model + committed plans + a bridge + a page, each with a buggy and a fixed variant: retry idempotency, token refresh, optimistic rollback, pagination order, reconnect budget, stale-while-revalidate, timeout ladder. `patterns/README.md` is the how-to-add-one guide, and `vacuity.mjs` is the check that a `contract-forbids-*` query could ever have failed. |
+| [`redteam/`](./redteam/) | **Attacks on the oracle.** Six holes a passing verdict used to walk through, each with an independent measurement that does not go through the oracle at all, plus a blue-team guard-walk that tries to make every new check fire on a *correct* app. |
+| [`patterns-audit/`](./patterns-audit/) | **Attacks on the patterns.** Not "what can walk past the runner" but "does each pattern catch a bug of its own class that its own plans were not written for?". Replays each pattern's own committed plans and own bridge against a page carrying such a bug. |
 
 ## The app
 
@@ -72,13 +92,22 @@ model/checkout.qnt  --enumerate.sh (Apalache)-->  model/traces/*.itf.json
 | `model/traces/` | One ITF witness per reachable state, straight from `quint verify`. |
 | `model/plans/` | Compiled `FaultPlan`s: per-operation outcomes + the oracle. Reviewable JSON, no Quint concepts. |
 | `model/bridge.mjs` | The three things the model cannot know: which URL each operation is, how to fire the action, how to read the UI back as a model label. |
+| `model/profile.json` | This machine's measured timing envelope (`chaosbringer model calibrate`), from which the probe window and the injected delays are solved. A committed profile is a *foreign* measurement — regenerate it on your own hardware. |
+| `targets.ts` | The one parser for `targets.txt`, shared by `run.ts`, `patterns/run-pattern.mts` and the tests. A status of `unreachable-live` / `unreachable-by-construction` is unreachable; matching the bare word `unreachable` is how both rows once got reported as *reachable*. |
 
 ### Regenerating (only when the model changes)
 
 ```bash
+pnpm -F chaosbringer build         # compile.sh / pnpm compile call dist/cli.js
 model/enumerate.sh                 # needs Quint + a JVM; ~14s per target
 pnpm compile                       # traces -> plans
 ```
+
+`enumerate.sh` also classifies its `contract-forbids-*` targets by calling
+[`patterns/vacuity.mjs`](./patterns/vacuity.mjs) (`quint run`, ~3s, no JVM), so
+`targets.txt` records *whether a witness was ever possible* rather than one word
+for both cases. `node patterns/vacuity.mjs` does it for every model unit in
+`examples/` at once.
 
 `enumerate.sh` walks a 4×4 grid of per-operation terminal states
 (`fulfilled` / `rejected` / `bodyRejected` / `hung`) plus the two states the

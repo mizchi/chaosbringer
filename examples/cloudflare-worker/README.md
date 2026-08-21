@@ -76,7 +76,8 @@ starts, requests *don't* carry the bypass header and the chaos raffle applies.
 └── model/             # model-driven fault coverage for the "add a todo" flow
     ├── todo.qnt       # the contract, as a Quint model
     ├── enumerate.sh   # witness-driven enumeration (dev-time: Quint + JVM)
-    ├── targets.txt    # what was asked, and what came back unreachable
+    ├── targets.txt    # what was asked, what came back unreachable, and
+    │                  #   whether a witness was ever possible for it
     ├── traces/        # one ITF witness per reachable state
     ├── plans/         # compiled FaultPlans (committed; replay needs no Quint)
     └── bridge.mjs     # rules / action / uiProbe for this app
@@ -98,6 +99,20 @@ bounded, a non-2xx write treated as a failure. Six states are reachable within
 4 steps; `stuck` and "a rejection escaped" are proved unreachable, which is the
 half a probability sweep can never report.
 
+Both of those unreachable rows are recorded as `unreachable-live`, not as a bare
+`unreachable`: `enumerate.sh` ends by re-asking each one against a knob-inverted
+copy of the model
+([`vacuity.mjs`](../model-faults/patterns/vacuity.mjs), `quint run`, no JVM), so
+the file distinguishes "unreachable because the contract forbids it" from
+"unreachable because the predicate restates the model's own arithmetic". Here the
+checker could have answered either way — flipping `HAS_TIMEOUT` produces a
+`stuck` witness in 69 of 400 random traces, and flipping
+`HANDLES_EVERY_REJECTION` produces an escaping rejection in 278 — so both
+`unreachable` verdicts are results rather than tautologies. Note that
+`chaosbringer model run` cannot print the unreachable rows itself
+(`States: 6/6 reachable` is the reachable half only); `targets.txt` is where that
+claim lives.
+
 This model was written **after** the app, against code that had been here for
 months, and the first run reported four findings — all in the write path, none
 in the read path (`refresh()` was already correctly guarded):
@@ -114,9 +129,17 @@ in the read path (`refresh()` was already correctly guarded):
 plans pass. Regenerating the plans (only needed when the model changes):
 
 ```bash
-pnpm model:enumerate          # traces/  (needs Quint + a JVM)
+pnpm -F chaosbringer build    # model:compile calls dist/cli.js
+pnpm model:enumerate          # traces/ + targets.txt  (needs Quint + a JVM)
 pnpm model:compile            # plans/
 ```
+
+`model:enumerate` also rewrites `targets.txt`'s `contract-forbids-*` rows via
+the sibling example's `vacuity.mjs` — one implementation for every model unit in
+`examples/`, because a second copy is how this unit ended up unclassified while
+the tooling reported "all rows classified". `node
+../model-faults/patterns/vacuity.mjs cloudflare-worker/model` does that step
+alone, in ~4s and with no JVM.
 
 ## Variations to try
 

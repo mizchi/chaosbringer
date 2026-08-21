@@ -42,5 +42,7 @@ emit "contract-forbids-unhandled" "unhandled"
 # tautology does not get a target. `../vacuity.mjs` is what caught this.
 
 # Every contract target above is only worth its ~14s if a witness was possible
-# at all. Classify them rather than leaving nine identical-looking rows.
-node ../vacuity.mjs --annotate "$(basename "$PWD")" || true
+# at all. Classify them rather than leaving identical-looking rows — and never
+# under `|| true`: this is the one check in the pipeline whose job is to find
+# checks that cannot fail, so swallowing its failure is the bug it looks for.
+node ../vacuity.mjs stale-revalidate --annotate

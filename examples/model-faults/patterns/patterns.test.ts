@@ -20,7 +20,7 @@ import {
   type PlanRunResult,
 } from "chaosbringer";
 import { afterAll, describe, expect, it } from "vitest";
-import { resolvePlanTiming } from "chaosbringer";
+import { ladderSettleMs, resolvePlanTiming } from "chaosbringer";
 import { startServer, type StartedServer } from "../server.js";
 import { PATTERNS } from "./index.mjs";
 import timeoutLadderBridge from "./timeout-ladder/bridge.mjs";
@@ -62,6 +62,42 @@ async function run(pattern: (typeof PATTERNS)[number], fixed: boolean): Promise<
 
 function keys(results: PlanRunResult[]): string[] {
   return results.flatMap((r) => r.mismatches.map((m) => `${m.plan}/${m.field}`)).sort();
+}
+
+/**
+ * "No milliseconds in a committed plan", stated as what a plan may contain
+ * rather than as a regex over its JSON.
+ *
+ * The proxy used to be `JSON.stringify(plans)` not matching `/\d{3,}/`, which
+ * forbids any three-digit number anywhere: `"occurrence": 100` or
+ * `"modelSteps": 120` would fail it for no reason, and a `delayMs: 99` would
+ * pass it. So walk the schedule instead: every step's outcome must be one of
+ * the intents the model can express, and no step may carry a duration at all —
+ * the durations are solved from the bridge's profile at replay time.
+ */
+const PLAN_INTENTS = new Set([
+  "pass",
+  "reject",
+  "reject-body",
+  "abort",
+  "hang",
+  "status",
+  "slow-ok",
+  "slow-trip",
+]);
+function expectNoTimingInPlans(plans: FaultPlan[]): void {
+  for (const plan of plans) {
+    for (const step of plan.schedule) {
+      expect(PLAN_INTENTS, `${plan.name}: unknown outcome "${step.outcome}"`).toContain(
+        step.outcome,
+      );
+      // A duration would have to arrive as a field; there is no other way in.
+      const timingKeys = Object.keys(step).filter((k) => /ms$|Ms$|delay|timeout/i.test(k));
+      expect(timingKeys, `${plan.name}: step carries timing ${timingKeys.join(", ")}`).toEqual([]);
+    }
+    const expectKeys = Object.keys(plan.expect).filter((k) => /ms$|Ms$|delay|timeout/i.test(k));
+    expect(expectKeys, `${plan.name}: expect carries timing ${expectKeys.join(", ")}`).toEqual([]);
+  }
 }
 
 describe("pattern: retry-idempotency", () => {
@@ -223,13 +259,22 @@ describe("pattern: optimistic-rollback", () => {
     const byName = new Map(results.map((r) => [r.plan.name, r]));
 
     // Nothing committed, row still on screen: the user believes it saved.
+    //
+    // The missing reconcile is reported as `injection`, not `amplification`:
+    // this app makes *fewer* calls than the model states (1 list read where the
+    // plan says 2), and the two directions are two different findings. An app
+    // that skipped a request the model says it makes is not an app that
+    // amplified anything.
     for (const name of ["write-rejectBefore", "write-serverError"]) {
       const r = byName.get(name)!;
       expect(r.mismatches.map((m) => m.field).sort()).toEqual([
-        "amplification",
+        "injection",
         "state",
         "uiInvariant",
       ]);
+      // …and the direction is in the mismatch, not just the field.
+      const missed = r.mismatches.find((m) => m.field === "injection")!;
+      expect(Number(missed.actual)).toBeLessThan(Number(missed.expected));
       expect(r.observed.state).toEqual({ committed: 0, shown: 1 });
     }
 
@@ -240,7 +285,7 @@ describe("pattern: optimistic-rollback", () => {
     // the row it is showing under an id no other client can address.
     const ambiguous = byName.get("write-rejectAfter")!;
     expect(ambiguous.mismatches.map((m) => m.field).sort()).toEqual([
-      "amplification",
+      "injection",
       "uiInvariant",
     ]);
     expect(ambiguous.observed.state).toEqual({ committed: 1, shown: 1 });
@@ -280,7 +325,7 @@ describe("pattern: pagination-order", () => {
     expect(byName.get("page1-slow")!.schedule[0]!.outcome).toBe("slow-ok");
 
     // Portability: the plan says "slow", never a millisecond value.
-    expect(JSON.stringify(plans)).not.toMatch(/\d{3,}/);
+    expectNoTimingInPlans(plans);
   });
 
   it("derives the losing delay from the app's own deadline", async () => {
@@ -311,8 +356,19 @@ describe("pattern: pagination-order", () => {
     expect(raced.observed.state).toEqual({ items: 4 });
     expect(raced.observed.unhandledRejection).toBe(false);
     // …and the invariant says which rows, in which order, because a report
-    // that only said "invariant failed" would not be actionable.
-    expect(raced.mismatches[0]!.detail).toMatch(/rendered 3,4,1,2/);
+    // that only said "invariant failed" would not be actionable. What is
+    // asserted is that property, not the permutation a 4-row / 2-page fixture
+    // happens to produce: the detail must name every row the page rendered,
+    // and name them in an order that is not the sorted one.
+    const detail = raced.mismatches[0]!.detail;
+    expect(detail).toMatch(/rows are out of order: rendered [\d,]+, expected [\d,]+/);
+    const [rendered, expected] = detail
+      .match(/rendered ([\d,]+), expected ([\d,]+)/)!
+      .slice(1)
+      .map((list) => list.split(",").map(Number));
+    expect(rendered!).toHaveLength(Number(raced.observed.state!.items));
+    expect([...rendered!].sort((a, b) => a - b)).toEqual(expected);
+    expect(rendered).not.toEqual(expected); // the whole finding, in one line
 
     // Controls. Prompt pages and a failed page must both pass in the buggy
     // variant: arrival order only reorders anything when a response is late,
@@ -370,7 +426,19 @@ describe("pattern: reconnect-budget", () => {
       timingProfile: bridge.timingProfile,
     });
     expect(timing.settleMs).toBe(bridge.settleMs);
-    expect(timing.settleMs).toBeGreaterThan(attempts * bridge.appDeadlineMs);
+    // …and "covers" means the runner's own requirement, not the loose
+    // `attempts x deadline`: each attempt is a round of
+    // `deadline + tightTail x safety + margin`, and the backoffs are on top.
+    // The loose form was satisfied by a 1800ms window that the pre-flight
+    // rejects once the profile's tail is measured honestly.
+    const needMs = ladderSettleMs(
+      { attempts, backoffsMs: backoffs },
+      bridge.appDeadlineMs,
+      bridge.timingProfile.tightTailMs * 2,
+      25,
+    );
+    expect(needMs).toBeGreaterThan(attempts * bridge.appDeadlineMs);
+    expect(timing.settleMs).toBeGreaterThanOrEqual(needMs);
     // …and the one solved for a single round is refused rather than silently
     // used, which is the whole point of declaring the ladder.
     expect(() =>
@@ -487,7 +555,7 @@ describe("pattern: timeout-ladder", () => {
     ]);
     // Portability: the plan says "slow", never "553ms". The milliseconds come
     // from the local profile, so the same plan works on a slower runner.
-    expect(JSON.stringify(plans)).not.toMatch(/\d{3,}/);
+    expectNoTimingInPlans(plans);
   });
 
   it("derives the delays from the app's own deadline", async () => {

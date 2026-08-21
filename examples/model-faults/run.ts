@@ -22,10 +22,11 @@ import {
 } from "chaosbringer";
 import bridge from "./model/bridge.mjs";
 import { startServer } from "./server.js";
+import { depthBoundOf, loadTargets } from "./targets.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const plansDir = join(here, "model", "plans");
-const targetsFile = join(here, "model", "targets.txt");
+const modelDir = join(here, "model");
+const plansDir = join(modelDir, "plans");
 
 function loadPlans(): FaultPlan[] {
   return readdirSync(plansDir)
@@ -35,20 +36,6 @@ function loadPlans(): FaultPlan[] {
       const plan = JSON.parse(readFileSync(join(plansDir, f), "utf8")) as FaultPlan;
       validatePlan(plan);
       return plan;
-    });
-}
-
-/** Enumeration bookkeeping, so unreachable states are reported, not dropped. */
-function loadTargets() {
-  return readFileSync(targetsFile, "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => {
-      const [status, name] = line.trim().split(/\s+/);
-      return {
-        target: name ?? "?",
-        status: status === "unreachable" ? ("unreachable" as const) : ("reachable" as const),
-      };
     });
 }
 
@@ -66,10 +53,13 @@ try {
     baseUrl: server.url,
     coverageFingerprints: true,
   });
+  // Enumeration bookkeeping, so unreachable states are reported rather than
+  // dropped — and the depth bound comes from the enumeration itself, not from
+  // a number retyped here.
   const coverage = aggregateCoverage(results, {
     spec: "model/checkout.qnt",
-    depthBound: 4,
-    targets: loadTargets(),
+    depthBound: depthBoundOf(modelDir),
+    targets: loadTargets(modelDir),
     fingerprints: fingerprintsOf(results),
   });
   console.log(formatModelCoverage(coverage));

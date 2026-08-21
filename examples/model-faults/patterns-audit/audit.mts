@@ -45,7 +45,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import {
@@ -64,6 +66,7 @@ import reconnectBridge from "../patterns/reconnect-budget/bridge.mjs";
 import retryBridge from "../patterns/retry-idempotency/bridge.mjs";
 import tokenBridge from "../patterns/token-refresh/bridge.mjs";
 import timeoutBridge from "../patterns/timeout-ladder/bridge.mjs";
+import { loadTargets } from "../targets.js";
 import { callsOn, resetLedger, startServer, type StartedServer } from "./server.js";
 
 const only = new Set(process.argv.slice(2).map((s) => s.toUpperCase()));
@@ -89,6 +92,41 @@ function shippedPlan(pattern: string, name: string): FaultPlan {
 
 function shippedPlans(pattern: string, names: string[]): FaultPlan[] {
   return names.map((n) => shippedPlan(pattern, n));
+}
+
+/**
+ * Steps whose outcome is answered client-side, so the fault layer counts a
+ * request the server never sees. Derived from the plans rather than written
+ * down: it is exactly the gap between "what the layers matched" and "what the
+ * ledger recorded", and asserting that gap is how the F2 escape (a count that
+ * had stopped tracking the traffic) is pinned without a slop constant.
+ */
+const OFF_THE_WIRE = new Set(["reject", "abort", "reject-body", "hang"]);
+function clientSideAnswers(plans: FaultPlan[]): number {
+  return plans.reduce(
+    (n, plan) => n + plan.schedule.filter((step) => OFF_THE_WIRE.has(step.outcome)).length,
+    0,
+  );
+}
+
+/**
+ * A number the app under test declares, read from its own source — so a window
+ * derived from it cannot drift from the app the window is about. `file` is
+ * relative to the example root (`public/stream.js`,
+ * `patterns-audit/public/token-refresh-loop.js`).
+ */
+function appConstant(file: string, name: string): number {
+  const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const m = new RegExp(`const ${name} = (\\d+)`).exec(src);
+  if (!m) throw new Error(`audit: ${file} declares no ${name}`);
+  return Number(m[1]);
+}
+
+function appConstantList(file: string, name: string): number[] {
+  const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const m = new RegExp(`const ${name} = (\\[[^\\]]*\\])`).exec(src);
+  if (!m) throw new Error(`audit: ${file} declares no ${name}`);
+  return JSON.parse(m[1]!) as number[];
 }
 
 function verdict(results: PlanRunResult[]): string {
@@ -331,17 +369,37 @@ async function F2(): Promise<void> {
     "amplification",
     "amplification",
   ]);
+  // The finding was a count that had stopped tracking the traffic: 9 against 9
+  // while the wire carried 58 against 6. So the assertion is that
+  // relationship, not a magnitude — a magnitude threshold (`> fixed + 20`) is a
+  // guess about how fast the machine loops, and says nothing about whether the
+  // count is still measuring anything.
+  //
+  // Subtract the requests the plans answer client-side (6 `reject` steps across
+  // the four, from the plans themselves) and what is left must be the server's
+  // own ledger: it cannot exceed it, and it can fall short only by requests
+  // still in flight when a plan's window closed. Each plan drives one page with
+  // one open resume loop, so that is at most one per plan.
+  const offWire = clientSideAnswers(plans);
+  const real = (v: string) => seen[v]!.bare + seen[v]!.withQuery;
+  const countedOnWire = (v: string) => seen[v]!.matched - offWire;
+  const inFlight = plans.length;
+  const tracks = (v: string) =>
+    countedOnWire(v) <= real(v) && countedOnWire(v) >= real(v) - inFlight;
   assert(
-    "F2 the counted number now moves with the real one",
-    // It used to be 9 against 9 while the wire carried 58 against 6.
-    seen.buggy!.matched > seen.fixed!.matched + 20 &&
-      // …and each count is within a client-side reject or two of the traffic
-      // the server actually saw, rather than of the model's number.
-      seen.buggy!.matched >= seen.buggy!.bare + seen.buggy!.withQuery &&
-      seen.buggy!.matched <= seen.buggy!.bare + seen.buggy!.withQuery + 9,
-    `matched ${seen.buggy!.matched} vs ${seen.fixed!.matched} (was 9 vs 9); ` +
-      `real requests to /api/stream ${seen.buggy!.bare + seen.buggy!.withQuery} vs ` +
-      `${seen.fixed!.bare + seen.fixed!.withQuery}`,
+    "F2 the counted number is the traffic, not the model's number",
+    tracks("buggy") && tracks("fixed"),
+    `buggy counted ${countedOnWire("buggy")} of ${real("buggy")} real requests ` +
+      `(matched ${seen.buggy!.matched} less ${offWire} answered client-side); ` +
+      `fixed counted ${countedOnWire("fixed")} of ${real("fixed")}; tolerance ${inFlight} ` +
+      `(one in-flight request per plan). The escape was 3 of 58.`,
+  );
+  assert(
+    "F2 the resume loop is visible in both the ledger and the count",
+    real("buggy") > real("fixed") && seen.buggy!.matched > seen.fixed!.matched,
+    `real requests to /api/stream ${real("buggy")} vs ${real("fixed")}, ` +
+      `counted ${seen.buggy!.matched} vs ${seen.fixed!.matched} — the unbounded resume loop ` +
+      `moves both numbers, which is what "the count is the contract" requires`,
   );
   assert(
     "F2 the anchored form is refused before a browser launches",
@@ -510,6 +568,95 @@ async function F4(): Promise<void> {
   );
 }
 
+// =====================================================================
+// F4L — the same page, and the invariant the late label promises
+// =====================================================================
+async function F4L(): Promise<void> {
+  console.log(
+    "\n=== F4L  timeout-ladder: what `ready` promises, checked after the window ===\n" +
+      "    `ui@late` says the LABEL moved. It cannot say what the new label\n" +
+      "    promises about the page, and that is a separate check with a separate\n" +
+      "    field: uiInvariant@late. Until this case existed, the runner's second\n" +
+      "    invariant pass (runner.ts: checkUiInvariants against uiSettled) was\n" +
+      "    covered only by a unit test of the reporting arm — the production\n" +
+      "    wiring could be deleted with every suite still green.\n" +
+      "    The invariant is the app's own contract for `ready`: a report on\n" +
+      "    screen must not be one the app already told the user it gave up on.\n" +
+      "    It holds at the probe (the banner says unavailable, no report shown)\n" +
+      "    and fails afterwards, when the abandoned request lands and renders.",
+  );
+  const plans = shippedPlans("timeout-ladder", ["report-tooSlow"]);
+  const bridge = {
+    ...timeoutBridge,
+    /**
+     * Written in the browser, and it needs one bit of memory: "did this page
+     * ever tell the user the report was unavailable?". The invariant is called
+     * once at the probe and once after the window, so the first call records
+     * and the second judges — an app that never showed the error never trips
+     * it, which is what makes the unbound control below a control.
+     */
+    uiInvariants: {
+      "*": async (page: import("playwright").Page) =>
+        page.evaluate(() => {
+          const w = window as unknown as { __gaveUp?: boolean };
+          const state = document.getElementById("app")!.dataset.state ?? "";
+          const banner = document.getElementById("banner")!.textContent ?? "";
+          if (state === "error") w.__gaveUp = true;
+          if (state === "ready" && w.__gaveUp === true) {
+            return `the report is on screen ("${banner}") after the page told the user it ` +
+              `was unavailable — rendered from a request the app reported as abandoned`;
+          }
+          return "";
+        }),
+    },
+  };
+
+  const runs: Record<string, PlanRunResult[]> = {};
+  for (const fixed of [false, true]) {
+    const server = await boot(fixed);
+    resetLedger();
+    runs[fixed ? "fixed" : "buggy"] = await runPlans(plans, {
+      ...bridge,
+      baseUrl: `${server.url}/audit/slow`,
+    });
+    console.log(`\n  variant=${fixed ? "race-bound" : "unbound (control)"}`);
+    console.log(verdict(runs[fixed ? "fixed" : "buggy"]!));
+  }
+
+  // The race-bound page: the label moved AND what the new label promises is
+  // false. Two fields, because they are two different statements about the
+  // page — collapsing them would lose the one a reader can act on.
+  expectFields("F4L Promise.race variant (report-tooSlow)", runs.fixed!, [
+    "ui@late",
+    "uiInvariant@late",
+  ]);
+  // The control. The unbound page never showed an error, so the invariant that
+  // fired above cannot fire here: the rule is not "read it twice and complain".
+  expectFields("F4L unbound control (report-tooSlow)", runs.buggy!, ["ui"]);
+  expectDistinguishable("F4L timeout-ladder", runs.fixed!, runs.buggy!, [
+    "race-bound (the app under audit)",
+    "unbound control",
+  ]);
+  assert(
+    "F4L the late invariant names the page it judged, not just the label",
+    runs.fixed!.some((r) =>
+      r.mismatches.some(
+        (m) =>
+          m.field === "uiInvariant@late" &&
+          /after the page told the user it was unavailable/.test(m.detail),
+      ),
+    ),
+    runs.fixed!.flatMap((r) => r.mismatches.map((m) => `${m.field}: ${m.detail}`)).join(" | ") ||
+      "(no mismatch)",
+  );
+  assert(
+    "F4L the invariant holds at the probe and fails after the window",
+    runs.fixed!.every((r) => r.mismatches.every((m) => m.field !== "uiInvariant")),
+    `fields=${JSON.stringify(fields(runs.fixed!))} — a probe-time uiInvariant here would mean ` +
+      `the invariant was already false at the probe, making the late pass redundant`,
+  );
+}
+
 async function watchPastProbe(
   base: string,
   delayMs: number,
@@ -606,52 +753,71 @@ async function F6(): Promise<void> {
   console.log(
     "\n=== F6  the contract-forbids targets a model checker can only answer one way ===\n" +
       "    CLOSED as tooling: the mechanism below is promoted into\n" +
-      "    patterns/vacuity.mjs, every enumerate.sh calls it, and targets.txt now\n" +
-      "    records `unreachable-live` or `unreachable-by-construction` per target\n" +
-      "    instead of one word for both. The 9 remaining by-construction rows are\n" +
-      "    labelled rather than deleted — each is a prompt to write the knob or\n" +
-      "    drop the query, and reconnect-budget's headline property got the knob.",
+      "    patterns/vacuity.mjs, every enumerate.sh in every example calls it, and\n" +
+      "    targets.txt now records `unreachable-live` or\n" +
+      "    `unreachable-by-construction` per target instead of one word for both.\n" +
+      "    Discovery is the workflow's own glob, so a unit nobody added to a list\n" +
+      "    is still classified. The 9 remaining by-construction rows are labelled\n" +
+      "    rather than deleted — each is a prompt to write the knob or drop the\n" +
+      "    query, and reconnect-budget's headline property got the knob.",
   );
-  // The red team's own script, unmodified: it is the measurement, and it still
-  // reports which targets a witness could ever have answered.
-  run(new URL("./model-vacuity.mts", import.meta.url));
+  // The measurement, delegated to the one script that performs it — and it
+  // asserts now, so a target flipping from LIVE to BY CONSTRUCTION fails here
+  // instead of scrolling past. `--json` hands back what it discovered, which
+  // is where the unit list below comes from: this assertion used to carry its
+  // own literal of six patterns, so it was silent about
+  // `examples/cloudflare-worker/model` (two bare `unreachable` rows) and about
+  // `stale-revalidate` while reporting "all rows classified".
+  const jsonPath = join(mkdtempSync(join(tmpdir(), "audit-f6-")), "vacuity.json");
+  run(new URL("./model-vacuity.mts", import.meta.url), [`--json=${jsonPath}`]);
+  const discovered = existsSync(jsonPath)
+    ? (JSON.parse(readFileSync(jsonPath, "utf8")) as {
+        units: Array<{ id: string; dir: string }>;
+        live: number;
+        byConstruction: number;
+        total: number;
+        unitCount: number;
+      })
+    : undefined;
 
   // …and the assertion the finding turns into: no `contract-forbids-*` row may
-  // be recorded with the same word as its neighbours any more.
+  // be recorded with the same word as its neighbours any more — across every
+  // unit the discovery found, not a list kept here.
   const unclassified: string[] = [];
-  const headline: string[] = [];
-  for (const pattern of [
-    "retry-idempotency",
-    "token-refresh",
-    "timeout-ladder",
-    "optimistic-rollback",
-    "pagination-order",
-    "reconnect-budget",
-  ]) {
-    const txt = readFileSync(
-      fileURLToPath(new URL(`../patterns/${pattern}/targets.txt`, import.meta.url)),
-      "utf8",
-    );
-    for (const line of txt.split("\n")) {
-      const m = /^(\S+)\s+(contract-forbids-\S+)/.exec(line);
-      if (!m) continue;
-      if (m[1] === "unreachable") unclassified.push(`${pattern}/${m[2]}`);
-      if (pattern === "reconnect-budget" && m[2] === "contract-forbids-runaway") {
-        headline.push(m[1]!);
+  const headline: Array<string | undefined> = [];
+  for (const unit of discovered?.units ?? []) {
+    // The example's one `targets.txt` parser, the same one `run.ts` reports
+    // from: an unreachable row with no verdict is an unclassified row.
+    for (const row of loadTargets(unit.dir)) {
+      if (!row.target.startsWith("contract-forbids-")) continue;
+      if (row.status === "unreachable" && row.verdict === undefined) {
+        unclassified.push(`${unit.id}/${row.target}`);
+      }
+      if (unit.id.endsWith("/reconnect-budget") && row.target === "contract-forbids-runaway") {
+        headline.push(row.verdict);
       }
     }
   }
   assert(
+    "F6 the audit sees every model unit in the repository",
+    discovered !== undefined && discovered.unitCount >= 9 && discovered.total >= 30,
+    discovered === undefined
+      ? "vacuity produced no report — nothing was classified"
+      : `${discovered.unitCount} unit(s), ${discovered.total} contract-forbids target(s) ` +
+        `(${discovered.live} live, ${discovered.byConstruction} by construction)`,
+  );
+  assert(
     "F6 every contract-forbids target records whether a witness was possible",
-    unclassified.length === 0,
+    unclassified.length === 0 && (discovered?.total ?? 0) > 0,
     unclassified.length === 0
-      ? "all rows classified live / by-construction"
+      ? `all ${discovered?.total ?? 0} rows across ${discovered?.unitCount ?? 0} unit(s) ` +
+        `classified live / by-construction`
       : `still unclassified: ${unclassified.join(", ")}`,
   );
   assert(
     "F6 reconnect-budget's headline property can now fail",
-    headline[0] === "unreachable-live",
-    `contract-forbids-runaway is recorded as ${headline[0] ?? "(missing)"} ` +
+    headline[0] === "live",
+    `contract-forbids-runaway is recorded as unreachable-${headline[0] ?? "(missing)"} ` +
       `(it was a restatement of its own assignment until BUDGETED existed)`,
   );
 }
@@ -691,6 +857,15 @@ async function F7(): Promise<void> {
   } as FaultPlan;
   validatePlan(plan);
 
+  // The window this pattern used to be judged in: solved from appDeadlineMs
+  // alone, i.e. one bounded round. Derived, because it is a property of the
+  // machine's profile — writing 531 here is how the assertion below and the
+  // number it is about drift apart.
+  const oneRoundMs = resolvePlanTiming({
+    appDeadlineMs: reconnectBridge.appDeadlineMs,
+    timingProfile: reconnectBridge.timingProfile,
+  }).settleMs;
+
   const server = await boot(true); // the shipped page, FIXED — a correct client
   const results = await runPlans([plan], {
     ...reconnectBridge,
@@ -704,27 +879,48 @@ async function F7(): Promise<void> {
   );
 
   // Independent: the same three timeouts, watched for as long as the app's own
-  // ladder actually takes.
-  const seen = await watchLadder(server.url);
+  // ladder actually takes — a window derived from the app's own constants
+  // rather than the 2200ms literal this used to carry against an
+  // exact-equality assertion on the attempt count.
+  const ladder = {
+    attempts: appConstant("public/stream.js", "MAX_ATTEMPTS"),
+    deadlineMs: appConstant("public/stream.js", "DEADLINE_MS"),
+    backoffsMs: appConstantList("public/stream.js", "BACKOFF_MS"),
+  };
+  const ladderMs =
+    ladder.attempts * ladder.deadlineMs + ladder.backoffsMs.reduce((a, b) => a + b, 0);
+  const seen = await watchLadder(server.url, oneRoundMs, ladderMs);
   console.log(
     `\n  INDEPENDENT (raw Playwright, /api/stream never answers, no chaosbringer)\n` +
-      `    at 531ms (the solved probe instant): ${JSON.stringify(seen.atProbe)}\n` +
-      `    at 2200ms:                          ${JSON.stringify(seen.after)}\n` +
+      `    the app's own ladder: ${ladder.attempts} x ${ladder.deadlineMs}ms + ` +
+      `[${ladder.backoffsMs.join(", ")}] = ${ladderMs}ms\n` +
+      `    at ${oneRoundMs}ms (the window solved for one round): ${JSON.stringify(seen.atProbe)}\n` +
+      `    at ${seen.settledAtMs}ms (waited for the ladder to finish, cap ` +
+      `${ladderMs + ladder.deadlineMs}ms): ${JSON.stringify(seen.after)}\n` +
       `    attempts the client actually made: ${seen.attempts}`,
   );
   assert(
     "F7 the correct, budgeted client is no longer reported as an endless spinner",
-    fields(results).length === 0 && seen.after.state === "offline" && seen.attempts === 3,
+    fields(results).length === 0 &&
+      seen.after.state === "offline" &&
+      seen.attempts === ladder.attempts,
     `oracle said ui="${r.observed.ui}" with ${fields(results).length} mismatch(es) at ` +
       `settleMs=${reconnectBridge.settleMs}; the app reached "${seen.after.state}" after ` +
-      `${seen.attempts} attempts (it used to be judged at 531ms, one attempt in)`,
+      `${seen.attempts} attempt(s) of the ${ladder.attempts} it budgets ` +
+      `(it used to be judged at ${oneRoundMs}ms, one attempt in)`,
+  );
+  assert(
+    "F7 the ladder outlasts the window solved for one round",
+    ladderMs > oneRoundMs && reconnectBridge.settleMs > ladderMs,
+    `ladder ${ladderMs}ms vs one solved round ${oneRoundMs}ms vs the declared window ` +
+      `${reconnectBridge.settleMs}ms — the middle number is the finding, the last one is the fix`,
   );
   assert(
     "F7 the window solved for one round is refused, not silently used",
     (() => {
       try {
         resolvePlanTiming({
-          settleMs: 531,
+          settleMs: oneRoundMs,
           appDeadlineMs: reconnectBridge.appDeadlineMs,
           appLadder: reconnectBridge.appLadder,
           timingProfile: reconnectBridge.timingProfile,
@@ -734,13 +930,32 @@ async function F7(): Promise<void> {
         return /settle_outlasts_app_ladder/.test(err instanceof Error ? err.message : "");
       }
     })(),
-    "resolvePlanTiming rejects settleMs=531 against a ladder of 3 x 500ms + [60, 120]",
+    `resolvePlanTiming rejects settleMs=${oneRoundMs} (one solved round) against a ladder of ` +
+      `${reconnectBridge.appLadder.attempts} x ${reconnectBridge.appDeadlineMs}ms + ` +
+      `[${reconnectBridge.appLadder.backoffsMs.join(", ")}]`,
   );
 }
 
+/**
+ * Watch the app's own retry ladder run to its end.
+ *
+ * `probeMs` is the window solved for one round — the instant the oracle used to
+ * judge this app at. The second read waits for the app to actually finish
+ * instead of for a hardcoded 2200ms: the ladder's length is `ladderMs` from the
+ * page's own constants, and the poll gives it one more round on top before
+ * giving up. An exact-equality assertion on the attempt count needs a window
+ * that cannot end early, and a literal is not that.
+ */
 async function watchLadder(
   base: string,
-): Promise<{ atProbe: { state: string }; after: { state: string }; attempts: number }> {
+  probeMs: number,
+  ladderMs: number,
+): Promise<{
+  atProbe: { state: string };
+  after: { state: string };
+  attempts: number;
+  settledAtMs: number;
+}> {
   const browser = await chromium.launch();
   const page = await (await browser.newContext()).newPage();
   let attempts = 0;
@@ -752,13 +967,21 @@ async function watchLadder(
   await page.goto(`${base}/stream`);
   const read = () =>
     page.evaluate(() => ({ state: document.getElementById("app")!.dataset.state ?? "" }));
+  const t0 = Date.now();
   await page.getByRole("button", { name: "Connect" }).click();
-  await page.waitForTimeout(531);
+  await page.waitForTimeout(probeMs);
   const atProbe = await read();
-  await page.waitForTimeout(2200 - 531);
-  const after = await read();
+  // Terminal states only: anything else means the ladder is still climbing.
+  const capMs = ladderMs + ladderMs / 3;
+  let after = atProbe;
+  while (Date.now() - t0 < capMs) {
+    after = await read();
+    if (after.state === "offline" || after.state === "live") break;
+    await page.waitForTimeout(50);
+  }
+  const settledAtMs = Date.now() - t0;
   await browser.close();
-  return { atProbe, after, attempts };
+  return { atProbe, after, attempts, settledAtMs };
 }
 
 // =====================================================================
@@ -786,6 +1009,7 @@ async function F8(): Promise<void> {
   ]);
 
   const runs: Record<string, PlanRunResult[]> = {};
+  const ledger: Record<string, number> = {};
   for (const fixed of [false, true]) {
     const label = fixed ? "fixed" : "buggy";
     const server = await boot(fixed);
@@ -797,9 +1021,10 @@ async function F8(): Promise<void> {
     console.log(`\n  variant=${label} (failed refresh: ${fixed ? "give up" : "retry forever"})`);
     console.log(verdict(runs[label]!));
     const rung = runs[label]!.find((r) => r.plan.name === "refresh-failed")!;
+    ledger[label] = callsOn("/api/refresh", "POST").length;
     console.log(
       `          POST /api/refresh seen by the server across the five plans: ` +
-        `${callsOn("/api/refresh", "POST").length}; on refresh-failed the fault layers ` +
+        `${ledger[label]}; on refresh-failed the fault layers ` +
         `counted ${rung.observed.matched.refresh} and the page reported ui=${rung.observed.ui}`,
     );
   }
@@ -816,11 +1041,37 @@ async function F8(): Promise<void> {
   expectDistinguishable("F8 token-refresh", runs.buggy!, runs.fixed!);
   const rung = (label: string) =>
     runs[label]!.find((r) => r.plan.name === "refresh-failed")!.observed.matched.refresh ?? 0;
+  const rungPlan = shippedPlan("token-refresh", "refresh-failed");
+  const stated = rungPlan.expect.calls!.refresh!;
+  // The observation window has to be long enough for the buggy client's own
+  // retry to happen inside it, or a count of 1 would mean "not observed"
+  // rather than "did not happen" — which is what makes a one-iteration margin
+  // fragile. The page's retry delay is one of its own constants, so the
+  // requirement is derived and it fails if either number moves.
+  const retryMs = appConstant("patterns-audit/public/token-refresh-loop.js", "RETRY_MS");
+  assert(
+    "F8 the window covers the buggy client's retry, so the count below is a measurement",
+    tokenBridge.settleMs >= retryMs * 3,
+    `settleMs=${tokenBridge.settleMs} against a ${retryMs}ms retry delay — room for ` +
+      `${Math.floor(tokenBridge.settleMs / retryMs)} retries inside the window`,
+  );
+  // Two independent measurements of the same thing: what the fault layers
+  // counted, and what the server logged. The plan states one refresh; the
+  // buggy client makes more, and the mismatch has to name the number it saw.
+  const amp = runs
+    .buggy!.find((r) => r.plan.name === "refresh-failed")!
+    .mismatches.find((m) => m.field === "amplification");
   assert(
     "F8 the retry loop is now a number the plan states, not an unreachable branch",
-    rung("buggy") > 1 && rung("fixed") === 1,
+    rung("fixed") === stated &&
+      rung("buggy") > stated &&
+      ledger.buggy! > ledger.fixed! &&
+      amp !== undefined &&
+      amp.expected === stated &&
+      amp.actual === rung("buggy"),
     `refresh calls on the refresh-failed plan: buggy=${rung("buggy")} fixed=${rung("fixed")} ` +
-      `(the plan states exactly 1)`,
+      `(the plan states exactly ${stated}); the server logged ${ledger.buggy} vs ${ledger.fixed} ` +
+      `POSTs across the five plans, and the mismatch reads "${amp?.detail ?? "(none)"}"`,
   );
 
   // Independent: the rung itself, driven by hand because no plan can express it.
@@ -872,12 +1123,27 @@ async function W(): Promise<void> {
   run(new URL("./windows.mts", import.meta.url));
 }
 
-function run(url: URL): void {
-  const out = execFileSync("npx", ["tsx", fileURLToPath(url)], {
-    encoding: "utf8",
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
-  });
-  console.log(out.trimEnd());
+/**
+ * Run one of the no-browser sub-scripts and echo it. Its exit code is part of
+ * the audit: `model-vacuity.mts` asserts now, and a delegated assertion that
+ * can only print is the shape of finding F6 itself.
+ */
+function run(url: URL, args: string[] = []): void {
+  const script = fileURLToPath(url);
+  try {
+    const out = execFileSync("npx", ["tsx", script, ...args], {
+      encoding: "utf8",
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+    });
+    console.log(out.trimEnd());
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; status?: number };
+    console.log((e.stdout ?? "").trimEnd());
+    if (e.stderr) console.error(e.stderr.trimEnd());
+    failures.push(
+      `${basename(script)} exited ${e.status ?? "non-zero"} — its own assertions did not hold`,
+    );
+  }
 }
 
 // =====================================================================
@@ -938,7 +1204,7 @@ async function R2(): Promise<void> {
 
 // =====================================================================
 const ALL: Record<string, () => Promise<void>> = {
-  F1, F2, F3, F4, F5, F6, F7, F8, W, R1, R2,
+  F1, F2, F3, F4, F4L, F5, F6, F7, F8, W, R1, R2,
 };
 
 try {

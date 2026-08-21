@@ -1,171 +1,218 @@
 /**
  * F6 — which `contract-forbids-*` targets are a proof and which are an
- * arithmetic identity.
+ * arithmetic identity, **asserted**.
  *
  *   cd examples/model-faults && npx tsx patterns-audit/model-vacuity.mts
+ *   …                          npx tsx patterns-audit/model-vacuity.mts --json=/tmp/v.json
  *
- * Every pattern's `enumerate.sh` ends with a block of targets whose comment
- * says: "The states the contract forbids. A witness here means the SPEC is
- * wrong." Those lines land in `targets.txt` as `unreachable <name>`, next to the
- * reachable ones, and they read as verification results — each one cost a
- * ~14s Apalache query.
+ * Every unit's `enumerate.sh` ends with a block of targets whose comment says:
+ * "The states the contract forbids. A witness here means the SPEC is wrong."
+ * Those lines land in `targets.txt` next to the reachable ones and read as
+ * verification results — each one cost a ~14s Apalache query. A target is only
+ * a result if the model *could* have produced a witness, and the measurement
+ * that decides it lives in one place: `../patterns/vacuity.mjs`.
  *
- * A target is only a result if the model *could* have produced a witness. The
- * design of these models is "set every knob to what a correct implementation
- * must do, then a forbidden state must be unreachable" — so the test is whether
- * flipping the knobs makes it reachable. If no setting of any knob can, the
- * checker was asked a question with one possible answer.
+ * This file used to be a second implementation of that measurement, with its
+ * own hand-written list of six patterns — which is the finding F6 is about,
+ * committed inside the tool that closes it. It missed `stale-revalidate` and
+ * both `model` units, disagreed with `vacuity.mjs` about token-refresh's depth
+ * (5 against the 6 the unit's own `enumerate.sh` declares), reported `14 of 23`
+ * where the repository has 30 such targets, and — because it was `console.log`
+ * end to end and always exited 0 — a target flipping from LIVE to BY
+ * CONSTRUCTION kept CI green. So it now *runs* the shared script and asserts
+ * three things a print cannot:
  *
- * The classification below is mechanical:
- *
- *   1. the targets are parsed out of the pattern's own `enumerate.sh`;
- *   2. `quint run` counts witnesses over N random traces for the shipped model
- *      and for a copy with every boolean contract knob inverted;
- *   3. for a target that stays at zero either way, every assignment to the
- *      variables it names is printed — a variable whose only assignment is
- *      `x' = x`, over an `init` that sets it false, is false in every reachable
- *      state by induction, and no model checker was needed to learn that.
+ *   1. the units it classified are exactly the units CI regenerates (the
+ *      workflow's own glob, re-derived here — a discovery regression is
+ *      indistinguishable from "there is nothing to classify");
+ *   2. every `contract-forbids-*` row in every committed `targets.txt` carries
+ *      the verdict this run measured, so a target that changes classification
+ *      fails until the committed artifact is regenerated;
+ *   3. the counts add up over the whole repository — one command, one number.
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadTargets } from "../targets.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const patternsDir = join(here, "..", "patterns");
-// Knob-inverted copies go to a temp dir: nothing is written into the repo.
-const scratch = mkdtempSync(join(tmpdir(), "patterns-audit-"));
+const here = fileURLToPath(new URL(".", import.meta.url));
+const exampleRoot = join(here, "..");
+const examplesRoot = join(exampleRoot, "..");
+const vacuity = join(exampleRoot, "patterns", "vacuity.mjs");
 
-const QUINT = ["--yes", "@informalsystems/quint@0.32.0"];
-const SAMPLES = process.env.SAMPLES ?? "400";
-
-interface Model {
-  pattern: string;
-  file: string;
+interface TargetVerdict {
+  name: string;
+  pred: string;
+  shipped: number;
+  flipped: number;
+  verdict: "live" | "by-construction";
+}
+interface UnitReport {
+  id: string;
+  dir: string;
+  spec: string;
   depth: string;
+  targets: TargetVerdict[];
+}
+interface VacuityReport {
+  units: UnitReport[];
+  allUnits: string[];
+  live: number;
+  byConstruction: number;
+  total: number;
+  unitCount: number;
 }
 
-const MODELS: Model[] = [
-  { pattern: "retry-idempotency", file: "retry.qnt", depth: "4" },
-  { pattern: "token-refresh", file: "token.qnt", depth: "5" },
-  { pattern: "timeout-ladder", file: "ladder.qnt", depth: "3" },
-  { pattern: "optimistic-rollback", file: "rollback.qnt", depth: "4" },
-  { pattern: "pagination-order", file: "feed.qnt", depth: "5" },
-  { pattern: "reconnect-budget", file: "reconnect.qnt", depth: "5" },
-];
-
-/** The `emit "<name>" "<predicate>"` lines of a pattern's own enumerate.sh. */
-function targetsOf(pattern: string): Array<{ name: string; pred: string }> {
-  const src = readFileSync(join(patternsDir, pattern, "enumerate.sh"), "utf8");
-  const out: Array<{ name: string; pred: string }> = [];
-  for (const line of src.split("\n")) {
-    const m = /^emit\s+"([^"]+)"\s+(.*)$/.exec(line.trim());
-    if (!m) continue;
-    let pred = m[2]!.trim();
-    if (pred.startsWith("'") && pred.endsWith("'")) pred = pred.slice(1, -1);
-    else if (pred.startsWith('"') && pred.endsWith('"')) pred = pred.slice(1, -1);
-    out.push({ name: m[1]!, pred: pred.replace(/\\"/g, '"') });
+/**
+ * The workflow's discovery, re-derived: `.github/workflows/model-plans.yml`
+ * globs `examples/*​/model/enumerate.sh examples/*​/patterns/*​/enumerate.sh`.
+ * Kept independent of `vacuity.mjs`'s own walk on purpose — two derivations of
+ * the same set can be compared, one cannot.
+ */
+function unitsCiRegenerates(): string[] {
+  const out: string[] = [];
+  const dirs = readdirSync(examplesRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== "node_modules")
+    .map((e) => e.name)
+    .sort();
+  for (const example of dirs) {
+    const candidates = [join(example, "model")];
+    const patternsDir = join(examplesRoot, example, "patterns");
+    if (existsSync(patternsDir)) {
+      for (const unit of readdirSync(patternsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory() && e.name !== "node_modules")
+        .map((e) => e.name)
+        .sort()) {
+        candidates.push(join(example, "patterns", unit));
+      }
+    }
+    for (const id of candidates) {
+      if (existsSync(join(examplesRoot, id, "enumerate.sh"))) out.push(id);
+    }
   }
   return out;
 }
 
-/** Every `pure val NAME = true|false` knob in the model. */
-function knobsOf(src: string): string[] {
-  return [...src.matchAll(/pure val (\w+) = (?:true|false)/g)].map((m) => m[1]!);
-}
-
-function flipKnobs(src: string): string {
-  return src.replace(
-    /pure val (\w+) = (true|false)/g,
-    (_all, name, value) => `pure val ${name} = ${value === "true" ? "false" : "true"}`,
-  );
-}
-
-function witnesses(file: string, depth: string, preds: string[]): Record<string, number> {
-  const args = [
-    ...QUINT,
-    "run",
-    file,
-    "--backend=typescript",
-    `--max-samples=${SAMPLES}`,
-    `--max-steps=${depth}`,
-    "--seed=0x1",
-    ...preds.flatMap((p) => ["--witnesses", p]),
-  ];
-  const out = execFileSync("npx", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  const hits: Record<string, number> = {};
-  for (const p of preds) hits[p] = 0;
-  for (const line of out.split("\n")) {
-    const m = /^(.*) was witnessed in (\d+) trace\(s\)/.exec(line.trim());
-    if (m && m[1]! in hits) hits[m[1]!] = Number(m[2]);
-  }
-  return hits;
-}
-
-/** Every assignment to `v` in the model, as written. */
-function assignmentsTo(src: string, v: string): string[] {
-  return [...src.matchAll(new RegExp(`${v}'\\s*=\\s*([^,\\n]+)`, "g"))].map((m) => m[1]!.trim());
-}
-
-const varNames = (src: string) => [...src.matchAll(/^\s*var (\w+):/gm)].map((m) => m[1]!);
-
-let live = 0;
-let vacuous = 0;
-const vacuousList: string[] = [];
-
-for (const model of MODELS) {
-  const path = join(patternsDir, model.pattern, model.file);
-  const src = readFileSync(path, "utf8");
-  const knobs = knobsOf(src);
-  const flippedPath = join(scratch, `flipped-${model.file}`);
-  writeFileSync(flippedPath, flipKnobs(src));
-
-  const targets = targetsOf(model.pattern).filter((t) => t.name.startsWith("contract-forbids-"));
-  const preds = targets.map((t) => t.pred);
-  const asIs = witnesses(path, model.depth, preds);
-  const flipped = witnesses(flippedPath, model.depth, preds);
-
-  console.log(`\n=== ${model.pattern}/${model.file}`);
-  console.log(
-    `    boolean contract knobs: ${knobs.length === 0 ? "(none)" : knobs.join(", ")}` +
-      `   (${SAMPLES} random traces, depth ${model.depth})`,
-  );
-  for (const t of targets) {
-    const a = asIs[t.pred]!;
-    const b = flipped[t.pred]!;
-    const verdictWord = b > 0 ? "LIVE" : "BY CONSTRUCTION";
-    if (b > 0) live += 1;
-    else {
-      vacuous += 1;
-      vacuousList.push(`${model.pattern}/${t.name}`);
-    }
-    console.log(
-      `    ${verdictWord.padEnd(15)} ${t.name.padEnd(34)} shipped=${a} knobs-flipped=${b}   [${t.pred}]`,
+/**
+ * `contract-forbids-*` rows of one unit's committed `targets.txt`, as the
+ * verdict word each carries. Read through the example's one `targets.txt`
+ * parser (`../targets.ts`) — the same one `run.ts` reports coverage from, so
+ * "what the committed file says" means the same thing in both places.
+ */
+function committedRows(dir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!existsSync(join(dir, "targets.txt"))) return out;
+  for (const row of loadTargets(dir)) {
+    if (!row.target.startsWith("contract-forbids-")) continue;
+    out.set(
+      row.target,
+      row.status === "reachable"
+        ? "reachable"
+        : row.verdict === undefined
+          ? "unreachable"
+          : `unreachable-${row.verdict}`,
     );
-    if (b === 0) {
-      // Say *why* no knob can reach it: show every assignment to the variables
-      // the predicate names.
-      for (const v of varNames(src)) {
-        if (!new RegExp(`\\b${v}\\b`).test(t.pred) && !predUsesVia(src, t.pred, v)) continue;
-        const asg = [...new Set(assignmentsTo(src, v))];
-        console.log(`                      ${v}' ∈ { ${asg.join(" | ")} }`);
-      }
-    }
   }
+  return out;
 }
 
-/** A predicate may name a `val` that mentions the variable (e.g. noPhantomRows). */
-function predUsesVia(src: string, pred: string, v: string): boolean {
-  for (const m of src.matchAll(/^\s*val (\w+) =([\s\S]*?)$/gm)) {
-    if (pred.includes(m[1]!) && new RegExp(`\\b${v}\\b`).test(m[2]!)) return true;
-  }
-  return false;
+const failures: string[] = [];
+function assert(label: string, cond: boolean, detail: string): void {
+  console.log(`  PROOF   ${cond ? "ok" : "FAILED"}  ${label}: ${detail}`);
+  if (!cond) failures.push(`${label}: ${detail}`);
 }
+
+// --- the measurement, from the one script that performs it -----------------
+const forwarded = process.argv.slice(2).find((a) => a.startsWith("--json="));
+const scratch = mkdtempSync(join(tmpdir(), "model-vacuity-"));
+const jsonPath = join(scratch, "vacuity.json");
+console.log(`$ node patterns/vacuity.mjs   (${basename(vacuity)}, the shared implementation)\n`);
+const stdout = execFileSync("node", [vacuity, `--json=${jsonPath}`], {
+  encoding: "utf8",
+  cwd: exampleRoot,
+});
+console.log(stdout.trimEnd());
+const report = JSON.parse(readFileSync(jsonPath, "utf8")) as VacuityReport;
+// Hand the report on when a caller asked for it (audit.mts's F6 derives its
+// unit list from this rather than from a literal of its own).
+if (forwarded) writeFileSync(forwarded.slice("--json=".length), JSON.stringify(report, null, 2));
+
+console.log("\n=== F6 assertions ===");
+
+// 1. Discovery covers every unit CI regenerates.
+const ci = unitsCiRegenerates();
+const measured = report.units.map((u) => u.id).sort();
+assert(
+  "F6 every unit CI regenerates is classified",
+  JSON.stringify(ci.slice().sort()) === JSON.stringify(measured),
+  `workflow glob finds ${ci.length} unit(s), vacuity classified ${measured.length}` +
+    (JSON.stringify(ci.slice().sort()) === JSON.stringify(measured)
+      ? `: ${measured.join(", ")}`
+      : `; missing from vacuity: [${ci.filter((u) => !measured.includes(u)).join(", ")}], ` +
+        `unknown to CI: [${measured.filter((u) => !ci.includes(u)).join(", ")}]`),
+);
+assert(
+  "F6 discovery is not empty",
+  report.unitCount > 0 && report.total > 0,
+  `${report.unitCount} unit(s), ${report.total} contract-forbids target(s)`,
+);
+
+// 2. Every committed row carries the verdict this run measured.
+const wrong: string[] = [];
+const unclassified: string[] = [];
+const missing: string[] = [];
+let committedTargets = 0;
+for (const unit of report.units) {
+  const rows = committedRows(unit.dir);
+  committedTargets += rows.size;
+  for (const [name, word] of rows) {
+    if (word === "unreachable") unclassified.push(`${unit.id}/${name}`);
+  }
+  for (const t of unit.targets) {
+    const word = rows.get(t.name);
+    if (word === undefined) {
+      missing.push(`${unit.id}/${t.name}`);
+      continue;
+    }
+    const want = `unreachable-${t.verdict}`;
+    if (word !== want) wrong.push(`${unit.id}/${t.name}: committed ${word}, measured ${want}`);
+  }
+}
+assert(
+  "F6 every contract-forbids row records whether a witness was possible",
+  unclassified.length === 0,
+  unclassified.length === 0
+    ? `all ${committedTargets} row(s) classified live / by-construction`
+    : `still unclassified: ${unclassified.join(", ")}`,
+);
+assert(
+  "F6 the committed classification is the one this run measured",
+  wrong.length === 0,
+  wrong.length === 0
+    ? `${report.total} row(s) agree with targets.txt`
+    : `${wrong.length} disagreement(s) — re-run the unit's enumerate.sh: ${wrong.join("; ")}`,
+);
+assert(
+  "F6 every measured target is recorded in its unit's targets.txt",
+  missing.length === 0,
+  missing.length === 0 ? "no target measured but unrecorded" : `missing rows: ${missing.join(", ")}`,
+);
+
+// 3. One number, true of the whole repository.
+assert(
+  "F6 the counts add up",
+  report.live + report.byConstruction === report.total && committedTargets === report.total,
+  `${report.live} live + ${report.byConstruction} by-construction = ${report.total} target(s) ` +
+    `across ${report.unitCount} unit(s); targets.txt carries ${committedTargets}`,
+);
 
 console.log(
-  `\nSUMMARY  ${live} of ${live + vacuous} contract-forbids targets are live ` +
-    `(a knob setting produces a witness); ${vacuous} are unreachable by construction:\n` +
-    vacuousList.map((v) => `  - ${v}`).join("\n"),
+  failures.length === 0
+    ? `\nF6 holds: ${report.live} of ${report.total} contract-forbids targets are live across ` +
+        `${report.unitCount} model units, and every committed row says which`
+    : `\n${failures.length} F6 assertion(s) did not hold:\n${failures.map((f) => `  - ${f}`).join("\n")}`,
 );
+process.exitCode = failures.length === 0 ? 0 : 1;
