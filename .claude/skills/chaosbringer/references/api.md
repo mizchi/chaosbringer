@@ -44,25 +44,46 @@ request costs one page `timeout` — hang what an action fires after load, or pa
 import { ChaosCrawler, faults } from "chaosbringer";
 
 const crawler = new ChaosCrawler({
-  seed: 42,                       // reproducible; omit for random
-  faultInjection: [ … ],          // network layer: FaultRule[]
-  runtimeFaults: [ … ],           // in-page fetch patching: RuntimeFault[]
-  lifecycleFaults: [ … ],         // visibility, offline, CPU: LifecycleFault[]
-  invariants: [ … ],              // what must hold; see below
+  baseUrl: "http://localhost:3000", // REQUIRED — the constructor throws without it
+  seed: 42,                         // reproducible; omit for random
+  faultInjection: [ … ],            // network layer: FaultRule[]
+  runtimeFaults: [ … ],             // in-page fetch patching: RuntimeFault[]
+  lifecycleFaults: [ … ],           // visibility, offline, CPU: LifecycleFault[]
+  invariants: [ … ],                // what must hold; see below
 });
 ```
 
-The report carries per-rule stats. Read the field names carefully, they are not
-synonyms:
+### Reading whether a fault fired
 
-- `matched` — requests whose URL (and method) the rule matched.
-- `injected` / `fired` — of those, the ones actually perturbed. A scheduled
-  `pass` decision matches without injecting.
-- `heldRequests` — requests parked by `hang`.
+The counters live in different places with different names, and getting this
+wrong is silent:
 
-A rule with `matched > 0` and `injected === 0` means the rule saw traffic and
-chose not to break it. A rule with `matched === 0` means your pattern is wrong —
-that is the most common cause of a fault test that passes for no reason.
+| where | count of matches | count of effects |
+|---|---|---|
+| `report.faultInjections[]` (network) | `matched` | **`injected`** |
+| `report.runtimeFaults[]` | `matched` | **`fired`** |
+| `report.lifecycleFaults[]` (row keyed `name`, not `rule`) | `matched` | **`fired`** |
+| `report.iframeFaults[]` | `matched` | **`fired`** |
+| `session.stats()` from `applyFaults` (network) | `matched` | **`injected`** |
+| `session.runtimeStats()` | `matched` | **`fired`** |
+
+`injected` and `fired` are the same question under two names — there is no
+object carrying both. So `stats.injected` on what turned out to be a runtime
+fault is `undefined`, and `undefined > 0` is `false`: the check quietly passes.
+Prefer the readers that normalise it — `session.firings()`, or
+`faultFirings(report)` / `unfiredFaults(report)` — and never spell the field
+yourself.
+
+Note `session.stats` is a **function**: `JSON.stringify(session.stats)` is
+`undefined`, which looks exactly like "nothing fired".
+
+`matched > 0` with no effects means the rule saw traffic and its firing policy
+declined (a scheduled `pass`, a probability that didn't roll, or `suppressed`:
+a rule ahead of it answered first). `matched === 0` means your pattern is wrong
+— the most common cause of a fault test that passes for no reason.
+`report.heldRequests` counts requests parked by an unbounded `hang`; it is a
+report field, not a per-rule one, and a `hang` with `releaseAfterMs` is not
+counted in it.
 
 ## Runtime faults
 

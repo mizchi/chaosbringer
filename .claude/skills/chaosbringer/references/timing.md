@@ -27,6 +27,34 @@ probe side is where that bites — `page.waitForTimeout` goes through a CDP roun
 trip and overshoots by ~100ms under single-core contention where it overshoots
 by 3ms idle.
 
+## When you cannot calibrate
+
+`model calibrate` launches a browser, so it needs one. If the CLI's own
+`playwright` resolves to a version whose browser build is not installed — a
+sandbox, a `file:` install, a CI image pinned differently — it cannot run, and
+there is no flag to hand it an `executablePath`.
+
+The fallback is `DEFAULT_TIMING_PROFILE`, exported from the package:
+
+```js
+import { DEFAULT_TIMING_PROFILE, solveTiming } from "chaosbringer";
+const solved = solveTiming(DEFAULT_TIMING_PROFILE, { deadlineMs: 700 });
+```
+
+It is deliberately pessimistic — roughly twice a warm envelope — so plans built
+on it are slower than they need to be but not flakier. Say in a comment that
+the profile is a default rather than a measurement, because the next person
+will otherwise assume the numbers describe their machine.
+
+`solveTiming(profile, request)` is the call the whole file is about, and it
+returns a union: `status: "sat"` carries `settleMs`, `slowMs`, `fastMs`,
+`quiescenceMs`, `pageTimeoutMs`, `wallClockMs` and the resolved `profile`;
+`status: "unsat"` carries `core` (which constraints could not be met) and a
+readable `explanation`. Check the status — the fields do not exist on the unsat
+branch. If the app has its own retry ladder, pass
+`ladder: { attempts, backoffsMs }` and the window covers all of it, not one
+round.
+
 ## What gets derived
 
 | value | why it exists |

@@ -106,6 +106,48 @@ unchecked expectation is worse than none. Two things about it:
 - **It must not change what it measures.** A read that bumps a revision makes
   the probe part of the experiment.
 
+## A plan is a JSON file, and you can write one by hand
+
+You do not need Quint or a JVM to use the replay side. Enumeration produces
+these; writing three of them yourself is a reasonable way to start, and the
+runner treats hand-written and generated plans identically.
+
+```json
+{
+  "name": "report-unbounded",
+  "schedule": [
+    { "order": 0, "rule": "report", "outcome": "slow-trip", "occurrence": 0 }
+  ],
+  "expect": { "ui": "error", "calls": { "report": 1 } }
+}
+```
+
+The field names are worth reading twice, because the prose around them uses
+different words:
+
+- the array is **`schedule`**, not "steps";
+- each entry names the bridge's operation with **`rule`**, not `op` — even
+  though everything here calls it an *operation* and `--calls-var` takes
+  `<op>=<var>`;
+- `order` is the position in the model trace (0-based), `occurrence` is which
+  call of that same rule this step targets (0-based, per rule);
+- `expect` holds the oracle: `ui`, `state`, `calls`, `unhandledRejection`.
+
+Optional on the plan: `spec` and `modelSteps` (provenance, informational) and
+`orderSensitive` (set when the outcome depends on the order two *different*
+operations settle — the runner refuses those by default rather than producing
+a flaky verdict, and exits 1).
+
+`outcome` is one of `pass`, `reject`, `abort`, `reject-body`, `hang`, `status`,
+`slow-ok` (slow but inside the app's bound — it must still succeed) or
+`slow-trip` (slow past the bound — the app must give up and say so). The two
+`slow-*` outcomes carry **no milliseconds**: you declare the app's own deadline
+in the bridge and the harness solves the delays, which is what keeps a
+committed plan portable between a laptop and CI.
+
+`validatePlan` is exported and will tell you exactly which field it dislikes —
+faster than guessing.
+
 ## What a plan can assert
 
 | field | compared against |
@@ -126,6 +168,14 @@ Lift the last two from the model at compile time:
 chaosbringer model compile --traces traces --out plans \
   --state-var orders --calls-var order=orderCalls
 ```
+
+## `uiInvariants` is keyed by the label the page reported
+
+Not the one the plan predicted. That is the useful way round — an invariant
+fires against whatever state the app actually reached, so a label no plan
+predicts (`"stuck"`, say) still gets checked — but it surprises people writing
+their first bridge, who key their invariants by the predicted label and see
+them never run. `"*"` applies to every label.
 
 ## What the runner reports
 

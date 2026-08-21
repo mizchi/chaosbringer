@@ -11,263 +11,214 @@ description: >-
   ChaosCrawler, fault injection, faults.delay, faults.status, model-driven faults, or Quint
   plans.
 ---
-
 # chaosbringer
 
-A fault-injection harness for browsers. You point it at a page, tell it which
-requests to break and how, and it asserts the app coped.
+A fault-injection harness for browsers: you point it at a page, say which
+requests to break and how, and assert the app coped.
 
-The single most useful thing to understand before writing any of it: **a fault
-test is only worth as much as its oracle.** Breaking a request is easy; knowing
-what *should* have happened is the hard part, and it decides whether a green run
-means anything. Most of this skill is about that.
+The thing to understand before writing any of it: **a fault test is worth
+exactly as much as its oracle.** Breaking a request is easy; knowing what
+*should* have happened is the hard part, and it decides whether a green run
+means anything.
 
 ## Getting a fault onto a page
 
-Before the interesting part, the two things that cost people their first half
-hour.
-
-**Install `playwright`, and `@playwright/test` only if you want the fixture.**
-The package root imports `playwright`; `chaosbringer/fixture` is the only
-subpath that needs `@playwright/test`. Both are peers, so they come from your
-project, not from this package.
-
-**Pick your entry point by how much you want to drive.**
+Install `playwright`. `@playwright/test` is only needed for
+`chaosbringer/fixture` — the package root doesn't touch it.
 
 ```ts
-// (a) You drive the page. Best for a regression test of one known incident.
 import { applyFaults, faults } from "chaosbringer";
 
 const session = await applyFaults(page, {
-  // network rules: an HTTP response the app never asked for
-  network: [faults.status(500, { name: "save-500", urlPattern: /\/api\/save$/, methods: ["POST"] })],
-  // runtime faults: the fetch() call itself misbehaving. These install as an
-  // init script, so apply BEFORE you navigate — applied to a loaded page they
-  // do nothing, and `runtimeStats()` will show `matched: 0` saying so.
-  runtime: [faults.rejectBody({ urlPattern: /\/api\/save$/, methods: ["POST"] })],
+  // `network:` for an HTTP response the app never asked for:
+  //   [faults.status(500, { name: "save-500", urlPattern: /\/api\/save$/, methods: ["POST"] })]
+  // `runtime:` for the fetch() call itself misbehaving. Installed as an init
+  // script, so apply BEFORE navigating — on an already-loaded page it does
+  // nothing and `runtimeStats()` reports `matched: 0` saying so.
+  runtime: [faults.rejectBody({ name: "save-unreadable", urlPattern: /\/api\/save$/, methods: ["POST"] })],
 });
 await page.goto(url);
 await page.getByRole("button", { name: "Save" }).click();
 
-// Did it fire? Ask in one vocabulary rather than remembering which layer
-// says `injected` and which says `fired`:
-expect(await session.firings()).toMatchObject([{ fired: 1 }, { fired: 1 }]);
+const [save] = await session.firings();
+expect(save.fired).toBeGreaterThan(0);   // it really happened — see below
 // …assert what the app did…
-await session.dispose();          // release parked requests, drop the route
+await session.dispose();     // release parked requests, drop the route
 ```
 
-`applyFaultRules(page, rules)` is the network-only shorthand for the same
-thing. Note the field names if you read the raw per-layer stats instead:
-`session.stats()` (network) reports **`injected`**, `session.runtimeStats()`
-(runtime) reports **`fired`**, and `report.faultInjections` /
-`report.runtimeFaults` do the same in a crawl. They are the same question, so
-`stats().injected` on what turned out to be a runtime fault is `undefined` —
-and `undefined > 0` is a silent no-op in the one assertion everything else
-depends on. `firings()` and the exported `faultFirings(report)` /
-`unfiredFaults(report)` exist so you never have to get that right.
+Give each fault a `name`. Without one the label is derived from the action
+(`"reject-body:json"`), which is fine until you are matching on it.
 
-```ts
-// (b) chaosbringer drives. Best for "break things across the app and tell me".
-import { chaos, faults } from "chaosbringer";
-const { exitCode } = await chaos({ baseUrl, faultInjection: [...], strict: true });
-```
+You drive the page: no crawl, no random driver, nothing happening between your
+click and your assertion. This is the shape a regression test for one incident
+wants. `applyFaultRules(page, rules)` is the network-only shorthand.
 
-```ts
-// (c) Inside Playwright Test.
-import { chaosTest } from "chaosbringer/fixture";   // note the subpath
-chaosTest("home survives a 500", async ({ page, chaos }) => {
-  const result = await chaos.testPage(page, url);
-  expect(result.errors).toHaveLength(0);            // PageResult.errors
-});
-```
+The alternatives, and when they beat it:
 
-`applyFaultRules` is the one to reach for when you know which click matters. It
-takes the same `FaultRule[]` as `chaos()` and makes the same decisions — same
-schedules, same occurrence numbering — but runs no crawl, so nothing random
-happens between your click and your assertion.
+- **`chaos({ baseUrl, faultInjection, strict: true })`** — chaosbringer drives,
+  breaking things across the app. Reach for it to explore an unfamiliar app.
+  Exit codes and `strict` only exist on this path. If you need it to follow a
+  *known* path, pass `driver: flowDriver({ steps })` — the default driver picks
+  actions at random, and a test that can't name the button pressed can't make a
+  claim. `flowDriver` is one-shot and stateful: reusing an instance across two
+  runs performs no actions at all and looks exactly like a wrong `urlPattern`.
+  Build a fresh one per run.
+- **`chaosTest` from `chaosbringer/fixture`** — inside Playwright Test. Its
+  `chaos.testPage(page, url)` returns `PageResult` with **`.errors`** (there is
+  no `.violations`), and it only *loads* the page — it clicks nothing, so it is
+  the wrong entry point for a fault behind a button.
+- **Model-driven** — when the question is "which failure states did we cover",
+  a temporal model enumerates them and each state becomes a replayable plan
+  with the model's own prediction as the oracle. More work, and it earns a
+  claim the others can't make. Read `references/model-driven.md` first; plans
+  are hand-writable and the schema is there.
 
-**If you need chaosbringer to drive the page but along a *known* path**, use
-`flowDriver` rather than the default weighted-random driver: a fault test that
-cannot say which button was pressed cannot make a claim. One trap, and it is
-silent — a `flowDriver` instance is stateful and one-shot. Reusing one across
-two `chaos()` calls produces a run with **no actions at all**, which looks
-exactly like a wrong `urlPattern`. Build a fresh one per run.
+**Did it fire?** Everything else is downstream of this one check: a fault whose
+request the app never issues looks exactly like a pass, and so does a typo'd
+pattern. The layers disagree about the field name — network says `injected`,
+the other three say `fired` — so `stats().injected` on what turned out to be a
+runtime fault is `undefined`, and `undefined > 0` is a silent no-op. Use
+`session.firings()`, or `faultFirings(report)` / `unfiredFaults(report)` for a
+crawl, and never write the field name yourself. `matched: 0` means the pattern
+never saw the request; `matched: 3, injected: 0` on a scheduled rule means
+something answered first (that's what `suppressed` counts).
 
-## Pick the layer before you write anything
+## Which layer
 
-Four ways to inject, and choosing wrong is the most common way to waste an hour.
-
-| You want | Use | Because |
+| You want | Layer | Because |
 |---|---|---|
-| an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | it intercepts at Playwright's route layer, so the app sees a real, wrong response |
+| an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | intercepts at Playwright's route layer, so the app sees a real, wrong response |
 | the `fetch()` call itself to fail — `TypeError`, `AbortError`, a body that won't parse | **runtime** (`runtimeFaults`) | a client-side rejection issues no request, so no route can produce it |
-| a page that never gets a response at all | network `hang`, or runtime `never-settle-fetch` | see below — either works; they differ in what reaches your server |
+| a page that never gets a response | network `hang` **or** runtime `never-settle-fetch` | either works; they differ in what reaches your server |
 | the app's own lifecycle to misbehave (visibility, offline, storage) | **lifecycle** (`lifecycleFaults`) | not a request at all |
 
-**Both hang flavours let a caller that can cancel out**, and either one tests
-whether a bound exists. `never-settle-fetch` honours `init.signal` explicitly;
-the network `hang` doesn't have to, because `AbortSignal.timeout` aborts the
-*fetch* and the browser cancels the request whether or not the route ever
-answers. (An earlier version of this file claimed the network `hang` put the
-request "outside the page's reach". It does not, and believing it costs you the
-layer you wanted.)
+The constructors differ in shape by layer: `faults.hang()` returns
+`{ urlPattern, fault }` for `faultInjection`, `faults.rejectBody()` returns
+`{ urlPattern, action }` for `runtimeFaults`. And a runtime pattern matches
+**the string handed to `fetch()`** (`"/api/save"`), not a resolved absolute URL
+— an absolute pattern silently matches nothing.
 
-What does separate them: **`hang` is a real HTTP request your server sees**,
-held open, and the browser reports it as a failed request when it is finally
-aborted — so it exercises server-side timeouts and connection accounting, and
-it shows up in your network log. `never-settle-fetch` patches `fetch` inside
-the page, so **nothing is sent at all** and the app is the only thing under
-test. Pick by which of those you mean. One more practical difference: a
-load-time `hang` costs the crawler a whole navigation `timeout` and gets
-reported as a page exception (see below), while the runtime fault does not.
+**One URL is often two operations.** `GET /api/todos` and `POST /api/todos` are
+different failures with different contracts, so rules take `methods: ["POST"]`.
+Without it your fault fires on whichever call arrives first, usually the
+page-load read.
 
-**One URL can host two operations.** `GET /api/todos` and `POST /api/todos` are
-different failures with different contracts, so rules take a method filter:
-`{ urlPattern: /\/api\/todos$/, methods: ["POST"] }`. Without it your fault
-fires on whichever call arrives first, which is usually the page-load read.
+**Both hang flavours let a caller that can cancel out** — `AbortSignal.timeout`
+aborts the fetch and the browser cancels the request whether or not the route
+ever answers — so either tests whether a bound exists. What separates them:
+`hang` is a real HTTP request your server sees, held open; `never-settle-fetch`
+patches `fetch` in the page and **sends nothing**. A load-time `hang` also
+costs the crawler a whole navigation `timeout`, and that rejection is recorded
+as a page `exception`, so `summary.jsExceptions` reads 1 for a page that threw
+nothing. Expected, not a finding.
 
-## Two ways to run, and when each is right
-
-### Probability, for breadth
-
-`chaosbringer --url … --seed 42` walks the app breaking things at random.
-(Crawling is the default — there is no `crawl` subcommand, and passing the word
-is now an error rather than silently ignored.)
-Good for "does anything here explode", bad for "was *this* case covered": after
-a run you know what fired, never what was never attempted. Reach for it first
-when exploring an unfamiliar app.
-
-### Deterministic schedules, for a specific case
+## Schedules, not probabilities
 
 ```js
 { urlPattern: /\/api\/cart$/, fault: faults.status(500),
   schedule: { decisions: ["pass", "inject"], afterEnd: "pass" } }
 ```
 
-A decision table indexed by how many times the rule already matched: the first
-call passes, the second 500s, the rest pass. Consumes no randomness, so it does
-not disturb a seed. This is what you want for a regression test of a known bug —
-"the retry is the one that fails" is a schedule, not a probability.
+A decision table indexed by how many times the rule has already matched: first
+call passes, second 500s, rest pass. Consumes no randomness, so it can't drift.
+"The retry is the one that fails" is a schedule, not a probability — reach for
+`probability` only when you're exploring.
 
-### Model-driven, when you need to claim coverage
-
-When the question is "which failure states did we actually cover", a temporal
-model enumerates them and each state becomes a replayable plan with the model's
-own prediction as the oracle. It is more work and it earns you a claim the other
-two cannot make. Read `references/model-driven.md` before starting one — the
-pipeline has several conventions that are cheap to follow and expensive to
-discover.
-
-## Fault shapes that decide which bug you find
-
-**`faults.status(500, { urlPattern })` sends a JSON body by default** —
-`{"error":500}`, not an empty one. That default picks which bug you find: a
-client that skips `res.ok` and calls `res.json()` renders junk out of it and
-reports success, whereas on an empty or HTML body `res.json()` *rejects* and the
-client takes its error path (or leaks an unhandled rejection). Two different
-defects behind one status code, so test both — pass `body: ""` for the second.
+## Fault shapes decide which bug you find
 
 **A route-level fault never reaches your server.** `status`, `abort` and
-unbounded `hang` are fulfilled in the browser, so a bug that needs the server to
-have *committed* something — the classic retry that writes twice — cannot be
-reproduced with them. The fault with that causal shape is
-`faults.rejectBody()`: the real request goes out, the server commits, and
-`res.json()` rejects on the way back. If you are chasing a double-write, this is
-the one.
+unbounded `hang` are fulfilled in the browser, so a bug that needs the server
+to have *committed* — the classic retry that writes twice — cannot be
+reproduced with them, and a test written with `status(500)` goes green against
+the broken app. The fault with that causality is **`faults.rejectBody()`**: the
+real request goes out, the server commits, and `res.json()` rejects on the way
+back. Chasing a double-write, this is the one. (Give it a `urlPattern` — bare,
+it matches every fetch on the page.)
 
-**`never-settle-fetch` rejects as `TimeoutError` under `AbortSignal.timeout`,**
-not `AbortError` (an explicit `controller.abort()` still gives `AbortError`). An
-app whose `catch` branches on `err.name === "AbortError"` will look broken when
-it is not, and vice versa.
+**`faults.status(500, …)` sends `{"error":500}` by default**, not an empty
+body, and that picks which bug you find: a client that skips `res.ok` and calls
+`res.json()` renders junk out of it and reports success, whereas on an empty or
+HTML body `res.json()` *rejects* and it takes its error path (or leaks an
+unhandled rejection). Two defects behind one status code; test both, with
+`body: ""` for the second.
 
-**`ignoreErrorPatterns` matches `PageError.message`.** For a network error that
-message is `"<url> - <errorText>"`, so a pattern can name either half. Use it to
-silence a pre-existing defect that is not what you are testing — but say so out
-loud, because silencing an error is indistinguishable from fixing it in a green
-run.
+**`never-settle-fetch` rejects as `TimeoutError`** under
+`AbortSignal.timeout`, not `AbortError` (an explicit `controller.abort()` still
+gives `AbortError`). A `catch` branching on the name will look broken when it
+isn't.
 
-**Exit codes:** a page that errors or times out, or any invariant violation,
-fails in every mode. Console errors, JS exceptions and unhandled rejections
-fail only under `strict: true`. If your finding is "a rejection escaped", you
-need `strict`.
+**Exit codes** (`chaos()` only): a page that errors or times out, and any
+invariant violation, fail in every mode. Console errors, JS exceptions and
+unhandled rejections fail only under `strict: true` — so if your finding is
+"a rejection escaped", you need `strict`. `ignoreErrorPatterns` matches
+`PageError.message`, which for a network error is `"<url> - <errorText>"`, so a
+pattern can name either half. Silencing a known unrelated defect with it is
+fine; say so out loud, because a silenced error and a fixed one look identical
+in a green run.
 
-## Writing an oracle that can fail
+## An oracle that can fail
 
-Every mode needs you to answer "and what should have happened?". The ways this
-goes wrong, in rough order of how often:
+The ways this goes wrong, in rough order of how often:
 
-**Asserting a label instead of a state.** `data-state="error"` is satisfied by an
-app that shows an error banner *and leaves the stale total on screen with the Pay
-button enabled*. If the label is the whole assertion, that app passes. Check
-what the label promises about the page, not just the label.
+**A label instead of a state.** `data-state="error"` is satisfied by an app
+that shows an error banner *and leaves the stale total on screen with the Pay
+button enabled*. Check what the label promises about the page.
 
-**Asserting at one instant.** A probe fires once. A backend that acknowledges now
-and commits 450ms later, a retry scheduled on the error path, a revalidation
-whose response arrives after you looked — all land after that instant, and a
-single read calls them clean. Decide whether your bug can move after the probe;
-if it can, you need a second look.
+**One instant.** A probe fires once. A backend that acknowledges now and
+commits 450ms later, a retry scheduled on the error path, a revalidation
+arriving after you looked — a single read calls all of them clean. If your bug
+can move after the probe, look twice.
 
-**Asserting a count the app chose.** A probe that asks the app which bucket to
-read (`/api/orders/count?session=` + whatever the page put in a global) can be
-lied to by the app under test. Prefer a reader the app does not parameterise.
+**A count the app chose.** A probe that asks the app which bucket to read
+(`/api/orders/count?session=` + whatever the page put in a global) can be lied
+to by the app under test. Prefer a reader the app doesn't parameterise.
 
-**Not checking that the fault fired.** The failure mode is silent: a plan whose
-request the app never issues looks exactly like a pass, and so does a typo'd
-`urlPattern`. Assert the injection happened — `session.stats()` from
-`applyFaultRules`, or `report.faultInjections` from a crawl. `matched: 0` means
-your pattern never saw the request; `matched: 3, injected: 0` on a scheduled
-rule means something else answered first (that is what `suppressed` counts).
-Everything else in this harness is downstream of this one check.
+**A reader the faults can intercept.** `page.request.get(...)` goes through the
+same route layer as the app's traffic, so a catch-all rule can fault your own
+oracle. Read from the test process instead, and label harness failures
+distinctly from findings — an inconclusive run reported as a violation is worse
+than no run.
+
+**Shared server state across scenarios.** Calling an app's exported `start()`
+once per scenario shares its module-level state, so scenario 2 inherits
+scenario 1's writes and a "duplicate write" may be two scenarios' writes. One
+app *process* per scenario, or a namespace the app honours.
 
 ## Verifying your work
 
-Run it against a *correct* version of the app as well as the broken one. A fault
-test that only ever passes proves nothing, and one that fails against correct
-code is worse than nothing. If you cannot produce a correct variant, at minimum
-run the same test with the fault removed and confirm it passes — that separates
-"my assertion works" from "my assertion always fires".
+Run it against a *correct* version of the app as well as the broken one, and
+**leave that fixed variant on disk** — a both-directions claim you can't re-run
+is a claim, not a result. Keep the original file byte-identical and serve the
+fix from a sibling (`app.fixed.js` plus a route override, or an env seam). If
+you can't produce a correct variant, at minimum run the same test with the
+fault removed: that separates "my assertion works" from "my assertion always
+fires".
 
-For timing faults specifically, never hard-code milliseconds. See
-`references/timing.md`: the right delay depends on the machine, the harness
-solves it from the app's own deadline, and a hand-picked constant is how a suite
-becomes flaky on CI.
+Better still, break it on purpose: re-introduce one regression at a time and
+check that only the scenario declaring it fails. A check that cannot fail is
+worth nothing, and this is the cheapest proof that yours can.
 
-## Two ways a harness lies to you
-
-Both of these produced a confident wrong answer for somebody, and neither looks
-like a bug while it is happening.
-
-**Shared server state across scenarios.** Calling an app's exported `start()`
-once per scenario shares its module-level state, so scenario 2 sees scenario 1's
-writes and a "duplicate write" finding may be two different scenarios' writes.
-One app *process* per scenario, or a per-scenario namespace the app honours.
-
-**A reader the faults can intercept.** If you verify server state with
-`page.request.get(...)`, that request goes through the same route layer as the
-app's — so a catch-all rule can fault your own oracle. Read from the test
-process (plain `fetch` in Node) instead. And label harness failures distinctly
-from app findings: an inconclusive run reported as a violation is worse than no
-run.
+For timing faults, never hard-code milliseconds. `references/timing.md`: the
+right delay depends on the machine, the harness solves it from the app's own
+deadline, and a hand-picked constant is how a suite becomes flaky on CI.
 
 ## Reference files
 
-Read the one you need; they are written to be read in isolation.
+Read the one you need; each stands alone.
 
-- `references/api.md` — the concrete API: options, fault constructors, report
-  fields, the Playwright Test integration. Start here when you know what you
-  want and need the call signature.
+- `references/api.md` — options, fault constructors, session and report fields,
+  the Playwright Test integration. Start here when you know what you want and
+  need the call signature.
 - `references/model-driven.md` — the enumerate → compile → replay pipeline, the
-  model's own vocabulary, and the conventions that are not guessable.
-- `references/timing.md` — delays, probe windows, and why they are solved rather
-  than chosen.
+  plan JSON schema, and the conventions that aren't guessable.
+- `references/timing.md` — delays, probe windows, and why they're solved.
 - `references/recipes.md` — the shapes that recur: retry idempotency, token
   refresh, timeout ladders, optimistic rollback, pagination order, reconnect
-  budgets, stale-while-revalidate. Read this before inventing a test for an
-  async bug; the bug probably has a name here.
+  budgets, stale-while-revalidate. Read it before inventing a test for an async
+  bug; the bug probably has a name here.
 
-Deeper material lives in the repository rather than the npm package —
-`docs/recipes/model-driven-faults.md`, `docs/cookbook/`, and a runnable
-`examples/` — at <https://github.com/mizchi/chaosbringer>. If you are working
-from an installed copy, `node_modules/chaosbringer/dist/*.d.ts` is the most
-complete reference you have locally, and it is worth reading: several fault
-behaviours are documented only there.
+Deeper material is in the repository rather than the npm package —
+`docs/recipes/model-driven-faults.md`, `docs/cookbook/`, a runnable
+`examples/` — at <https://github.com/mizchi/chaosbringer>. Working from an
+installed copy, `node_modules/chaosbringer/dist/*.d.ts` is the most complete
+local reference, and worth reading: some behaviour is documented only there.
