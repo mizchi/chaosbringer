@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { faults } from "@mizchi/playwright-faults";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyFault, applyFaultRules } from "./fault-router.js";
+import { applyFault, applyFaultRules, applyFaults } from "./fault-router.js";
 
 /**
  * `applyFaultRules` exists because every other way into the fault layers runs
@@ -36,7 +36,10 @@ describe("applyFaultRules on a page you drive yourself", () => {
     state.textContent = "saving";
     try {
       const r = await fetch("/api/save", { method: "POST" });
-      state.textContent = r.ok ? "saved" : "error " + r.status;
+      // Read the body, because that is where a reject-body fault lands: the
+      // request succeeded and the reply is what the client cannot have.
+      const body = await r.json();
+      state.textContent = r.ok && body ? "saved" : "error " + r.status;
     } catch {
       state.textContent = "threw";
     }
@@ -45,6 +48,12 @@ describe("applyFaultRules on a page you drive yourself", () => {
     state.textContent = "waiting";
     fetch("/api/slow").then(() => { state.textContent = "answered"; },
                            () => { state.textContent = "gave up"; });
+  };
+  window.hangBounded = (ms) => {
+    state.textContent = "waiting";
+    fetch("/api/slow", { signal: AbortSignal.timeout(ms) }).then(
+      () => { state.textContent = "answered"; },
+      (e) => { state.textContent = "bounded:" + e.name; });
   };
 </script></body>`);
     });
@@ -129,6 +138,60 @@ describe("applyFaultRules on a page you drive yourself", () => {
     }
   }, 60_000);
 
+  it("does not put a hang beyond a caller that can cancel", async () => {
+    // I wrote in the skill that the network `hang` "parks the request outside
+    // the page's reach", contrasting it with `never-settle-fetch`, which
+    // honours `init.signal`. That contrast is false, and it nearly cost a
+    // reader the right layer: `AbortSignal.timeout` aborts the *fetch*, and the
+    // browser cancels the request whether or not the route ever answers. Both
+    // hang flavours leave an unbounded caller waiting and let a bounded one
+    // out.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      const session = await applyFaultRules(page, [faults.hang({ urlPattern: /\/api\/slow$/ })]);
+      await page.evaluate("window.hangBounded(250)");
+      await expect.poll(() => page.textContent("#state"), { timeout: 5000 }).toBe(
+        "bounded:TimeoutError",
+      );
+      // The request was still parked from the route's point of view — the
+      // difference between the two faults is not reachability.
+      expect(session.heldRequests()).toBe(1);
+      await session.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("and the difference that is real: a hang makes a request, never-settle does not", async () => {
+    // What actually separates them, and it is worth knowing which one you
+    // want: `hang` is an HTTP request the origin can see (and the browser
+    // reports as a failed request when it is aborted); `never-settle-fetch`
+    // patches `fetch` in the page, so nothing is ever sent.
+    const page = await browser.newPage();
+    try {
+      const netRequests: string[] = [];
+      page.on("request", (r) => {
+        if (r.url().includes("/api/slow")) netRequests.push(r.url());
+      });
+      const session = await applyFaults(page, {
+        runtime: [
+          { name: "never", urlPattern: /\/api\/slow$/, action: { kind: "never-settle-fetch" } },
+        ],
+      });
+      await page.goto(base + "/");
+      await page.evaluate("window.hangBounded(250)");
+      await expect.poll(() => page.textContent("#state"), { timeout: 5000 }).toBe(
+        "bounded:TimeoutError",
+      );
+      expect(netRequests).toEqual([]);
+      expect(await session.runtimeStats()).toEqual([{ rule: "never", matched: 1, fired: 1 }]);
+      await session.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   it("hands the page back to the real origin on dispose", async () => {
     const page = await browser.newPage();
     try {
@@ -141,6 +204,72 @@ describe("applyFaultRules on a page you drive yourself", () => {
       await page.click("#save");
       await expect.poll(() => page.textContent("#state")).toBe("saved");
       expect(posts).toBe(before + 1);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("applies a runtime fault to a page you drive, so rejectBody composes with this", async () => {
+    // The case that did not compose: a double-write regression needs the
+    // server to have *committed* — so a route-level fault is the wrong tool
+    // and `faults.rejectBody` (runtime) is the right one — applied to a page
+    // the caller drives, which only the network layer could do.
+    const page = await browser.newPage();
+    try {
+      const session = await applyFaults(page, {
+        runtime: [
+          {
+            name: "save-body-unreadable",
+            // Runtime faults match the string handed to `fetch()`, not a
+            // resolved absolute URL.
+            urlPattern: /\/api\/save$/,
+            methods: ["POST"],
+            action: { kind: "reject-body" },
+            schedule: { decisions: ["inject"], afterEnd: "pass" },
+          },
+        ],
+      });
+      // Init script, so it lands on the *next* navigation.
+      await page.goto(base + "/");
+      const before = posts;
+      await page.click("#save");
+      await expect.poll(() => page.textContent("#state")).toBe("threw");
+      // The real request went out and the server really saw it — which is the
+      // whole reason to use this layer.
+      expect(posts).toBe(before + 1);
+
+      const runtime = await session.runtimeStats();
+      expect(runtime).toEqual([{ rule: "save-body-unreadable", matched: 1, fired: 1 }]);
+      // And in the one vocabulary, so a caller does not have to know that this
+      // layer says `fired` where the other says `injected`.
+      const firings = await session.firings();
+      expect(firings).toEqual([
+        { name: "save-body-unreadable", layer: "runtime", matched: 1, fired: 1, suppressed: 0, errored: 0 },
+      ]);
+      await session.dispose();
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("reports matched: 0 for a runtime fault applied after the navigation", async () => {
+    // An init script installs on navigation. Applying one to a loaded page and
+    // getting silence is the failure mode the library exists to remove, so the
+    // counters have to say so out loud.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      const session = await applyFaults(page, {
+        runtime: [
+          { name: "too-late", urlPattern: /\/api\/save$/, action: { kind: "reject-fetch" } },
+        ],
+      });
+      await page.click("#save");
+      await expect.poll(() => page.textContent("#state")).toBe("saved");
+      expect(await session.runtimeStats()).toEqual([
+        { rule: "too-late", matched: 0, fired: 0 },
+      ]);
+      await session.dispose();
     } finally {
       await page.close();
     }

@@ -134,6 +134,31 @@ export function buildRuntimeFaultsScript(
   // Stats keys are indices, not names — two faults can legitimately share
   // a name (`flaky-fetch` x2 with different urlPatterns) and we mustn't
   // collapse their counters.
+  // A compiled fault is not a `RuntimeFault`, and the mistake is easy to make
+  // and horrible to debug: `buildRuntimeFaultsScript(compileRuntimeFaults(r))`
+  // is the natural guess, and it produces a script that throws
+  // `Cannot read properties of undefined (reading 'kind')` *inside the page*
+  // and injects nothing. Silent, unless the caller also checked that the fault
+  // fired. Two readers hit it; one of them was me.
+  for (const [i, f] of faults.entries()) {
+    if (!f || typeof f !== "object" || "action" in f) continue;
+    const asRecord = f as Record<string, unknown>;
+    // A *compiled* fault also carries `fault`, so tell the two apart by the
+    // fields only the compiled form has — otherwise the error names the wrong
+    // mistake, which is its own small waste of somebody's afternoon.
+    const compiled = "pattern" in asRecord || "matched" in asRecord;
+    throw new Error(
+      compiled
+        ? `chaosbringer: buildRuntimeFaultsScript received the output of ` +
+          `\`compileRuntimeFaults\` at index ${i} — pass the original RuntimeFault objects. ` +
+          `The compiled form wraps each one as \`{ fault, pattern, name, ... }\`, and the ` +
+          `generated script reads \`action\` off the top level, so it would have thrown ` +
+          `inside the page and injected nothing`
+        : `chaosbringer: buildRuntimeFaultsScript received a network FaultRule at index ${i} ` +
+          `(it has \`fault\`, not \`action\`) — runtime faults go in \`runtimeFaults\`, network ` +
+          `rules in \`faultInjection\``,
+    );
+  }
   const serialized = faults.map((f, i) => ({
     id: i,
     name: runtimeFaultName(f),

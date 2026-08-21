@@ -461,10 +461,19 @@ export {
 // That subpath is unchanged. If you were importing those four names from the
 // package root, add `/fixture` — it is the only breaking edit here.
 
+// "Did my fault actually fire?", in one shape across all four layers.
+export {
+  faultFirings,
+  unfiredFaults,
+  type Firing,
+  type FaultLayer,
+} from "./firings.js";
+
 // The network fault layer, applied to a page you drive yourself. Everything
 // else in the library that injects faults also runs a crawl; this does not.
 export {
   applyFaultRules,
+  applyFaults,
   faultStatsOf,
   pickFaultRule,
   type CompiledFaultRule,

@@ -7,7 +7,7 @@ the code wins — say so rather than working around it.
 
 ```bash
 pnpm add -D chaosbringer            # or npm/yarn
-npx chaosbringer crawl --url http://localhost:3000 --seed 42
+npx chaosbringer --url http://localhost:3000 --seed 42
 ```
 
 Working *inside* the chaosbringer repo, the CLI lives at

@@ -219,6 +219,23 @@ export function ladderSettleMs(
         `[${ladder.backoffsMs.join(", ")}]`,
     );
   }
+  // The three numbers this function is *given* were unchecked, so a caller who
+  // passed a missing deadline (or a profile field that did not exist) got NaN
+  // back — and NaN propagates into every derived wait as a comparison that is
+  // always false, i.e. a suite that waits for nothing and passes. A window
+  // solver returning a number nobody can act on has to say so instead.
+  for (const [name, value] of [
+    ["deadline", deadline],
+    ["tightTailMs", tightTailMs],
+    ["marginMs", marginMs],
+  ] as const) {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `chaosbringer: ladderSettleMs ${name} must be a finite, non-negative number, got ` +
+          `${JSON.stringify(value)} — every wait derived from this window would have been NaN`,
+      );
+    }
+  }
   // One round is `deadline + tightTail + margin` — the same unit `settleMs`
   // already uses — and every rung pays its own tail, because every rung has
   // its own abort to observe. With `attempts: 1` and no backoffs this is
@@ -387,11 +404,29 @@ export function solveTiming(
     };
   }
 
-  const settleMs = deadline + tight + margin;
-  // The post-probe observation window. Same unit as the settle window,
-  // because it has the same job one round later: outlast whatever the app
-  // scheduled in response to the outcomes the plan injected.
-  const quiescenceMs = deadline + tight + margin;
+  // One round is `deadline + tight + margin`. A bridge that declares a retry
+  // `ladder` is saying the app makes several bounded attempts before it gives
+  // up, so the probe has to outlast all of them — otherwise it fires while the
+  // app is still climbing and a correctly budgeted client reads as an endless
+  // spinner.
+  //
+  // This was the same defect this file has produced before: the rule lived in
+  // two places. `resolvePlanTiming` honoured the ladder and `checkTiming` had a
+  // `settle_outlasts_app_ladder` row for it, but `solveTiming` — the public
+  // entry point — ignored `request.ladder` outright. So it returned a window
+  // its own checker rejected: with a 700ms deadline and 3 attempts it handed
+  // back `settleMs: 925` against a required 2955. A solver that disagrees with
+  // its own checker is worse than one that refuses.
+  const oneRound = deadline + tight + margin;
+  const settleMs =
+    request.ladder === undefined
+      ? oneRound
+      : Math.max(oneRound, ladderSettleMs(request.ladder, deadline, tight, margin));
+  // The post-probe observation window. Same unit as *one round* of the settle
+  // window, because it has the same job one round later: outlast whatever the
+  // app scheduled in response to the outcomes the plan injected. A ladder does
+  // not lengthen it — by the time the probe has fired the ladder is over.
+  const quiescenceMs = oneRound;
   const fastMs = deadline - tail - margin;
   // Three requirements, and the third is the one that shipped wrong. The
   // tripping delay must miss the app's deadline (`settle >= deadline + tight +

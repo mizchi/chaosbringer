@@ -9,6 +9,13 @@
  * which all run a crawl. A targeted regression test wants one page, one
  * scripted click, and a rule that fires on a known request.
  *
+ * `applyFaults` covers the network *and* runtime layers, because which layer
+ * implements a fault is the library's business, not the caller's — and the
+ * split bit somebody immediately: a double-write regression needs
+ * `faults.rejectBody()` (runtime, so the server really commits) applied to a
+ * page they drive (which only existed for the network layer), and the two
+ * recommendations did not compose.
+ *
  * It lives in one module rather than two copies because "a rule encoded more
  * than once" is the defect this codebase keeps producing: the copy the tests
  * were written against gets fixed, and the other one stays wrong.
@@ -16,9 +23,22 @@
 
 import type { Page, Route } from "playwright";
 import { decideFault, validateFaultSchedule } from "./schedule.js";
-import type { Fault, FaultInjectionStats, FaultRule, UrlMatcher } from "./types.js";
+import type {
+  Fault,
+  FaultInjectionStats,
+  FaultRule,
+  RuntimeFault,
+  RuntimeFaultStats,
+  UrlMatcher,
+} from "./types.js";
 import { compileUrlMatcher } from "./url-matcher.js";
 import { createRng, randomSeed, type Rng } from "./random.js";
+import {
+  buildRuntimeFaultsScript,
+  compileRuntimeFaults,
+  type CompiledRuntimeFault,
+} from "./runtime-faults.js";
+import { faultFirings, type Firing } from "./firings.js";
 
 /**
  * Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid
@@ -94,9 +114,24 @@ export async function applyFault(
       await route.abort(fault.errorCode ?? "failed");
       return;
     case "status": {
-      // Chromium emits a spurious ERR_ABORTED alongside the response when the
-      // body is empty, so synthesise a minimal JSON body by default. Callers
-      // can still opt into an empty body by passing `body: ""` explicitly.
+      // The default body is `{"error":<status>}`, not empty.
+      //
+      // The reason recorded here used to be "Chromium emits a spurious
+      // ERR_ABORTED alongside an empty intercepted body". That does not
+      // reproduce on Chromium 147: an empty-bodied intercepted 500 produces no
+      // `requestfailed`, no ERR_ABORTED on any channel, and the same single
+      // console line as a JSON-bodied one. Either it was fixed upstream or it
+      // was always narrower than the comment claimed.
+      //
+      // The default stays, for a reason that is easy to verify and matters
+      // more: it decides which app bug a 500 finds. A client that skips
+      // `res.ok` and calls `res.json()` renders junk out of `{"error":500}` and
+      // reports success; the same client on an empty body has `res.json()`
+      // *reject* and takes its error path (or leaks an unhandled rejection).
+      // Those are two different defects behind one status code, so the choice
+      // belongs to the caller — `body: ""` for the second — and flipping the
+      // default now would silently re-point every existing suite at the other
+      // bug.
       const body =
         fault.body !== undefined ? fault.body : JSON.stringify({ error: fault.status });
       await route.fulfill({
@@ -208,14 +243,28 @@ export function faultStatsOf(
   }));
 }
 
-/** A page with fault rules installed. Returned by `applyFaultRules`. */
+/** A page with faults installed. Returned by `applyFaults` / `applyFaultRules`. */
 export interface FaultSession {
   /**
-   * Per-rule counters, live. `matched: 0` on a rule you expected to fire is
-   * the first thing to check when a fault test passes for no reason — it
-   * usually means the `urlPattern` does not match what the app requests.
+   * Per-rule counters for the network layer, live. `matched: 0` on a rule you
+   * expected to fire is the first thing to check when a fault test passes for
+   * no reason — it usually means the `urlPattern` does not match what the app
+   * requests.
    */
   stats(): FaultInjectionStats[];
+  /**
+   * Per-fault counters for the runtime layer, read out of the page. Async
+   * because the numbers live in the page, not here.
+   */
+  runtimeStats(): Promise<RuntimeFaultStats[]>;
+  /**
+   * Both layers in one vocabulary — the network layer's `injected` and the
+   * runtime layer's `fired` are the same question, so they are one field.
+   * This is the reading to assert on; `stats().injected` on a fault that
+   * turned out to be a runtime fault is `undefined`, and `undefined > 0` is a
+   * silent no-op.
+   */
+  firings(): Promise<Firing[]>;
   /**
    * Requests currently parked by an unbounded `hang` — held open, never
    * answered. Non-zero means the app is waiting on something that will not
@@ -249,7 +298,7 @@ export interface FaultSession {
  *
  * ```ts
  * const faults = await applyFaultRules(page, [
- *   faults.status({ urlPattern: /\/api\/save$/, methods: ["POST"], status: 500 }),
+ *   faults.status(500, { urlPattern: /\/api\/save$/, methods: ["POST"] }),
  * ]);
  * await page.getByRole("button", { name: "Save" }).click();
  * expect(faults.stats()[0]?.injected).toBe(1); // it really fired
@@ -260,11 +309,25 @@ export interface FaultSession {
  * consumes no randomness, which is what makes a scheduled rule the right
  * choice for a regression test.
  */
-export async function applyFaultRules(
+export async function applyFaults(
   page: Page,
-  rules: ReadonlyArray<FaultRule>,
-  opts: { seed?: number } = {},
+  spec: {
+    /** Network-layer rules: an HTTP response the app never asked for. */
+    network?: ReadonlyArray<FaultRule>;
+    /**
+     * Runtime-layer faults: the `fetch()` call itself failing, a body that will
+     * not parse, a promise that never settles. These are installed as an init
+     * script, so they take effect **on the next navigation** — apply first,
+     * then `page.goto`. A fault applied to an already-loaded page does nothing,
+     * silently, which is the failure mode this library exists to remove.
+     */
+    runtime?: ReadonlyArray<RuntimeFault>;
+    /** Only matters for `probability`; a `schedule` consumes no randomness. */
+    seed?: number;
+  },
 ): Promise<FaultSession> {
+  const rules = spec.network ?? [];
+  const runtime = spec.runtime ?? [];
   // `ChaosCrawler` validates in `validateOptions`; this entry point has no
   // options object to validate, so it happens here — a rule setting both
   // `probability` and `schedule` should fail at the call site, not silently
@@ -273,7 +336,8 @@ export async function applyFaultRules(
     validateFaultSchedule(`fault rule "${rule.name ?? String(rule.urlPattern)}"`, rule);
   }
   const compiled = compileFaultRules([...rules]);
-  const rng = createRng(opts.seed ?? randomSeed());
+  const seed = spec.seed ?? randomSeed();
+  const rng = createRng(seed);
   let held: Route[] = [];
   let heldCount = 0;
 
@@ -305,17 +369,77 @@ export async function applyFaultRules(
     });
   };
 
-  await page.route("**/*", handler);
+  if (rules.length > 0) await page.route("**/*", handler);
+
+  let compiledRuntime: CompiledRuntimeFault[] = [];
+  if (runtime.length > 0) {
+    compiledRuntime = compileRuntimeFaults([...runtime]);
+    await page.addInitScript(buildRuntimeFaultsScript([...runtime], seed));
+  }
+
+  /**
+   * Read the in-page counters.
+   *
+   * Deliberately *not* `mergeRuntimeStats`, which accumulates into the
+   * compiled objects — right for a crawl summing many pages, wrong here:
+   * calling it twice against one page's counters doubles them, and the first
+   * version of this function did exactly that (`stats()` then `firings()`
+   * reported `matched: 2` for one request). This reads the page and maps,
+   * so it is idempotent.
+   *
+   * A page with no counters at all reports zeros rather than throwing: a
+   * runtime fault applied *after* the navigation that would have installed it
+   * really did match nothing, and saying so is more useful than an error.
+   */
+  const readRuntime = async (): Promise<RuntimeFaultStats[]> => {
+    if (compiledRuntime.length === 0) return [];
+    const raw = (await page.evaluate("window.__chaosbringerRuntimeStats").catch(() => null)) as
+      | Record<string, { matched: number; fired: number; suppressed?: number }>
+      | null;
+    return compiledRuntime.map((c, i) => {
+      const ps = raw?.[String(i)];
+      return {
+        rule: c.name,
+        matched: ps?.matched ?? 0,
+        fired: ps?.fired ?? 0,
+        ...(ps?.suppressed ? { suppressed: ps.suppressed } : {}),
+      };
+    });
+  };
 
   return {
     stats: () => faultStatsOf(compiled),
+    runtimeStats: readRuntime,
+    firings: async () =>
+      faultFirings({
+        faultInjections: faultStatsOf(compiled),
+        runtimeFaults: await readRuntime(),
+      } as never),
     heldRequests: () => heldCount,
     release: drain,
     dispose: async () => {
       await drain();
-      await page.unroute("**/*", handler).catch(() => {
-        /* page already closed — the route went with it */
-      });
+      if (rules.length > 0) {
+        await page.unroute("**/*", handler).catch(() => {
+          /* page already closed — the route went with it */
+        });
+      }
+      // An init script cannot be removed, so a runtime fault outlives
+      // `dispose()` for the life of this page. Say so rather than pretend:
+      // if you need a clean page afterwards, make a new one.
     },
   };
+}
+
+/**
+ * Network-layer faults only. `applyFaults(page, { network: rules })` under a
+ * shorter name, kept because most one-incident regression tests want exactly
+ * this and nothing else.
+ */
+export async function applyFaultRules(
+  page: Page,
+  rules: ReadonlyArray<FaultRule>,
+  opts: { seed?: number } = {},
+): Promise<FaultSession> {
+  return applyFaults(page, { network: rules, seed: opts.seed });
 }

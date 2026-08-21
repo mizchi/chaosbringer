@@ -311,3 +311,86 @@ describe("checkTiming", () => {
     expect(check.ok).toBe(true);
   });
 });
+
+describe("ladderSettleMs guards its own inputs", () => {
+  const ladder = { attempts: 3, backoffsMs: [60, 120] };
+
+  it("throws rather than returning NaN for a missing deadline", () => {
+    // NaN propagates into every derived wait as a comparison that is always
+    // false — a suite that waits for nothing and passes. Somebody got NaN here
+    // from a profile field that did not exist.
+    expect(() => ladderSettleMs(ladder, undefined as never, 3, 22)).toThrow(/finite/);
+    expect(() => ladderSettleMs(ladder, Number.NaN, 3, 22)).toThrow(/deadline/);
+    expect(() => ladderSettleMs(ladder, 600, Number.NaN, 22)).toThrow(/tightTailMs/);
+    expect(() => ladderSettleMs(ladder, 600, 3, undefined as never)).toThrow(/marginMs/);
+    expect(() => ladderSettleMs(ladder, -1, 3, 22)).toThrow(/non-negative/);
+  });
+
+  it("still solves a well-formed ladder", () => {
+    // 3 x (600 + 3 + 22) + 180
+    expect(ladderSettleMs(ladder, 600, 3, 22)).toBe(3 * 625 + 180);
+  });
+});
+
+describe("solveTiming and a declared retry ladder", () => {
+  const profile = { delayFloorMs: 10, delayTailMs: 60, tightTailMs: 5, fixedPerPlanMs: 700 };
+
+  it("solves a window that outlasts the whole ladder, not one round of it", () => {
+    // `solveTiming` used to ignore `request.ladder` entirely while
+    // `checkTiming` had a `settle_outlasts_app_ladder` row for it — so the
+    // public solver returned a window its own checker rejected, and the runner
+    // took that number for any bridge that did not hand-declare one. A probe
+    // that fires mid-ladder reports a correctly-retrying client as an endless
+    // spinner, which is the one verdict a timing plan must never produce.
+    const req = { deadlineMs: 700, ladder: { attempts: 3, backoffsMs: [60, 120] } };
+    const solved = solveTiming(profile, req);
+    expect(solved.status).toBe("sat");
+    if (solved.status !== "sat") return;
+    expect(solved.settleMs).toBe(
+      // The resolved profile, not the raw one: `resolve()` applies the safety
+      // factor, and a test that reuses the raw numbers is testing its own
+      // arithmetic rather than the solver's.
+      ladderSettleMs(req.ladder, 700, solved.profile.tightTailMs, solved.profile.marginMs),
+    );
+    // And the solver now agrees with its own checker, which is the property
+    // that was actually broken.
+    expect(checkTiming(profile, req, solved).ok).toBe(true);
+  });
+
+  it("leaves the no-ladder window exactly where it was", () => {
+    const plain = solveTiming(profile, { deadlineMs: 700 });
+    const oneRound = solveTiming(profile, {
+      deadlineMs: 700,
+      ladder: { attempts: 1, backoffsMs: [] },
+    });
+    expect(plain.status).toBe("sat");
+    if (plain.status !== "sat" || oneRound.status !== "sat") return;
+    // `attempts: 1` is "no retry ladder", so it must reduce to the same
+    // arithmetic rather than compete with it.
+    expect(oneRound.settleMs).toBe(plain.settleMs);
+    expect(oneRound.slowMs).toBe(plain.slowMs);
+  });
+
+  it("keeps the observation window at one round — the ladder is over by then", () => {
+    const solved = solveTiming(profile, {
+      deadlineMs: 700,
+      ladder: { attempts: 4, backoffsMs: [60, 120, 240] },
+    });
+    const plain = solveTiming(profile, { deadlineMs: 700 });
+    expect(solved.status).toBe("sat");
+    if (solved.status !== "sat" || plain.status !== "sat") return;
+    expect(solved.quiescenceMs).toBe(plain.quiescenceMs);
+    expect(solved.settleMs).toBeGreaterThan(plain.settleMs);
+  });
+
+  it("moves the tripping delay with the window, so it still outlasts the probe", () => {
+    const solved = solveTiming(profile, {
+      deadlineMs: 700,
+      ladder: { attempts: 3, backoffsMs: [60, 120] },
+    });
+    expect(solved.status).toBe("sat");
+    if (solved.status !== "sat") return;
+    const { tightTailMs: tight, marginMs: margin, delayFloorMs: floor } = solved.profile;
+    expect(solved.slowMs + floor).toBeGreaterThanOrEqual(solved.settleMs + tight + margin);
+  });
+});

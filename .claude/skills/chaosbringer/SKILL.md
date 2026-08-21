@@ -36,16 +36,35 @@ project, not from this package.
 
 ```ts
 // (a) You drive the page. Best for a regression test of one known incident.
-import { applyFaultRules, faults } from "chaosbringer";
+import { applyFaults, faults } from "chaosbringer";
 
-const session = await applyFaultRules(page, [
-  faults.status(500, { name: "save-500", urlPattern: /\/api\/save$/, methods: ["POST"] }),
-]);
+const session = await applyFaults(page, {
+  // network rules: an HTTP response the app never asked for
+  network: [faults.status(500, { name: "save-500", urlPattern: /\/api\/save$/, methods: ["POST"] })],
+  // runtime faults: the fetch() call itself misbehaving. These install as an
+  // init script, so apply BEFORE you navigate — applied to a loaded page they
+  // do nothing, and `runtimeStats()` will show `matched: 0` saying so.
+  runtime: [faults.rejectBody({ urlPattern: /\/api\/save$/, methods: ["POST"] })],
+});
+await page.goto(url);
 await page.getByRole("button", { name: "Save" }).click();
-expect(session.stats()[0]).toMatchObject({ matched: 1, injected: 1 }); // it fired
+
+// Did it fire? Ask in one vocabulary rather than remembering which layer
+// says `injected` and which says `fired`:
+expect(await session.firings()).toMatchObject([{ fired: 1 }, { fired: 1 }]);
 // …assert what the app did…
 await session.dispose();          // release parked requests, drop the route
 ```
+
+`applyFaultRules(page, rules)` is the network-only shorthand for the same
+thing. Note the field names if you read the raw per-layer stats instead:
+`session.stats()` (network) reports **`injected`**, `session.runtimeStats()`
+(runtime) reports **`fired`**, and `report.faultInjections` /
+`report.runtimeFaults` do the same in a crawl. They are the same question, so
+`stats().injected` on what turned out to be a runtime fault is `undefined` —
+and `undefined > 0` is a silent no-op in the one assertion everything else
+depends on. `firings()` and the exported `faultFirings(report)` /
+`unfiredFaults(report)` exist so you never have to get that right.
 
 ```ts
 // (b) chaosbringer drives. Best for "break things across the app and tell me".
@@ -82,14 +101,25 @@ Four ways to inject, and choosing wrong is the most common way to waste an hour.
 |---|---|---|
 | an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | it intercepts at Playwright's route layer, so the app sees a real, wrong response |
 | the `fetch()` call itself to fail — `TypeError`, `AbortError`, a body that won't parse | **runtime** (`runtimeFaults`) | a client-side rejection issues no request, so no route can produce it |
-| a page that never gets a response at all | network `hang`, or runtime `never-settle-fetch` | see below — they differ on cancellation |
+| a page that never gets a response at all | network `hang`, or runtime `never-settle-fetch` | see below — either works; they differ in what reaches your server |
 | the app's own lifecycle to misbehave (visibility, offline, storage) | **lifecycle** (`lifecycleFaults`) | not a request at all |
 
-The two hang flavours are not interchangeable. `never-settle-fetch` honours
-`init.signal`, so an app that bounds its request with `AbortSignal.timeout`
-recovers and only an app that *cannot* cancel is left hanging — which is what
-you want when you are testing whether a bound exists. The network `hang` parks
-the request outside the page's reach.
+**Both hang flavours let a caller that can cancel out**, and either one tests
+whether a bound exists. `never-settle-fetch` honours `init.signal` explicitly;
+the network `hang` doesn't have to, because `AbortSignal.timeout` aborts the
+*fetch* and the browser cancels the request whether or not the route ever
+answers. (An earlier version of this file claimed the network `hang` put the
+request "outside the page's reach". It does not, and believing it costs you the
+layer you wanted.)
+
+What does separate them: **`hang` is a real HTTP request your server sees**,
+held open, and the browser reports it as a failed request when it is finally
+aborted — so it exercises server-side timeouts and connection accounting, and
+it shows up in your network log. `never-settle-fetch` patches `fetch` inside
+the page, so **nothing is sent at all** and the app is the only thing under
+test. Pick by which of those you mean. One more practical difference: a
+load-time `hang` costs the crawler a whole navigation `timeout` and gets
+reported as a page exception (see below), while the runtime fault does not.
 
 **One URL can host two operations.** `GET /api/todos` and `POST /api/todos` are
 different failures with different contracts, so rules take a method filter:
@@ -100,7 +130,9 @@ fires on whichever call arrives first, which is usually the page-load read.
 
 ### Probability, for breadth
 
-`chaosbringer crawl --url … --seed 42` walks the app breaking things at random.
+`chaosbringer --url … --seed 42` walks the app breaking things at random.
+(Crawling is the default — there is no `crawl` subcommand, and passing the word
+is now an error rather than silently ignored.)
 Good for "does anything here explode", bad for "was *this* case covered": after
 a run you know what fired, never what was never attempted. Reach for it first
 when exploring an unfamiliar app.
@@ -129,11 +161,11 @@ discover.
 ## Fault shapes that decide which bug you find
 
 **`faults.status(500, { urlPattern })` sends a JSON body by default** —
-`{"error":500}`, because Chromium emits a spurious `ERR_ABORTED` alongside an
-empty intercepted body. That default picks the bug: a client that skips
-`res.ok` and calls `res.json()` renders `undefined` from it, whereas an HTML or
-empty body makes `res.json()` *reject* and takes a different path. Both are
-real; if you care about the second, pass `body: ""` explicitly.
+`{"error":500}`, not an empty one. That default picks which bug you find: a
+client that skips `res.ok` and calls `res.json()` renders junk out of it and
+reports success, whereas on an empty or HTML body `res.json()` *rejects* and the
+client takes its error path (or leaks an unhandled rejection). Two different
+defects behind one status code, so test both — pass `body: ""` for the second.
 
 **A route-level fault never reaches your server.** `status`, `abort` and
 unbounded `hang` are fulfilled in the browser, so a bug that needs the server to

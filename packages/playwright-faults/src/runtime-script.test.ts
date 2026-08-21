@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRuntimeFaultsScript } from "./runtime-faults.js";
+import { buildRuntimeFaultsScript, compileRuntimeFaults } from "./runtime-faults.js";
 import type { RuntimeFault } from "./types.js";
 
 /**
@@ -206,5 +206,33 @@ describe("the generated runtime script, less-travelled paths", () => {
       },
     ]);
     await expect(fetch("/api/save")).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("buildRuntimeFaultsScript rejects the shapes that fail silently", () => {
+  it("names the compiled-instead-of-raw mistake", () => {
+    // The natural guess — and it used to emit a script that threw inside the
+    // page and injected nothing, which without a fired-check looks like a pass.
+    const compiled = compileRuntimeFaults([
+      { urlPattern: /\/api\/save/, action: { kind: "reject-fetch" } },
+    ]);
+    expect(() => buildRuntimeFaultsScript(compiled as never, 1)).toThrow(
+      /output of `compileRuntimeFaults`/,
+    );
+  });
+
+  it("names a network rule handed to the runtime layer", () => {
+    expect(() =>
+      buildRuntimeFaultsScript(
+        [{ urlPattern: /\/api\/save/, fault: { kind: "abort" } }] as never,
+        1,
+      ),
+    ).toThrow(/network FaultRule/);
+  });
+
+  it("still builds from raw runtime faults", () => {
+    expect(
+      buildRuntimeFaultsScript([{ urlPattern: /\/api\/save/, action: { kind: "reject-fetch" } }], 1),
+    ).toContain("chaosFetch");
   });
 });
