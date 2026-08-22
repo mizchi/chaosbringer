@@ -17,6 +17,7 @@ import {
   observationNameFor,
   resolvePlanTiming,
   validateCallCountRules,
+  type PendingAsync,
   type PlanOracleInput,
   type PlanRunResult,
 } from "./runner.js";
@@ -845,6 +846,7 @@ describe("nextDrainWaitMs", () => {
     const decoysThenTheInterestingOne = {
       timers: 5,
       intervals: 0,
+      measured: true,
       earliestDueInMs: 150,
       latestDueInMs: 900,
       dueInMs: [150, 300, 450, 600, 900],
@@ -856,6 +858,7 @@ describe("nextDrainWaitMs", () => {
     const withASessionTimer = {
       timers: 6,
       intervals: 0,
+      measured: true,
       earliestDueInMs: 150,
       latestDueInMs: 300000,
       dueInMs: [150, 300, 450, 600, 900, 300000],
@@ -869,7 +872,7 @@ describe("nextDrainWaitMs", () => {
     // stop — the timer is reported in `observed.pendingAsync`, not slept on.
     expect(
       nextDrainWaitMs(
-        { timers: 1, intervals: 0, earliestDueInMs: 295328, latestDueInMs: 295328, dueInMs: [295328] },
+        { timers: 1, intervals: 0, measured: true, earliestDueInMs: 295328, latestDueInMs: 295328, dueInMs: [295328] },
         3000,
       ),
     ).toBeNull();
@@ -877,24 +880,24 @@ describe("nextDrainWaitMs", () => {
     // earliest, which is the safe direction: it under-drains rather than
     // over-sleeping.
     expect(
-      nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 295328 }, 3000),
+      nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 295328 }, 3000),
     ).toBeNull();
     // Exactly on the boundary is still worth waiting for; one ms over is not.
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 2975 }, 3000)).toBe(3000);
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 2976 }, 3000)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 2975 }, 3000)).toBe(3000);
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 2976 }, 3000)).toBeNull();
   });
 
   it("stops when nothing is pending or the cap is spent", () => {
-    expect(nextDrainWaitMs({ timers: 0, intervals: 0 }, 3000)).toBeNull();
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 10 }, 0)).toBeNull();
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 10 }, -5)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 0, intervals: 0, measured: true }, 3000)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 10 }, 0)).toBeNull();
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 10 }, -5)).toBeNull();
   });
 
   it("never waits less than the callback needs to actually run", () => {
     // A timer already due reads as 0 or negative; the +25 is what makes the
     // difference between "became due" and "ran".
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: 0 }, 3000)).toBe(25);
-    expect(nextDrainWaitMs({ timers: 1, intervals: 0, earliestDueInMs: -40 }, 3000)).toBe(25);
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: 0 }, 3000)).toBe(25);
+    expect(nextDrainWaitMs({ timers: 1, intervals: 0, measured: true, earliestDueInMs: -40 }, 3000)).toBe(25);
   });
 });
 
@@ -1248,6 +1251,78 @@ describe("evaluatePlanOracle", () => {
   });
   const fields = (input: PlanOracleInput): string[] =>
     evaluatePlanOracle(input).map((m) => m.field).sort();
+
+  describe("a drain that was asked for and did not happen", () => {
+    // `unhandledRejection: false` is a claim about a window. The drain is what
+    // makes the window long enough to cover a `void retry()` on a backoff, so
+    // "the instrumentation was not there" and "the page had nothing pending"
+    // have to be different observations — they used to be the same
+    // `{ timers: 0, intervals: 0 }`.
+    const plan = { name: "clean", schedule: [], expect: { unhandledRejection: false } };
+    const observedWith = (pendingAsync: PendingAsync) => ({
+      unhandledRejection: false,
+      lateUnhandledRejection: false,
+      fired: {},
+      matched: {},
+      pendingAsync,
+    });
+
+    it("reports `undecided` when the instrumentation was not readable", () => {
+      expect(
+        fields(
+          base({
+            plan,
+            asyncDrainCapMs: 3000,
+            observed: observedWith({ timers: 0, intervals: 0, measured: false }),
+          }),
+        ),
+      ).toEqual(["undecided"]);
+    });
+
+    it("says nothing when the page really was idle", () => {
+      // Same counters, opposite meaning. This is the pair the old shape could
+      // not express.
+      expect(
+        fields(
+          base({
+            plan,
+            asyncDrainCapMs: 3000,
+            observed: observedWith({ timers: 0, intervals: 0, measured: true }),
+          }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("respects an explicit opt-out", () => {
+      // `asyncDrainCapMs: 0` disables the instrumentation on purpose, so an
+      // unmeasured read is the documented consequence of the caller's choice,
+      // not a harness that broke. Reporting it would make the opt-out unusable.
+      expect(
+        fields(
+          base({
+            plan,
+            asyncDrainCapMs: 0,
+            observed: observedWith({ timers: 0, intervals: 0, measured: false }),
+          }),
+        ),
+      ).toEqual([]);
+    });
+
+    it("does not fire for a plan that expects a rejection to escape", () => {
+      // The drain only matters to the negative claim: an escape the model
+      // predicted either happened or did not, and waiting longer cannot turn
+      // "it escaped" into a weaker statement.
+      expect(
+        fields(
+          base({
+            plan: { name: "escapes", schedule: [], expect: { unhandledRejection: true } },
+            asyncDrainCapMs: 3000,
+            observed: observedWith({ timers: 0, intervals: 0, measured: false }),
+          }),
+        ),
+      ).toEqual(["unhandledRejection"]);
+    });
+  });
 
   describe("`expect.ui` without a uiProbe", () => {
     // The bridge decides whether a uiProbe exists; the plan decides whether it

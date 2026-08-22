@@ -35,6 +35,12 @@ const mod = await import(pkgEntry.href).catch((err) => {
   process.exit(2);
 });
 const exported = new Set(Object.keys(mod));
+// The runtime's own list of legal option names, imported rather than restated:
+// a second copy here would drift, and the copy the checker used would be the
+// one nobody fixed.
+const { KNOWN_OPTION_NAMES } = await import(
+  new URL("../packages/chaosbringer/src/crawler.ts", import.meta.url).href
+);
 const faultHelpers = new Set(Object.keys(mod.faults ?? {}));
 
 const files = ["SKILL.md", ...readdirSync(join(skillDir, "references")).map((f) => `references/${f}`)];
@@ -110,6 +116,46 @@ for (const rel of files) {
     for (const flag of line.match(/--[a-z][a-z0-9-]*/g) ?? []) {
       if (!cliFlags.has(flag)) {
         problems.push(`${rel}: \`${line.trim()}\` uses ${flag}, which the CLI does not accept`);
+      }
+    }
+  }
+}
+
+// Crawler option names. `maxActions` is not an option: JavaScript accepts it,
+// ignores it, and the run then fails as "my fault never fired" — the hardest
+// thing in this library to debug. A wrong option *in the docs* propagates that
+// to every reader, so the names the docs hand out are checked against the same
+// list the runtime near-miss guard uses.
+const optionNames = new Set(KNOWN_OPTION_NAMES);
+// Keys `chaos()` layers on top of CrawlerOptions, plus the bridge options of
+// `runPlan`, which appear in the same object-literal shape.
+const alsoValid = new Set([
+  "setup", "teardown", "rules", "action", "uiProbe", "stateProbe", "uiInvariants",
+  "settleMs", "quiescenceMs", "asyncDrainCapMs", "checkAmplification", "plansDir",
+  "allowOrderSensitive", "timingProfile", "appDeadlineMs", "coverageFingerprints",
+]);
+for (const rel of files) {
+  const text = readFileSync(join(skillDir, rel), "utf8");
+  const blocks = [...text.matchAll(/```(\w*)\n([\s\S]*?)```/g)]
+    .filter(([, lang]) => lang === "ts" || lang === "js");
+  for (const [, , body] of blocks) {
+    // `new ChaosCrawler({`, `chaos({`, `runPlan(plan, {` — the option literal
+    // runs to the matching close, which a regex cannot find, so take the keys
+    // at the literal's own indentation depth and stop at the first dedent.
+    for (const m of body.matchAll(/(?:new ChaosCrawler|chaos|runPlan)\s*\([^{]*\{\n([\s\S]*?)\n(?=\S|\}\))/g)) {
+      const lines = m[1].split("\n");
+      const indent = (lines[0].match(/^\s*/) ?? [""])[0];
+      for (const line of lines) {
+        if (!line.startsWith(indent) || line.slice(indent.length).startsWith(" ")) continue;
+        const key = line.slice(indent.length).match(/^([A-Za-z_$][A-Za-z0-9_$]*)\s*:/);
+        if (!key) continue;
+        checkedIdentifiers++;
+        if (!optionNames.has(key[1]) && !alsoValid.has(key[1])) {
+          problems.push(
+            `${rel}: documents option "${key[1]}", which is not a CrawlerOptions key — ` +
+              `a misspelled option is accepted and ignored, and fails as "my fault never fired"`,
+          );
+        }
       }
     }
   }

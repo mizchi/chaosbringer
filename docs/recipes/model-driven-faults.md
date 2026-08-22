@@ -349,13 +349,22 @@ action ──── settleMs ────▶ probe: ui, uiInvariants, state
                            late-rejection classification
 ```
 
-- The runner instruments `setTimeout` / `setInterval` **before** firing the
-  action, so it knows whether the page has work due in the future and how far
-  out, and waits for it (default cap `asyncDrainCapMs: 3000`). A `void retry()`
-  inside a 900ms backoff escapes every handler; a run that stopped at 400ms
-  reported `unhandledRejection: false` and was neither wrong nor right — it had
-  not looked. Recurring timers are *reported*, never waited on: an uncleared
-  `setInterval` is a fact about the app, not a reason to hang.
+- The runner instruments `setTimeout` / `setInterval` **before the page's own
+  scripts run**, so it knows whether the page has work due in the future and how
+  far out, and waits for it (default cap `asyncDrainCapMs: 3000`). A `void
+  retry()` inside a 900ms backoff escapes every handler; a run that stopped at
+  400ms reported `unhandledRejection: false` and was neither wrong nor right —
+  it had not looked. Recurring timers are *reported*, never waited on: an
+  uncleared `setInterval` is a fact about the app, not a reason to hang.
+
+  It used to be installed from the `afterLoad` hook, i.e. after load and before
+  the action. That left a plan with **no `action`** — operations issued by page
+  load itself — with nothing instrumented, and the report then said
+  `pendingAsync: { timers: 0 }`, which reads as a fact about the page rather
+  than as the absence of a measurement. `pendingAsync.measured` now separates
+  the two, and a run that asked for a drain and could not read the
+  instrumentation reports `undecided` instead of a clean `unhandledRejection:
+  false`.
 - `expect.state` is compared against a **second** read, taken after
   `quiescenceMs`. The window is spent by any plan the second look could change
   its mind about — one naming `expect.state`, or a `ui` label, or a bridge with
@@ -405,8 +414,10 @@ guarantee.
   from one is caught — but it cannot make one fail, so a bug reachable only by
   perturbing local scheduling has nothing to write a plan against.
 - **Work past the observation window.** `quiescenceMs` bounds one further round
-  of app-deadline-length work, and the timer drain follows at most four rounds
-  of chained timers within `asyncDrainCapMs`. A duplicate write that commits
+  of app-deadline-length work, and the timer drain follows chained timers for as
+  long as `asyncDrainCapMs` lasts — each round waits for the latest pending
+  timer that still fits in the remaining budget, so the bound is the budget and
+  not a round count. A duplicate write that commits
   five seconds later, or a retry ladder with a 30-second backoff, is outside
   it. The window is a derived heuristic, not a proof of quiescence: what is
   still pending when the run ends is reported in

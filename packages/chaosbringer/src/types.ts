@@ -133,6 +133,24 @@ export interface CrawlerOptions {
    * action sequence.
    */
   coverageFeedback?: CoverageFeedbackOptions;
+  /**
+   * Raw JavaScript to evaluate on every page before any of the page's own
+   * scripts run, installed at the context level so pages opened via
+   * `window.open` inherit it too.
+   *
+   * The fault layers use `addInitScript` for exactly this reason: to patch an
+   * API the app is about to call, you have to be there before it calls it. A
+   * script installed from an `afterLoad` invariant instead is already too
+   * late for anything the page did while loading, and the gap does not
+   * announce itself — an observer that missed the load reports zero
+   * observations, which reads as "nothing happened" rather than "I wasn't
+   * watching yet".
+   *
+   * Each string is installed verbatim, so wrap in an IIFE and guard against
+   * double-install (`if (window.__myFlag) return;`) — Playwright re-runs init
+   * scripts on every navigation, including same-page iframes.
+   */
+  initScripts?: readonly string[];
   /** HAR record/replay configuration for deterministic network state. */
   har?: HarConfig;
   /**

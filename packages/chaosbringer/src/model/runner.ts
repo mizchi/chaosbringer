@@ -232,11 +232,19 @@ export interface RunPlanOptions {
    * cap and returned with that timer still pending: +3s per plan of pure
    * sleep for any page with a stray `setTimeout`.)
    *
-   * Blind spot worth knowing: the instrumentation is installed from the
-   * `afterLoad` hook, so timers scheduled *during page load* are invisible to
-   * it. For a plan with no `action` — operations issued by page load itself —
-   * the drain is therefore inert, and `unhandledRejection: false` on such a
-   * plan carries none of the guarantee described above.
+   * The instrumentation goes in as a pre-load init script, so timers scheduled
+   * *during page load* are counted too. It used to be installed from the
+   * `afterLoad` hook, which left a plan with no `action` — operations issued by
+   * page load itself — with nothing instrumented at all: a page that let a
+   * rejection escape from a 900ms load-time backoff was reported as
+   * `unhandledRejection: false`, alongside `pendingAsync: { timers: 0 }`
+   * asserting there had been nothing to wait for.
+   *
+   * The cost of watching from load is that load-time timers a framework
+   * schedules for its own reasons are now waited on as well. That is bounded
+   * by this cap and by what the drain can actually finish, and it buys the one
+   * thing the shorter window could not: `unhandledRejection: false` on an
+   * action-less plan now means something.
    */
   asyncDrainCapMs?: number;
   /**
@@ -1060,73 +1068,88 @@ export interface PendingAsync {
    * budget, which neither extreme can answer.
    */
   dueInMs?: readonly number[];
+  /**
+   * Whether the instrumentation was actually in place when this was read.
+   *
+   * `{ timers: 0, intervals: 0 }` used to be returned both for "the page has
+   * nothing scheduled" and for "the wrapper was never installed, so I have no
+   * idea" — two facts a reader cannot tell apart, one of which is a
+   * measurement and the other an absence of one. Everything the drain and the
+   * `unhandledRejection` verdict claim rests on that difference.
+   */
+  measured: boolean;
 }
 
 /**
  * Instrument `setTimeout` / `setInterval` so the run can tell "no rejection
  * escaped" from "nothing had run yet".
  *
- * Installed from the invariant hook, before the action fires — which is
- * exactly when the interesting timers get scheduled, since they are the app's
- * reaction to the outcomes the plan injected. `fetch` is deliberately left
- * alone: the fault layers already own it, and wrapping it again would insert
- * a microtask into the very promise chains under test.
+ * Installed as a pre-load init script, not from the invariant hook. The hook
+ * runs `afterLoad`, so every timer the page scheduled *while loading* was
+ * invisible to it — and a plan with no `action`, whose operations are issued
+ * by page load itself, therefore had nothing instrumented at all. A page that
+ * let a rejection escape from a 900ms load-time backoff was reported as
+ * `unhandledRejection: false` with `pendingAsync: { timers: 0 }`: not merely
+ * a missed finding, but a positive claim that there was nothing to wait for.
+ *
+ * `fetch` is deliberately left alone: the fault layers already own it, and
+ * wrapping it again would insert a microtask into the very promise chains
+ * under test.
+ *
+ * Returned as a string rather than applied to a `Page`, because being early
+ * enough is the whole point — see `CrawlerOptions.initScripts`.
  */
-async function installAsyncWatch(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const w = window as unknown as {
-      __cbModelAsync?: { timers: Map<unknown, number>; intervals: number };
-    };
-    if (w.__cbModelAsync) return;
-    const state = { timers: new Map<unknown, number>(), intervals: 0 };
-    w.__cbModelAsync = state;
-    try {
-      const origSetTimeout = window.setTimeout;
-      const origClearTimeout = window.clearTimeout;
-      const origSetInterval = window.setInterval;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).setTimeout = function (handler: unknown, timeout?: number, ...args: unknown[]) {
-        if (typeof handler !== "function") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return (origSetTimeout as any).call(window, handler, timeout, ...args);
-        }
-        let id: unknown;
-        function wrapped(this: unknown) {
-          state.timers.delete(id);
-          // eslint-disable-next-line prefer-rest-params
-          return (handler as (...a: unknown[]) => unknown).apply(this, arguments as unknown as unknown[]);
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        id = (origSetTimeout as any).call(window, wrapped, timeout, ...args);
-        state.timers.set(id, Date.now() + (Number(timeout) || 0));
-        return id;
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).clearTimeout = function (id: unknown) {
+export function buildAsyncWatchScript(): string {
+  // An explicit string, not `fn.toString()`. Serializing a live function reads
+  // as tidier and is the one form that can break without saying so: a minifier,
+  // a coverage instrumenter or a transpiler rewriting the body leaves an init
+  // script that installs nothing, and an observer that installed nothing
+  // reports zero — see `PendingAsync.measured` for what that costs. The rest of
+  // this codebase builds init scripts as text for the same reason.
+  return `(() => {
+  if (typeof window === "undefined") return;
+  if (window.__cbModelAsync) return;
+  const state = { timers: new Map(), intervals: 0 };
+  window.__cbModelAsync = state;
+  try {
+    const origSetTimeout = window.setTimeout;
+    const origClearTimeout = window.clearTimeout;
+    const origSetInterval = window.setInterval;
+    window.setTimeout = function (handler, timeout, ...args) {
+      if (typeof handler !== "function") {
+        return origSetTimeout.call(window, handler, timeout, ...args);
+      }
+      let id;
+      function wrapped() {
         state.timers.delete(id);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (origClearTimeout as any).call(window, id);
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).setInterval = function (...args: unknown[]) {
-        state.intervals += 1;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (origSetInterval as any).apply(window, args);
-      };
-    } catch {
-      // Never let instrumentation break the page under test.
-    }
-  });
+        return handler.apply(this, arguments);
+      }
+      id = origSetTimeout.call(window, wrapped, timeout, ...args);
+      state.timers.set(id, Date.now() + (Number(timeout) || 0));
+      return id;
+    };
+    window.clearTimeout = function (id) {
+      state.timers.delete(id);
+      return origClearTimeout.call(window, id);
+    };
+    window.setInterval = function (...args) {
+      state.intervals += 1;
+      return origSetInterval.apply(window, args);
+    };
+  } catch {
+    // Never let instrumentation break the page under test.
+  }
+})();`;
 }
 
-async function readPendingAsync(page: Page): Promise<PendingAsync> {
+export async function readPendingAsync(page: Page): Promise<PendingAsync> {
   try {
     return await page.evaluate(() => {
       const w = window as unknown as {
         __cbModelAsync?: { timers: Map<unknown, number>; intervals: number };
       };
       const state = w.__cbModelAsync;
-      if (!state) return { timers: 0, intervals: 0 };
+      if (!state) return { timers: 0, intervals: 0, measured: false };
       const now = Date.now();
       const due: number[] = [];
       state.timers.forEach((at) => {
@@ -1140,11 +1163,14 @@ async function readPendingAsync(page: Page): Promise<PendingAsync> {
             earliestDueInMs: due[0],
             latestDueInMs: due[due.length - 1],
             dueInMs: due,
+            measured: true,
           }
-        : { timers: 0, intervals: state.intervals };
+        : { timers: 0, intervals: state.intervals, measured: true };
     });
   } catch {
-    return { timers: 0, intervals: 0 };
+    // An `evaluate` that threw is a page we could not read, not a page with
+    // nothing scheduled.
+    return { timers: 0, intervals: 0, measured: false };
   }
 }
 
@@ -1269,6 +1295,12 @@ export interface PlanOracleInput {
   hasUiProbe: boolean;
   /** Whether the bridge supplied a `stateProbe`. */
   hasStateProbe: boolean;
+  /**
+   * The drain budget the run asked for, so the oracle can tell an opt-out
+   * (`0`, a deliberate choice) from instrumentation that was asked for and
+   * did not arrive.
+   */
+  asyncDrainCapMs?: number;
   /** Opt-in span comparison; see `RunPlanOptions.checkAmplification`. */
   checkAmplification?: boolean;
   /** Reported in the details, so a failure names the window it was judged in. */
@@ -1311,6 +1343,7 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
     settleMs,
     quiescenceMs,
   } = input;
+
   const uiInvariantFailures = input.uiInvariantFailures ?? [];
   const mismatches: PlanMismatch[] = [];
 
@@ -1651,6 +1684,35 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
             : `a rejection escaped every handler, which the model's contract forbids`,
       });
     }
+    // 4b. `unhandledRejection: false` is a claim about a window, and the drain
+    //     is what makes the window long enough to hold the app's own follow-up
+    //     work. If the run asked for a drain and the instrumentation was not
+    //     there to read, the claim rests on whatever happened to finish before
+    //     the probe — which is the difference between "nothing escaped" and "I
+    //     stopped watching first". `asyncDrainCapMs: 0` is excluded: that is a
+    //     caller deliberately choosing the shorter window, not a harness that
+    //     failed to install.
+    const drain = observed.pendingAsync;
+    if (
+      plan.expect.unhandledRejection === false &&
+      (input.asyncDrainCapMs ?? 0) > 0 &&
+      drain !== undefined &&
+      !drain.measured
+    ) {
+      mismatches.push({
+        plan: plan.name,
+        field: "undecided",
+        expected: false,
+        actual: observed.unhandledRejection,
+        detail:
+          `the plan states no rejection escapes, and the run asked to wait out the app's own ` +
+          `timers (asyncDrainCapMs=${input.asyncDrainCapMs}) — but the timer instrumentation ` +
+          `was not readable when the drain went to look, so nothing waited for a \`void retry()\` ` +
+          `on a backoff. "No rejection escaped" here means "none escaped before the probe", ` +
+          `which is a different and much weaker statement. Check that the init script installed ` +
+          `(a page with a CSP that blocks it, or a navigation that replaced the window).`,
+      });
+    }
   }
   return mismatches;
 }
@@ -1709,7 +1771,6 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     when: "afterLoad",
     check: async ({ page }) => {
       try {
-        if (asyncDrainCapMs > 0) await installAsyncWatch(page);
         if (opts.action) await opts.action(page);
         // The observation clock starts here, not at the top of the action: the
         // action *issues* the request, so the injected delay's own clock and
@@ -1736,7 +1797,10 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
         // retry the app scheduled on the error path is observed instead of
         // outliving the run.
         const rejectionsAtProbe = await peekEscapedRejections(page);
-        let pending: PendingAsync = { timers: 0, intervals: 0 };
+        // `measured: false` until something reads the page: if the drain is
+        // disabled, or the read below throws, what gets reported has to say so
+        // rather than look like an idle page.
+        let pending: PendingAsync = { timers: 0, intervals: 0, measured: false };
         if (asyncDrainCapMs > 0) pending = await drainScheduledWork(page, asyncDrainCapMs);
         if (quiescenceMs > 0) await page.waitForTimeout(quiescenceMs);
         if (asyncDrainCapMs > 0) pending = await readPendingAsync(page);
@@ -1772,6 +1836,10 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     timeout: opts.timeout ?? timing.pageTimeoutMs ?? 15000,
     ...(runtimeFaults.length > 0 ? { runtimeFaults } : {}),
     ...(faultInjection.length > 0 ? { faultInjection } : {}),
+    // Before the page's own scripts, so a timer scheduled during load is
+    // visible too. `asyncDrainCapMs: 0` opts out of the instrumentation as
+    // well as the wait, which is what the option documents.
+    ...(asyncDrainCapMs > 0 ? { initScripts: [buildAsyncWatchScript()] } : {}),
     ...(opts.coverageFingerprints ? { coverageFeedback: { enabled: true } } : {}),
     invariants: [oracleHook],
   });
@@ -1801,6 +1869,7 @@ export async function runPlan(plan: FaultPlan, opts: RunPlanOptions): Promise<Pl
     uiInvariantFailuresLate,
     hasUiProbe: opts.uiProbe !== undefined,
     hasStateProbe: opts.stateProbe !== undefined,
+    asyncDrainCapMs,
     ...(opts.checkAmplification !== undefined ? { checkAmplification: opts.checkAmplification } : {}),
     settleMs,
     quiescenceMs,

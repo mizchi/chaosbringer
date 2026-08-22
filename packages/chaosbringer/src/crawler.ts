@@ -171,6 +171,7 @@ const DEFAULT_OPTIONS: Required<
   lifecycleFaults: [],
   runtimeFaults: [],
   iframeFaults: [],
+  initScripts: [],
 };
 
 const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {
@@ -779,6 +780,13 @@ export class ChaosCrawler {
         this.compiledRuntimeFaults.map((c) => c.fault),
         this.rng.seed,
       );
+      await this.context.addInitScript({ content: script });
+    }
+
+    // Caller-supplied init scripts, after the fault layers so a script can
+    // observe the patched APIs. Installed even when empty-checked away, so a
+    // caller that passes `[]` costs nothing.
+    for (const script of this.options.initScripts ?? []) {
       await this.context.addInitScript({ content: script });
     }
 
@@ -2909,7 +2917,7 @@ export class ChaosCrawler {
  * because breaking those to catch typos would trade one silent failure for a
  * loud one somebody did not ask for.
  */
-const KNOWN_OPTION_NAMES = [
+export const KNOWN_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
   "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
   "userAgent", "traceparent", "actionWeights", "logFile", "logLevel", "logToConsole",
@@ -2918,6 +2926,7 @@ const KNOWN_OPTION_NAMES = [
   "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
+  "initScripts",
 ] as const;
 
 /**
