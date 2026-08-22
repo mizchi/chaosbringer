@@ -58,6 +58,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
     import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
   parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
   journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
+  model: () => import("./model/cli.js").then((m) => m.runModelCli),
 };
 
 const rawSub = process.argv[2];
@@ -215,6 +216,33 @@ EXAMPLES:
   chaosbringer --url http://localhost:3000 --exclude "/api/" --ignore-error "third-party"
 `);
   process.exit(0);
+}
+
+// A positional that is not a URL used to be dropped on the floor, which made
+// every wrong invocation look like a working one: `chaosbringer crawl --url X`
+// ran the default crawl and ignored the word `crawl`, so documentation that
+// invented a subcommand never got caught by anyone running it. There is no
+// `crawl` subcommand — crawling is what this binary does with no subcommand at
+// all.
+const looksLikeUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+const strays = positionals.filter((p) => !looksLikeUrl(p));
+if (strays.length > 0) {
+  const first = strays[0]!;
+  const known = Object.keys(SUBCOMMANDS).sort().join(", ");
+  console.error(`Error: unexpected argument "${first}"`);
+  if (first === "crawl") {
+    console.error(
+      "There is no `crawl` subcommand — crawling is the default, so drop the word: " +
+        "`chaosbringer --url <url>`.",
+    );
+  } else {
+    console.error(`Known subcommands: ${known}. Run with --help for usage information.`);
+  }
+  process.exit(1);
+}
+if (positionals.length > 1) {
+  console.error(`Error: expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
+  process.exit(1);
 }
 
 // URL from --url or first positional

@@ -1,0 +1,9 @@
+{
+  "name": "order-rejectAfter__then-fulfil",
+  "spec": "redteam/order.qnt (hand-written, mirrors patterns/retry-idempotency)",
+  "schedule": [
+    { "order": 0, "rule": "order", "outcome": "reject-body", "occurrence": 0 },
+    { "order": 1, "rule": "order", "outcome": "pass", "occurrence": 1 }
+  ],
+  "expect": { "ui": "placed", "unhandledRejection": false, "state": { "orders": 1 } }
+}

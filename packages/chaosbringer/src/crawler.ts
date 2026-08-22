@@ -4,7 +4,7 @@
 
 import type { Browser, BrowserContext, Page, Route } from "playwright";
 import { chromium, devices } from "playwright";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -44,9 +44,18 @@ import {
   lifecycleMatchesUrl,
   lifecycleStatsFrom,
   PlaywrightLifecycleExecutor,
-  shouldFireProbability,
   type CompiledLifecycleFault,
 } from "./lifecycle-faults.js";
+import { decideFault, validateFaultSchedule } from "./schedule.js";
+import {
+  applyFault,
+  compileFaultRules,
+  pickFaultRule,
+  toRegExp,
+  type CompiledFaultRule,
+} from "./fault-router.js";
+import { compileUrlMatcher } from "./url-matcher.js";
+import { drainRejections, watchUnhandledRejections } from "./rejections.js";
 import {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -118,6 +127,7 @@ const DEFAULT_OPTIONS: Required<
   Omit<
     CrawlerOptions,
     | "baseUrl"
+    | "launchOptions"
     | "har"
     | "storageState"
     | "performanceBudget"
@@ -354,13 +364,15 @@ export class ChaosCrawler {
   /** Deterministic RNG for reproducible action selection. */
   private rng: Rng;
   /** Fault injection rules compiled once at construction time. */
-  private compiledFaultRules: Array<{
-    rule: FaultRule;
-    pattern: RegExp;
-    methods?: string[];
-    matched: number;
-    injected: number;
-  }> = [];
+  private compiledFaultRules: CompiledFaultRule[] = [];
+  /**
+   * Routes held open by a `hang` fault with no `releaseAfterMs`. Drained
+   * (aborted with "timedout") when the page that issued them is torn down,
+   * so a hung request can't keep the context from closing. `heldRequests`
+   * survives the drain for the report.
+   */
+  private heldRoutes: Route[] = [];
+  private heldRequests = 0;
   /** Page-lifecycle faults compiled once at construction time. */
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
   /** Compiled runtime faults — installed once at context level via init script. */
@@ -618,18 +630,7 @@ export class ChaosCrawler {
 
   /** Pop and return any unhandled promise rejections captured since last call. */
   private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
-    try {
-      return await page.evaluate(() => {
-        // @ts-ignore
-        const bag = (window.__chaosRejections || []) as Array<{ message: string; stack?: string }>;
-        // @ts-ignore
-        window.__chaosRejections = [];
-        return bag;
-      });
-    } catch {
-      // Page may have navigated away; drop rejections rather than throwing.
-      return [];
-    }
+    return drainRejections(page);
   }
 
   /** Get the logger instance for external use */
@@ -744,7 +745,12 @@ export class ChaosCrawler {
       mkdirSync(this.options.screenshotDir, { recursive: true });
     }
 
-    this.browser = await chromium.launch({ headless: this.options.headless });
+    this.browser = await chromium.launch({
+      ...this.options.launchOptions,
+      // Last, so the explicit option (and the CLI flag behind it) wins over
+      // anything `launchOptions` happens to carry.
+      headless: this.options.headless,
+    });
     // Device descriptor overrides viewport / userAgent / device pixel ratio;
     // explicit options in CrawlerOptions still win because they come later.
     const deviceDesc =
@@ -917,12 +923,36 @@ export class ChaosCrawler {
       await this.setupNavigationBlocking(page);
     }
 
-    const result = await this.crawlPageWithExistingPage(page, url);
-    this.events.onPageComplete?.(result);
-    this.logger.logPageComplete(result);
-    this.results.push(result);
+    // The page belongs to the caller, so this method never closes it — which
+    // is exactly why it has to release what it parked. A `hang` fault holds a
+    // route open with no answer; leaving it held past the result means the
+    // caller's next action on this page waits on a request nothing will ever
+    // answer. The drain is in a `finally` rather than after the result
+    // because a page that throws mid-run is exactly the case where the
+    // caller is least likely to release it themselves.
+    try {
+      const result = await this.crawlPageWithExistingPage(page, url);
+      this.events.onPageComplete?.(result);
+      this.logger.logPageComplete(result);
+      this.results.push(result);
 
-    return result;
+      return result;
+    } finally {
+      await this.drainHeldRoutes();
+    }
+  }
+
+  /**
+   * Release every request currently parked by a `hang` fault, on demand.
+   *
+   * `testPage()` already does this before it returns, so most callers never
+   * need it. It exists for the one shape that owns the page across several
+   * operations of its own — apply faults, drive the page directly, then hand
+   * it back — where "parked until the crawler is done with it" is not the
+   * lifetime the caller has in mind.
+   */
+  async release(): Promise<void> {
+    await this.drainHeldRoutes();
   }
 
   private shouldExclude(url: string): boolean {
@@ -1303,6 +1333,32 @@ export class ChaosCrawler {
    * are caught and recorded in the fault's stats counter — a misbehaving
    * fault should not abort the rest of the crawl.
    */
+  /** Register a route parked by a `hang` fault. */
+  private holdRoute(route: Route): void {
+    this.heldRoutes.push(route);
+    this.heldRequests++;
+  }
+
+  /**
+   * Abort every parked route. Called when a page the crawler owns is torn
+   * down (`crawlPage`) and before `testPage()` hands a caller-owned page
+   * back. Safe to call repeatedly, and safe to call late: a caller can close
+   * the page while a route is still parked, so aborting a route whose page is
+   * already gone is swallowed rather than surfaced as a run failure.
+   */
+  private async drainHeldRoutes(): Promise<void> {
+    if (this.heldRoutes.length === 0) return;
+    const held = this.heldRoutes;
+    this.heldRoutes = [];
+    await Promise.all(
+      held.map((route) =>
+        route.abort("timedout").catch(() => {
+          /* page already gone — the request died with it */
+        }),
+      ),
+    );
+  }
+
   private async applyLifecycleStage(
     stage: LifecycleStage,
     page: Page,
@@ -1318,8 +1374,9 @@ export class ChaosCrawler {
 
     for (const c of compiled) {
       if (!lifecycleMatchesUrl(c, url)) continue;
+      const occurrence = c.matched;
       c.matched++;
-      if (!shouldFireProbability(c.fault.probability, this.rng)) continue;
+      if (decideFault(c.fault, occurrence, this.rng) === "pass") continue;
       try {
         await executeLifecycleAction(c.fault.action, executor);
         c.fired++;
@@ -1406,19 +1463,14 @@ export class ChaosCrawler {
       }
 
       // 1. Fault injection has priority so tests can exercise backends that
-      // would otherwise be allowed through.
-      for (const compiled of rules) {
-        if (!compiled.pattern.test(url)) continue;
-        if (compiled.methods && !compiled.methods.includes(method)) continue;
-
-        compiled.matched++;
-        const prob = compiled.rule.probability ?? 1;
-        // prob 0 should never inject; prob 1 always injects; in between we
-        // use the crawler's seeded RNG so probability is reproducible.
-        if (prob < 1 && this.rng.next() >= prob) continue;
-
-        compiled.injected++;
-        await applyFault(route, compiled.rule.fault);
+      // would otherwise be allowed through. The decision — two passes,
+      // shared occurrence numbering, lazy probability — lives in
+      // `pickFaultRule` so that this handler and the public
+      // `applyFaultRules` cannot drift: a rule encoded twice is the defect
+      // this file has produced more than any other.
+      const winner = pickFaultRule(rules, url, method, this.rng);
+      if (winner) {
+        await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
 
@@ -1560,6 +1612,9 @@ export class ChaosCrawler {
         }
         this.coverageCollector = null;
       }
+      // Release hung requests before the page goes away, so `page.close()`
+      // isn't racing a route handler that never responded.
+      await this.drainHeldRoutes();
       await page.close();
     }
   }
@@ -1632,19 +1687,13 @@ export class ChaosCrawler {
       });
     }
 
-    // Capture unhandled promise rejections. Claim them via preventDefault so
-    // they don't also fire as `pageerror` (which we'd misclassify as exception).
-    await page.addInitScript(() => {
-      // @ts-ignore - custom bag attached to window
-      window.__chaosRejections = [];
-      window.addEventListener("unhandledrejection", (event) => {
-        const message = event.reason?.message || String(event.reason);
-        const stack = event.reason?.stack;
-        // @ts-ignore
-        window.__chaosRejections.push({ message, stack });
-        event.preventDefault();
-      });
-    });
+    // Capture unhandled promise rejections. The install claims them via
+    // `preventDefault` so they don't also fire as `pageerror` (which we'd
+    // misclassify as an exception). Shared with the exported
+    // `watchUnhandledRejections` rather than inlined twice — a harness written
+    // against this library needs exactly the same mechanism, and two copies is
+    // how one of them ends up without the `preventDefault`.
+    await watchUnhandledRejections(page);
 
     // Capture SPA route changes that go through the History API
     // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,
@@ -1698,7 +1747,15 @@ export class ChaosCrawler {
     page.on("requestfailed", (request) => {
       if (!collecting) return;
       const requestUrl = request.url();
-      if (this.shouldIgnoreError(requestUrl)) return;
+      // Test the pattern against the *message* — `"<url> - <errorText>"` — not
+      // the URL alone. The doc on `ignoreErrorPatterns` promised
+      // `PageError.message` for every error type, and this one path tested the
+      // URL, so `"net::ERR_FAILED"` silenced the console copy of an aborted
+      // request and left the network copy standing. Matching the message is a
+      // superset: every pattern that matched the URL still matches.
+      const failure = request.failure();
+      const message = `${requestUrl} - ${failure?.errorText || "Unknown error"}`;
+      if (this.shouldIgnoreError(message)) return;
 
       // Check if this is a SPA-related error
       const spaPattern = this.matchesSpaPattern(requestUrl);
@@ -1713,10 +1770,9 @@ export class ChaosCrawler {
         return; // Don't count as regular error
       }
 
-      const failure = request.failure();
       const error: PageError = {
         type: "network",
-        message: `${requestUrl} - ${failure?.errorText || "Unknown error"}`,
+        message,
         url: page.url(),
         timestamp: Date.now(),
       };
@@ -2720,6 +2776,7 @@ export class ChaosCrawler {
       actions: this.actions,
       summary,
       faultInjections: this.compiledFaultRules.length > 0 ? this.getFaultStats() : undefined,
+      heldRequests: this.heldRequests > 0 ? this.heldRequests : undefined,
       lifecycleFaults:
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
@@ -2750,6 +2807,10 @@ export class ChaosCrawler {
             topN: this.coverageFeedback.topN,
           })
         : undefined,
+      coverageFingerprint:
+        this.coverageFeedback && this.globalCoverage.size > 0
+          ? coverageFingerprintOf(this.globalCoverage)
+          : undefined,
       advisor: this.advisorRuntime
         ? {
             provider: this.advisorRuntime.provider.name,
@@ -2819,6 +2880,7 @@ export class ChaosCrawler {
       rule: c.rule.name ?? c.pattern.toString(),
       matched: c.matched,
       injected: c.injected,
+      ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
     }));
   }
 
@@ -2832,7 +2894,97 @@ export class ChaosCrawler {
  * well-formed inputs. Every error starts with `chaosbringer:` and names
  * the field, so users don't get an anonymous `TypeError: Invalid URL`.
  */
+/**
+ * Option names the type system cannot protect a caller from getting wrong.
+ *
+ * `CrawlerOptions` is a closed type, but excess-property checking only applies
+ * to a fresh object literal — spread one, build it in a helper, or write plain
+ * JS, and `maxActions: 0` sails through and does nothing. Measured on the
+ * fixture page: 4 chaos actions with the default, 0 with
+ * `maxActionsPerPage: 0`, and 4 with `maxActions: 0`, which is the shape of
+ * "my fault never fired and I cannot see why". This file's own tests did it.
+ *
+ * Only *near misses* are refused. A key nobody could have meant as an option —
+ * a caller's own `myAppPort` riding along in a config object — is left alone,
+ * because breaking those to catch typos would trade one silent failure for a
+ * loud one somebody did not ask for.
+ */
+const KNOWN_OPTION_NAMES = [
+  "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
+  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
+  "userAgent", "traceparent", "actionWeights", "logFile", "logLevel", "logToConsole",
+  "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
+  "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
+  "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
+  "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
+  "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
+] as const;
+
+/**
+ * Compile-time guard that the list above is complete.
+ *
+ * A list like this rots silently in the worst possible direction: add an option
+ * and forget it here, and the near-miss check refuses the *correct* new name as
+ * a typo of an old one. If this line fails to compile, the error names the
+ * options that are missing from `KNOWN_OPTION_NAMES` — add them.
+ */
+type UnlistedOptionNames = Exclude<keyof CrawlerOptions, (typeof KNOWN_OPTION_NAMES)[number]>;
+const _allOptionsListed: UnlistedOptionNames extends never ? true : UnlistedOptionNames = true;
+void _allOptionsListed;
+
+/** Levenshtein distance, capped: we only care whether it is 1 or 2. */
+function editDistance(a: string, b: string, cap = 3): number {
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j]! + 1,
+        row[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
+function rejectNearMissOptions(options: object): void {
+  const known: ReadonlySet<string> = new Set<string>(KNOWN_OPTION_NAMES);
+  for (const key of Object.keys(options)) {
+    if (known.has(key)) continue;
+    const lower = key.toLowerCase();
+    // Rank rather than take the first hit: in list order, `shard` matched
+    // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
+    // makes no sense is worse than none. Prefix relationships win, then the
+    // smaller edit distance.
+    let suggestion: string | undefined;
+    let best = Number.POSITIVE_INFINITY;
+    for (const name of KNOWN_OPTION_NAMES as readonly string[]) {
+      const n = name.toLowerCase();
+      // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
+      // plural/singular slip (`faultInjections` for `faultInjection`).
+      const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
+      const distance = editDistance(lower, n, 2);
+      const score = prefix ? 0 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+      if (score < best) {
+        best = score;
+        suggestion = name;
+      }
+    }
+    if (suggestion !== undefined) {
+      throw new Error(
+        `chaosbringer: unknown option "${key}" — did you mean "${suggestion}"? ` +
+          `A misspelled option is accepted and ignored by JavaScript, so it fails as ` +
+          `"my fault never fired" rather than as an error.`,
+      );
+    }
+  }
+}
+
 export function validateOptions(options: CrawlerOptions): void {
+  rejectNearMissOptions(options);
   // baseUrl — parse and surface a named error.
   try {
     // eslint-disable-next-line no-new
@@ -2909,14 +3061,27 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
   for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
-  for (const rule of options.faultInjection ?? []) {
-    const label = rule.name ? `faultInjection rule "${rule.name}"` : `faultInjection rule`;
+  for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {
+    // The index when there is no name: "faultInjection rule" alone, in a
+    // config with twenty of them, does not tell you which one to fix.
+    const label = rule.name
+      ? `faultInjection rule "${rule.name}"`
+      : `faultInjection rule #${ruleIndex}`;
     assertMatcher(`${label} urlPattern`, rule.urlPattern);
+    validateFaultSchedule(label, rule, "chaosbringer");
     if (rule.probability !== undefined) {
       const p = rule.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
         throw new Error(
           `chaosbringer: ${label} probability must be in [0, 1] (got ${JSON.stringify(p)})`
+        );
+      }
+    }
+    if (rule.fault.kind === "hang" && rule.fault.releaseAfterMs !== undefined) {
+      const ms = rule.fault.releaseAfterMs;
+      if (!Number.isFinite(ms) || ms < 0) {
+        throw new Error(
+          `chaosbringer: ${label} hang releaseAfterMs must be a non-negative finite number (got ${JSON.stringify(ms)})`
         );
       }
     }
@@ -2929,16 +3094,17 @@ export function validateOptions(options: CrawlerOptions): void {
     "betweenActions",
   ]);
   const VALID_SCOPES = new Set(["localStorage", "sessionStorage", "cookies", "indexedDB"]);
-  for (const fault of options.lifecycleFaults ?? []) {
+  for (const [faultIndex, fault] of (options.lifecycleFaults ?? []).entries()) {
     const label = fault.name
       ? `lifecycleFaults entry "${fault.name}"`
-      : `lifecycleFaults entry`;
+      : `lifecycleFaults entry #${faultIndex}`;
     if (!VALID_STAGES.has(fault.when)) {
       throw new Error(
         `chaosbringer: ${label} "when" must be one of beforeNavigation/afterLoad/beforeActions/betweenActions (got ${JSON.stringify(fault.when)})`
       );
     }
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    validateFaultSchedule(label, fault, "chaosbringer");
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -2984,11 +3150,24 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   }
 
-  for (const fault of options.runtimeFaults ?? []) {
+  for (const [faultIndex, fault] of (options.runtimeFaults ?? []).entries()) {
     const label = fault.name
       ? `runtimeFaults entry "${fault.name}"`
-      : `runtimeFaults entry`;
+      : `runtimeFaults entry #${faultIndex}`;
     assertMatcher(`${label} urlPattern`, fault.urlPattern);
+    validateFaultSchedule(label, fault, "chaosbringer");
+    if (fault.methods !== undefined) {
+      if (!Array.isArray(fault.methods) || fault.methods.length === 0) {
+        throw new Error(`chaosbringer: ${label} methods must be a non-empty array of HTTP methods`);
+      }
+      for (const m of fault.methods) {
+        if (typeof m !== "string" || m.length === 0) {
+          throw new Error(
+            `chaosbringer: ${label} methods entry must be a non-empty string (got ${JSON.stringify(m)})`
+          );
+        }
+      }
+    }
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -2998,14 +3177,57 @@ export function validateOptions(options: CrawlerOptions): void {
       }
     }
     const a = fault.action;
+    const assertMessage = (kind: string, message: unknown): void => {
+      if (message !== undefined && typeof message !== "string") {
+        throw new Error(`chaosbringer: ${label} ${kind} rejectionMessage must be a string`);
+      }
+    };
     if (a.kind === "flaky-fetch") {
-      if (a.rejectionMessage !== undefined && typeof a.rejectionMessage !== "string") {
-        throw new Error(`chaosbringer: ${label} flaky-fetch rejectionMessage must be a string`);
+      assertMessage("flaky-fetch", a.rejectionMessage);
+    } else if (a.kind === "reject-fetch") {
+      assertMessage("reject-fetch", a.rejectionMessage);
+      if (a.rejectAs !== undefined && a.rejectAs !== "TypeError" && a.rejectAs !== "AbortError") {
+        throw new Error(
+          `chaosbringer: ${label} reject-fetch rejectAs must be "TypeError" or "AbortError" (got ${JSON.stringify(a.rejectAs)})`
+        );
+      }
+    } else if (a.kind === "never-settle-fetch") {
+      // No fields to validate.
+    } else if (a.kind === "resolve-rejected-thenable") {
+      assertMessage("resolve-rejected-thenable", a.rejectionMessage);
+    } else if (a.kind === "reject-body") {
+      assertMessage("reject-body", a.rejectionMessage);
+      const VALID_CONSUMERS = new Set(["json", "text", "arrayBuffer", "blob", "formData"]);
+      if (a.consumers !== undefined) {
+        if (!Array.isArray(a.consumers) || a.consumers.length === 0) {
+          throw new Error(
+            `chaosbringer: ${label} reject-body consumers must be a non-empty array`
+          );
+        }
+        for (const c of a.consumers) {
+          if (!VALID_CONSUMERS.has(c)) {
+            throw new Error(
+              `chaosbringer: ${label} reject-body consumers entry is not recognized (got ${JSON.stringify(c)})`
+            );
+          }
+        }
       }
     } else if (a.kind === "clock-skew") {
       if (!Number.isFinite(a.skewMs) || !Number.isInteger(a.skewMs)) {
         throw new Error(
           `chaosbringer: ${label} clock-skew skewMs must be a finite integer (got ${JSON.stringify(a.skewMs)})`
+        );
+      }
+      // `clock-skew` is page-scoped: it patches `Date` once when the init
+      // script installs, matching on `location.href`. There is no request, so
+      // there is no method to filter on — and a `methods` here was accepted
+      // and then ignored, which reads as "the fault applies to POSTs only"
+      // while it applies to the whole page.
+      if (fault.methods !== undefined) {
+        throw new Error(
+          `chaosbringer: ${label} sets methods on a clock-skew action, which is page-scoped ` +
+            `(it patches Date once per page load and matches location.href, so no request method ` +
+            `is involved) — drop methods, or use urlPattern to scope it to a page`
         );
       }
     } else {
@@ -3015,13 +3237,14 @@ export function validateOptions(options: CrawlerOptions): void {
     }
   }
 
-  for (const fault of options.iframeFaults ?? []) {
+  for (const [faultIndex, fault] of (options.iframeFaults ?? []).entries()) {
     const label = fault.name
       ? `iframeFaults entry "${fault.name}"`
-      : `iframeFaults entry`;
+      : `iframeFaults entry #${faultIndex}`;
     if (typeof fault.selector !== "string" || fault.selector.length === 0) {
       throw new Error(`chaosbringer: ${label} selector must be a non-empty string`);
     }
+    validateFaultSchedule(label, fault, "chaosbringer");
     if (fault.probability !== undefined) {
       const p = fault.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {
@@ -3187,47 +3410,7 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Coerce a UrlMatcher to RegExp. Returns null if the string is not a valid regex. */
-function toRegExp(m: UrlMatcher): RegExp | null {
-  if (m instanceof RegExp) return m;
-  try {
-    return new RegExp(m);
-  } catch {
-    return null;
-  }
-}
 
-function compileFaultRules(rules: FaultRule[] | undefined): Array<{
-  rule: FaultRule;
-  pattern: RegExp;
-  methods?: string[];
-  matched: number;
-  injected: number;
-}> {
-  if (!rules || rules.length === 0) return [];
-  const compiled: Array<{
-    rule: FaultRule;
-    pattern: RegExp;
-    methods?: string[];
-    matched: number;
-    injected: number;
-  }> = [];
-  for (const rule of rules) {
-    const pattern = toRegExp(rule.urlPattern);
-    if (!pattern) {
-      // Skip invalid regex silently; validateOptions will have already raised.
-      continue;
-    }
-    compiled.push({
-      rule,
-      pattern,
-      methods: rule.methods?.map((m) => m.toUpperCase()),
-      matched: 0,
-      injected: 0,
-    });
-  }
-  return compiled;
-}
 
 /**
  * Strip the regex-metacharacters from `re.source` to produce a candidate
@@ -3303,6 +3486,13 @@ export function findFaultRuleShadows(
     // A probability < 1 rule never reliably shadows — some requests fall
     // through to the next rule. Skip to avoid false positives.
     if ((earlier.rule.probability ?? 1) < 1) continue;
+    // Same for a schedule that ever passes: only a table of all-"inject"
+    // decisions that also keeps injecting past its end covers every
+    // occurrence, and therefore shadows what follows.
+    const sched = earlier.rule.schedule;
+    if (sched && !(sched.afterEnd === "inject" && sched.decisions.every((d) => d === "inject"))) {
+      continue;
+    }
 
     for (let j = i + 1; j < compiled.length; j++) {
       const later = compiled[j]!;
@@ -3331,27 +3521,17 @@ export function findFaultRuleShadows(
   return out;
 }
 
-async function applyFault(route: Route, fault: Fault): Promise<void> {
-  switch (fault.kind) {
-    case "abort":
-      await route.abort(fault.errorCode ?? "failed");
-      return;
-    case "status": {
-      // Chromium emits a spurious ERR_ABORTED alongside the response when the
-      // body is empty, so synthesise a minimal JSON body by default. Callers
-      // can still opt into an empty body by passing `body: ""` explicitly.
-      const body =
-        fault.body !== undefined ? fault.body : JSON.stringify({ error: fault.status });
-      await route.fulfill({
-        status: fault.status,
-        body,
-        contentType: fault.contentType ?? "application/json",
-      });
-      return;
-    }
-    case "delay":
-      await new Promise((r) => setTimeout(r, fault.ms));
-      await route.fallback();
-      return;
-  }
+/**
+ * Stable digest of the set of function fingerprints a run executed.
+ *
+ * Two runs with the same digest ran the same code. The model pipeline uses
+ * that to spot plans the model calls distinct states but that exercise
+ * identical code — either the model is over-refined or the app does not
+ * actually distinguish the cases, and neither is visible from the model
+ * alone. Sorted before hashing so the digest is order-independent.
+ */
+export function coverageFingerprintOf(covered: ReadonlySet<string>): string {
+  const sorted = [...covered].sort();
+  return createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 32);
 }
+

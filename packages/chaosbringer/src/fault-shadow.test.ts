@@ -7,6 +7,7 @@ function compiled(rules: Array<{
   pattern: RegExp;
   methods?: string[];
   probability?: number;
+  schedule?: FaultRule["schedule"];
 }>) {
   return rules.map((r) => {
     const rule: FaultRule = {
@@ -16,6 +17,7 @@ function compiled(rules: Array<{
     if (r.name !== undefined) rule.name = r.name;
     if (r.methods !== undefined) rule.methods = r.methods;
     if (r.probability !== undefined) rule.probability = r.probability;
+    if (r.schedule !== undefined) rule.schedule = r.schedule;
     return {
       rule,
       pattern: r.pattern,
@@ -162,6 +164,30 @@ describe("findFaultRuleShadows", () => {
     expect(shadows).toHaveLength(1);
     expect(shadows[0]!.earlierName).toMatch(/^\//);
     expect(shadows[0]!.laterName).toMatch(/^\//);
+  });
+
+  it("a scheduled catch-all that ever passes does not shadow", () => {
+    // Occurrences the schedule passes fall through to the later rule, so
+    // flagging it would be a false positive.
+    const rules = compiled([
+      { name: "block-all", pattern: /^https?:\/\//, schedule: { decisions: ["inject", "pass"] } },
+      { name: "api-a", pattern: /^https:\/\/a\.example\.com\// },
+    ]);
+    expect(findFaultRuleShadows(rules)).toHaveLength(0);
+  });
+
+  it("a schedule that injects on every occurrence still shadows", () => {
+    const rules = compiled([
+      {
+        name: "block-all",
+        pattern: /^https?:\/\//,
+        schedule: { decisions: ["inject"], afterEnd: "inject" },
+      },
+      { name: "api-a", pattern: /^https:\/\/a\.example\.com\// },
+    ]);
+    const shadows = findFaultRuleShadows(rules);
+    expect(shadows).toHaveLength(1);
+    expect(shadows[0]!.earlierName).toBe("block-all");
   });
 
   it("returns multiple shadows when the catch-all hides several later rules", () => {

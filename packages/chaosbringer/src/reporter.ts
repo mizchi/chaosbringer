@@ -179,7 +179,21 @@ export function formatReport(report: CrawlReport): string {
     lines.push("FAULT INJECTION");
     lines.push("-".repeat(40));
     for (const stats of report.faultInjections) {
-      lines.push(`  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}`);
+      // `suppressed` only when it happened: on most runs every row would read
+      // `suppressed=0` and a reader would stop seeing the column.
+      const suppressed = stats.suppressed ? ` suppressed=${stats.suppressed}` : "";
+      lines.push(
+        `  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}${suppressed}`,
+      );
+    }
+    if (report.heldRequests) {
+      // Was JSON-only. A parked request is the whole point of an unbounded
+      // `hang`, and it is also the explanation for the navigation timeout
+      // sitting in the errors above — a reader who cannot see this number has
+      // to guess.
+      lines.push(
+        `  requests held open (unbounded hang, aborted at teardown): ${report.heldRequests}`,
+      );
     }
   }
 
@@ -324,7 +338,15 @@ export function getExitCode(report: CrawlReport, strict: boolean | ExitCodeOptio
   if (report.summary.invariantViolations > 0) {
     return 1;
   }
-  if (opts.strict && (report.summary.consoleErrors > 0 || report.summary.jsExceptions > 0)) {
+  if (
+    opts.strict &&
+    (report.summary.consoleErrors > 0 ||
+      report.summary.jsExceptions > 0 ||
+      // An escaping rejection is the failure mode this library exists to
+      // find, and it used to be the one thing `strict` ignored: a run whose
+      // whole finding was "the app left a rejection unhandled" exited 0.
+      report.summary.unhandledRejections > 0)
+  ) {
     return 1;
   }
   if (opts.baselineStrict && report.diff) {

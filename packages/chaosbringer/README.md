@@ -23,7 +23,9 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Seeded reproducibility** — same seed, same action order. Every report prints a `Repro:` line you can paste into CI logs.
 - **Network fault injection** via Playwright's route API: serve a 500, abort, or add latency to any URL pattern.
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
-- **Runtime fault injection** — persistent in-page monkey-patches (`flaky-fetch`, `clock-skew`) installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach (e.g. `fetch` rejection before any request goes out).
+- **Runtime fault injection** — persistent in-page monkey-patches installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach: `reject-fetch` (TypeError or AbortError), `never-settle-fetch`, `reject-body` (`res.json()` rejects after the fetch resolved), `resolve-rejected-thenable`, `clock-skew`.
+- **Deterministic fault schedules** — `schedule: { decisions: ["inject", "pass"] }` on any fault layer replaces the probability roll with a per-occurrence decision table, so "fail the first call, pass the retry" is a test rather than a lucky run. Consumes no RNG, so seeds stay stable.
+- **Model-driven fault coverage** — a temporal-logic model (Quint / ITF) enumerates the failure space, `chaosbringer model compile` turns each witness into a committed `FaultPlan`, and `model run` replays every state with the model as the oracle. Reports which states are reachable, which are unreachable within the bound, and which plans the app never actually exercised.
 - **Coverage-guided action selection** — opt-in V8 precise coverage feedback (CDP `Profiler.takePreciseCoverage`) attributes per-action coverage deltas to the target that fired them and biases subsequent action weights toward targets that historically delivered new code paths.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
@@ -182,7 +184,52 @@ await chaos({
 
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
 
+> **Behaviour change:** `probability: 0` no longer draws from the RNG. It is a
+> rule that can never fire, so rolling for it was a wasted draw — but the draw
+> was part of the sequence, so **any existing seeded config containing a
+> `probability: 0` fault rule now produces a different action sequence than it
+> did before.** Parking a rule with `probability: 0` instead of deleting it is
+> the ordinary way to do that, so if you have a pinned seed and a pinned
+> expected action order, re-record it. `probability: 1` and values in `(0, 1)`
+> are unaffected, and the lifecycle layer never drew for `0` in the first
+> place. Nothing else about seed stability changed: RNG is consumed only for a
+> `probability` strictly inside `(0, 1)`.
+
+> **Behaviour change, the second one:** every rule's `urlPattern` is now
+> `test()`ed against every request, where before the handler returned as soon
+> as a rule injected. This is what lets two rules on the same URL agree about
+> occurrence numbers, and it is invisible for a stateless pattern — but a
+> RegExp carrying `g` or `y` has a `lastIndex` that `test()` writes, so an
+> extra test used to renumber it. Those flags are now stripped when a matcher
+> is compiled (your own RegExp object is left alone), which means a `/g`
+> pattern matches what it reads as matching rather than firing on alternating
+> requests. If you have a pinned expectation recorded against the old
+> alternating behaviour, it will change — in the direction of what the pattern
+> says.
+
+### Deterministic schedules
+
+`probability` cannot say "fail the first call, let the retry through". `schedule` can: a decision table indexed by how many times the rule has already matched.
+
+```ts
+faultInjection: [
+  faults.status(500, {
+    urlPattern: /\/api\/cart$/,
+    schedule: { decisions: ["inject", "pass"] }, // 1st call 500s, retry works
+  }),
+],
+```
+
+- `afterEnd` decides what happens past the table: `"pass"` (default — spent), `"inject"` (keep firing), `"repeat"` (cycle it).
+- Available on all four layers (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`). `probability` + `schedule` together is a validation error.
+- A schedule consumes no RNG, so adding one leaves the seed sequence — and therefore chaos action selection — untouched.
+- Faults watching the same URL share occurrence numbering on the layers that evaluate every matching rule — the network layer, the runtime `fetch` layer and the lifecycle layer — so occurrence 0 can get one fault kind and occurrence 2 another. The **iframe layer and the load path are single-pass**: the first fault to claim an assignment returns, and a scheduled fault sitting behind it does not advance. Numbering there is per-rule, so don't write a two-fault occurrence split on those layers. Don't split one endpoint across the network and runtime layers either: a client-side rejection issues no request, so the network counter never advances.
+
+To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
+
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
+
+A third counter, `suppressed`, appears on a row only when it is non-zero. Rules are first-match-wins, but a *scheduled* rule advances its occurrence whenever its pattern matches — that is what lets two rules on one URL agree about what "occurrence 1" means. So a scheduled rule can decide `inject` and still not act, because a rule ahead of it answered the request. Without `suppressed` that reads as `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule reports: a planned fault that did not happen, indistinguishable from one that was never planned. `RuntimeFaultStats` carries the same field for the same reason, and there `fired` counts effects, not decisions.
 
 ### Rule order: first match wins
 
@@ -346,7 +393,7 @@ Every lifecycle helper accepts the same overrides:
 | --- | --- |
 | `when` | Override the helper's default stage. |
 | `urlPattern` | Restrict the fault to URLs matching this regex / regex string. Omit to apply on every page. |
-| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 fault doesn't shift the seed sequence for chaos action selection. |
+| `probability` | 0..1, default 1. Uses the crawler's seeded RNG so the firing pattern is reproducible. RNG is consumed only when `probability` is in `(0, 1)` — adding a probability-1 (or probability-0) fault doesn't shift the seed sequence for chaos action selection. Note that `probability: 0` **used to** consume a draw on the network layer; see the behaviour change above. |
 | `name` | Override the auto-derived stats label (e.g. `cpu-throttle:4x`). |
 
 ### Stats
@@ -391,7 +438,32 @@ await chaos({
 });
 ```
 
+Promise-shaped kinds, for the failure modes a network mock cannot express:
+
+| Helper | What the app sees | Bug it exposes |
+| --- | --- | --- |
+| `faults.rejectFetch({ rejectAs })` | `fetch` rejects with a `TypeError` (default) or a `DOMException` named `AbortError` | Handlers that branch on `instanceof TypeError`; a retry banner shown on a user cancel |
+| `faults.rejectBody()` | `fetch` resolves, then `res.json()` rejects | The classic missed `catch`: guarded fetch, unguarded `await res.json()` |
+| `faults.neverSettleFetch()` | the promise never settles, no request is issued | Missing timeout. Because nothing is in flight, `networkidle` still fires — the UI simply never leaves loading |
+| `faults.rejectedThenable()` | same rejection, one microtask later, via thenable assimilation | Handlers attached too late |
+
+`faults.flakyFetch()` still works; it is `rejectFetch({ rejectAs: "TypeError" })`. One thing to know if you migrate: the stats label changes with it. An unnamed `flakyFetch` reported `rule: "flaky-fetch"` and the `rejectFetch` form reports `rule: "reject-fetch:TypeError"`, so anything matching on `report.runtimeFaults[].rule` needs updating — or pass an explicit `name` and stop depending on the derived one.
+
+`faults.status(500, { urlPattern })` with no `body` does **not** send an empty body — the default is `{"error":500}` with `content-type: application/json`. That default decides which app bug a 500 finds: a client that skips `res.ok` and calls `res.json()` renders junk out of it and reports success, where an HTML or empty body makes `res.json()` *reject* and the client takes its error path (or leaks an unhandled rejection). Two different defects behind one status code, so both are worth testing; pass `body: ""` or `body: "<html>…"` explicitly for the second.
+
+(The default was originally justified by a spurious `ERR_ABORTED` Chromium was said to emit alongside an empty intercepted body. That does not reproduce on Chromium 147 — no `requestfailed`, no ERR_ABORTED on any channel, the same single console line either way — so treat the body choice as being about your client's parsing path, not about browser noise.)
+
+The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
+
+Since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
+
+Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws, and that throw is recorded as a page error of type `exception` — so `summary.jsExceptions` reads 1 and an error cluster appears carrying Playwright's own timeout message. **The page threw nothing.** The classification is the crawler's, not the app's, and it is the expected outcome of the fault rather than a finding. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+
+`never-settle-fetch` honours `init.signal`, which is what makes it a fair test of a bounded request rather than a way to fail every client. Note what the caller sees: under `AbortSignal.timeout(ms)` the rejection is a `TimeoutError`, not an `AbortError` — a `catch` branching only on `err.name === "AbortError"` misses it. An explicit `AbortController.abort()` still gives `AbortError`.
+
 The probability roll is deterministic given the same `(seed, runtimeFaults)` pair — the in-page LCG is seeded from `seed` so two runs roll identically.
+
+`urlPattern` means different things per kind: **fetch-scoped** kinds (`flaky-fetch`, `reject-fetch`, `never-settle-fetch`, `reject-body`, `resolve-rejected-thenable`) match the **request URL** passed to `fetch()`, per call; **page-scoped** kinds (`clock-skew`) match `location.href` once, when the init script installs.
 
 Layer comparison:
 
@@ -926,6 +998,40 @@ chaosbringer --url http://localhost:3000 --strict --github-annotations
 
 Severity maps from cluster type: invariants / exceptions / network errors / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
 
+## Model-driven fault coverage
+
+Probability sampling tells you what fired; it cannot tell you what was never
+attempted. A temporal-logic model (Quint, or anything emitting ITF) enumerates
+the failure space instead, and each enumerated state replays as one
+deterministic run with the model's prediction as the oracle:
+
+```bash
+# dev-time: ITF witnesses -> committed plan files (pure Node)
+chaosbringer model compile --traces model/traces --out model/plans
+
+# CI: replay every plan, check every oracle (no Quint, no JVM)
+chaosbringer model run --plans model/plans --url http://localhost:3000 \
+  --config model/bridge.mjs
+```
+
+```
+=== MODEL COVERAGE ===
+States: 16/18 reachable (depth <= 4), 2 unreachable
+Plans run: 16
+Mismatches: 13
+  [unhandledRejection] cart-fulfilled__shipping-rejected: a rejection escaped every handler, which the model's contract forbids
+  [ui] cart-hung__shipping-fulfilled: model predicted ui="error", page reported "stuck"
+```
+
+Programmatic equivalent: `compilePlan` / `runPlans` / `aggregateCoverage`,
+exported from the package root. The runner checks three things per plan — the
+UI label via your `uiProbe`, whether a rejection escaped, and whether the
+planned faults actually fired (a plan whose request the app never issues is
+reported, not counted as a pass).
+
+Full walkthrough: [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
+Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree/main/examples/model-faults).
+
 ## Error clustering
 
 `CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
@@ -945,9 +1051,17 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 | No navigation errors, no invariant violations | **0** |
 | At least one page with `status: "error"` or `"timeout"` | **1** |
 | At least one invariant violation (any mode) | **1** |
-| `--strict` and any console error / JS exception | **1** |
+| `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
+
+> **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
+> used to ignore them, so a run whose entire finding was "the app left a
+> rejection unhandled" exited 0 while a single `console.error` exited 1 — and
+> an escaping rejection is the failure mode this library's Promise fault kinds
+> exist to produce. If you were running `--strict` over a page with a known
+> unhandled rejection, that run now fails; add the pattern to
+> `ignoreErrorPatterns`, or fix it.
 
 ## Playwright Test integration
 

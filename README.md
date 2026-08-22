@@ -71,6 +71,7 @@ Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
   - [Multiple per-worker logged-in identities](docs/cookbook/per-worker-auth.md)
   - [Standard invariants toolkit](docs/cookbook/invariant-toolkit.md) (toast / state-machine / response shape / monotonic)
   - [Which fault layer for which bug](docs/cookbook/fault-layer-cheatsheet.md)
+  - [Fail the first call, pass the retry](docs/cookbook/deterministic-schedules.md) (`schedule`)
   - [Find out what actually broke](docs/cookbook/debugging-failures.md) (errors → artifacts → HAR replay)
   - [Realistic think-time shaping](docs/cookbook/think-time-shaping.md)
   - [Grow an AI skill library (Goals + Recipes)](docs/cookbook/ai-recipe-skills.md) — `recipeDriver` replays verified trajectories without LLM calls. See [`examples/recipe-skills/`](examples/recipe-skills/README.md).
@@ -89,14 +90,17 @@ Longer-form "what does this feature do and why" docs:
 - [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
+- [`docs/recipes/model-driven-faults.md`](docs/recipes/model-driven-faults.md) — Enumerate the failure space with a temporal-logic model (Quint) instead of sampling it with probabilities: one deterministic run per reachable state, the model as oracle, and unreachable states reported rather than silently missing. Includes the timing solver: `chaosbringer model calibrate` measures what the machine can honour, and probe windows / delays are solved from it instead of hand-picked.
 
 ## Examples
 
 Runnable demos under [`examples/`](examples/), workspace-linked to the local packages so changes flow through immediately. CI runs them end-to-end on every PR (`example-tests` matrix in `.github/workflows/ci.yml`):
 
-- **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above.
+- **[`examples/cloudflare-worker/`](examples/cloudflare-worker/)** — Hono on Cloudflare Worker (via `wrangler dev`) + `@mizchi/server-faults` (with `metadataHeader: true` + `bypassHeader`) + chaosbringer driver (with `server: { mode: "remote" }`). Boots both processes and demonstrates the orchestration shipped in the recipes above. Also carries a `model/` directory: model-driven fault coverage applied retroactively to this app, which found four write-path bugs its own chaos run never surfaced.
 - **[`examples/playwright-test/`](examples/playwright-test/)** — chaosbringer inside an `@playwright/test` suite via the `chaos` fixture. Both `chaosTest` and `withChaos()` extension patterns in one file.
 - **[`examples/load-with-chaos/`](examples/load-with-chaos/)** — `scenarioLoad` running 5 virtual users through a shopping journey while 10% of `/api/*` is forced to 500. Boots its own in-process HTTP server. Shows per-step latency rollups, the per-second timeline sparkline, and fault-rule injection stats co-existing in one report.
+- **[`examples/model-faults/patterns/`](examples/model-faults/patterns/)** — Real-world async patterns, one model each: retry idempotency (a retry that double-charges), token-refresh stampede (two 401s, two refreshes), timeout ladder (slow vs never). Each catches a bug class that is invisible on screen, and each asserts both directions — the buggy variant must fail, the fixed one must pass.
+- **[`examples/model-faults/`](examples/model-faults/)** — Model-driven fault coverage: a Quint model of a checkout page's load contract enumerates 16 failure states (2 more proved unreachable), each replays as a deterministic run with the model as oracle. The buggy variant fails 11 of 16 plans with 13 mismatches — an unbounded load and an eager-start/sequential-await whose second rejection escapes; `FIXED=1` passes all 16.
 - **[`examples/recipe-skills/`](examples/recipe-skills/)** — Recipe layer demo: hand-written `ActionRecipe` → `verifyAndPromote` across 3 fresh contexts → re-load store from disk → drive the verified recipe through `recipeDriver`. Self-contained, no API key.
 
 ## Internal design docs

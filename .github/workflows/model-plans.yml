@@ -1,0 +1,99 @@
+# Regenerate the committed model plans and fail if they drifted.
+#
+# Enumeration needs Quint + a JVM (Apalache), which is exactly why it does not
+# gate every PR: `chaosbringer model run` replays committed plan files and needs
+# neither. This job exists so a model edit that nobody recompiled is caught
+# here rather than silently leaving the plans stale.
+#
+# The unit of work is a *model directory*, not an example. Every directory with
+# an `enumerate.sh` + `compile.sh` + `plans/` triple is one matrix leg, so a new
+# pattern parallelises itself instead of extending one job's wall clock — the
+# whole-example loop was already at 5m43s with three patterns.
+name: model plans
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays, 04:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "examples/*/model/**"
+      - "examples/*/patterns/**"
+
+jobs:
+  # Discovery is a job rather than a hand-maintained list because the failure
+  # mode of the list is silent: a pattern nobody added is a pattern nobody
+  # regenerates, and it looks exactly like a green run.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      units: ${{ steps.find.outputs.units }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          shopt -s nullglob
+          units=()
+          for script in examples/*/model/enumerate.sh examples/*/patterns/*/enumerate.sh; do
+            dir=$(dirname "$script")
+            # A unit without a compile.sh cannot be checked uniformly; fail
+            # loudly rather than skipping it into invisibility.
+            if [ ! -x "$dir/compile.sh" ]; then
+              echo "::error::$dir has enumerate.sh but no executable compile.sh"
+              exit 1
+            fi
+            units+=("$dir")
+          done
+          if [ ${#units[@]} -eq 0 ]; then
+            echo "::error::no model units found — the glob or the layout changed"
+            exit 1
+          fi
+          printf '%s\n' "${units[@]}"
+          echo "units=$(printf '%s\n' "${units[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+
+  regenerate:
+    needs: discover
+    name: regenerate (${{ matrix.unit }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        unit: ${{ fromJSON(needs.discover.outputs.units) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build chaosbringer (for the model CLI)
+        run: pnpm -F chaosbringer build
+
+      - name: Enumerate witnesses into a scratch directory
+        # OUT keeps the committed traces untouched: they carry a "Created by
+        # Apalache on <timestamp>" line, so regenerating them in place would
+        # make every run look dirty.
+        run: OUT=/tmp/fresh-traces ${{ matrix.unit }}/enumerate.sh
+
+      - name: Compile the fresh witnesses
+        # The unit owns its compile options (`--state-var`, …), so this step
+        # needs to know nothing about any individual model.
+        run: TRACES=/tmp/fresh-traces OUT=/tmp/fresh-plans ${{ matrix.unit }}/compile.sh
+
+      - name: Compare against the committed plans
+        # Semantic comparison, not `git diff`: what matters is the injection
+        # schedule and the oracle, not which equivalent witness the solver
+        # happened to return this time.
+        run: node examples/model-faults/model/check-plans.mjs ${{ matrix.unit }}/plans /tmp/fresh-plans

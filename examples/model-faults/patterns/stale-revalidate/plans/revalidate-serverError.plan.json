@@ -1,0 +1,28 @@
+{
+  "name": "revalidate-serverError",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "profile",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "profile",
+      "outcome": "status",
+      "occurrence": 1
+    }
+  ],
+  "expect": {
+    "ui": "stale",
+    "unhandledRejection": false,
+    "state": {
+      "shown": 1
+    },
+    "calls": {
+      "profile": 2
+    }
+  },
+  "modelSteps": 3
+}

@@ -11,7 +11,7 @@
  * ships test fixtures and notes into the published tarball.
  */
 
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,4 +43,11 @@ for (const asset of assets) {
   await writeFile(dest, await readFile(asset));
   copied += 1;
 }
-console.log(`copy-assets: ${copied} file(s) staged from src/ to dist/`);
+// `tsc` emits the CLI as 644, and `package.json`'s `bin` points straight at
+// it. Installing from a registry tarball hides this — npm sets the bit on the
+// bin target itself — but a `file:` or workspace install links the file as-is,
+// so `npx chaosbringer` dies with "Permission denied" and every CLI example in
+// the docs is unrunnable. Two people hit that before this line existed.
+const BIN = join(DIST, "cli.js");
+await chmod(BIN, 0o755);
+console.log(`copy-assets: ${copied} file(s) staged from src/ to dist/, cli.js made executable`);

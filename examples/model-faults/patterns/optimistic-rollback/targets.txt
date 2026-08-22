@@ -1,0 +1,9 @@
+reachable    write-fulfil
+reachable    write-rejectBefore
+reachable    write-serverError
+reachable    write-rejectAfter
+unreachable-live            contract-forbids-screen-ahead
+unreachable-by-construction contract-forbids-screen-behind
+unreachable-live            contract-forbids-unhandled
+unreachable-by-construction contract-forbids-phantom-success
+unreachable-by-construction contract-forbids-double-write

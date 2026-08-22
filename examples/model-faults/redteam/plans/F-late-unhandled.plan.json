@@ -1,0 +1,6 @@
+{
+  "name": "late-unhandled",
+  "spec": "redteam/late.qnt (hand-written)",
+  "schedule": [{ "order": 0, "rule": "quote", "outcome": "reject", "occurrence": 0 }],
+  "expect": { "ui": "error", "unhandledRejection": false }
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Report</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+      .banner { padding: .75rem 1rem; border-radius: .4rem; margin: 1rem 0; background: #f3f4f6; }
+      [data-state="error"] .banner { background: #fee2e2; }
+      [data-state="ready"] .banner { background: #ecfdf5; }
+      button { padding: .5rem 1rem; font-size: 1rem; }
+    </style>
+  </head>
+  <body>
+    <main id="app" data-state="idle">
+      <h1>Report</h1>
+      <button id="load">Load report</button>
+      <p class="banner" id="banner">Nothing loaded yet.</p>
+    </main>
+    <script src="/slow.js"></script>
+  </body>
+</html>

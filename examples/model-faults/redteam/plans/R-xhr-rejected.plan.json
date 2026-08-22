@@ -1,0 +1,6 @@
+{
+  "name": "xhr-feed-rejected",
+  "spec": "redteam/xhr (refutation probe)",
+  "schedule": [{ "order": 0, "rule": "feed", "outcome": "reject", "occurrence": 0 }],
+  "expect": { "ui": "error", "unhandledRejection": false }
+}

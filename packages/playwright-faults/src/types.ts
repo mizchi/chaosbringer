@@ -22,6 +22,27 @@ export interface Rng {
   next(): number;
 }
 
+/** One occurrence's verdict in a `FaultSchedule`. */
+export type FaultDecision = "pass" | "inject";
+
+/**
+ * Deterministic replacement for `probability`: a decision table indexed by
+ * how many times the fault has already matched (occurrence 0, 1, 2, …).
+ *
+ * Understood by all four fault layers. Mutually exclusive with
+ * `probability` — setting both throws at compile time. Evaluated by
+ * `decideFault` (Node-side layers) or its generated in-page twin.
+ */
+export interface FaultSchedule {
+  /** Verdict for occurrence 0, 1, 2, … */
+  decisions: ReadonlyArray<FaultDecision>;
+  /**
+   * Behaviour past the end of `decisions`. Default `"pass"` (spent).
+   * `"inject"` keeps firing; `"repeat"` cycles the table.
+   */
+  afterEnd?: "pass" | "inject" | "repeat";
+}
+
 // =====================================================================
 // 1. Network-level fault injection (Playwright route())
 // =====================================================================
@@ -30,7 +51,24 @@ export interface Rng {
 export type Fault =
   | { kind: "abort"; errorCode?: string }
   | { kind: "status"; status: number; body?: string; contentType?: string }
-  | { kind: "delay"; ms: number };
+  | { kind: "delay"; ms: number }
+  /**
+   * Hold the request open and never respond — the request stays in flight,
+   * so the caller's promise never settles. Exposes spinners with no timeout
+   * and `Promise.all` chains that can never resolve; `delay` cannot, because
+   * it always eventually responds.
+   *
+   * `releaseAfterMs` aborts with `"timedout"` after that long. Omit it to
+   * hold until the page closes — but note the crawler navigates with
+   * `waitUntil: "networkidle"`, so a hang on a request issued *during*
+   * navigation costs one `timeout` per page visit — and the resulting
+   * `page.goto` rejection is recorded as a page error of type `exception`,
+   * which shows up in `summary.jsExceptions` even though the page threw
+   * nothing. That is the expected outcome of this fault, not a finding.
+   * Prefer hanging requests
+   * that an action fires after load, or set `releaseAfterMs`.
+   */
+  | { kind: "hang"; releaseAfterMs?: number };
 
 export interface FaultRule {
   /** Optional human-readable name used in stats. */
@@ -43,6 +81,12 @@ export interface FaultRule {
   fault: Fault;
   /** 0..1, default 1.0. Uses the caller-provided RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions, e.g. `{ decisions: ["inject",
+   * "pass"] }` to fail the first matching request and let the retry through.
+   * Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
 }
 
 /** Per-rule stats for fault injection, emitted on the final report. */
@@ -50,6 +94,19 @@ export interface FaultInjectionStats {
   rule: string;
   matched: number;
   injected: number;
+  /**
+   * Times this rule's schedule said "inject" and an earlier rule had already
+   * claimed the request. Present only when non-zero.
+   *
+   * Rules are first-match-wins, but a *scheduled* rule advances its
+   * occurrence whenever its pattern matches — two rules watching one URL have
+   * to agree on what occurrence 1 means. So a scheduled rule can decide
+   * "inject" and still do nothing. Without this number that shows up as
+   * `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule
+   * reports: a planned fault that did not happen, indistinguishable from one
+   * that was never planned.
+   */
+  suppressed?: number;
 }
 
 // =====================================================================
@@ -126,6 +183,11 @@ export interface LifecycleFault {
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Uses the caller-provided RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions. Occurrence counts page visits
+   * whose URL matched. Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: LifecycleAction;
 }
@@ -156,8 +218,62 @@ export type RuntimeAction =
    * from a network `Fault` of kind `"abort"`: `flaky-fetch` rejects the
    * Promise client-side with a TypeError, simulating "Failed to fetch" /
    * Service Worker reject / DNS failure.
+   *
+   * @deprecated Use `reject-fetch`, which is the same thing with a
+   * selectable error shape. `flaky-fetch` keeps working indefinitely.
    */
   | { kind: "flaky-fetch"; rejectionMessage?: string }
+  /**
+   * Reject `window.fetch` with a chosen error shape.
+   *
+   * `rejectAs: "TypeError"` (default) is the network-failure shape.
+   * `rejectAs: "AbortError"` throws a `DOMException` named `AbortError` —
+   * what an `AbortController` produces. Code that only inspects
+   * `err instanceof TypeError`, or that treats every rejection as a network
+   * outage and shows a retry banner on a user-initiated cancel, breaks on
+   * exactly one of the two.
+   */
+  | {
+      kind: "reject-fetch";
+      rejectAs?: "TypeError" | "AbortError";
+      rejectionMessage?: string;
+    }
+  /**
+   * Return a promise from `window.fetch` that never settles, without
+   * issuing a request. The client-side twin of the network `hang` fault:
+   * no route matches, nothing is in flight, and `await fetch(...)` simply
+   * never returns. Exposes missing timeouts in code that never reaches the
+   * network (Service Worker / cache layers included).
+   *
+   * An `init.signal` is still honoured — the promise rejects when the caller
+   * aborts, exactly as a real hung request does. So an app that bounds its
+   * requests with `AbortController` / `AbortSignal.timeout` survives this
+   * fault, and only one that cannot cancel is left hanging.
+   */
+  | { kind: "never-settle-fetch" }
+  /**
+   * Let `fetch` resolve normally, then reject when the app consumes the
+   * body (`res.json()` by default).
+   *
+   * This is the most commonly missed `catch` in real code: the fetch is
+   * wrapped in try/catch or `.catch()`, but `await res.json()` sits outside
+   * it, so a truncated / non-JSON body escapes as an unhandled rejection
+   * even though the app "handles fetch errors".
+   */
+  | {
+      kind: "reject-body";
+      /** Which consumers reject. Default: `["json"]`. */
+      consumers?: ReadonlyArray<"json" | "text" | "arrayBuffer" | "blob" | "formData">;
+      rejectionMessage?: string;
+    }
+  /**
+   * Resolve `fetch` with a *thenable* that rejects, instead of rejecting
+   * directly. The promise still ends up rejected, but one microtask later
+   * and via the spec's thenable-assimilation path — which is where
+   * "handler attached too late" bugs live (a `.catch()` added in a
+   * `setTimeout`, or a rejection that beats its own handler registration).
+   */
+  | { kind: "resolve-rejected-thenable"; rejectionMessage?: string }
   /**
    * Skew `Date.now()` / `performance.now()` (and the no-arg `Date`
    * constructor) forward by `skewMs`. Useful for forcing token-expiry,
@@ -174,13 +290,35 @@ export interface RuntimeFault {
   /** Optional human-readable name used in stats. Auto-derived when omitted. */
   name?: string;
   /**
-   * Restrict to pages whose URL matches this matcher. Omitted = applies on
-   * every page. The check happens inside the page (against `location.href`),
-   * so the matcher must be JSON-serializable (string regex or RegExp literal).
+   * URL matcher, evaluated inside the page — so it must be
+   * JSON-serializable (a string regex or a RegExp literal). Omitted =
+   * always applies.
+   *
+   * **What it is matched against depends on the action:**
+   * - fetch-scoped kinds (`flaky-fetch`, `reject-fetch`,
+   *   `never-settle-fetch`, `reject-body`, `resolve-rejected-thenable`)
+   *   match the **request URL** passed to `fetch()`, per call.
+   * - page-scoped kinds (`clock-skew`) match `location.href` once, when
+   *   the init script installs.
    */
   urlPattern?: UrlMatcher;
   /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
   probability?: number;
+  /**
+   * HTTP methods to match (case-insensitive), for fetch-scoped kinds.
+   * Omitted = every method. Needed whenever one URL carries more than one
+   * operation — `GET /api/todos` and `POST /api/todos` are different
+   * operations that a URL pattern alone cannot tell apart.
+   */
+  methods?: string[];
+  /**
+   * Deterministic per-occurrence decisions, evaluated in-page. Occurrence
+   * counts matching calls (e.g. `fetch()` invocations whose URL and method
+   * matched) within one page load — the counter resets on navigation,
+   * because the init script is re-installed in the new frame. Mutually
+   * exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: RuntimeAction;
 }
@@ -191,8 +329,21 @@ export interface RuntimeFaultStats {
   rule: string;
   /** Times the fault was tested (URL matched, probability about to roll). */
   matched: number;
-  /** Times the fault actually fired. */
+  /**
+   * Times the fault actually took effect — the call it answered. A scheduled
+   * fault that decided "inject" while an earlier fault was already answering
+   * the call is counted in `suppressed`, not here: it decided, it did not act,
+   * and a consumer reading `fired` on a `never-settle-fetch` concludes the
+   * page is hanging.
+   */
   fired: number;
+  /**
+   * Times this fault decided "inject" and another fault answered the call
+   * instead. Present only when non-zero. See `FaultInjectionStats.suppressed`
+   * — the network layer's counterpart — for why the decision is consumed even
+   * when it cannot be acted on.
+   */
+  suppressed?: number;
 }
 
 // =====================================================================
@@ -248,6 +399,12 @@ export interface IframeFault {
   selector: string;
   /** 0..1, default 1.0. Rolled per call against an in-page seeded RNG. */
   probability?: number;
+  /**
+   * Deterministic per-occurrence decisions, evaluated in-page. Occurrence
+   * counts iframes matching `selector` whose `src` was assigned during this
+   * page load. Mutually exclusive with `probability`.
+   */
+  schedule?: FaultSchedule;
   /** What to do when the fault fires. */
   action: IframeAction;
 }

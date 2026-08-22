@@ -1,0 +1,34 @@
+{
+  "name": "refresh-failed",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "prefs",
+      "outcome": "status",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "refresh",
+      "outcome": "status",
+      "occurrence": 0
+    },
+    {
+      "order": 2,
+      "rule": "me",
+      "outcome": "status",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "signedOut",
+    "unhandledRejection": false,
+    "state": {
+      "refreshes": 0
+    },
+    "calls": {
+      "refresh": 1
+    }
+  },
+  "modelSteps": 4
+}

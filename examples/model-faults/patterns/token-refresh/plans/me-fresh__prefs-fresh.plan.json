@@ -1,0 +1,28 @@
+{
+  "name": "me-fresh__prefs-fresh",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "me",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "prefs",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "ready",
+    "unhandledRejection": false,
+    "state": {
+      "refreshes": 0
+    },
+    "calls": {
+      "refresh": 0
+    }
+  },
+  "modelSteps": 3
+}

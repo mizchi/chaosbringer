@@ -1,0 +1,9 @@
+{
+  "name": "search-stale-wins",
+  "spec": "redteam/race.qnt (hand-written)",
+  "schedule": [
+    { "order": 0, "rule": "search", "outcome": "slow-ok", "occurrence": 0 },
+    { "order": 1, "rule": "search", "outcome": "pass", "occurrence": 1 }
+  ],
+  "expect": { "ui": "ready", "unhandledRejection": false }
+}

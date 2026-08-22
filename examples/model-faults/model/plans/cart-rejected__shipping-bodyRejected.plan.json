@@ -1,0 +1,22 @@
+{
+  "name": "cart-rejected__shipping-bodyRejected",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "shipping",
+      "outcome": "reject-body",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "cart",
+      "outcome": "reject",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 3
+}

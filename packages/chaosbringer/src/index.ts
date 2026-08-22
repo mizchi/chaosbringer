@@ -18,6 +18,93 @@ export {
   type RuntimeHelperOptions,
 } from "./faults.js";
 export { profiles } from "./profiles.js";
+// Timing values this environment can keep (solved, not guessed).
+// `ProposedTiming` / `TimingSlack` stay internal: they are `checkTiming`'s
+// parameter and row shapes, and committing to them commits to the constraint
+// set's spelling forever. `checkTiming` itself, and `TimingCheck` for its
+// return value, are the useful surface.
+export {
+  checkTiming,
+  formatTimingCheck,
+  ladderSettleMs,
+  solveTiming,
+  DEFAULT_TIMING_PROFILE,
+  type AppLadder,
+  type ResolvedProfile,
+  type TimingCheck,
+  type TimingConstraint,
+  type TimingInfeasible,
+  type TimingProfile,
+  type TimingRequest,
+  type TimingResult,
+  type TimingSolution,
+} from "./timing.js";
+// Model-driven fault coverage (Quint / ITF -> deterministic replay).
+//
+// `parseItfJson` / `parseItfTrace` / `compilePlan` are the pipeline. The ITF
+// decoding primitives (`decodeItfValue`, `unwrapVariant`, `readBool`,
+// `readString`, `finalState`) and the stat-naming conventions (`faultNameFor`,
+// `observationNameFor`) are how that pipeline is written, not an interface:
+// exporting them commits to the ITF decoding shape and the `rule:outcome`
+// string format for no known consumer. `observed.fired` / `observed.matched`
+// already come back keyed, which is what attribution actually needs.
+export {
+  aggregateCoverage,
+  calibrateTiming,
+  compilePlan,
+  compilePlanFaults,
+  failingPlans,
+  fingerprintsOf,
+  findCollapsedPlans,
+  formatModelCoverage,
+  markOrderSensitivePlans,
+  modelRunPassed,
+  parseItfJson,
+  checkUiInvariants,
+  evaluatePlanOracle,
+  parseItfTrace,
+  resolvePlanTiming,
+  runPlan,
+  runPlans,
+  validateCallCountRules,
+  validatePlan,
+  DEFAULT_ACTION_OUTCOMES,
+  DEFAULT_IGNORED_ACTIONS,
+  PLAN_OUTCOMES,
+  type AggregateCoverageOptions,
+  type CalibrateOptions,
+  type CalibrationResult,
+  type CompilePlanOptions,
+  type FaultPlan,
+  type ItfState,
+  type ItfTrace,
+  type ItfValue,
+  type MismatchField,
+  type ModelCoverage,
+  type PlanExpectation,
+  type PlanMismatch,
+  type PlanOracleInput,
+  type PlanOutcome,
+  type PlanRuleTarget,
+  type PlanRunResult,
+  type PlanStep,
+  type ResolvedPlanTiming,
+  type RunPlanOptions,
+  type TargetOutcome,
+  type UiInvariant,
+} from "./model/index.js";
+// `scheduleDecisionAt` + `decideFault` are the useful pair. The codegen
+// internals (`buildDecisionHelperSource`, `serializeSchedule`) are not
+// re-exported here: their contract is written in terms of `__nextRoll()`, a
+// symbol that only exists inside a generated init script, so nobody outside
+// the package can use them correctly. They remain available from
+// `@mizchi/playwright-faults` for callers writing their own init-script layer.
+export {
+  decideFault,
+  scheduleDecisionAt,
+  validateFaultSchedule,
+  type ScheduledFaultLike,
+} from "./schedule.js";
 export {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -358,8 +445,48 @@ export {
   type WriteFailureBundleArgs,
 } from "./failure-artifacts.js";
 
-// Playwright Test integration
-export { chaosTest, withChaos, runChaosTest, chaosExpect, type ChaosFixture, type ChaosFixtures } from "./fixture.js";
+// Playwright Test integration — deliberately NOT re-exported here.
+//
+// `./fixture.js` statically imports `@playwright/test`, which is an *optional*
+// peer dependency. Re-exporting it from the root barrel made that peer
+// effectively required: `import { chaos } from "chaosbringer"` threw
+// `Cannot find package '@playwright/test'` for anyone who had installed
+// `playwright` alone, and the `exports` map left no way around it. Four
+// separate first-time readers lost their first stretch of work to it.
+//
+// The import to use is the one the fixture's own docs have always shown:
+//
+//   import { chaosTest, withChaos } from "chaosbringer/fixture";
+//
+// That subpath is unchanged. If you were importing those four names from the
+// package root, add `/fixture` — it is the only breaking edit here.
+
+// The rejections an app lets escape — the other half of an error-path oracle.
+export {
+  drainRejections,
+  watchUnhandledRejections,
+  type EscapedRejection,
+  type RejectionWatcher,
+} from "./rejections.js";
+
+// "Did my fault actually fire?", in one shape across all four layers.
+export {
+  faultFirings,
+  unfiredFaults,
+  type Firing,
+  type FaultLayer,
+} from "./firings.js";
+
+// The network fault layer, applied to a page you drive yourself. Everything
+// else in the library that injects faults also runs a crawl; this does not.
+export {
+  applyFaultRules,
+  applyFaults,
+  faultStatsOf,
+  pickFaultRule,
+  type CompiledFaultRule,
+  type FaultSession,
+} from "./fault-router.js";
 
 // Types
 export type {
@@ -377,7 +504,9 @@ export type {
   Invariant,
   InvariantContext,
   Fault,
+  FaultDecision,
   FaultRule,
+  FaultSchedule,
   FaultInjectionStats,
   LifecycleAction,
   LifecycleFault,

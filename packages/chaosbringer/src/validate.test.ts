@@ -371,4 +371,122 @@ describe("validateOptions", () => {
       ),
     ).toThrow(/action.kind/);
   });
+
+  it("rejects a fault rule that sets both probability and schedule", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [
+            {
+              name: "both",
+              urlPattern: /\/api\//,
+              fault: { kind: "abort" },
+              probability: 0.5,
+              schedule: { decisions: ["inject"] },
+            },
+          ],
+        })
+      )
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("rejects an empty schedule decision table", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          runtimeFaults: [
+            { name: "empty", action: { kind: "flaky-fetch" }, schedule: { decisions: [] } },
+          ],
+        })
+      )
+    ).toThrow(/empty "schedule.decisions"/);
+  });
+
+  it("accepts a schedule on its own", () => {
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [
+            {
+              name: "sched",
+              urlPattern: /\/api\//,
+              fault: { kind: "abort" },
+              schedule: { decisions: ["inject", "pass"], afterEnd: "repeat" },
+            },
+          ],
+        })
+      )
+    ).not.toThrow();
+  });
+});
+
+describe("config errors that used to pass silently", () => {
+  it("refuses `methods` on a clock-skew fault, which is page-scoped", () => {
+    // Accepted and then ignored: the config reads "skew the clock on POSTs
+    // only" while the skew applies to the whole page.
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        runtimeFaults: [
+          { name: "skew", methods: ["POST"], action: { kind: "clock-skew", skewMs: 60_000 } },
+        ],
+      }),
+    ).toThrow(/page-scoped/);
+  });
+
+  it("still accepts a clock-skew scoped by urlPattern", () => {
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        runtimeFaults: [
+          { urlPattern: /\/checkout/, action: { kind: "clock-skew", skewMs: 60_000 } },
+        ],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("a misspelled option is an error, not silence", () => {
+  const base = { baseUrl: "http://127.0.0.1:1" };
+
+  it("refuses a near miss and names the option meant", () => {
+    // `maxActions` is not an option. TypeScript's excess-property check only
+    // fires on a fresh object literal, so a spread, a helper, or plain JS lets
+    // it through — and it then does nothing. Measured on a page with one
+    // button: 4 chaos actions with the default, 0 with `maxActionsPerPage: 0`,
+    // and 4 with `maxActions: 0`. That presents as "my fault never fired",
+    // which is the hardest thing in this library to debug. This file's own
+    // tests had the typo.
+    expect(() => validateOptions({ ...base, maxActions: 0 } as never)).toThrow(
+      /unknown option "maxActions".*maxActionsPerPage/s,
+    );
+    expect(() => validateOptions({ ...base, faultInjections: [] } as never)).toThrow(
+      /faultInjection/,
+    );
+    expect(() => validateOptions({ ...base, headles: true } as never)).toThrow(/headless/);
+    expect(() => validateOptions({ ...base, invariant: [] } as never)).toThrow(/invariants/);
+  });
+
+  it("suggests the nearest name, not the first one that scores", () => {
+    // `shard` used to suggest `har` — two edits, and earlier in the list than
+    // `shardIndex`. A suggestion that makes no sense is worse than none.
+    expect(() => validateOptions({ ...base, shard: 1 } as never)).toThrow(/shardIndex/);
+  });
+
+  it("leaves a caller's own keys alone", () => {
+    // Refusing every unknown key would trade one silent failure for a loud one
+    // nobody asked for: config objects carry their own fields.
+    for (const key of ["myAppPort", "dbUrl", "fixtureRoot", "__internal"]) {
+      expect(() => validateOptions({ ...base, [key]: 1 } as never)).not.toThrow();
+    }
+  });
+
+  it("accepts the keys chaos() layers on top of CrawlerOptions", () => {
+    // `chaos()` destructures these out before the crawler sees them, but a
+    // caller who hands the same object straight to `ChaosCrawler` must not be
+    // punished for it.
+    for (const key of ["strict", "baseline", "baselineStrict", "setup", "server"]) {
+      expect(() => validateOptions({ ...base, [key]: 1 } as never)).not.toThrow();
+    }
+  });
 });

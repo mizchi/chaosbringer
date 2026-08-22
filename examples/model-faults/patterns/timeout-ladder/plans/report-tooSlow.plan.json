@@ -1,0 +1,16 @@
+{
+  "name": "report-tooSlow",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "report",
+      "outcome": "slow-trip",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 2
+}

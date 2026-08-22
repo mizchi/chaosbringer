@@ -16,6 +16,21 @@ export interface CrawlerOptions {
   maxActionsPerPage?: number;
   /** Page load timeout in ms */
   timeout?: number;
+  /**
+   * Extra options forwarded to `chromium.launch()`. `headless` here loses to
+   * the top-level `headless` option, which is the one the CLI sets.
+   *
+   * The case this exists for is Chromium's Private Network Access classifier:
+   * a page served from a non-loopback origin cannot load a `127.0.0.1`
+   * sub-resource, and switching origins does not help once the response is
+   * intercepted, because Chromium does not classify an intercepted response
+   * as loopback. `{ args: ["--disable-web-security"] }` is the workaround —
+   * test-only, never ship it. The README documented this before the option
+   * existed, so anyone who followed it was passing a field nothing read.
+   */
+  launchOptions?: Omit<Parameters<typeof import("playwright").chromium.launch>[0], "headless"> & {
+    headless?: boolean;
+  };
   /** Run browser in headless mode */
   headless?: boolean;
   /** Take screenshots of visited pages */
@@ -32,6 +47,13 @@ export interface CrawlerOptions {
    * and `invariant-violation`. There is no separate
    * `ignoreNetworkErrorPatterns`; use this single allowlist for both
    * console noise and network noise.
+   *
+   * A `network` error's message is `"<request url> - <errorText>"`, so a
+   * pattern can name either half: `"analytics"` silences a third-party
+   * beacon, `"net::ERR_FAILED"` silences a class of failure wherever it
+   * happens. (This path used to test the URL alone, which meant the second
+   * form silenced the console copy of an aborted request and left the network
+   * copy standing.)
    */
   ignoreErrorPatterns?: string[];
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */
@@ -268,8 +290,10 @@ export type { ErrorCluster };
 // (and to satisfy CrawlerOptions / CrawlReport references in this file).
 import type {
   Fault,
+  FaultDecision,
   FaultInjectionStats,
   FaultRule,
+  FaultSchedule,
   IframeAction,
   IframeFault,
   IframeFaultStats,
@@ -286,8 +310,10 @@ import type {
 
 export type {
   Fault,
+  FaultDecision,
   FaultInjectionStats,
   FaultRule,
+  FaultSchedule,
   IframeAction,
   IframeFault,
   IframeFaultStats,
@@ -646,6 +672,16 @@ export interface CrawlReport {
   /** Per-rule fault injection stats (present only when rules were configured). */
   faultInjections?: FaultInjectionStats[];
   /**
+   * Requests parked by a `hang` fault — the ones with no `releaseAfterMs`.
+   * The crawler aborts them when it tears down a page it owns, and before
+   * `testPage()` hands a page it does *not* own back to the caller;
+   * `ChaosCrawler.release()` does it on demand for a caller driving the page
+   * itself. Present only when at least one request was held — a non-zero
+   * count means the app was left waiting on a promise that never settled
+   * during the run, which is usually the point.
+   */
+  heldRequests?: number;
+  /**
    * Per-fault lifecycle fault stats (present only when `lifecycleFaults` was
    * configured). One row per `LifecycleFault`, regardless of how many pages
    * matched.
@@ -669,6 +705,13 @@ export interface CrawlReport {
    * new coverage, and the top-N action targets by historical novelty.
    */
   coverage?: CoverageReport;
+  /**
+   * Stable digest of every function fingerprint the run executed (present
+   * only when `coverageFeedback` was enabled). Two runs sharing a digest ran
+   * the same code — which is how the model pipeline detects plans that the
+   * model calls distinct states but that exercise identical code.
+   */
+  coverageFingerprint?: string;
   /**
    * Action-advisor activity (present only when `advisor` was configured).
    * Reports the provider, attempt + success counts, and one row per pick

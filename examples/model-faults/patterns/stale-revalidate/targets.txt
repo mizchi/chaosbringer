@@ -1,0 +1,6 @@
+reachable    revalidate-fulfil
+reachable    revalidate-reject
+reachable    revalidate-serverError
+unreachable-live            contract-forbids-silent-stale
+unreachable-live            contract-forbids-unlabelled-stale
+unreachable-live            contract-forbids-unhandled

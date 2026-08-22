@@ -22,7 +22,13 @@
  * crawler reads it after each page visit.
  */
 
+import {
+  buildDecisionHelperSource,
+  serializeSchedule,
+  validateFaultSchedule,
+} from "./schedule.js";
 import type { Rng, RuntimeFault, RuntimeFaultStats, UrlMatcher } from "./types.js";
+import { compileUrlMatcher, stripStatefulFlags } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
 export interface CompiledRuntimeFault {
@@ -32,6 +38,8 @@ export interface CompiledRuntimeFault {
   name: string;
   matched: number;
   fired: number;
+  /** Decided "inject" while an earlier fault was already answering the call. */
+  suppressed: number;
 }
 
 /** Auto-derive a stats label when the user didn't set `fault.name`. */
@@ -41,6 +49,14 @@ export function runtimeFaultName(fault: RuntimeFault): string {
   switch (a.kind) {
     case "flaky-fetch":
       return "flaky-fetch";
+    case "reject-fetch":
+      return `reject-fetch:${a.rejectAs ?? "TypeError"}`;
+    case "never-settle-fetch":
+      return "never-settle-fetch";
+    case "reject-body":
+      return `reject-body:${(a.consumers ?? ["json"]).join("+")}`;
+    case "resolve-rejected-thenable":
+      return "resolve-rejected-thenable";
     case "clock-skew":
       return `clock-skew:${a.skewMs}ms`;
   }
@@ -48,20 +64,24 @@ export function runtimeFaultName(fault: RuntimeFault): string {
 
 function compilePattern(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return null;
-  return matcher instanceof RegExp ? matcher : new RegExp(matcher);
+  return compileUrlMatcher(matcher);
 }
 
 export function compileRuntimeFaults(
   faults: RuntimeFault[] | undefined,
 ): CompiledRuntimeFault[] {
   if (!faults || faults.length === 0) return [];
-  return faults.map((fault) => ({
-    fault,
-    pattern: compilePattern(fault.urlPattern),
-    name: runtimeFaultName(fault),
-    matched: 0,
-    fired: 0,
-  }));
+  return faults.map((fault) => {
+    validateFaultSchedule(`runtimeFault "${runtimeFaultName(fault)}"`, fault);
+    return {
+      fault,
+      pattern: compilePattern(fault.urlPattern),
+      name: runtimeFaultName(fault),
+      matched: 0,
+      fired: 0,
+      suppressed: 0,
+    };
+  });
 }
 
 /** True when `compiled.pattern` matches `url` (or no pattern was set). */
@@ -90,7 +110,11 @@ export function shouldFireProbability(probability: number | undefined, rng: Rng)
  */
 function serializeMatcher(m: UrlMatcher | undefined): { source: string; flags: string } | null {
   if (m === undefined) return null;
-  if (m instanceof RegExp) return { source: m.source, flags: m.flags };
+  // Stateful flags are stripped on the way into the page for the same reason
+  // they are stripped on the way into `compilePattern`: the in-page script
+  // rebuilds one RegExp and tests it against every `fetch()` the page makes,
+  // so a `lastIndex` would carry across calls.
+  if (m instanceof RegExp) return { source: m.source, flags: stripStatefulFlags(m.flags) };
   return { source: m, flags: "" };
 }
 
@@ -110,11 +134,38 @@ export function buildRuntimeFaultsScript(
   // Stats keys are indices, not names — two faults can legitimately share
   // a name (`flaky-fetch` x2 with different urlPatterns) and we mustn't
   // collapse their counters.
+  // A compiled fault is not a `RuntimeFault`, and the mistake is easy to make
+  // and horrible to debug: `buildRuntimeFaultsScript(compileRuntimeFaults(r))`
+  // is the natural guess, and it produces a script that throws
+  // `Cannot read properties of undefined (reading 'kind')` *inside the page*
+  // and injects nothing. Silent, unless the caller also checked that the fault
+  // fired. Two readers hit it; one of them was me.
+  for (const [i, f] of faults.entries()) {
+    if (!f || typeof f !== "object" || "action" in f) continue;
+    const asRecord = f as Record<string, unknown>;
+    // A *compiled* fault also carries `fault`, so tell the two apart by the
+    // fields only the compiled form has — otherwise the error names the wrong
+    // mistake, which is its own small waste of somebody's afternoon.
+    const compiled = "pattern" in asRecord || "matched" in asRecord;
+    throw new Error(
+      compiled
+        ? `chaosbringer: buildRuntimeFaultsScript received the output of ` +
+          `\`compileRuntimeFaults\` at index ${i} — pass the original RuntimeFault objects. ` +
+          `The compiled form wraps each one as \`{ fault, pattern, name, ... }\`, and the ` +
+          `generated script reads \`action\` off the top level, so it would have thrown ` +
+          `inside the page and injected nothing`
+        : `chaosbringer: buildRuntimeFaultsScript received a network FaultRule at index ${i} ` +
+          `(it has \`fault\`, not \`action\`) — runtime faults go in \`runtimeFaults\`, network ` +
+          `rules in \`faultInjection\``,
+    );
+  }
   const serialized = faults.map((f, i) => ({
     id: i,
     name: runtimeFaultName(f),
     pattern: serializeMatcher(f.urlPattern),
+    methods: f.methods && f.methods.length > 0 ? f.methods.map((m) => m.toUpperCase()) : null,
     probability: typeof f.probability === "number" ? f.probability : 1,
+    schedule: serializeSchedule(f.schedule),
     action: f.action,
   }));
 
@@ -136,7 +187,7 @@ export function buildRuntimeFaultsScript(
 
   const faults = ${JSON.stringify(serialized)};
   const stats = window.__chaosbringerRuntimeStats;
-  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
+  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0, suppressed: 0 };
 
   const matchUrl = (pattern, url) => {
     if (!pattern) return true;
@@ -147,33 +198,150 @@ export function buildRuntimeFaultsScript(
     }
   };
 
+  ${buildDecisionHelperSource()}
+
+  // Occurrence = how many times this fault has matched so far in this frame.
+  // Deciding and firing are two separate counts on purpose: a scheduled fault
+  // whose decision is "inject" still advances its occurrence, but only one
+  // fault can actually act on a given call. Counting \`fired\` here would
+  // credit the runners-up with work they did not do — the network layer
+  // increments \`injected\` only for the winner, and these two report the same
+  // feature.
   const roll = (f) => {
     const slot = stats[String(f.id)];
+    const occurrence = slot.matched;
     slot.matched++;
-    if (f.probability >= 1) {
-      slot.fired++;
-      return true;
-    }
-    if (f.probability <= 0) return false;
-    const fired = __nextRoll() < f.probability;
-    if (fired) slot.fired++;
-    return fired;
+    return __decide(f, occurrence);
+  };
+  const fire = (f) => {
+    stats[String(f.id)].fired++;
+  };
+  // Decided "inject", lost the call to an earlier fault. Recorded rather than
+  // dropped: with only \`matched\` and \`fired\`, a scheduled fault that decided
+  // to act and could not is indistinguishable from one whose schedule said
+  // pass.
+  const suppress = (f) => {
+    stats[String(f.id)].suppressed++;
   };
 
-  // --- flaky-fetch ---
-  const fetchFaults = faults.filter((f) => f.action.kind === "flaky-fetch");
+  // --- fetch-scoped faults (Promise-level failure modes) ---
+  const FETCH_KINDS = [
+    "flaky-fetch",
+    "reject-fetch",
+    "never-settle-fetch",
+    "reject-body",
+    "resolve-rejected-thenable",
+  ];
+  const fetchFaults = faults.filter((f) => FETCH_KINDS.indexOf(f.action.kind) !== -1);
   if (fetchFaults.length > 0 && typeof window.fetch === "function") {
     const realFetch = window.fetch.bind(window);
+    const makeError = (rejectAs, msg) => {
+      if (rejectAs === "AbortError" && typeof DOMException === "function") {
+        return new DOMException(msg, "AbortError");
+      }
+      return new TypeError(msg);
+    };
+    const methodOf = (input, init) => {
+      if (init && typeof init.method === "string") return init.method.toUpperCase();
+      if (input && typeof input === "object" && typeof input.method === "string") {
+        return input.method.toUpperCase();
+      }
+      return "GET";
+    };
+    const matchMethod = (f, method) => !f.methods || f.methods.indexOf(method) !== -1;
     window.fetch = function chaosFetch(input, init) {
       const url =
         typeof input === "string" ? input :
         input instanceof URL ? input.toString() :
         (input && typeof input.url === "string") ? input.url :
         "";
+      const method = methodOf(input, init);
+      // Two passes. A *scheduled* fault always advances its occurrence
+      // counter when its pattern matches, even if an earlier fault already
+      // claimed this call — otherwise two faults watching the same URL
+      // would number occurrences differently and a plan could not give
+      // occurrence 0 to one outcome and occurrence 1 to another. Faults on
+      // the probability path stay lazy (not consulted once a winner exists),
+      // so existing seeds draw exactly as many numbers as before.
+      let chosen = null;
       for (const f of fetchFaults) {
-        if (matchUrl(f.pattern, url) && roll(f)) {
-          const msg = f.action.rejectionMessage || "chaosbringer: simulated fetch failure";
+        if (!matchUrl(f.pattern, url)) continue;
+        if (!matchMethod(f, method)) continue;
+        if (f.schedule) {
+          const decided = roll(f);
+          if (decided) {
+            if (chosen) suppress(f);
+            else chosen = f;
+          }
+        } else if (!chosen) {
+          if (roll(f)) chosen = f;
+        }
+      }
+      if (chosen) {
+        const f = chosen;
+        fire(f);
+        const a = f.action;
+        const msg = a.rejectionMessage || "chaosbringer: simulated fetch failure";
+        if (a.kind === "flaky-fetch") {
           return Promise.reject(new TypeError(msg));
+        }
+        if (a.kind === "reject-fetch") {
+          return Promise.reject(makeError(a.rejectAs, msg));
+        }
+        if (a.kind === "never-settle-fetch") {
+          // No request, no settlement — the caller waits forever *unless it
+          // cancels*, which is what a real hung request does: an
+          // AbortController (or AbortSignal.timeout) still rejects it. Without
+          // honouring the signal this fault would report a correctly-bounded
+          // app as stuck.
+          const signal = (init && init.signal) || (input && input.signal) || null;
+          if (!signal) return new Promise(() => {});
+          const abortError = () =>
+            signal.reason ||
+            (typeof DOMException === "function"
+              ? new DOMException("The operation was aborted.", "AbortError")
+              : new Error("The operation was aborted."));
+          return new Promise((_resolve, reject) => {
+            if (signal.aborted) {
+              reject(abortError());
+              return;
+            }
+            signal.addEventListener("abort", () => { reject(abortError()); }, { once: true });
+          });
+        }
+        if (a.kind === "resolve-rejected-thenable") {
+          // Resolving *with a thenable* means the rejection arrives one
+          // microtask later, through the assimilation path.
+          //
+          // \`TypeError\` directly, not \`makeError(a.rejectAs, …)\`: this action
+          // has no \`rejectAs\` field (see \`RuntimeAction\` in types.ts), so the
+          // read was always \`undefined\` and the helper always returned a
+          // TypeError anyway. The emitted script is a template string, so TS
+          // never saw the mistake — worth remembering when reading the rest
+          // of this function.
+          return Promise.resolve({
+            then: (_resolve, reject) => { reject(new TypeError(msg)); },
+          });
+        }
+        if (a.kind === "reject-body") {
+          const consumers = a.consumers && a.consumers.length > 0 ? a.consumers : ["json"];
+          return realFetch(input, init).then((res) => {
+            // Own properties shadow Response.prototype, so "instanceof
+            // Response", res.ok, headers and status all stay real — only
+            // the body consumers reject.
+            for (const name of consumers) {
+              try {
+                Object.defineProperty(res, name, {
+                  configurable: true,
+                  writable: true,
+                  value: () => Promise.reject(new TypeError(msg)),
+                });
+              } catch (e) {
+                // Frozen response (shouldn't happen) — leave it alone.
+              }
+            }
+            return res;
+          });
         }
       }
       return realFetch(input, init);
@@ -188,6 +356,7 @@ export function buildRuntimeFaultsScript(
     let totalSkew = 0;
     for (const f of skewFaults) {
       if (matchUrl(f.pattern, location.href) && roll(f)) {
+        fire(f);
         totalSkew += Number(f.action.skewMs);
       }
     }
@@ -228,7 +397,10 @@ export function buildRuntimeFaultsScript(
  */
 export function mergeRuntimeStats(
   compiled: CompiledRuntimeFault[],
-  pageStats: Record<string, { matched: number; fired: number }>,
+  // `suppressed` is optional on the way in: a page that installed an older
+  // script reports only `matched` and `fired`, and reading it as 0 there is
+  // right — that script could not distinguish the case.
+  pageStats: Record<string, { matched: number; fired: number; suppressed?: number }>,
 ): RuntimeFaultStats[] {
   for (let i = 0; i < compiled.length; i++) {
     const c = compiled[i]!;
@@ -237,6 +409,7 @@ export function mergeRuntimeStats(
     if (ps) {
       c.matched += ps.matched;
       c.fired += ps.fired;
+      c.suppressed += ps.suppressed ?? 0;
       continue;
     }
     // Backwards-compat: name-keyed (one slot per distinct name only;
@@ -245,11 +418,13 @@ export function mergeRuntimeStats(
     if (byName && !compiled.slice(0, i).some((c2) => c2.name === c.name)) {
       c.matched += byName.matched;
       c.fired += byName.fired;
+      c.suppressed += byName.suppressed ?? 0;
     }
   }
   return compiled.map((c) => ({
     rule: c.name,
     matched: c.matched,
     fired: c.fired,
+    ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
   }));
 }

@@ -1,0 +1,28 @@
+{
+  "name": "revalidate-fulfil",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "profile",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "profile",
+      "outcome": "pass",
+      "occurrence": 1
+    }
+  ],
+  "expect": {
+    "ui": "fresh",
+    "unhandledRejection": false,
+    "state": {
+      "shown": 2
+    },
+    "calls": {
+      "profile": 2
+    }
+  },
+  "modelSteps": 3
+}

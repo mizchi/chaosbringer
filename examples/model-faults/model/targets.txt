@@ -1,0 +1,18 @@
+reachable    cart-fulfilled__shipping-fulfilled  opState.get("cart") == "fulfilled" and opState.get("shipping") == "fulfilled"  (witness: 3 steps)
+reachable    cart-fulfilled__shipping-rejected  opState.get("cart") == "fulfilled" and opState.get("shipping") == "rejected"  (witness: 3 steps)
+reachable    cart-fulfilled__shipping-bodyRejected  opState.get("cart") == "fulfilled" and opState.get("shipping") == "bodyRejected"  (witness: 3 steps)
+reachable    cart-fulfilled__shipping-hung  opState.get("cart") == "fulfilled" and opState.get("shipping") == "hung"  (witness: 3 steps)
+reachable    cart-rejected__shipping-fulfilled  opState.get("cart") == "rejected" and opState.get("shipping") == "fulfilled"  (witness: 3 steps)
+reachable    cart-rejected__shipping-rejected  opState.get("cart") == "rejected" and opState.get("shipping") == "rejected"  (witness: 3 steps)
+reachable    cart-rejected__shipping-bodyRejected  opState.get("cart") == "rejected" and opState.get("shipping") == "bodyRejected"  (witness: 3 steps)
+reachable    cart-rejected__shipping-hung  opState.get("cart") == "rejected" and opState.get("shipping") == "hung"  (witness: 3 steps)
+reachable    cart-bodyRejected__shipping-fulfilled  opState.get("cart") == "bodyRejected" and opState.get("shipping") == "fulfilled"  (witness: 3 steps)
+reachable    cart-bodyRejected__shipping-rejected  opState.get("cart") == "bodyRejected" and opState.get("shipping") == "rejected"  (witness: 3 steps)
+reachable    cart-bodyRejected__shipping-bodyRejected  opState.get("cart") == "bodyRejected" and opState.get("shipping") == "bodyRejected"  (witness: 3 steps)
+reachable    cart-bodyRejected__shipping-hung  opState.get("cart") == "bodyRejected" and opState.get("shipping") == "hung"  (witness: 3 steps)
+reachable    cart-hung__shipping-fulfilled  opState.get("cart") == "hung" and opState.get("shipping") == "fulfilled"  (witness: 3 steps)
+reachable    cart-hung__shipping-rejected  opState.get("cart") == "hung" and opState.get("shipping") == "rejected"  (witness: 3 steps)
+reachable    cart-hung__shipping-bodyRejected  opState.get("cart") == "hung" and opState.get("shipping") == "bodyRejected"  (witness: 3 steps)
+reachable    cart-hung__shipping-hung  opState.get("cart") == "hung" and opState.get("shipping") == "hung"  (witness: 3 steps)
+unreachable-live            contract-forbids-stuck  ui == "stuck"
+unreachable-live            contract-forbids-unhandled  unhandled

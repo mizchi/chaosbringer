@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Checkout</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+      .banner { padding: .75rem 1rem; border-radius: .4rem; margin: 1rem 0; }
+      [data-state="loading"] .banner { background: #eef2ff; }
+      [data-state="error"] .banner { background: #fee2e2; }
+      [data-state="ready"] .banner { background: #ecfdf5; }
+      button { padding: .5rem 1rem; font-size: 1rem; }
+      dl { display: grid; grid-template-columns: 8rem 1fr; gap: .25rem 1rem; }
+      dt { color: #555; }
+    </style>
+  </head>
+  <body>
+    <main id="app" data-state="idle">
+      <h1>Checkout</h1>
+      <button id="load">Load order</button>
+      <p class="banner" id="banner">Nothing loaded yet.</p>
+      <dl id="summary"></dl>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

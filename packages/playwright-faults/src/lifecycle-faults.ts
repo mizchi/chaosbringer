@@ -14,6 +14,7 @@
  */
 
 import type { BrowserContext, CDPSession, Page } from "playwright";
+import { validateFaultSchedule } from "./schedule.js";
 import type {
   LifecycleAction,
   LifecycleFault,
@@ -21,6 +22,7 @@ import type {
   LifecycleStage,
   UrlMatcher,
 } from "./types.js";
+import { compileUrlMatcher } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
 export interface CompiledLifecycleFault {
@@ -53,21 +55,24 @@ export function lifecycleFaultName(fault: LifecycleFault): string {
 
 function compilePattern(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return null;
-  return matcher instanceof RegExp ? matcher : new RegExp(matcher);
+  return compileUrlMatcher(matcher);
 }
 
 export function compileLifecycleFaults(
   faults: LifecycleFault[] | undefined,
 ): CompiledLifecycleFault[] {
   if (!faults || faults.length === 0) return [];
-  return faults.map((fault) => ({
-    fault,
-    pattern: compilePattern(fault.urlPattern),
-    name: lifecycleFaultName(fault),
-    matched: 0,
-    fired: 0,
-    errored: 0,
-  }));
+  return faults.map((fault) => {
+    validateFaultSchedule(`lifecycleFault "${lifecycleFaultName(fault)}"`, fault);
+    return {
+      fault,
+      pattern: compilePattern(fault.urlPattern),
+      name: lifecycleFaultName(fault),
+      matched: 0,
+      fired: 0,
+      errored: 0,
+    };
+  });
 }
 
 /** True when `compiled.pattern` matches `url` (or no pattern was set). */
@@ -82,6 +87,13 @@ export function lifecycleMatchesUrl(
  * Roll the seeded RNG against `probability`. Returns true when the fault
  * should fire. `prob >= 1` (or undefined) always fires; `prob <= 0` never
  * fires; anything in between samples one number from `rng`.
+ *
+ * Ignores `schedule` entirely, which is why nothing in either package calls
+ * it any more: every layer needs the occurrence-indexed decision and uses
+ * `decideFault` from `./schedule.js`. It stays exported because it is the
+ * probability half on its own, which is what a consumer building a fifth
+ * layer with no schedule support wants — and because removing a public export
+ * to tidy up is a breaking change for a saving of nine lines.
  *
  * RNG consumption is deliberately conditional on `prob < 1` so that adding
  * a probability-1 fault to a config doesn't shift the seed sequence for

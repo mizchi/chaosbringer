@@ -1,0 +1,22 @@
+{
+  "name": "write-hung__no-refresh",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "list",
+      "outcome": "pass",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "post",
+      "outcome": "hang",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false
+  },
+  "modelSteps": 3
+}

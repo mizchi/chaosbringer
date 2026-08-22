@@ -1,0 +1,8 @@
+reachable    connect-on-1
+reachable    connect-on-2
+reachable    connect-on-3
+reachable    budget-exhausted
+unreachable-live            contract-forbids-runaway
+unreachable-live            contract-forbids-endless-spinner
+unreachable-live            contract-forbids-unhandled
+unreachable-live            contract-forbids-phantom-live

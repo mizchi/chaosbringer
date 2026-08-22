@@ -6,6 +6,7 @@
  * shared abstraction here would over-couple two evolving callers.
  */
 import type { BrowserContext, Route, Request } from "playwright";
+import { decideFault, validateFaultSchedule } from "../schedule.js";
 import type { Fault, FaultRule, FaultInjectionStats, UrlMatcher } from "../types.js";
 
 interface CompiledRule {
@@ -22,6 +23,13 @@ interface CompiledRule {
    */
   firings: number[];
 }
+
+/**
+ * Upper bound for a `hang` fault with no explicit `releaseAfterMs` in a load
+ * run. Long enough that the app has clearly missed any sane timeout, short
+ * enough that a worker isn't wedged for the rest of the run.
+ */
+const LOAD_HANG_RELEASE_MS = 30_000;
 
 function toRegExp(matcher: UrlMatcher | undefined): RegExp | null {
   if (matcher === undefined) return /.*/;
@@ -43,6 +51,12 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
     // FaultRule has `urlPattern` + `fault`; bare Fault would be a programmer
     // error here, so just skip with a 0-row entry rather than crash.
     if (!("fault" in r)) continue;
+    // The other four layers validate here, and this one did not: a rule
+    // setting both `probability` and `schedule` threw everywhere except on
+    // the load path, where the schedule silently won, and a malformed
+    // `decisions` entry silently never fired. A firing policy that is wrong
+    // in a way nothing reports is the worst kind of fault config.
+    validateFaultSchedule(`load fault rule "${r.name ?? String(r.urlPattern)}"`, r);
     const pattern = toRegExp(r.urlPattern);
     if (!pattern) continue;
     out.push({
@@ -76,13 +90,35 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
       await new Promise((r) => setTimeout(r, fault.ms));
       await route.fallback();
       return;
+    case "hang": {
+      // Load runs have no per-page teardown hook to drain parked routes, so
+      // a hang always gets a bound here: `releaseAfterMs` when given, else
+      // LOAD_HANG_RELEASE_MS. Until then the request stays in flight, which
+      // is the fault.
+      const ms = fault.releaseAfterMs ?? LOAD_HANG_RELEASE_MS;
+      // `unref`: the default bound is 30s, and without this a load run with
+      // an unbounded `hang` holds the process open for 30s after its report
+      // is printed.
+      const timer = setTimeout(() => {
+        void route.abort("timedout").catch(() => {
+          /* context already gone */
+        });
+      }, ms);
+      timer.unref?.();
+      return;
+    }
   }
 }
 
 /**
- * Install a single `**` route on the context that runs the compiled
- * fault rules. Rolls probability for each match. Stats are mutated on
- * the compiled rule objects — drain via `faultStatsFrom` at run end.
+ * Install a single `**` route on the context that runs the compiled fault
+ * rules. A rule with a `schedule` is decided by occurrence; otherwise the
+ * probability is rolled per match. Stats are mutated on the compiled rule
+ * objects — drain via `faultStatsFrom` at run end.
+ *
+ * Single pass, first claim wins: unlike the network and runtime layers, a
+ * later rule is not consulted once one has answered, so occurrence numbering
+ * here is per-rule rather than shared.
  */
 export async function installFaultRoutes(
   context: BrowserContext,
@@ -95,9 +131,12 @@ export async function installFaultRoutes(
     for (const c of compiled) {
       if (!c.pattern.test(url)) continue;
       if (c.methods && !c.methods.includes(method)) continue;
+      const occurrence = c.matched;
       c.matched += 1;
-      const probability = c.rule.probability ?? 1;
-      if (Math.random() >= probability) continue;
+      // Load runs are unseeded by design (workers run concurrently), so the
+      // probability path draws from Math.random; a `schedule` ignores the RNG
+      // entirely and reads its decision table by occurrence.
+      if (decideFault(c.rule, occurrence, { next: Math.random }) === "pass") continue;
       c.injected += 1;
       c.firings.push(Date.now());
       await applyFault(route, c.rule.fault);

@@ -224,6 +224,32 @@ describe("mergeRuntimeStats", () => {
     expect(compiled[0]!.fired).toBe(3);
   });
 
+  it("accumulates `suppressed`, and omits it from the report when it is zero", () => {
+    const compiled = compileRuntimeFaults([
+      { name: "loser", action: { kind: "never-settle-fetch" } },
+      { name: "clean", action: { kind: "flaky-fetch" } },
+    ]);
+    const out = mergeRuntimeStats(compiled, {
+      "0": { matched: 4, fired: 1, suppressed: 3 },
+      "1": { matched: 2, fired: 2 },
+    });
+    expect(out).toEqual([
+      { rule: "loser", matched: 4, fired: 1, suppressed: 3 },
+      // Absent, not zero: the field exists to say something happened, and a
+      // `suppressed: 0` on every row is noise a reader learns to skip.
+      { rule: "clean", matched: 2, fired: 2 },
+    ]);
+  });
+
+  it("reads a page that reported no `suppressed` as zero, not as undefined", () => {
+    // An older init script in a cached frame reports only matched/fired. It
+    // could not tell the case apart, so 0 is the honest reading.
+    const compiled = compileRuntimeFaults([{ name: "f1", action: { kind: "flaky-fetch" } }]);
+    const out = mergeRuntimeStats(compiled, { "0": { matched: 2, fired: 1 } });
+    expect(out).toEqual([{ rule: "f1", matched: 2, fired: 1 }]);
+    expect(compiled[0]!.suppressed).toBe(0);
+  });
+
   it("does not collapse counters when two faults share a name", () => {
     // Both default to name="flaky-fetch"; index keys keep them apart.
     const compiled = compileRuntimeFaults([
@@ -280,3 +306,97 @@ describe("faults.flakyFetch / faults.clockSkew round-trip via compile", () => {
     expect(compiled[1]!.name).toBe("clock-skew:30000ms");
   });
 });
+
+describe("Promise-level fetch faults", () => {
+  it("names every new kind distinctly", () => {
+    expect(runtimeFaultName({ action: { kind: "reject-fetch" } })).toBe("reject-fetch:TypeError");
+    expect(
+      runtimeFaultName({ action: { kind: "reject-fetch", rejectAs: "AbortError" } }),
+    ).toBe("reject-fetch:AbortError");
+    expect(runtimeFaultName({ action: { kind: "never-settle-fetch" } })).toBe(
+      "never-settle-fetch",
+    );
+    expect(runtimeFaultName({ action: { kind: "reject-body" } })).toBe("reject-body:json");
+    expect(
+      runtimeFaultName({ action: { kind: "reject-body", consumers: ["json", "text"] } }),
+    ).toBe("reject-body:json+text");
+    expect(runtimeFaultName({ action: { kind: "resolve-rejected-thenable" } })).toBe(
+      "resolve-rejected-thenable",
+    );
+  });
+
+  it("never-settle-fetch honours an abort signal so bounded apps aren't false-flagged", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "never-settle-fetch" } }], 1);
+    expect(script).toContain("init.signal");
+    expect(script).toContain('signal.addEventListener("abort"');
+    expect(script).toContain("signal.reason");
+    // Still hangs forever when the caller has no way to cancel.
+    expect(script).toContain("if (!signal) return new Promise(() => {});");
+  });
+
+  it("emits one patched fetch that dispatches on every fetch-scoped kind", () => {
+    const script = buildRuntimeFaultsScript(
+      [
+        { action: { kind: "reject-fetch", rejectAs: "AbortError" }, urlPattern: /\/a$/ },
+        { action: { kind: "never-settle-fetch" }, urlPattern: /\/b$/ },
+        { action: { kind: "reject-body", consumers: ["json"] }, urlPattern: /\/c$/ },
+        { action: { kind: "resolve-rejected-thenable" }, urlPattern: /\/d$/ },
+      ],
+      7,
+    );
+    // Exactly one fetch patch, dispatching internally — not four.
+    expect(script.match(/window\.fetch = function chaosFetch/g)).toHaveLength(1);
+    expect(script).toContain('AbortError');
+    expect(script).toContain("new Promise(() => {})");
+    expect(script).toContain("Object.defineProperty(res, name");
+    expect(script).toContain("then: (_resolve, reject)");
+  });
+
+  it("guards the fetch patch so a clock-skew-only config installs nothing", () => {
+    // The patch source is always emitted; installing it is guarded at run
+    // time on there being at least one fetch-scoped fault.
+    const script = buildRuntimeFaultsScript([{ action: { kind: "clock-skew", skewMs: 1000 } }], 1);
+    expect(script).toContain(
+      'if (fetchFaults.length > 0 && typeof window.fetch === "function")',
+    );
+    expect(script).toContain('"clock-skew"');
+    // …and the serialized fault list carries no fetch-scoped kind at all.
+    const serialized = script.slice(script.indexOf("const faults = ["));
+    expect(serialized.slice(0, serialized.indexOf("];"))).not.toContain("fetch");
+  });
+
+  it("keeps flaky-fetch working as the TypeError alias", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "flaky-fetch" } }], 1);
+    expect(script).toContain("chaosFetch");
+    expect(script).toContain("new TypeError(msg)");
+  });
+});
+
+describe("method filtering", () => {
+  it("serializes an upper-cased method list and matches on it in-page", () => {
+    const script = buildRuntimeFaultsScript(
+      [
+        {
+          name: "post-only",
+          urlPattern: /\/api\/todos$/,
+          methods: ["post"],
+          action: { kind: "reject-fetch" },
+        },
+      ],
+      1,
+    );
+    expect(script).toContain('"methods":["POST"]');
+    expect(script).toContain("const matchMethod =");
+    expect(script).toContain("if (!matchMethod(f, method)) continue;");
+    // The method is read from init, then from a Request-like input, then GET.
+    expect(script).toContain("init.method");
+    expect(script).toContain('return "GET";');
+  });
+
+  it("omits the filter when no methods are given, so every method matches", () => {
+    const script = buildRuntimeFaultsScript([{ action: { kind: "reject-fetch" } }], 1);
+    expect(script).toContain('"methods":null');
+  });
+});
+
+

@@ -1,0 +1,25 @@
+{
+  "name": "first-rejectBefore__then-rejectAfter",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "order",
+      "outcome": "reject",
+      "occurrence": 0
+    },
+    {
+      "order": 1,
+      "rule": "order",
+      "outcome": "reject-body",
+      "occurrence": 1
+    }
+  ],
+  "expect": {
+    "ui": "error",
+    "unhandledRejection": false,
+    "state": {
+      "orders": 1
+    }
+  },
+  "modelSteps": 3
+}

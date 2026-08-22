@@ -128,10 +128,24 @@ function buildApp(env: Env): Hono<{ Bindings: Env }> {
         list.innerHTML = "<li>error: " + err.message + "</li>";
       }
     }
+    // The write path is guarded the same way the read path is: a rejection,
+    // a non-2xx response, and a response that never arrives all have to reach
+    // the user. Leaving the old list on screen would tell them their todo was
+    // saved when it wasn't. (These three cases are enumerated in model/ —
+    // see the README.)
     document.getElementById("add").addEventListener("click", async () => {
-      await fetch("/api/todos", { method: "POST", headers: {"content-type":"application/json"},
-        body: JSON.stringify({ title: "todo-" + Date.now() }) });
-      refresh();
+      try {
+        const r = await fetch("/api/todos", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: "todo-" + Date.now() }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!r.ok) throw new Error("save failed: " + r.status);
+        await refresh();
+      } catch (err) {
+        list.innerHTML = "<li>error: " + err.message + "</li>";
+      }
     });
     refresh();
   </script>

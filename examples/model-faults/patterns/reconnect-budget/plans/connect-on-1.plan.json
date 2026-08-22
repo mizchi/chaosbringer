@@ -1,0 +1,19 @@
+{
+  "name": "connect-on-1",
+  "schedule": [
+    {
+      "order": 0,
+      "rule": "stream",
+      "outcome": "pass",
+      "occurrence": 0
+    }
+  ],
+  "expect": {
+    "ui": "live",
+    "unhandledRejection": false,
+    "calls": {
+      "stream": 1
+    }
+  },
+  "modelSteps": 2
+}

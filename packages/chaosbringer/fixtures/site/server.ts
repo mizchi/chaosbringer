@@ -138,6 +138,72 @@ const pages: Record<string, Route> = {
     }),
   },
 
+  // Retry-on-failure consumer: the first attempt is allowed to fail and the
+  // page tries once more. Exercises occurrence-indexed fault schedules
+  // (`{ decisions: ["inject", "pass"] }` must end in "ok after retry", while
+  // a probability-1 rule leaves it in "error").
+  "/api-retry": {
+    body: html({
+      title: "API Retry",
+      nav: true,
+      body: `
+        <h1>API Retry</h1>
+        <p id="status">loading…</p>
+        <p id="attempts">0</p>
+        <script>
+          let attempts = 0;
+          const get = () => {
+            attempts++;
+            document.getElementById("attempts").textContent = String(attempts);
+            return fetch("/api/data").then((r) =>
+              r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))
+            );
+          };
+          get()
+            .then(() => { document.getElementById("status").textContent = "ok"; })
+            .catch(() =>
+              get()
+                .then(() => { document.getElementById("status").textContent = "ok after retry"; })
+                .catch((err) => {
+                  document.getElementById("status").textContent = "error: " + err.message;
+                })
+            );
+        </script>
+        <a href="/">back</a>
+      `,
+    }),
+  },
+
+  // The classic missed `catch`: the fetch is guarded, `res.json()` is not.
+  // A body that rejects therefore escapes as an unhandled rejection even
+  // though the page "handles fetch errors". Exercises `reject-body`.
+  "/api-json-consumer": {
+    body: html({
+      title: "API JSON Consumer",
+      nav: true,
+      body: `
+        <h1>API JSON Consumer</h1>
+        <p id="status">loading…</p>
+        <script>
+          async function load() {
+            let res;
+            try {
+              res = await fetch("/api/data");
+            } catch (err) {
+              document.getElementById("status").textContent = "network error";
+              return;
+            }
+            // Outside the try — a rejecting body is unhandled.
+            const data = await res.json();
+            document.getElementById("status").textContent = "ok:" + data.items.length;
+          }
+          load();
+        </script>
+        <a href="/">back</a>
+      `,
+    }),
+  },
+
   "/api/data": {
     body: JSON.stringify({ ok: true, items: [1, 2, 3] }),
     contentType: "application/json; charset=utf-8",

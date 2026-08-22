@@ -1,0 +1,14 @@
+{
+  "delayFloorMs": 3,
+  "delayTailMs": 66,
+  "tightTailMs": 52,
+  "fixedPerPlanMs": 741,
+  "runs": 5,
+  "measuredAt": "2026-08-21T10:06:50.209Z",
+  "env": {
+    "node": "v22.22.2",
+    "platform": "linux"
+  },
+  "measuredUnder": "4 busy-loop processes on a 4-core container, i.e. every core contended for the whole calibration — not a warm idle machine",
+  "provenance": "chaosbringer model calibrate --url http://127.0.0.1:5173/ --runs 5, run under the contention above. Measured, not floored. The previous committed value tightTailMs=3 was a warm measurement and not a bound: a reviewer reproduced 2-of-4 failures of timeout-ladder's slow-trip rung under single-core contention, where the probe's own jitter is what overshoots. tightTailMs is that jitter (AbortSignal.timeout and page.waitForTimeout overhead), so measuring it on an idle machine understates the one number the probe instant depends on. Regenerate on your own hardware; these numbers are a property of the machine, not of the app."
+}
