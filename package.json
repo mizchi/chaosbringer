@@ -22,5 +22,8 @@
       "duckdb",
       "esbuild"
     ]
+  },
+  "devDependencies": {
+    "yaml": "^2.9.0"
   }
 }
