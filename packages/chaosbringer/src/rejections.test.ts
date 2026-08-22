@@ -115,6 +115,77 @@ describe("watchUnhandledRejections", () => {
     }
   }, 60_000);
 
+  it("catches escapes when installed after the page already loaded", async () => {
+    // The whole point of the previous test read the other way round. Installing
+    // only as an init script meant this case listened to nothing and `drain()`
+    // answered `[]` — the same answer a clean page gives, so the caller who got
+    // the order wrong was told their app was fine. Getting the order wrong is
+    // the normal way to use a helper whose name does not mention navigation.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      const watcher = await watchUnhandledRejections(page);
+      await page.evaluate('window.escapeOne("late-install")');
+      expect((await drainOnce(page, watcher)).map((r) => r.message)).toEqual(["late-install"]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("still claims the rejection when installed late, so it is not double-counted", async () => {
+    // `preventDefault` is the load-bearing line: without it Chromium reports
+    // the same rejection again through `pageerror`, and a harness listening to
+    // both counts one escape as two and calls one of them a thrown exception.
+    // The late install runs the same code, so it has to keep that property —
+    // this is what a second copy of the listener would have quietly lost.
+    const page = await browser.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (e) => pageErrors.push(e.message));
+    try {
+      await page.goto(base + "/");
+      const watcher = await watchUnhandledRejections(page);
+      await page.evaluate('window.escapeOne("claimed")');
+      expect((await drainOnce(page, watcher)).map((r) => r.message)).toEqual(["claimed"]);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("counts one escape once no matter how many times it was installed", async () => {
+    // Installing twice on a live document is the case the idempotence guard is
+    // for, and it is easy to reach: the crawler installs on page setup, and a
+    // caller who also wants a watcher of their own installs again. Both
+    // listeners push into the same `window.__chaosRejections`, so without the
+    // guard one escaped rejection is reported as two — a fabricated finding,
+    // which is worse than a missed one.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      await watchUnhandledRejections(page);
+      const watcher = await watchUnhandledRejections(page);
+      await page.evaluate('window.escapeOne("once")');
+      expect((await drainOnce(page, watcher)).map((r) => r.message)).toEqual(["once"]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  it("re-arms across navigation after a late install", async () => {
+    // The guard must not fire on a fresh document, or the first navigation
+    // after a late install would leave nothing listening.
+    const page = await browser.newPage();
+    try {
+      await page.goto(base + "/");
+      const watcher = await watchUnhandledRejections(page);
+      await page.goto(base + "/?again");
+      await page.evaluate('window.escapeOne("after-nav")');
+      expect((await drainOnce(page, watcher)).map((r) => r.message)).toEqual(["after-nav"]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   it("reports nothing, rather than throwing, once the page is gone", async () => {
     const page = await browser.newPage();
     const watcher = await watchUnhandledRejections(page);

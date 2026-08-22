@@ -187,9 +187,9 @@ button enabled*. Check what the label promises about the page.
 
 **Forgetting what escaped.** "The spinner stopped" and "the spinner stopped and
 nothing escaped" are different findings, and the second is usually the bug.
-`watchUnhandledRejections(page)` before you navigate, then `drain()` at each
-read — it claims the rejections via `preventDefault`, so they do not also
-arrive as `pageerror` and get counted twice.
+`watchUnhandledRejections(page)` at any point, then `drain()` at each read — it
+claims the rejections via `preventDefault`, so they do not also arrive as
+`pageerror` and get counted twice.
 
 **One instant.** A probe fires once. A backend that acknowledges now and
 commits 450ms later, a retry scheduled on the error path, a revalidation

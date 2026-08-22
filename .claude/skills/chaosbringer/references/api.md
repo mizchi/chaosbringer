@@ -252,17 +252,20 @@ belong to `chaos()`.
 ```ts
 import { watchUnhandledRejections } from "chaosbringer";
 
-const rejections = await watchUnhandledRejections(page);  // BEFORE page.goto
+const rejections = await watchUnhandledRejections(page);  // before or after goto
 await page.goto(url);
 await page.click("#save");
 // …wait settleMs…
 const escaped = await rejections.drain();     // [] if the app handled everything
 ```
 
-Installed as an init script, so it must precede the navigation, and it survives
-navigation — one call covers a whole test. `drain()` empties as it reads, so a
-second probe after a quiescence window reports only what is new, and it returns
-`[]` rather than throwing once the page is closed.
+Installed both as an init script and against the document already open, so the
+order does not matter and it survives navigation — one call covers a whole test.
+(It used to be the init script only, which meant installing after `goto` left
+nothing listening and `drain()` returned `[]` — the same answer a clean page
+gives.) `drain()` empties as it reads, so a second probe after a quiescence
+window reports only what is new, and it returns `[]` rather than throwing once
+the page is closed — which is a read that could not happen, not a clean page.
 
 It claims each rejection with `preventDefault()`, which matters: without that,
 Chromium reports the same rejection a second time through
