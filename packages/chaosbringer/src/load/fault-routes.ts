@@ -6,7 +6,8 @@
  * shared abstraction here would over-couple two evolving callers.
  */
 import type { BrowserContext, Route, Request } from "playwright";
-import { decideFault, validateFaultSchedule } from "../schedule.js";
+import { validateFaultSchedule } from "../schedule.js";
+import { pickFaultRule } from "../fault-router.js";
 import type { Fault, FaultRule, FaultInjectionStats, UrlMatcher } from "../types.js";
 
 interface CompiledRule {
@@ -15,6 +16,13 @@ interface CompiledRule {
   methods?: string[];
   matched: number;
   injected: number;
+  /**
+   * Times this rule's schedule said "inject" and an earlier rule had already
+   * claimed the request. Same meaning as on the crawler's network layer, and
+   * present for the same reason: `matched=3 injected=0` is otherwise
+   * indistinguishable from an all-`pass` schedule.
+   */
+  suppressed: number;
   /**
    * Wall-clock timestamps (ms) at which this rule actually injected
    * a fault. Captured so the runner can correlate fault firings with
@@ -65,6 +73,7 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
       methods: r.methods?.map((m) => m.toUpperCase()),
       matched: 0,
       injected: 0,
+      suppressed: 0,
       firings: [],
     });
   }
@@ -116,9 +125,13 @@ async function applyFault(route: Route, fault: Fault): Promise<void> {
  * probability is rolled per match. Stats are mutated on the compiled rule
  * objects — drain via `faultStatsFrom` at run end.
  *
- * Single pass, first claim wins: unlike the network and runtime layers, a
- * later rule is not consulted once one has answered, so occurrence numbering
- * here is per-rule rather than shared.
+ * Two passes over one list, using the crawler's own `pickFaultRule` rather
+ * than a second copy of the decision: a *scheduled* rule consumes its
+ * occurrence whenever its pattern matches, even if an earlier rule already
+ * claimed the request, so two rules watching one URL agree about what
+ * "occurrence 3" means. Rules on the probability path stay lazy. This used to
+ * be single-pass — `return` on the first injection — which made `decisions`
+ * mean something different here than on the crawler's layers, silently.
  */
 export async function installFaultRoutes(
   context: BrowserContext,
@@ -128,21 +141,16 @@ export async function installFaultRoutes(
   await context.route("**/*", async (route: Route, request: Request) => {
     const url = request.url();
     const method = request.method().toUpperCase();
-    for (const c of compiled) {
-      if (!c.pattern.test(url)) continue;
-      if (c.methods && !c.methods.includes(method)) continue;
-      const occurrence = c.matched;
-      c.matched += 1;
-      // Load runs are unseeded by design (workers run concurrently), so the
-      // probability path draws from Math.random; a `schedule` ignores the RNG
-      // entirely and reads its decision table by occurrence.
-      if (decideFault(c.rule, occurrence, { next: Math.random }) === "pass") continue;
-      c.injected += 1;
-      c.firings.push(Date.now());
-      await applyFault(route, c.rule.fault);
+    // Load runs are unseeded by design (workers run concurrently), so the
+    // probability path draws from `Math.random`; a `schedule` ignores the RNG
+    // entirely and reads its decision table by occurrence.
+    const winner = pickFaultRule(compiled, url, method, { next: Math.random });
+    if (!winner) {
+      await route.fallback();
       return;
     }
-    await route.fallback();
+    winner.firings.push(Date.now());
+    await applyFault(route, winner.rule.fault);
   });
 }
 
@@ -153,6 +161,7 @@ export function faultStatsFrom(
     rule: c.rule.name ?? `fault-${i}`,
     matched: c.matched,
     injected: c.injected,
+    ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
   }));
 }
 

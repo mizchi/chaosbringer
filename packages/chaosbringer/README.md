@@ -223,7 +223,7 @@ faultInjection: [
 - `afterEnd` decides what happens past the table: `"pass"` (default — spent), `"inject"` (keep firing), `"repeat"` (cycle it).
 - Available on all four layers (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`). `probability` + `schedule` together is a validation error.
 - A schedule consumes no RNG, so adding one leaves the seed sequence — and therefore chaos action selection — untouched.
-- Faults watching the same URL share occurrence numbering on the layers that evaluate every matching rule — the network layer, the runtime `fetch` layer and the lifecycle layer — so occurrence 0 can get one fault kind and occurrence 2 another. The **iframe layer and the load path are single-pass**: the first fault to claim an assignment returns, and a scheduled fault sitting behind it does not advance. Numbering there is per-rule, so don't write a two-fault occurrence split on those layers. Don't split one endpoint across the network and runtime layers either: a client-side rejection issues no request, so the network counter never advances.
+- Faults watching the same URL (or the same iframe) share occurrence numbering on **every** layer: each evaluates every matching rule, so occurrence 0 can get one fault kind and occurrence 2 another, and a rule that decided `inject` and lost the race is counted in `suppressed` rather than dropped. Don't split one endpoint across the network and runtime layers, though: a client-side rejection issues no request, so the network counter never advances.
 
 To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
 

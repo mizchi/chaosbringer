@@ -23,12 +23,13 @@
  * generated from `buildDecisionHelperSource()` here rather than hand-written
  * twice.
  *
- * What the layers do *not* all share is who gets to advance an occurrence.
- * The network, runtime-`fetch` and lifecycle layers consult every matching
- * rule, so two faults on one URL agree about what "occurrence 1" means. The
- * iframe layer and the load path are single-pass — the first fault to claim
- * the event returns — so a scheduled fault behind a claiming one never
- * advances, and its occurrences count only the events it was asked about.
+ * Occurrence numbering is shared on every layer: each consults every matching
+ * rule, so two faults watching one URL (or one iframe) agree about what
+ * "occurrence 1" means, and a scheduled fault behind a claiming one still
+ * advances. It was not always so — the iframe layer and the load path were
+ * single-pass, returning on the first claim, which made `decisions` mean
+ * something different there than everywhere else, silently. A fault that
+ * decided "inject" and lost the race is reported as `suppressed`.
  */
 
 import type { FaultDecision, FaultSchedule, Rng } from "./types.js";

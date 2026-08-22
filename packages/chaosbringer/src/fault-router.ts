@@ -197,13 +197,17 @@ export async function applyFault(
  * Mutates `matched`, `suppressed` and (for the winner) `injected`, and returns
  * the winner or null.
  */
-export function pickFaultRule(
-  rules: ReadonlyArray<CompiledFaultRule>,
+export function pickFaultRule<T extends CompiledFaultRule>(
+  rules: ReadonlyArray<T>,
   url: string,
   method: string,
-  rng: Rng,
-): CompiledFaultRule | null {
-  let winner: CompiledFaultRule | null = null;
+  // Only `next` is used. Typed as the minimum rather than the whole `Rng` so
+  // the load path — which is unseeded by design, because its workers run
+  // concurrently — can pass `{ next: Math.random }` and still share this
+  // function instead of keeping a second copy of the decision.
+  rng: Pick<Rng, "next">,
+): T | null {
+  let winner: T | null = null;
   for (const compiled of rules) {
     if (!compiled.pattern.test(url)) continue;
     if (compiled.methods && !compiled.methods.includes(method)) continue;
