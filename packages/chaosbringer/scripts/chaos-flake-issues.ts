@@ -26,6 +26,13 @@ interface ClusterOccurrence {
 
 interface FlakeAnalysis {
   runs: number;
+  /**
+   * Set by `flakeReport`. False means the run count could not decide
+   * flakiness, in which case `flakyClusters` is empty because of the sample
+   * size and not because the app is clean — see the guard in `main`.
+   * Optional so a `flake.json` written before the field existed still parses.
+   */
+  decidable?: boolean;
   stableClusters: ClusterOccurrence[];
   flakyClusters: ClusterOccurrence[];
   flakyPages: { url: string; failedInRuns: number; visitedInRuns: number }[];
@@ -101,6 +108,26 @@ function findExisting(issues: ReturnType<typeof listOpenFlakeIssues>, key: strin
 
 function main() {
   const analysis = JSON.parse(readFileSync(inputPath!, "utf8")) as FlakeAnalysis;
+
+  // The loop below closes every open issue whose cluster is absent from this
+  // report. An undecidable report has an empty `flakyClusters` *by
+  // construction* — with one run nothing can differ between runs — so acting
+  // on it would close every open flake issue with the comment "Cluster no
+  // longer appears in the latest flake report". Deleting real bug reports
+  // because nothing was measured is the worst thing this script can do, so it
+  // refuses rather than reconciling against a report that decided nothing.
+  //
+  // `decidable === undefined` is a report written before the field existed;
+  // fall back to the run count, which is the same rule `flakeReport` applies.
+  const decidable = analysis.decidable ?? analysis.runs >= 2;
+  if (!decidable) {
+    console.error(
+      `refusing to reconcile: ${analysis.runs} run(s) cannot decide flakiness, so an empty ` +
+        `flakyClusters here would close every open issue. Re-run with --runs 2 or more.`,
+    );
+    process.exit(1);
+  }
+
   const flaky = analysis.flakyClusters.filter((c) => c.runsWithCluster >= MIN_RUNS_WITH_CLUSTER);
   const seenKeys = new Set(flaky.map((c) => c.key));
 

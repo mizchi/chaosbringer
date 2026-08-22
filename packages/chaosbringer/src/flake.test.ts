@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
-import { flakeReport, formatFlakeReport } from "./flake.js";
+import { flakeReport, formatFlakeReport, parseFlakeArgs } from "./flake.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
 function summary(over: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -166,6 +166,28 @@ describe("flakeReport", () => {
   it("preserves input order for durations", () => {
     const reports = [makeReport({ duration: 100 }), makeReport({ duration: 50 }), makeReport({ duration: 200 })];
     expect(flakeReport(reports).durations).toEqual([100, 50, 200]);
+  });
+});
+
+describe("flake CLI arguments", () => {
+  // Not a parser unit test for its own sake: the weekly workflow that runs
+  // this passed the *root* command's spelling of a shared option, strict
+  // `parseArgs` refused it, and `|| true` hid the failure.
+  const base = ["--url", "http://x", "--runs", "2"];
+
+  it("accepts either spelling of the per-page action cap", () => {
+    expect(parseFlakeArgs([...base, "--max-actions", "5"]).maxActions).toBe(5);
+    expect(parseFlakeArgs([...base, "--max-actions-per-page", "5"]).maxActions).toBe(5);
+  });
+
+  it("leaves it unset when neither is given", () => {
+    expect(parseFlakeArgs(base).maxActions).toBeUndefined();
+  });
+
+  it("still refuses a flag no spelling covers", () => {
+    // The alias must not become "accept anything": an unknown flag has to stay
+    // an error, because being refused is what makes a typo visible at all.
+    expect(() => parseFlakeArgs([...base, "--max-action", "5"])).toThrow();
   });
 });
 

@@ -161,6 +161,69 @@ for (const rel of files) {
   }
 }
 
+// The same flag check against the workflows that actually invoke the CLI.
+//
+// Motivated by `.github/workflows/chaos-flake.yml` passing
+// `--max-actions-per-page 5` to `chaosbringer flake`, whose parser declared
+// only `--max-actions`: strict `parseArgs` killed the step on its first line,
+// a `|| true` swallowed it, and the next step failed on the `flake.json` that
+// was never written — a weekly scheduled job that had never once detected a
+// flake.
+//
+// Worth being exact about what this catches, because it does NOT catch that
+// one: `--max-actions-per-page` is a real flag of the *root* crawl command,
+// and the flag union here is deliberately loose across every `*cli.ts` (see
+// above), so a flag that is valid for one subcommand and passed to another
+// reads as valid. Making it per-subcommand means teaching this script which
+// parser owns which verb, which is a second copy of a mapping that lives in
+// `cli.ts` — and a drifting second copy is the defect this file exists to
+// prevent. That bug was fixed at the source instead, by having `flake` accept
+// both spellings as the root command already did.
+//
+// What this does catch is a flag that appears in no parser at all — a typo, a
+// rename, an invented option — in a scheduled workflow nobody watches.
+// Verified against a planted `--bogus-flag`.
+const workflowDir = new URL("../.github/workflows/", import.meta.url).pathname;
+let workflowFiles = [];
+try {
+  workflowFiles = readdirSync(workflowDir).filter((f) => /\.ya?ml$/.test(f));
+} catch {
+  workflowFiles = [];
+}
+if (workflowFiles.length === 0) {
+  // A check that silently finds nothing to check is the thing this whole file
+  // is about, so say it rather than reporting a pass.
+  problems.push(`no workflow files found under .github/workflows — this check ran on nothing`);
+}
+for (const rel of workflowFiles) {
+  const text = readFileSync(join(workflowDir, rel), "utf8");
+  // Join backslash continuations first: a multi-line `run:` block puts the
+  // command on one line and every flag on its own, so a line-at-a-time scan
+  // never sees a flag next to the command it belongs to.
+  const joined = text.replace(/\\\s*\n\s*/g, " ");
+  for (const raw of joined.split("\n")) {
+    // Drop YAML comments before matching. A `# … the --changed file list …`
+    // comment is prose, and a checker that flags prose gets loosened until it
+    // stops flagging anything.
+    const line = raw.replace(/(^|\s)#.*$/, "$1");
+    // Only a real invocation: `chaosbringer` as the executable, after `npx` or
+    // `exec` or at the start of the command. Not `pnpm -F chaosbringer
+    // flaker:status --markdown`, where `chaosbringer` names the workspace
+    // package and the flags belong to a different binary entirely.
+    if (!/(?:\bnpx\s+|\bexec\s+|^\s*|&&\s+|\|\s+)chaosbringer\s+[a-z]/.test(line)) continue;
+    if (/-F\s+chaosbringer|--filter\s+chaosbringer/.test(line)) continue;
+    for (const flag of line.match(/--[a-z][a-z0-9-]*/g) ?? []) {
+      if (!cliFlags.has(flag)) {
+        problems.push(
+          `.github/workflows/${rel}: passes ${flag} to the chaosbringer CLI, which does not ` +
+            `accept it — \`parseArgs\` is strict, so the step dies on its first line`,
+        );
+      }
+    }
+    checkedIdentifiers++;
+  }
+}
+
 // And the session surface the docs promise.
 const SESSION_METHODS = ["stats", "runtimeStats", "firings", "heldRequests", "release", "dispose"];
 const apiText = readFileSync(join(skillDir, "references/api.md"), "utf8");

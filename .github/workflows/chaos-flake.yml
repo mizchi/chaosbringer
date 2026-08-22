@@ -69,7 +69,7 @@ jobs:
             --url http://127.0.0.1:4455 \
             --runs ${{ github.event.inputs.runs || '10' }} \
             --max-pages 30 \
-            --max-actions-per-page 5 \
+            --max-actions 5 \
             --output flake.json \
           || true   # exit 1 means flakes were found; we want to process them
 
