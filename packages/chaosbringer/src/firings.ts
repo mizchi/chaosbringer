@@ -32,6 +32,14 @@ export interface Firing {
    */
   fired: number;
   /**
+   * False when the source row carried no usable counters — a report from an
+   * older version, a hand-built one, a run that died before the stats arrays
+   * were written. `matched` and `fired` read 0 in that case, which is the only
+   * safe default, and this flag is how a caller tells "nothing happened" from
+   * "nothing was measured". They are very different findings.
+   */
+  counted: boolean;
+  /**
    * Times the fault decided to fire and something else answered first.
    * Network and runtime layers only; 0 elsewhere.
    */
@@ -48,46 +56,40 @@ export interface Firing {
  * crawl died before the routes went on.
  */
 export function faultFirings(report: CrawlReport): Firing[] {
+  // One builder, four layers. The counters are coerced rather than trusted:
+  // a row missing `matched` produced `matched: undefined`, and
+  // `unfiredFaults` then reported `matched undefinedx and never fired` — a
+  // diagnosis with `undefined` in it, from the function whose whole job is to
+  // give a usable one, asserting a firing policy that had not been consulted.
+  const row = (
+    name: unknown,
+    layer: FaultLayer,
+    matched: unknown,
+    fired: unknown,
+    suppressed: unknown,
+    errored: unknown,
+  ): Firing => ({
+    name: typeof name === "string" && name.length > 0 ? name : "(unnamed)",
+    layer,
+    matched: typeof matched === "number" && Number.isFinite(matched) ? matched : 0,
+    fired: typeof fired === "number" && Number.isFinite(fired) ? fired : 0,
+    suppressed: typeof suppressed === "number" && Number.isFinite(suppressed) ? suppressed : 0,
+    errored: typeof errored === "number" && Number.isFinite(errored) ? errored : 0,
+    counted: typeof matched === "number" && Number.isFinite(matched),
+  });
+
   const out: Firing[] = [];
   for (const s of report.faultInjections ?? []) {
-    out.push({
-      name: s.rule,
-      layer: "network",
-      matched: s.matched,
-      fired: s.injected,
-      suppressed: s.suppressed ?? 0,
-      errored: 0,
-    });
+    out.push(row(s.rule, "network", s.matched, s.injected, s.suppressed, 0));
   }
   for (const s of report.runtimeFaults ?? []) {
-    out.push({
-      name: s.rule,
-      layer: "runtime",
-      matched: s.matched,
-      fired: s.fired,
-      suppressed: s.suppressed ?? 0,
-      errored: 0,
-    });
+    out.push(row(s.rule, "runtime", s.matched, s.fired, s.suppressed, 0));
   }
   for (const s of report.lifecycleFaults ?? []) {
-    out.push({
-      name: s.name,
-      layer: "lifecycle",
-      matched: s.matched,
-      fired: s.fired,
-      suppressed: 0,
-      errored: s.errored,
-    });
+    out.push(row(s.name, "lifecycle", s.matched, s.fired, 0, s.errored));
   }
   for (const s of report.iframeFaults ?? []) {
-    out.push({
-      name: s.rule,
-      layer: "iframe",
-      matched: s.matched,
-      fired: s.fired,
-      suppressed: 0,
-      errored: 0,
-    });
+    out.push(row(s.rule, "iframe", s.matched, s.fired, 0, 0));
   }
   return out;
 }
@@ -115,6 +117,16 @@ export function unfiredFaults(report: CrawlReport, only?: readonly string[]): st
   for (const f of faultFirings(report)) {
     if (wanted && !wanted.has(f.name)) continue;
     if (f.fired > 0) continue;
+    if (!f.counted) {
+      // A third case, and it used to be reported as the second: the row
+      // carries no usable counters, so the firing policy was never consulted.
+      // Unmeasured is not the same as didn't-fire.
+      problems.push(
+        `${f.layer} fault "${f.name}" reported no usable counters — nothing measured whether ` +
+          `it fired, so this run decides nothing about it`,
+      );
+      continue;
+    }
     if (f.matched === 0) {
       problems.push(
         `${f.layer} fault "${f.name}" never matched anything — the pattern did not see the ` +

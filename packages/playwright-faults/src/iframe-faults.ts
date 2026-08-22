@@ -28,6 +28,7 @@ import {
   validateFaultSchedule,
 } from "./schedule.js";
 import type { IframeAction, IframeFault, IframeFaultStats } from "./types.js";
+import { assertCompiledFaults } from "./compiled-guard.js";
 
 /** Compiled form: stats counters initialised, name pre-derived. */
 export interface CompiledIframeFault {
@@ -198,6 +199,7 @@ export function mergeIframeStats(
   compiled: CompiledIframeFault[],
   pageStats: Record<string, { matched: number; fired: number }>,
 ): IframeFaultStats[] {
+  assertCompiledFaults("mergeIframeStats", "compileIframeFaults", compiled);
   for (let i = 0; i < compiled.length; i++) {
     const c = compiled[i]!;
     const ps = pageStats[String(i)];

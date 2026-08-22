@@ -205,7 +205,7 @@ It cannot take runtime faults.
 |---|---|
 | `stats()` | network rules: `{ rule, matched, injected, suppressed? }[]`, live |
 | `runtimeStats()` | runtime faults: `Promise<{ rule, matched, fired, suppressed? }[]>`, read out of the page |
-| `firings()` | `Promise<Firing[]>` — both layers in one shape: `{ name, layer, matched, fired, suppressed, errored }`. `layer` is `"network" \| "runtime" \| "lifecycle" \| "iframe"` |
+| `firings()` | `Promise<Firing[]>` — both layers in one shape: `{ name, layer, matched, fired, suppressed, errored, counted }`. `layer` is `"network" \| "runtime" \| "lifecycle" \| "iframe"`; `counted` is false when the source row carried no usable counters, which is how you tell "nothing happened" from "nothing was measured" |
 | `heldRequests()` | requests currently parked by an unbounded `hang` |
 | `release()` | abort the parked ones, so the app's `catch` runs |
 | `dispose()` | release, then remove the route — page talks to the real origin again |

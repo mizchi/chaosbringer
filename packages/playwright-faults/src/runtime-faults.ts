@@ -28,6 +28,7 @@ import {
   validateFaultSchedule,
 } from "./schedule.js";
 import type { Rng, RuntimeFault, RuntimeFaultStats, UrlMatcher } from "./types.js";
+import { assertCompiledFaults } from "./compiled-guard.js";
 import { compileUrlMatcher, stripStatefulFlags } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
@@ -402,6 +403,7 @@ export function mergeRuntimeStats(
   // right — that script could not distinguish the case.
   pageStats: Record<string, { matched: number; fired: number; suppressed?: number }>,
 ): RuntimeFaultStats[] {
+  assertCompiledFaults("mergeRuntimeStats", "compileRuntimeFaults", compiled);
   for (let i = 0; i < compiled.length; i++) {
     const c = compiled[i]!;
     // Index-keyed (current shape).

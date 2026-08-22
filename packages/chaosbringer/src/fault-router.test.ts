@@ -365,7 +365,15 @@ describe("applyFaultRules on a page you drive yourself", () => {
       // layer says `fired` where the other says `injected`.
       const firings = await session.firings();
       expect(firings).toEqual([
-        { name: "save-body-unreadable", layer: "runtime", matched: 1, fired: 1, suppressed: 0, errored: 0 },
+        {
+          name: "save-body-unreadable",
+          layer: "runtime",
+          matched: 1,
+          fired: 1,
+          suppressed: 0,
+          errored: 0,
+          counted: true,
+        },
       ]);
       await session.dispose();
     } finally {
