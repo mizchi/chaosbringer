@@ -14,7 +14,8 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "lint:nul": "pnpm -r lint:nul",
-    "check:skill-docs": "pnpm -F chaosbringer exec tsx ../../scripts/check-skill-docs.mjs"
+    "check:skill-docs": "pnpm -F chaosbringer exec tsx ../../scripts/check-skill-docs.mjs",
+    "check:workflow-shell": "node scripts/check-workflow-shell.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
