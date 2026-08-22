@@ -306,9 +306,15 @@ describe("checkTiming", () => {
   });
 
   it("skips constraints whose inputs were not proposed", () => {
-    const check = checkTiming(MEASURED, { deadlineMs: 5000 }, {});
-    expect(check.rows).toEqual([]);
+    // The skipping is the point: naming one field checks that field and stays
+    // quiet about the rest. This used to be written with an *empty* proposal
+    // and `ok: true`, which asserted something else — that checking nothing
+    // counts as passing. That half is now covered, with the opposite
+    // expectation, under "checkTiming reports whether it checked anything".
+    const check = checkTiming(MEASURED, { deadlineMs: 5000 }, { quiescenceMs: 5097 });
+    expect(check.checked).toBe(1);
     expect(check.ok).toBe(true);
+    expect(check.rows.map((r) => r.constraint)).toEqual(["rejections_drained_after_last_timer"]);
   });
 });
 
@@ -392,5 +398,48 @@ describe("solveTiming and a declared retry ladder", () => {
     if (solved.status !== "sat") return;
     const { tightTailMs: tight, marginMs: margin, delayFloorMs: floor } = solved.profile;
     expect(solved.slowMs + floor).toBeGreaterThanOrEqual(solved.settleMs + tight + margin);
+  });
+});
+
+describe("checkTiming reports whether it checked anything", () => {
+  const profile = { delayFloorMs: 10, delayTailMs: 60, tightTailMs: 5, fixedPerPlanMs: 700 };
+  const request = { deadlineMs: 700 };
+
+  it("does not call an empty proposal `ok`", () => {
+    // It used to: zero rows, `ok: true`. "I checked nothing" reading as
+    // "everything is fine" is the defect this codebase keeps producing, and
+    // finding it in the validator is the least excusable place for it. One
+    // call site had already worked around it locally, which is the tell.
+    const empty = checkTiming(profile, request, {});
+    expect(empty.checked).toBe(0);
+    expect(empty.ok).toBe(false);
+    expect(empty.violations).toEqual([]);
+  });
+
+  it("treats explicitly-undefined fields as absent, not as zero", () => {
+    const undef = checkTiming(profile, request, { settleMs: undefined, slowMs: undefined });
+    expect(undef.checked).toBe(0);
+    expect(undef.ok).toBe(false);
+  });
+
+  it("counts what it evaluated, and passes a sound proposal", () => {
+    const solved = solveTiming(profile, request);
+    expect(solved.status).toBe("sat");
+    if (solved.status !== "sat") return;
+    const check = checkTiming(profile, request, {
+      settleMs: solved.settleMs,
+      slowMs: solved.slowMs,
+    });
+    expect(check.checked).toBeGreaterThan(0);
+    expect(check.ok).toBe(true);
+    expect(check.violations).toEqual([]);
+  });
+
+  it("still fails a proposal that violates something", () => {
+    // The guard above must not be satisfiable by calling everything ok.
+    const check = checkTiming(profile, request, { settleMs: 1 });
+    expect(check.checked).toBeGreaterThan(0);
+    expect(check.ok).toBe(false);
+    expect(check.violations.length).toBeGreaterThan(0);
   });
 });

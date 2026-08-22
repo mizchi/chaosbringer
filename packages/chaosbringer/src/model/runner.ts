@@ -970,6 +970,10 @@ function checkBudgetAndNavigation(
     ...(opts.budgetMs !== undefined ? { settleMs, quiescenceMs } : {}),
     ...(opts.timeout !== undefined ? { pageTimeoutMs: opts.timeout, slowMs } : {}),
   };
+  // The caller declared neither a budget nor a navigation timeout, so there is
+  // genuinely nothing to validate — distinct from handing `checkTiming` an
+  // empty proposal, which it now reports as `ok: false` because "you asked me
+  // to check nothing" is not a verdict.
   if (Object.keys(proposed).length === 0) return;
   const check = checkTiming(profile, request, proposed);
   if (check.ok) return;
