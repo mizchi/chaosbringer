@@ -1261,7 +1261,11 @@ export interface PlanOracleInput {
    * only fails here is `uiInvariant@late`.
    */
   uiInvariantFailuresLate?: ReadonlyArray<{ key: string; message: string }>;
-  /** Whether the bridge supplied a `uiProbe` — without one `expect.ui` is skipped. */
+  /**
+   * Whether the bridge supplied a `uiProbe`. Without one a plan's `expect.ui`
+   * cannot be judged, which is reported as an `undecided` mismatch rather than
+   * skipped — see section 2a.
+   */
   hasUiProbe: boolean;
   /** Whether the bridge supplied a `stateProbe`. */
   hasStateProbe: boolean;
@@ -1478,6 +1482,31 @@ export function evaluatePlanOracle(input: PlanOracleInput): PlanMismatch[] {
   //    the convergence in the detail. A label that started *right* and moved
   //    is the `Promise.race` bug: the user is told the report failed and then
   //    shown the report, from a request the app believes it abandoned.
+  //
+  // 2a. …but first: was there a probe at all? A plan stating `expect.ui`
+  //     against a bridge with no `uiProbe` used to assert nothing about the UI,
+  //     silently — the comparison below was skipped because there was nothing
+  //     to compare, and a plan's most commonly stated expectation evaporated.
+  //     Section 3 already holds the opposite rule for `expect.state` ("an
+  //     unchecked expectation is worse than none") and the `expect.calls` path
+  //     reports `undecided` when no layer counted; `ui` was the one with a free
+  //     pass. Reported as `undecided` rather than `ui` so a consumer switching
+  //     on the field can tell "no label was ever read" from "the app showed the
+  //     wrong label". (Section 3 predates `undecided` and reports under `state`
+  //     with `actual: undefined`; left as it is rather than changed underneath
+  //     its callers.)
+  if (plan.expect.ui !== undefined && !hasUiProbe) {
+    mismatches.push({
+      plan: plan.name,
+      field: "undecided",
+      expected: plan.expect.ui,
+      actual: undefined,
+      detail:
+        `plan expects ui="${plan.expect.ui}" but the bridge has no uiProbe, so no label was ` +
+        `ever read — nothing here decides anything about the UI. Add a uiProbe, or drop ` +
+        `expect.ui from the plan; an unmeasured assertion is not a satisfied one.`,
+    });
+  }
   if (plan.expect.ui !== undefined && hasUiProbe && !undecidedProbe) {
     if (observed.ui !== plan.expect.ui) {
       const converged =

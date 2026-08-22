@@ -1249,6 +1249,57 @@ describe("evaluatePlanOracle", () => {
   const fields = (input: PlanOracleInput): string[] =>
     evaluatePlanOracle(input).map((m) => m.field).sort();
 
+  describe("`expect.ui` without a uiProbe", () => {
+    // The bridge decides whether a uiProbe exists; the plan decides whether it
+    // states `expect.ui`. When those disagree the run used to skip the label
+    // comparison and report nothing, so the plan's loudest expectation passed
+    // by never being read. These tests pin the opposite.
+    const plan = {
+      name: "no-probe",
+      schedule: [],
+      expect: { ui: "error" },
+    };
+
+    it("reports `undecided` instead of passing silently", () => {
+      expect(fields(base({ plan, hasUiProbe: false }))).toEqual(["undecided"]);
+    });
+
+    it("names the missing probe and the unread label in the detail", () => {
+      const m = evaluatePlanOracle(base({ plan, hasUiProbe: false }));
+      expect(m).toHaveLength(1);
+      expect(m[0]!.expected).toBe("error");
+      expect(m[0]!.actual).toBeUndefined();
+      expect(m[0]!.detail).toContain("uiProbe");
+      expect(m[0]!.detail).toContain('ui="error"');
+    });
+
+    it("stays quiet when the plan states no ui expectation", () => {
+      // A probe-less bridge is a legitimate configuration — it is only the
+      // *combination* with `expect.ui` that decides nothing.
+      expect(
+        fields(base({ plan: { name: "n", schedule: [], expect: {} }, hasUiProbe: false })),
+      ).toEqual([]);
+    });
+
+    it("judges the label normally once a probe exists", () => {
+      expect(
+        fields(
+          base({
+            plan,
+            hasUiProbe: true,
+            observed: {
+              unhandledRejection: false,
+              lateUnhandledRejection: false,
+              fired: {},
+              matched: {},
+              ui: "error",
+            },
+          }),
+        ),
+      ).toEqual([]);
+    });
+  });
+
   describe("an all-`pass` plan has to be observed, not merely not-failed", () => {
     const plan = {
       name: "happy",
