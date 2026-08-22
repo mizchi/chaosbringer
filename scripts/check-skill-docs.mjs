@@ -20,6 +20,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 const skillDir =
   process.argv[2] ?? new URL("../.claude/skills/chaosbringer", import.meta.url).pathname;
@@ -195,32 +196,65 @@ if (workflowFiles.length === 0) {
   // is about, so say it rather than reporting a pass.
   problems.push(`no workflow files found under .github/workflows — this check ran on nothing`);
 }
+// The `run:` scripts come off a parsed tree, not out of a regex over the raw
+// text. The first version of this scan read the YAML with regexes and would
+// have happily reported a pass on a file GitHub cannot load — which is what
+// `check-workflow-shell.mjs` did, one commit after being written to catch
+// exactly that. Once is a bug; leaving the second copy is the "one rule in two
+// places" shape this file exists to prevent.
+function runScripts(node, out) {
+  if (Array.isArray(node)) {
+    for (const v of node) runScripts(v, out);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "run" && typeof value === "string") out.push(value);
+    else runScripts(value, out);
+  }
+}
 for (const rel of workflowFiles) {
   const text = readFileSync(join(workflowDir, rel), "utf8");
-  // Join backslash continuations first: a multi-line `run:` block puts the
-  // command on one line and every flag on its own, so a line-at-a-time scan
-  // never sees a flag next to the command it belongs to.
-  const joined = text.replace(/\\\s*\n\s*/g, " ");
-  for (const raw of joined.split("\n")) {
-    // Drop YAML comments before matching. A `# … the --changed file list …`
-    // comment is prose, and a checker that flags prose gets loosened until it
-    // stops flagging anything.
-    const line = raw.replace(/(^|\s)#.*$/, "$1");
-    // Only a real invocation: `chaosbringer` as the executable, after `npx` or
-    // `exec` or at the start of the command. Not `pnpm -F chaosbringer
-    // flaker:status --markdown`, where `chaosbringer` names the workspace
-    // package and the flags belong to a different binary entirely.
-    if (!/(?:\bnpx\s+|\bexec\s+|^\s*|&&\s+|\|\s+)chaosbringer\s+[a-z]/.test(line)) continue;
-    if (/-F\s+chaosbringer|--filter\s+chaosbringer/.test(line)) continue;
-    for (const flag of line.match(/--[a-z][a-z0-9-]*/g) ?? []) {
-      if (!cliFlags.has(flag)) {
-        problems.push(
-          `.github/workflows/${rel}: passes ${flag} to the chaosbringer CLI, which does not ` +
-            `accept it — \`parseArgs\` is strict, so the step dies on its first line`,
-        );
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    // `check:workflow-shell` reports the parse error with its position; here it
+    // only matters that a broken file is not scanned and called clean.
+    problems.push(
+      `.github/workflows/${rel}: does not parse as YAML, so its flags were not checked ` +
+        `(and GitHub will not run it) — see \`pnpm check:workflow-shell\``,
+    );
+    continue;
+  }
+  const scripts = [];
+  runScripts(doc, scripts);
+  for (const script of scripts) {
+    // Join backslash continuations: a multi-line command puts the executable on
+    // one line and every flag on its own, so a line-at-a-time scan never sees a
+    // flag next to the command it belongs to.
+    const joined = script.replace(/\\\s*\n\s*/g, " ");
+    for (const raw of joined.split("\n")) {
+      // Drop shell comments before matching. A `# … the --changed file list …`
+      // comment is prose, and a checker that flags prose gets loosened until it
+      // stops flagging anything.
+      const line = raw.replace(/(^|\s)#.*$/, "$1");
+      // Only a real invocation: `chaosbringer` as the executable, after `npx` or
+      // `exec` or at the start of the command. Not `pnpm -F chaosbringer
+      // flaker:status --markdown`, where `chaosbringer` names the workspace
+      // package and the flags belong to a different binary entirely.
+      if (!/(?:\bnpx\s+|\bexec\s+|^\s*|&&\s+|\|\s+)chaosbringer\s+[a-z]/.test(line)) continue;
+      if (/-F\s+chaosbringer|--filter\s+chaosbringer/.test(line)) continue;
+      for (const flag of line.match(/--[a-z][a-z0-9-]*/g) ?? []) {
+        if (!cliFlags.has(flag)) {
+          problems.push(
+            `.github/workflows/${rel}: passes ${flag} to the chaosbringer CLI, which does not ` +
+              `accept it — \`parseArgs\` is strict, so the step dies on its first line`,
+          );
+        }
       }
+      checkedIdentifiers++;
     }
-    checkedIdentifiers++;
   }
 }
 
