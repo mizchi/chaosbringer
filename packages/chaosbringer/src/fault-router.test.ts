@@ -477,3 +477,49 @@ describe("a fault kind the library does not know", () => {
     expect(calls).toEqual(["abort", "fulfill", "fallback", "held"]);
   });
 });
+
+describe("a urlPattern that is not a valid regex", () => {
+  it("refuses the rule instead of dropping it", async () => {
+    // Measured before this threw: `applyFaultRules` with `"/api/(cart"`
+    // installed nothing, the page got its real 200, `stats()` was `[]` and
+    // `firings()` was `{}` — the rule was not even listed as having matched
+    // nothing. `compileFaultRules` skipped it on the premise that
+    // `validateOptions` had already raised, which is true for `ChaosCrawler`
+    // and false for this entry point.
+    const page = { route: async () => {}, unroute: async () => {} } as unknown as import("playwright").Page;
+    await expect(
+      applyFaultRules(page, [
+        { urlPattern: "/api/(cart", fault: { kind: "status", status: 500 } },
+      ]),
+    ).rejects.toThrow(/invalid urlPattern/);
+  });
+
+  it("names the rule so a config with twenty of them is actionable", async () => {
+    const page = { route: async () => {}, unroute: async () => {} } as unknown as import("playwright").Page;
+    // By name when there is one…
+    await expect(
+      applyFaultRules(page, [
+        { name: "cart-500", urlPattern: "(", fault: { kind: "status", status: 500 } },
+      ]),
+    ).rejects.toThrow(/rule "cart-500"/);
+    // …and by index when there is not, which is what locates it in the array.
+    await expect(
+      applyFaultRules(page, [
+        { urlPattern: /\/api\/ok/, fault: { kind: "abort" } },
+        { urlPattern: "(", fault: { kind: "abort" } },
+      ]),
+    ).rejects.toThrow(/rule #1/);
+  });
+
+  it("still accepts every pattern that does compile", async () => {
+    // The guard must not be satisfiable by refusing everything: a string, a
+    // regex, and a string with regex metacharacters that are legal.
+    const page = { route: async () => {}, unroute: async () => {} } as unknown as import("playwright").Page;
+    const session = await applyFaultRules(page, [
+      { urlPattern: "/api/cart", fault: { kind: "abort" } },
+      { urlPattern: /\/api\/checkout\?.*$/, fault: { kind: "abort" } },
+      { urlPattern: "\\/api\\/(cart|checkout)", fault: { kind: "abort" } },
+    ]);
+    expect(session.stats()).toHaveLength(3);
+  });
+});

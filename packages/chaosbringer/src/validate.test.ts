@@ -90,6 +90,38 @@ describe("validateOptions", () => {
     ).toThrow(/bad.*urlPattern/);
   });
 
+  it("names an unnamed fault rule by index and by pattern", () => {
+    // The two halves of this library labelled the same unnamed rule
+    // differently: validation said "rule #1", `getFaultStats` reports
+    // `pattern.toString()`. The index locates it in your config array and the
+    // pattern locates it in the report, so an error carrying only one leaves
+    // the reader to guess which row it is about.
+    let message = "";
+    try {
+      validateOptions(
+        base({
+          faultInjection: [
+            { urlPattern: "/api/ok", fault: { kind: "abort" } },
+            { urlPattern: "/api/cart", probability: 4, fault: { kind: "abort" } },
+          ],
+        }),
+      );
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("rule #1");
+    expect(message).toContain("/api/cart");
+    // …and a rule that has a name still leads with the name, which is the
+    // handle the stats table uses for it too.
+    expect(() =>
+      validateOptions(
+        base({
+          faultInjection: [{ name: "cart-500", urlPattern: "/api/cart", probability: 4, fault: { kind: "abort" } }],
+        }),
+      ),
+    ).toThrow(/rule "cart-500"/);
+  });
+
   it("rejects an invalid excludePatterns regex", () => {
     expect(() => validateOptions(base({ excludePatterns: ["("] }))).toThrow(
       /excludePatterns/

@@ -75,11 +75,30 @@ export type CompiledFaultRule = {
 export function compileFaultRules(rules: FaultRule[] | undefined): CompiledFaultRule[] {
   if (!rules || rules.length === 0) return [];
   const compiled: CompiledFaultRule[] = [];
-  for (const rule of rules) {
+  for (const [i, rule] of rules.entries()) {
     const pattern = toRegExp(rule.urlPattern);
     if (!pattern) {
-      // Skip invalid regex silently; validateOptions will have already raised.
-      continue;
+      // This used to `continue`, on the premise that "validateOptions will have
+      // already raised". True for `ChaosCrawler`, and false for `applyFaults` /
+      // `applyFaultRules`, which have no options object and validate schedules
+      // and layer confusion here but never the pattern. Measured on
+      // `applyFaultRules(page, [{ urlPattern: "/api/(cart", … }])`: no error,
+      // the page saw 200, `stats()` was `[]` and `firings()` was `{}` — the
+      // rule was not even listed as having matched nothing. That presents as
+      // "my fault never fired", which this codebase repeatedly calls the
+      // hardest thing in it to debug.
+      //
+      // Thrown here rather than fixed in the second caller, so one rule lives
+      // in one place. `validateOptions` still runs first on the crawler path
+      // and still produces its more specific message, so nothing changes
+      // there.
+      const label = rule.name ? `"${rule.name}"` : `#${i}`;
+      throw new Error(
+        `chaosbringer: faultInjection rule ${label} has an invalid urlPattern ` +
+          `(${JSON.stringify(String(rule.urlPattern))}) — it is not a valid regular expression, ` +
+          `so the rule cannot be installed. Skipping it silently would present as "my fault ` +
+          `never fired" with an empty stats table.`,
+      );
     }
     compiled.push({
       rule,

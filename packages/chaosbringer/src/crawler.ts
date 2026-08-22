@@ -3073,9 +3073,16 @@ export function validateOptions(options: CrawlerOptions): void {
   for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {
     // The index when there is no name: "faultInjection rule" alone, in a
     // config with twenty of them, does not tell you which one to fix.
+    //
+    // …and the pattern alongside it, because the two halves of this library
+    // label the same unnamed rule differently: errors here said "rule #3"
+    // while `getFaultStats` reports it as `pattern.toString()`. Each is the
+    // right handle for its own context — the index finds it in your array, the
+    // pattern finds it in the report — and carrying both is what lets a reader
+    // connect an error to the row it is about.
     const label = rule.name
       ? `faultInjection rule "${rule.name}"`
-      : `faultInjection rule #${ruleIndex}`;
+      : `faultInjection rule #${ruleIndex} (${String(rule.urlPattern)})`;
     assertMatcher(`${label} urlPattern`, rule.urlPattern);
     validateFaultSchedule(label, rule, "chaosbringer");
     if (rule.probability !== undefined) {
