@@ -108,14 +108,59 @@ describe("flakeReport", () => {
     expect(flakeReport(reports).flakyPages).toEqual([]);
   });
 
-  it("returns an empty analysis for zero runs", () => {
+  it("returns an empty analysis for zero runs, marked undecidable", () => {
+    // The empty lists are the same shape a clean result has, and the CLI turns
+    // `flakyClusters.length === 0` into a green gate. `decidable` is what keeps
+    // "nothing flaked" apart from "nothing was measured".
     expect(flakeReport([])).toEqual({
       runs: 0,
+      decidable: false,
       stableClusters: [],
       flakyClusters: [],
       flakyPages: [],
       durations: [],
     });
+  });
+
+  it("refuses to call anything stable or flaky from a single run", () => {
+    const err = { type: "console" as const, message: "boom", url: "http://x/a" };
+    const one = flakeReport([
+      makeReport({
+        errorClusters: [cluster("seen-once", 1)],
+        pages: [page({ url: "http://x/a", errors: [err] })],
+      }),
+    ]);
+    expect(one.decidable).toBe(false);
+    // The cluster is still listed — one run is enough to say what happened —
+    // but `flakyClusters` being empty here is arithmetic, not evidence: with
+    // one run every cluster fired in "every" run.
+    expect(one.stableClusters).toHaveLength(1);
+    expect(one.flakyClusters).toEqual([]);
+  });
+
+  it("becomes decidable at two runs", () => {
+    const two = flakeReport([makeReport({}), makeReport({})]);
+    expect(two.decidable).toBe(true);
+  });
+
+  it("says so in the formatted report instead of printing a verdict", () => {
+    const text = formatFlakeReport(flakeReport([makeReport({ errorClusters: [cluster("c", 1)] })]));
+    expect(text).toContain("UNDECIDABLE");
+    expect(text).toContain("at least 2 runs");
+    // And it must not print the line that claims stability.
+    expect(text).not.toContain("Stable clusters (fire every run)");
+    expect(text).toContain("stability undecidable");
+  });
+
+  it("prints the ordinary verdict once there are enough runs", () => {
+    const text = formatFlakeReport(
+      flakeReport([
+        makeReport({ errorClusters: [cluster("c", 1)] }),
+        makeReport({ errorClusters: [cluster("c", 1)] }),
+      ]),
+    );
+    expect(text).not.toContain("UNDECIDABLE");
+    expect(text).toContain("Stable clusters (fire every run)");
   });
 
   it("preserves input order for durations", () => {

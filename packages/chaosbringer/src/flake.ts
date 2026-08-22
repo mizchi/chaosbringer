@@ -32,7 +32,22 @@ export interface PageOccurrence {
 
 export interface FlakeAnalysis {
   runs: number;
-  /** Clusters that fired in every run. */
+  /**
+   * Whether `runs` was enough to decide anything about flakiness at all. Two
+   * is the minimum, and below it every field lies in the reassuring direction:
+   * with one run each cluster fired in "every" run, so `flakyClusters` is
+   * empty *by construction* and `stableClusters` calls a cluster seen exactly
+   * once stable. With zero runs everything is empty.
+   *
+   * Both read identically to a clean result, which is why this flag exists
+   * rather than a comment: the CLI turns `flakyClusters.length === 0` into a
+   * green CI gate, and a gate that passes because nothing was measured is the
+   * one outcome this tool must never produce. (`flakyPages` already required
+   * `visitedInRuns >= 2` for the same reason — the guard existed on the
+   * quieter half of the report and not on the headline.)
+   */
+  decidable: boolean;
+  /** Clusters that fired in every run. Stability is only a claim when `decidable`. */
   stableClusters: ClusterOccurrence[];
   /** Clusters that fired in some runs but not others. */
   flakyClusters: ClusterOccurrence[];
@@ -49,8 +64,19 @@ export interface FlakeAnalysis {
  */
 export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
   const runs = reports.length;
+  // One run is enough to *list* what happened and never enough to call any of
+  // it stable or flaky, so the verdict is marked undecidable rather than
+  // returned as a clean bill of health.
+  const decidable = runs >= 2;
   if (runs === 0) {
-    return { runs: 0, stableClusters: [], flakyClusters: [], flakyPages: [], durations: [] };
+    return {
+      runs: 0,
+      decidable,
+      stableClusters: [],
+      flakyClusters: [],
+      flakyPages: [],
+      durations: [],
+    };
   }
 
   const keyMap = new Map<string, ClusterOccurrence>();
@@ -112,6 +138,7 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
 
   return {
     runs,
+    decidable,
     stableClusters,
     flakyClusters,
     flakyPages,
@@ -131,7 +158,22 @@ export function formatFlakeReport(analysis: FlakeAnalysis): string {
     lines.push(`Duration (ms): avg=${avg.toFixed(0)} min=${min} max=${max}`);
   }
   lines.push("");
-  lines.push(`Stable clusters (fire every run): ${analysis.stableClusters.length}`);
+  if (!analysis.decidable) {
+    lines.push(
+      `UNDECIDABLE — flakiness needs at least 2 runs of the same configuration; ` +
+        `this analysis has ${analysis.runs}.`,
+    );
+    lines.push(
+      `  With one run nothing can differ between runs, so "0 flaky clusters" below is a ` +
+        `property of the sample size and not of the app. Re-run with --runs 2 or more.`,
+    );
+    lines.push("");
+  }
+  lines.push(
+    analysis.decidable
+      ? `Stable clusters (fire every run): ${analysis.stableClusters.length}`
+      : `Clusters seen (stability undecidable): ${analysis.stableClusters.length}`,
+  );
   for (const c of analysis.stableClusters) {
     lines.push(`  [${c.type}] ${truncate(c.fingerprint, 70)}  counts=${c.perRunCounts.join(",")}`);
   }
@@ -286,7 +328,16 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
     writeFileSync(args.output, JSON.stringify(analysis, null, 2));
     if (!args.quiet) console.log(`Analysis saved to: ${args.output}`);
   }
-  // Exit 1 if anything flaked — CI uses this to fail a gate.
+  // Exit 1 if anything flaked — CI uses this to fail a gate. An undecidable
+  // analysis fails it too: `--runs` is validated at parse time so this should
+  // be unreachable, but the alternative to failing is a green gate that
+  // measured nothing, and that is the failure mode worth being paranoid about.
+  if (!analysis.decidable) {
+    console.error(
+      `flake: ${analysis.runs} run(s) cannot decide flakiness — nothing above is a verdict.`,
+    );
+    process.exit(1);
+  }
   if (analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0) {
     process.exit(1);
   }
