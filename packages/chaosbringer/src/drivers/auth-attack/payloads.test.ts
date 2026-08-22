@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   freshTestEmail,
   NONEXISTENT_USERNAME,
@@ -39,9 +39,39 @@ describe("auth-attack payloads", () => {
   });
 
   it("freshTestEmail produces unique addresses across calls", () => {
+    // 20000, not 50. The old implementation leaned on 16 bits of randomness
+    // inside a constant millisecond, so 50 calls collided in 1.68% of trials —
+    // a test that failed once every sixty CI runs and passed the rest, which
+    // reads as a flake rather than as the bug it was. At this scale the old
+    // implementation loses ~200 addresses every time, so the test either
+    // catches the defect or it is not there.
+    //
+    // The addresses are what the auth-attack probes sign up with: a collision
+    // makes a probe register an address that already exists and report the
+    // app's duplicate-signup behaviour as its answer about a fresh signup.
     const seen = new Set<string>();
-    for (let i = 0; i < 50; i++) seen.add(freshTestEmail());
-    expect(seen.size).toBe(50);
+    for (let i = 0; i < 20000; i++) seen.add(freshTestEmail());
+    expect(seen.size).toBe(20000);
+  });
+
+  it("is unique by construction, not by having enough random bits", () => {
+    // Freeze *both* sources of entropy. Any implementation whose uniqueness
+    // comes from a timestamp or from randomness produces 1 distinct address
+    // here; only a counter produces 200. That is the difference between a
+    // guarantee and a wide-enough coincidence, and a statistical test cannot
+    // tell them apart — widening `Math.random()` to 32 bits passes a
+    // 20000-draw uniqueness check ~95% of the time while still being able to
+    // collide.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      const seen = new Set<string>();
+      for (let i = 0; i < 200; i++) seen.add(freshTestEmail());
+      expect(seen.size).toBe(200);
+    } finally {
+      nowSpy.mockRestore();
+      randSpy.mockRestore();
+    }
   });
 
   it("freshTestEmail with a salt embeds it as a plus-tag", () => {
