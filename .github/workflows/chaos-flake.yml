@@ -65,13 +65,23 @@ jobs:
 
       - name: chaosbringer flake
         run: |
+          # Exit 1 means flakes were found and the next step should process
+          # them. Anything else means the command did not run, and a bare
+          # `|| true` swallowed both alike: this step spent weeks dying on an
+          # unknown-option error while looking like a step with nothing to say.
+          set +e
           pnpm exec chaosbringer flake \
             --url http://127.0.0.1:4455 \
             --runs ${{ github.event.inputs.runs || '10' }} \
             --max-pages 30 \
-            --max-actions-per-page 5 \
-            --output flake.json \
-          || true   # exit 1 means flakes were found; we want to process them
+            --max-actions 5 \
+            --output flake.json
+          status=$?
+          set -e
+          if [ "$status" -gt 1 ]; then
+            echo "flake command failed with exit $status — this is not a flake result" >&2
+            exit "$status"
+          fi
 
       - name: Stop fixture server
         if: always()

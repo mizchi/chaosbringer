@@ -583,13 +583,35 @@ export interface TimingSlack {
 }
 
 export interface TimingCheck {
+  /**
+   * True when something was checked **and** all of it held.
+   *
+   * The second half matters: an empty `ProposedTiming` used to return
+   * `ok: true` with zero rows, so "I checked nothing" read as "everything is
+   * fine" — in the validator, which is the one place that shape is least
+   * excusable. One call site had worked around it with its own
+   * `Object.keys(proposed).length === 0` guard, which is how you can tell the
+   * knowledge was in the wrong place.
+   */
   ok: boolean;
+  /**
+   * How many constraints were actually evaluated. Zero means the proposal
+   * named no fields this function knows how to check — a programming error at
+   * the call site, not a verdict about the timing.
+   */
+  checked: number;
   rows: TimingSlack[];
   violations: TimingSlack[];
   profile: ResolvedProfile;
 }
 
-/** A config to validate — anything omitted is skipped rather than assumed. */
+/**
+ * A config to validate — anything omitted is skipped rather than assumed.
+ *
+ * Omitting *everything* is not "nothing to complain about": see
+ * `TimingCheck.ok`. If your proposal is built conditionally and may come out
+ * empty, decide what that means at your call site before calling.
+ */
 export interface ProposedTiming {
   settleMs?: number;
   quiescenceMs?: number;
@@ -713,7 +735,16 @@ export function checkTiming(
   }
 
   const violations = rows.filter((r) => r.slackMs < 0);
-  return { ok: violations.length === 0, rows, violations, profile: p };
+  // `rows.length` is the count of constraints evaluated: one row per thing this
+  // function had something to say about. Zero means the proposal named nothing
+  // checkable, which is a call-site mistake and not a passing verdict.
+  return {
+    ok: rows.length > 0 && violations.length === 0,
+    checked: rows.length,
+    rows,
+    violations,
+    profile: p,
+  };
 }
 
 /** Render a check as a one-screen report. */

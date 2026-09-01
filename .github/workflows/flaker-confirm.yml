@@ -27,12 +27,14 @@ jobs:
 
       - name: Run confirmation tests
         run: |
-          for i in \$(seq 1 ${{ inputs.repeat }}); do
-            echo "--- Run \$i/${{ inputs.repeat }} ---"
-            pnpm exec vitest run "${{ inputs.suite }}" \\
-              -t "${{ inputs.test_name }}" \\
-              --reporter json \\
-              --outputFile "result-\$i.json" || true
+          for i in $(seq 1 ${{ inputs.repeat }}); do
+            echo "--- Run $i/${{ inputs.repeat }} ---"
+            # `|| true` is deliberate here and only here: a failing run is the
+            # data this workflow collects, not an error.
+            pnpm exec vitest run "${{ inputs.suite }}" \
+              -t "${{ inputs.test_name }}" \
+              --reporter json \
+              --outputFile "result-$i.json" || true
           done
 
       - uses: actions/upload-artifact@v4

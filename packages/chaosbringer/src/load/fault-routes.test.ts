@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { compileLoadFaultRules, faultFiringsFrom, faultStatsFrom } from "./fault-routes.js";
+import {
+  compileLoadFaultRules,
+  faultFiringsFrom,
+  faultStatsFrom,
+  installFaultRoutes,
+} from "./fault-routes.js";
 
 describe("compileLoadFaultRules", () => {
   it("returns [] for undefined / empty input", () => {
@@ -101,5 +106,90 @@ describe("compileLoadFaultRules validates the firing policy", () => {
         },
       ]),
     ).toThrow(/empty-table/);
+  });
+});
+
+describe("the load path shares the crawler's fault decision", () => {
+  /** Minimal context/route doubles: enough to drive the installed handler. */
+  function fakeContext() {
+    let handler: ((route: unknown, request: unknown) => Promise<void>) | null = null;
+    const served: string[] = [];
+    const context = {
+      route: async (_pattern: string, h: (route: unknown, request: unknown) => Promise<void>) => {
+        handler = h;
+      },
+    } as never;
+    const send = async (url: string, method = "GET") => {
+      const route = {
+        fulfill: async () => void served.push("fulfilled"),
+        abort: async () => void served.push("aborted"),
+        fallback: async () => void served.push("fallback"),
+      };
+      await handler?.(route, { url: () => url, method: () => method });
+    };
+    return { context, send, served };
+  }
+
+  it("advances a scheduled rule that lost the race, and records it as suppressed", async () => {
+    // Single-pass, `second` was never consulted on the first request, so its
+    // own `decisions[1]` landed on the wrong call and its inject never fired.
+    const compiled = compileLoadFaultRules([
+      {
+        name: "first",
+        urlPattern: /\/api\/x/,
+        fault: { kind: "abort" },
+        schedule: { decisions: ["inject", "pass"] },
+      },
+      {
+        name: "second",
+        urlPattern: /\/api\/x/,
+        fault: { kind: "status", status: 503 },
+        schedule: { decisions: ["inject", "inject"] },
+      },
+    ]);
+    const { context, send, served } = fakeContext();
+    await installFaultRoutes(context, compiled);
+    await send("http://x/api/x");
+    await send("http://x/api/x");
+
+    expect(faultStatsFrom(compiled)).toEqual([
+      { rule: "first", matched: 2, injected: 1 },
+      // Occurrence advanced both times; it lost the first and won the second.
+      { rule: "second", matched: 2, injected: 1, suppressed: 1 },
+    ]);
+    expect(served).toEqual(["aborted", "fulfilled"]);
+  });
+
+  it("falls through when no rule claims the request", async () => {
+    const compiled = compileLoadFaultRules([
+      { name: "only", urlPattern: /\/api\/y/, fault: { kind: "abort" } },
+    ]);
+    const { context, send, served } = fakeContext();
+    await installFaultRoutes(context, compiled);
+    await send("http://x/api/x");
+    expect(served).toEqual(["fallback"]);
+    expect(faultStatsFrom(compiled)).toEqual([{ rule: "only", matched: 0, injected: 0 }]);
+  });
+
+  it("timestamps only the rule that acted", async () => {
+    const compiled = compileLoadFaultRules([
+      {
+        name: "winner",
+        urlPattern: /\/api\/x/,
+        fault: { kind: "abort" },
+        schedule: { decisions: ["inject"] },
+      },
+      {
+        name: "loser",
+        urlPattern: /\/api\/x/,
+        fault: { kind: "abort" },
+        schedule: { decisions: ["inject"] },
+      },
+    ]);
+    const { context, send } = fakeContext();
+    await installFaultRoutes(context, compiled);
+    await send("http://x/api/x");
+    expect(compiled[0]!.firings).toHaveLength(1);
+    expect(compiled[1]!.firings).toHaveLength(0);
   });
 });

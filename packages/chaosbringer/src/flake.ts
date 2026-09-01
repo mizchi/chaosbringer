@@ -32,7 +32,22 @@ export interface PageOccurrence {
 
 export interface FlakeAnalysis {
   runs: number;
-  /** Clusters that fired in every run. */
+  /**
+   * Whether `runs` was enough to decide anything about flakiness at all. Two
+   * is the minimum, and below it every field lies in the reassuring direction:
+   * with one run each cluster fired in "every" run, so `flakyClusters` is
+   * empty *by construction* and `stableClusters` calls a cluster seen exactly
+   * once stable. With zero runs everything is empty.
+   *
+   * Both read identically to a clean result, which is why this flag exists
+   * rather than a comment: the CLI turns `flakyClusters.length === 0` into a
+   * green CI gate, and a gate that passes because nothing was measured is the
+   * one outcome this tool must never produce. (`flakyPages` already required
+   * `visitedInRuns >= 2` for the same reason — the guard existed on the
+   * quieter half of the report and not on the headline.)
+   */
+  decidable: boolean;
+  /** Clusters that fired in every run. Stability is only a claim when `decidable`. */
   stableClusters: ClusterOccurrence[];
   /** Clusters that fired in some runs but not others. */
   flakyClusters: ClusterOccurrence[];
@@ -49,8 +64,19 @@ export interface FlakeAnalysis {
  */
 export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
   const runs = reports.length;
+  // One run is enough to *list* what happened and never enough to call any of
+  // it stable or flaky, so the verdict is marked undecidable rather than
+  // returned as a clean bill of health.
+  const decidable = runs >= 2;
   if (runs === 0) {
-    return { runs: 0, stableClusters: [], flakyClusters: [], flakyPages: [], durations: [] };
+    return {
+      runs: 0,
+      decidable,
+      stableClusters: [],
+      flakyClusters: [],
+      flakyPages: [],
+      durations: [],
+    };
   }
 
   const keyMap = new Map<string, ClusterOccurrence>();
@@ -112,6 +138,7 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
 
   return {
     runs,
+    decidable,
     stableClusters,
     flakyClusters,
     flakyPages,
@@ -131,7 +158,22 @@ export function formatFlakeReport(analysis: FlakeAnalysis): string {
     lines.push(`Duration (ms): avg=${avg.toFixed(0)} min=${min} max=${max}`);
   }
   lines.push("");
-  lines.push(`Stable clusters (fire every run): ${analysis.stableClusters.length}`);
+  if (!analysis.decidable) {
+    lines.push(
+      `UNDECIDABLE — flakiness needs at least 2 runs of the same configuration; ` +
+        `this analysis has ${analysis.runs}.`,
+    );
+    lines.push(
+      `  With one run nothing can differ between runs, so "0 flaky clusters" below is a ` +
+        `property of the sample size and not of the app. Re-run with --runs 2 or more.`,
+    );
+    lines.push("");
+  }
+  lines.push(
+    analysis.decidable
+      ? `Stable clusters (fire every run): ${analysis.stableClusters.length}`
+      : `Clusters seen (stability undecidable): ${analysis.stableClusters.length}`,
+  );
   for (const c of analysis.stableClusters) {
     lines.push(`  [${c.type}] ${truncate(c.fingerprint, 70)}  counts=${c.perRunCounts.join(",")}`);
   }
@@ -170,7 +212,14 @@ interface FlakeCliArgs {
   quiet: boolean;
 }
 
-function parseFlakeArgs(argv: string[]): FlakeCliArgs {
+/**
+ * Exported for tests. The parser is where the workflow bug lived — a real flag
+ * of the root command that this subcommand refused — and it is not reachable
+ * from `runFlakeCli` without launching browsers. Note that invalid *values*
+ * exit the process via `fail()` rather than throwing, so only the
+ * unknown-flag path (thrown by `parseArgs` itself) is assertable in-process.
+ */
+export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -179,6 +228,14 @@ function parseFlakeArgs(argv: string[]): FlakeCliArgs {
       seed: { type: "string" },
       "max-pages": { type: "string" },
       "max-actions": { type: "string" },
+      // The root CLI accepts both spellings for the same crawl option
+      // (`values["max-actions"] ?? values["max-actions-per-page"]`), so a
+      // caller who learned the long one there passed it here and `parseArgs`,
+      // being strict, killed the command on its first line. That is what
+      // happened to `.github/workflows/chaos-flake.yml`: a weekly job whose
+      // flake step had never once run. Accepting both here removes the trap
+      // rather than fixing the one call site that hit it.
+      "max-actions-per-page": { type: "string" },
       timeout: { type: "string" },
       "ignore-analytics": { type: "boolean", default: false },
       "har-replay": { type: "string" },
@@ -202,6 +259,8 @@ function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     fail(`--runs must be an integer >= 2 (got ${JSON.stringify(values.runs)})`);
   }
 
+  const maxActionsRaw = values["max-actions"] ?? values["max-actions-per-page"];
+
   let seed: number | undefined;
   if (values.seed !== undefined) {
     const parsed = Number(values.seed);
@@ -216,7 +275,7 @@ function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     runs,
     seed,
     maxPages: values["max-pages"] ? Number(values["max-pages"]) : undefined,
-    maxActions: values["max-actions"] ? Number(values["max-actions"]) : undefined,
+    maxActions: maxActionsRaw !== undefined ? Number(maxActionsRaw) : undefined,
     timeout: values.timeout ? Number(values.timeout) : undefined,
     ignoreAnalytics: values["ignore-analytics"] ?? false,
     harReplay: values["har-replay"],
@@ -241,7 +300,7 @@ OPTIONS:
                         so any flake points at non-determinism outside
                         chaosbringer (server, network, timers).
   --max-pages <n>       Forward to each crawl
-  --max-actions <n>     Forward to each crawl
+  --max-actions <n>     Forward to each crawl (--max-actions-per-page also accepted)
   --timeout <ms>        Forward to each crawl
   --ignore-analytics    Forward to each crawl
   --har-replay <path>   Forward to each crawl
@@ -286,7 +345,16 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
     writeFileSync(args.output, JSON.stringify(analysis, null, 2));
     if (!args.quiet) console.log(`Analysis saved to: ${args.output}`);
   }
-  // Exit 1 if anything flaked — CI uses this to fail a gate.
+  // Exit 1 if anything flaked — CI uses this to fail a gate. An undecidable
+  // analysis fails it too: `--runs` is validated at parse time so this should
+  // be unreachable, but the alternative to failing is a green gate that
+  // measured nothing, and that is the failure mode worth being paranoid about.
+  if (!analysis.decidable) {
+    console.error(
+      `flake: ${analysis.runs} run(s) cannot decide flakiness — nothing above is a verdict.`,
+    );
+    process.exit(1);
+  }
   if (analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0) {
     process.exit(1);
   }

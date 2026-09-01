@@ -28,6 +28,7 @@ import {
   validateFaultSchedule,
 } from "./schedule.js";
 import type { IframeAction, IframeFault, IframeFaultStats } from "./types.js";
+import { assertCompiledFaults } from "./compiled-guard.js";
 
 /** Compiled form: stats counters initialised, name pre-derived. */
 export interface CompiledIframeFault {
@@ -35,6 +36,8 @@ export interface CompiledIframeFault {
   name: string;
   matched: number;
   fired: number;
+  /** Decided "inject" while an earlier fault was already claiming the iframe. */
+  suppressed: number;
 }
 
 /** Auto-derive a stats label when the user didn't set `fault.name`. */
@@ -62,6 +65,7 @@ export function compileIframeFaults(
       name: iframeFaultName(fault),
       matched: 0,
       fired: 0,
+      suppressed: 0,
     };
   });
 }
@@ -110,19 +114,22 @@ export function buildIframeFaultsScript(
 
   const faults = ${JSON.stringify(serialized)};
   const stats = window.__chaosbringerIframeFaultStats;
-  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0 };
+  for (const f of faults) stats[String(f.id)] = { matched: 0, fired: 0, suppressed: 0 };
 
   ${buildDecisionHelperSource()}
 
   // Occurrence = how many matching iframes this fault has seen in this frame.
+  // Deciding and firing are separate counts, as on the network and runtime
+  // layers: a scheduled fault whose decision is "inject" still advances its
+  // occurrence, but only one fault can act on a given iframe.
   const roll = (f) => {
     const slot = stats[String(f.id)];
     const occurrence = slot.matched;
     slot.matched++;
-    const fired = __decide(f, occurrence);
-    if (fired) slot.fired++;
-    return fired;
+    return __decide(f, occurrence);
   };
+  const fire = (f) => { stats[String(f.id)].fired++; };
+  const suppress = (f) => { stats[String(f.id)].suppressed++; };
 
   const HIFE = HTMLIFrameElement.prototype;
   const srcDescriptor = Object.getOwnPropertyDescriptor(HIFE, "src");
@@ -134,6 +141,12 @@ export function buildIframeFaultsScript(
 
   // Returns true if a fault claimed responsibility for this src assignment.
   function handleSrc(iframe, value) {
+    // Two passes, like the network and runtime layers. This was single-pass —
+    // the first fault to claim the iframe returned, so a *scheduled* fault
+    // behind it never advanced its occurrence and therefore never fired. That
+    // made \`decisions\` mean something different here than on the other layers,
+    // silently, while the docs promised one shape understood by all four.
+    let chosen = null;
     for (const f of faults) {
       let matched;
       try {
@@ -142,7 +155,24 @@ export function buildIframeFaultsScript(
         matched = false;
       }
       if (!matched) continue;
-      if (!roll(f)) continue;
+      if (f.schedule) {
+        // A scheduled fault always consumes its occurrence when its selector
+        // matches, so two faults watching one iframe agree about what
+        // "occurrence 1" means.
+        if (roll(f)) {
+          if (chosen) suppress(f);
+          else chosen = f;
+        }
+        continue;
+      }
+      // Probability stays lazy: never consulted once a winner exists, so
+      // existing seeds draw exactly as many numbers as before.
+      if (chosen) continue;
+      if (roll(f)) chosen = f;
+    }
+    if (chosen) {
+      const f = chosen;
+      fire(f);
       const action = f.action;
       if (action.kind === "load-delay") {
         const ms = Number(action.ms);
@@ -196,14 +226,16 @@ export function buildIframeFaultsScript(
  */
 export function mergeIframeStats(
   compiled: CompiledIframeFault[],
-  pageStats: Record<string, { matched: number; fired: number }>,
+  pageStats: Record<string, { matched: number; fired: number; suppressed?: number }>,
 ): IframeFaultStats[] {
+  assertCompiledFaults("mergeIframeStats", "compileIframeFaults", compiled);
   for (let i = 0; i < compiled.length; i++) {
     const c = compiled[i]!;
     const ps = pageStats[String(i)];
     if (ps) {
       c.matched += ps.matched;
       c.fired += ps.fired;
+      c.suppressed += ps.suppressed ?? 0;
     }
   }
   return compiled.map((c) => ({
@@ -212,5 +244,6 @@ export function mergeIframeStats(
     action: actionKind(c.fault.action),
     matched: c.matched,
     fired: c.fired,
+    ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
   }));
 }

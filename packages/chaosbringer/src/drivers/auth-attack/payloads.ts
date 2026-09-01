@@ -32,12 +32,32 @@ export const WEAK_PASSWORDS: ReadonlyArray<string> = [
  */
 export const NONEXISTENT_USERNAME = "chaosbringer-noexist-9f3c@example.invalid";
 
+/**
+ * A counter, because "never collide" has to be a guarantee and not a
+ * probability. This used to be `Date.now()` plus 16 bits of `Math.random()`:
+ * within one millisecond the timestamp is constant, so uniqueness rested on
+ * those 16 bits alone. Measured over 4000 trials of 50 calls, 1.68% of trials
+ * produced a duplicate, and 20000 calls lost 215 addresses to collisions.
+ *
+ * What that costs is not a flaky test. These addresses are what the
+ * auth-attack probes sign up with, so a collision means a probe registers an
+ * address that already exists and reads the app's *duplicate signup* response
+ * as its answer about a *fresh* signup — a finding about a path the probe never
+ * took.
+ */
+let freshEmailSeq = 0;
+
 /** Generate a one-shot test email so repeated signups never collide. */
 export function freshTestEmail(salt?: string): string {
   const ts = Date.now().toString(36);
-  const rand = Math.floor(Math.random() * 0xffff).toString(16);
+  // The counter carries uniqueness within the process, which is the scope that
+  // matters: every signup in one run comes from one process. Timestamp and
+  // randomness are what keep two concurrent runs (a sharded crawl, two
+  // developers) apart, and 32 bits there is cheap.
+  const seq = (freshEmailSeq++).toString(36);
+  const rand = Math.floor(Math.random() * 0xffffffff).toString(16);
   const tag = salt ? `+${salt}` : "";
-  return `chaosbringer-test${tag}-${ts}-${rand}@example.invalid`;
+  return `chaosbringer-test${tag}-${ts}-${seq}-${rand}@example.invalid`;
 }
 
 /**

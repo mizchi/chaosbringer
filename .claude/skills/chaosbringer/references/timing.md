@@ -87,7 +87,13 @@ returns a union: `status: "sat"` carries `settleMs`, `slowMs`, `fastMs`,
 `quiescenceMs`, `pageTimeoutMs`, `wallClockMs` and the resolved `profile`;
 `status: "unsat"` carries `core` (which constraints could not be met) and a
 readable `explanation`. Check the status — the fields do not exist on the unsat
-branch. If the app has its own retry ladder, pass
+branch.
+
+`checkTiming(profile, request, proposed)` validates numbers you picked
+yourself, and returns `{ ok, checked, rows, violations }`. Omitting a field
+skips its constraint, but omitting *everything* is not a pass: `ok` is false
+when `checked` is 0, because "I checked nothing" is not a verdict. If you build
+`proposed` conditionally, decide at the call site what an empty one means. If the app has its own retry ladder, pass
 `ladder: { attempts, backoffsMs }` and the window covers all of it, not one
 round.
 

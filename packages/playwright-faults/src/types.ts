@@ -421,4 +421,10 @@ export interface IframeFaultStats {
   matched: number;
   /** Iframes the fault actually fired on (after the probability roll). */
   fired: number;
+  /**
+   * Iframes where this fault decided "inject" and another fault claimed the
+   * assignment first. Present only when non-zero — see
+   * `FaultInjectionStats.suppressed` for why the decision is consumed anyway.
+   */
+  suppressed?: number;
 }

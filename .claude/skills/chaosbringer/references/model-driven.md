@@ -157,6 +157,12 @@ faster than guessing.
 | `state` | `stateProbe`, read after the run settled |
 | `calls` | requests the fault layers counted, page-load calls included |
 
+An expectation whose probe the bridge does not supply is reported, not skipped:
+`expect.ui` against a bridge with no `uiProbe` fails the plan as `undecided`,
+and `expect.state` without a `stateProbe` fails as `state`. A probe-less bridge
+is fine — stating an expectation it cannot read is what is not, because a check
+that reads nothing passes for the wrong reason.
+
 `calls` is the only one that can say what must **not** happen: the schedule pins
 the outcome of call 0 and call 1 and has no way to state that call 2 does not
 exist. It also states calls no fault can target — the extra read an app owes you

@@ -16,21 +16,24 @@
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
-interface ClusterOccurrence {
-  key: string;
-  type: string;
-  fingerprint: string;
-  perRunCounts: number[];
-  runsWithCluster: number;
-}
+// The shapes come from the library rather than being restated here. This file
+// used to declare its own `ClusterOccurrence` / `FlakeAnalysis`, and when
+// `decidable` was added to the real one I hand-copied it into the duplicate —
+// which is the "one rule in two places, and the copy nobody looked at is the
+// stale one" shape the whole branch this landed in is about. `decidable` is
+// read through a `?? runs >= 2` fallback below, so a `flake.json` written
+// before the field existed still reconciles.
+import type { ClusterOccurrence, FlakeAnalysis } from "../src/flake.js";
 
-interface FlakeAnalysis {
-  runs: number;
-  stableClusters: ClusterOccurrence[];
-  flakyClusters: ClusterOccurrence[];
-  flakyPages: { url: string; failedInRuns: number; visitedInRuns: number }[];
-  durations: number[];
-}
+/**
+ * What a `flake.json` on disk may actually contain, as opposed to what
+ * `flakeReport` returns today. `decidable` is required on `FlakeAnalysis`, so
+ * importing that type verbatim would tell the checker the field is always
+ * present and make the fallback below look like dead code — while a report
+ * written before the field existed still lacks it at runtime. Stating the one
+ * difference keeps the shape shared and the fallback honest.
+ */
+type ParsedAnalysis = Omit<FlakeAnalysis, "decidable"> & { decidable?: boolean };
 
 const LABEL = "chaos-flake";
 const MIN_RUNS_WITH_CLUSTER = 2;
@@ -100,7 +103,27 @@ function findExisting(issues: ReturnType<typeof listOpenFlakeIssues>, key: strin
 }
 
 function main() {
-  const analysis = JSON.parse(readFileSync(inputPath!, "utf8")) as FlakeAnalysis;
+  const analysis = JSON.parse(readFileSync(inputPath!, "utf8")) as ParsedAnalysis;
+
+  // The loop below closes every open issue whose cluster is absent from this
+  // report. An undecidable report has an empty `flakyClusters` *by
+  // construction* — with one run nothing can differ between runs — so acting
+  // on it would close every open flake issue with the comment "Cluster no
+  // longer appears in the latest flake report". Deleting real bug reports
+  // because nothing was measured is the worst thing this script can do, so it
+  // refuses rather than reconciling against a report that decided nothing.
+  //
+  // `decidable === undefined` is a report written before the field existed;
+  // fall back to the run count, which is the same rule `flakeReport` applies.
+  const decidable = analysis.decidable ?? analysis.runs >= 2;
+  if (!decidable) {
+    console.error(
+      `refusing to reconcile: ${analysis.runs} run(s) cannot decide flakiness, so an empty ` +
+        `flakyClusters here would close every open issue. Re-run with --runs 2 or more.`,
+    );
+    process.exit(1);
+  }
+
   const flaky = analysis.flakyClusters.filter((c) => c.runsWithCluster >= MIN_RUNS_WITH_CLUSTER);
   const seenKeys = new Set(flaky.map((c) => c.key));
 

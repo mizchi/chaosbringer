@@ -22,6 +22,7 @@ import type {
   LifecycleStage,
   UrlMatcher,
 } from "./types.js";
+import { assertCompiledFaults } from "./compiled-guard.js";
 import { compileUrlMatcher } from "./url-matcher.js";
 
 /** Compiled form: regex pre-compiled, name pre-derived. */
@@ -119,6 +120,7 @@ export function lifecycleFaultsAtStage(
 export function lifecycleStatsFrom(
   compiled: readonly CompiledLifecycleFault[],
 ): LifecycleFaultStats[] {
+  assertCompiledFaults("lifecycleStatsFrom", "compileLifecycleFaults", compiled);
   return compiled.map((c) => ({
     name: c.name,
     matched: c.matched,

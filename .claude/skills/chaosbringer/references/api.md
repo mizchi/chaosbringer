@@ -58,9 +58,18 @@ const crawler = new ChaosCrawler({
   faultInjection: [ … ],            // network layer: FaultRule[]
   runtimeFaults: [ … ],             // in-page fetch patching: RuntimeFault[]
   lifecycleFaults: [ … ],           // visibility, offline, CPU: LifecycleFault[]
+  initScripts: [ "…js…" ],          // raw JS run before the page's own scripts
   invariants: [ … ],                // what must hold; see below
 });
 ```
+
+`initScripts` is for anything that has to be in place *before* the app runs —
+patching an API you want to observe, seeding a global, stubbing a clock. An
+observer installed later reports zero for everything that happened during load,
+and zero is indistinguishable from "nothing happened", so if the thing you are
+measuring can occur during load, it belongs here rather than in an `afterLoad`
+invariant. Each string is evaluated verbatim on every navigation: wrap it in an
+IIFE and guard against a second install.
 
 ### Reading whether a fault fired
 
@@ -205,7 +214,7 @@ It cannot take runtime faults.
 |---|---|
 | `stats()` | network rules: `{ rule, matched, injected, suppressed? }[]`, live |
 | `runtimeStats()` | runtime faults: `Promise<{ rule, matched, fired, suppressed? }[]>`, read out of the page |
-| `firings()` | `Promise<Firing[]>` — both layers in one shape: `{ name, layer, matched, fired, suppressed, errored }`. `layer` is `"network" \| "runtime" \| "lifecycle" \| "iframe"` |
+| `firings()` | `Promise<Firing[]>` — both layers in one shape: `{ name, layer, matched, fired, suppressed, errored, counted }`. `layer` is `"network" \| "runtime" \| "lifecycle" \| "iframe"`; `counted` is false when the source row carried no usable counters, which is how you tell "nothing happened" from "nothing was measured" |
 | `heldRequests()` | requests currently parked by an unbounded `hang` |
 | `release()` | abort the parked ones, so the app's `catch` runs |
 | `dispose()` | release, then remove the route — page talks to the real origin again |
@@ -243,17 +252,20 @@ belong to `chaos()`.
 ```ts
 import { watchUnhandledRejections } from "chaosbringer";
 
-const rejections = await watchUnhandledRejections(page);  // BEFORE page.goto
+const rejections = await watchUnhandledRejections(page);  // before or after goto
 await page.goto(url);
 await page.click("#save");
 // …wait settleMs…
 const escaped = await rejections.drain();     // [] if the app handled everything
 ```
 
-Installed as an init script, so it must precede the navigation, and it survives
-navigation — one call covers a whole test. `drain()` empties as it reads, so a
-second probe after a quiescence window reports only what is new, and it returns
-`[]` rather than throwing once the page is closed.
+Installed both as an init script and against the document already open, so the
+order does not matter and it survives navigation — one call covers a whole test.
+(It used to be the init script only, which meant installing after `goto` left
+nothing listening and `drain()` returned `[]` — the same answer a clean page
+gives.) `drain()` empties as it reads, so a second probe after a quiescence
+window reports only what is new, and it returns `[]` rather than throwing once
+the page is closed — which is a read that could not happen, not a clean page.
 
 It claims each rejection with `preventDefault()`, which matters: without that,
 Chromium reports the same rejection a second time through

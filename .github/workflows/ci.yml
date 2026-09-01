@@ -32,6 +32,9 @@ jobs:
       - name: Check the chaosbringer skill's docs against the real exports
         run: pnpm check:skill-docs
 
+      - name: Check that workflow shell blocks parse
+        run: pnpm check:workflow-shell
+
       - name: Build
         run: pnpm -F chaosbringer build
 
