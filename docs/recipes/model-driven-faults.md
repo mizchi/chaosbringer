@@ -569,6 +569,137 @@ operations belong in separate rules. `--allow-order-sensitive` runs them
 anyway, and exists for one case only: finding out *whether* the ordering is
 what your app actually depends on, before you go back and change the model.
 
+## Reading a counterexample that is longer than the bug
+
+`quint verify` returns the first counterexample its search reaches, not the
+smallest one. Ask for a witness at `--max-steps=6` and you routinely get six
+steps for a bug that needs two, with nothing to say which two. Worse, the
+outcomes are whatever the search picked: a plan that reports `hang` on call 3
+may well fail on a plain 500 on call 0, and those are very different statements
+about your app.
+
+`chaosbringer model shrink` answers that by re-running smaller candidates:
+
+```bash
+chaosbringer model shrink --plan plans/refresh-storm.plan.json \
+  --url http://localhost:3000 --config model/bridge.mjs \
+  --out plans/refresh-storm.min.plan.json
+```
+
+Real output, against `examples/model-faults/` on the buggy variant:
+
+```
+  run=1 reproduces (kept): baseline
+  run=2 reproduces (kept): keep 1/2 steps: shipping:reject@0
+  run=3 reproduces (kept): step 0 (shipping) reject → reject-body
+  run=4 reproduces (kept): step 0 (shipping) reject-body → status
+  run=5 clean: step 0 (shipping) status → pass
+
+2 step(s) -> 1 over 5 run(s), preserving unhandledRejection
+1-minimal: every remaining edit was tried and none of them still fails.
+```
+
+The model's counterexample was "cart fulfils, shipping rejects client-side".
+The minimum is sharper and easier to act on: a plain **500 on `shipping`
+alone** is enough for a rejection to escape, and the `cart` step never
+mattered.
+
+Three dimensions, in the order they are searched:
+
+1. **Steps** — delta debugging (`ddmin`) over the schedule. This is where six
+   steps become one. It is the same 1-minimal search `chaosbringer minimize`
+   runs over a recorded trace, on the plan's schedule instead.
+2. **Outcomes** — each step is offered every strictly weaker outcome,
+   strongest-weaker first, along `pass < status < reject-body < reject < abort
+   < slow-ok < slow-trip < hang`. That ordering is a judgement (only its two
+   ends are beyond argument), which is exactly why nothing is *assumed*: each
+   weaker outcome is run and put to the oracle.
+3. **Occurrences** — lowered toward 0, because "it fails on the first call" is
+   both the simpler claim and usually the real one.
+
+The passes alternate rather than running once each, because they feed each
+other: weakening a step to `pass` often makes it deletable, and deleting a step
+can bring a neighbour's occurrence into reach. A round that changes nothing
+ends the search — which is what makes the `1-minimal` verdict true of all three
+dimensions rather than just the last one to run.
+
+### Contracts shrink; predictions do not
+
+This is the one constraint to understand before reaching for it, and it is not
+a limitation of the implementation — it is what a plan means.
+
+A plan's `expect` is computed **by the model, for that schedule**. Shrinking
+changes the schedule, and chaosbringer has no model checker at run time (by
+design — that is what makes plans committed artifacts CI can replay), so it
+cannot recompute the prediction. So a mismatch against a prediction says
+nothing at all about a smaller plan:
+
+> `expect.ui: "error"` with every step weakened to `pass`. The app loads
+> normally, reports `ready`, and the plan "fails" — against an app that is
+> behaving perfectly. An earlier version of this search happily reported that
+> as the minimum: a one-step plan that injects nothing.
+
+A mismatch against a **contract** has no such problem. "No rejection escapes
+every handler" and "this label promises the total is visible" are claims about
+the app, true or false under any schedule. So:
+
+| Finding | Shrinkable | Why |
+|---|---|---|
+| `unhandledRejection`, `unhandledRejection@late` | yes, when the plan says `expect.unhandledRejection: false` | "a rejection escaped" is a bug whatever was injected |
+| `uiInvariant`, `uiInvariant@late` | yes | the bridge's own invariant, keyed by the label the page reported |
+| `ui`, `ui@late`, `state`, `injection`, `amplification` | no | each compares against a number or label the model computed for the original schedule |
+
+A plan whose findings are all predictions exits 1 with
+`stop: "schedule-relative"` and says so. To minimise that, minimise the model
+and recompile. A plan with one of each is shrunk against the contract and the
+output names the finding the minimum does **not** cover:
+
+```
+2 step(s) -> 1 over 5 run(s), preserving unhandledRejection
+1-minimal: every remaining edit was tried and none of them still fails.
+not preserved (compares against the model's prediction, not a contract): ui
+```
+
+### What shrinking deliberately will not do
+
+**It will not follow a different bug.** The fields the baseline reported become
+the target, and a candidate that fails some *other* way counts as clean. Without
+that the search wanders and then presents its minimum as the minimum for the bug
+you started with. `--target ui` narrows it when one plan trips several checks.
+
+**It will not weaken `expect`.** Dropping an expectation is not a smaller
+counterexample, it is a weaker claim — and since an unstated `expect.ui` is not
+checked at all, it would "shrink" a failure into a plan that cannot fail.
+
+**It will not vote on a run it could not judge.** `undecided` and `probeError`
+are the oracle's third answer, and folding either into a boolean is wrong both
+ways: as "clean" it discards a candidate that does fail, so the reported minimum
+is smaller than the truth *and* moves with machine load; as "reproduces" it keeps
+a step on the strength of a run that measured nothing. Such a candidate is
+retried (`--retries`, default 1), and if it stays undecidable the search stops
+and names it.
+
+### The exit code is about the search, not the app
+
+`model shrink` exits 0 only for `stop: "1-minimal"`. Three other outcomes exit 1
+and print which:
+
+| `stop` | Means |
+|---|---|
+| `not-reproducible` | the plan you handed in did not fail on this run — a stale plan, or a bug that is not deterministic yet |
+| `budget` | `--max-runs` (default 100) ran out with edits left to try; the result still reproduces, but smaller plans went untried |
+| `inconclusive` | a candidate stayed undecidable, or the plan itself did (an `orderSensitive` plan is skipped by the runner, so *every* candidate is unjudgeable — pass `--allow-order-sensitive`) |
+| `schedule-relative` | every field the plan failed on compares against the model's prediction, so no smaller schedule can carry it — see above |
+
+The distinction is the whole point of reporting `stop`: "I stopped looking" must
+not reach a reader as "nothing smaller reproduces this". `--json` prints the full
+run log so a `budget` stop can be read as what it is — one edit from done, or
+barely started.
+
+Shrink at dev time, commit the minimised plan, and let CI run *that*: it is
+fewer steps, so it is faster, and its schedule now says what the bug actually
+needs.
+
 ## Keeping the coverage claim honest
 
 Model coverage is not code coverage. `coverageFingerprints: true` collects a
@@ -627,6 +758,7 @@ explicitly for exactly that reason.
 | `quint verify` (one target) | ~14s incl. JVM start | Quint + JVM |
 | `model compile` | milliseconds | Node |
 | `model run` (per plan) | ~2s (one browser, one action) | Node + Chromium |
+| `model shrink` (one plan) | ~2s × candidates tried (default cap 100; a candidate offered twice is answered from a memo, not re-run) | Node + Chromium |
 | `node patterns/vacuity.mjs` (all seven models) | ~21s, no JVM | Quint |
 | …plus, for a plan naming `expect.state` or an `expect.ui` label | one `quiescenceMs` window | — |
 | …plus, on a page with pending timers | up to `asyncDrainCapMs` (3s) | — |

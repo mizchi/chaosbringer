@@ -25,7 +25,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Lifecycle fault injection** — CDP CPU throttling, storage wipe (localStorage / sessionStorage / cookies / IndexedDB), Service Worker cache eviction, and key/value tampering, applied at named stages of every page visit (`beforeNavigation` / `afterLoad` / `beforeActions` / `betweenActions`).
 - **Runtime fault injection** — persistent in-page monkey-patches installed via `addInitScript` on every navigation; subverts JS APIs that no network mock can reach: `reject-fetch` (TypeError or AbortError), `never-settle-fetch`, `reject-body` (`res.json()` rejects after the fetch resolved), `resolve-rejected-thenable`, `clock-skew`.
 - **Deterministic fault schedules** — `schedule: { decisions: ["inject", "pass"] }` on any fault layer replaces the probability roll with a per-occurrence decision table, so "fail the first call, pass the retry" is a test rather than a lucky run. Consumes no RNG, so seeds stay stable.
-- **Model-driven fault coverage** — a temporal-logic model (Quint / ITF) enumerates the failure space, `chaosbringer model compile` turns each witness into a committed `FaultPlan`, and `model run` replays every state with the model as the oracle. Reports which states are reachable, which are unreachable within the bound, and which plans the app never actually exercised.
+- **Model-driven fault coverage** — a temporal-logic model (Quint / ITF) enumerates the failure space, `chaosbringer model compile` turns each witness into a committed `FaultPlan`, `model run` replays every state with the model as the oracle, and `model shrink` minimises a failing plan to the smallest schedule that still fails the same way. Reports which states are reachable, which are unreachable within the bound, and which plans the app never actually exercised.
 - **Coverage-guided action selection** — opt-in V8 precise coverage feedback (CDP `Profiler.takePreciseCoverage`) attributes per-action coverage deltas to the target that fired them and biases subsequent action weights toward targets that historically delivered new code paths.
 - **Declarative invariants** evaluated on every page. A violation fails the run regardless of `--strict`. Trans-page state — e.g. state-machine transitions — is supported via a run-scoped `ctx.state` Map and an `invariants.stateMachine()` helper.
 - **Accessibility checks** via an `invariants.axe()` preset — axe-core is an optional peer dep.
@@ -1028,6 +1028,37 @@ exported from the package root. The runner checks three things per plan — the
 UI label via your `uiProbe`, whether a rejection escaped, and whether the
 planned faults actually fired (a plan whose request the app never issues is
 reported, not counted as a pass).
+
+A checker returns the first counterexample it reaches, not the smallest, so a
+failing plan is routinely longer and harsher than the bug. `model shrink`
+minimises one:
+
+```bash
+chaosbringer model shrink --plan model/plans/refresh-storm.plan.json \
+  --url http://localhost:3000 --config model/bridge.mjs --out min.plan.json
+```
+
+```
+2 step(s) -> 1 over 5 run(s), preserving unhandledRejection
+1-minimal: every remaining edit was tried and none of them still fails.
+```
+
+It drops steps that do not matter, weakens outcomes that need not be that
+strong (`hang` → `status`), and lowers occurrences that need not be that late
+— every candidate a real run judged by the same oracle, so the minimum
+provably still fails, and the *same* way: a candidate that breaks differently
+is a different finding and is rejected.
+
+Only **contract** findings can be shrunk — an escaping rejection, a
+`uiInvariant` violation. `expect.ui` and `expect.state` are what the *model*
+predicted for that exact schedule, and a smaller schedule has no recomputed
+prediction, so shrinking on them would "minimise" a plan to one that injects
+nothing and still call it a reproduction. Those exit 1 with
+`schedule-relative` rather than being answered wrongly. Likewise the search
+exits 0 only when it actually finished: running out of runs, or hitting a
+candidate the oracle could not judge, exits 1 and says which, because a
+minimum nobody established is not a minimum. `shrinkPlan` is the exported
+equivalent.
 
 Full walkthrough: [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
 Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree/main/examples/model-faults).

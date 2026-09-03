@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
-import { compilePlansFromTraces, coverageForRun } from "./cli.js";
+import {
+  compilePlansFromTraces,
+  coverageForRun,
+  formatShrinkResult,
+  parseTargetFields,
+} from "./cli.js";
 import { compilePlan, markOrderSensitivePlans, validatePlan, type FaultPlan } from "./plan.js";
 import {
   checkUiInvariants,
@@ -1923,5 +1928,84 @@ describe("checkUiInvariants", () => {
       { key: "*", message: "always wrong" },
     ]);
     expect(await checkUiInvariants(page, "ready", undefined)).toEqual([]);
+  });
+});
+
+describe("model shrink CLI plumbing", () => {
+  it("accepts the mismatch fields the oracle actually emits", () => {
+    expect(parseTargetFields("ui,unhandledRejection@late")).toEqual([
+      "ui",
+      "unhandledRejection@late",
+    ]);
+  });
+
+  it("tolerates spacing, because a shell quotes the list as one word", () => {
+    expect(parseTargetFields("ui , state")).toEqual(["ui", "state"]);
+  });
+
+  it("rejects a misspelled field instead of quietly dropping it", () => {
+    // Dropping it would leave the search targeting fewer fields than asked
+    // for — and if it drops the only one, targeting nothing, which reproduces
+    // on nothing and reports the input plan as its own minimum. The error
+    // names the field and lists the real ones.
+    expect(() => parseTargetFields("ui,uInvariant")).toThrow(/no such mismatch field: uInvariant/);
+    expect(() => parseTargetFields("ui,uInvariant")).toThrow(/uiInvariant/);
+  });
+
+  it("rejects an empty list rather than targeting nothing", () => {
+    expect(() => parseTargetFields(" , ")).toThrow(/at least one mismatch field/);
+  });
+
+  it("names a finding the minimum does not cover, even on a converged result", () => {
+    // A minimum that preserves the escaping rejection has not been shown to
+    // preserve the `ui` finding beside it. Printing only "1-minimal" would
+    // let a reader assume it covers both.
+    const out = formatShrinkResult({
+      original: { schedule: [1, 2] },
+      minimal: { schedule: [1] },
+      target: ["unhandledRejection"],
+      excludedTarget: ["ui"],
+      runs: 5,
+      stop: "1-minimal",
+      note: "this minimum has not been shown to preserve it.",
+    });
+    expect(out).toContain("1-minimal");
+    expect(out).toContain("not preserved");
+    expect(out).toContain("ui");
+  });
+
+  it("says nothing about exclusions when there are none", () => {
+    const out = formatShrinkResult({
+      original: { schedule: [1, 2] },
+      minimal: { schedule: [1] },
+      target: ["unhandledRejection"],
+      excludedTarget: [],
+      runs: 5,
+      stop: "1-minimal",
+    });
+    expect(out).not.toContain("not preserved");
+  });
+
+  it("says 1-minimal only when the search finished", () => {
+    const base = { original: { schedule: [1, 2, 3] }, minimal: { schedule: [1] }, target: ["ui"] };
+    expect(formatShrinkResult({ ...base, runs: 9, stop: "1-minimal" })).toContain("1-minimal");
+    expect(formatShrinkResult({ ...base, runs: 9, stop: "1-minimal" })).toContain(
+      "3 step(s) -> 1 over 9 run(s), preserving ui",
+    );
+  });
+
+  it("names the reason a partial result is partial", () => {
+    // The whole point of reporting `stop`: "I stopped looking" must not read
+    // like "nothing smaller reproduces".
+    const out = formatShrinkResult({
+      original: { schedule: [1, 2, 3] },
+      minimal: { schedule: [1, 2] },
+      target: ["ui"],
+      runs: 4,
+      stop: "budget",
+      note: "maxRuns=4 reached",
+    });
+    expect(out).toContain("NOT minimal (budget): maxRuns=4 reached");
+    expect(out).not.toContain("1-minimal");
   });
 });
