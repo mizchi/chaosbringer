@@ -156,3 +156,65 @@ export function unfiredFaults(report: CrawlReport, only?: readonly string[]): st
   }
   return problems;
 }
+
+/** One logger event for one fault that did not take effect. */
+export interface FaultWarning {
+  /**
+   * Which of the three diagnoses this is, as the event name — so a consumer
+   * routes on it instead of parsing prose. `fault_rule_unmatched` is the name
+   * the network layer's run-end warning has always emitted and keeps.
+   */
+  event: "fault_rule_unmatched" | "fault_rule_unfired" | "fault_rule_uncounted";
+  /**
+   * Logger payload. `rule` carries the same label the network warning always
+   * did, so an existing `fault_rule_unmatched` consumer keeps working; `layer`
+   * is what distinguishes the three newly-covered layers from it.
+   *
+   * `matched` is absent on `fault_rule_uncounted`, deliberately: that row had
+   * no usable counter, and publishing the coerced `0` would report a
+   * measurement nobody made.
+   */
+  data: {
+    rule: string;
+    layer: FaultLayer;
+    matched?: number;
+    suppressed?: number;
+  };
+}
+
+/**
+ * The warnings a finished run should emit for faults that did not take effect.
+ *
+ * Same three diagnoses as `unfiredFaults`, shaped for a logger rather than an
+ * assertion. It is a separate function because the run-end warning is the one
+ * place that has to say something without being asked: a caller who never
+ * writes the `unfiredFaults` assertion still gets told.
+ *
+ * That warning used to walk the network layer's compiled rules directly and
+ * fire only on `matched === 0` — so a runtime, lifecycle or iframe fault that
+ * never fired produced nothing at all, and neither did a network rule that
+ * matched and was then declined by its own firing policy. Three of the four
+ * layers and two of the three diagnoses were silent, which is the failure this
+ * module exists to end: a check reporting nothing rather than reporting what it
+ * could not check.
+ */
+export function faultWarnings(report: CrawlReport): FaultWarning[] {
+  const out: FaultWarning[] = [];
+  for (const f of faultFirings(report)) {
+    if (f.fired > 0) continue;
+    if (!f.counted) {
+      out.push({ event: "fault_rule_uncounted", data: { rule: f.name, layer: f.layer } });
+      continue;
+    }
+    const data = { rule: f.name, layer: f.layer, matched: f.matched };
+    if (f.matched === 0) {
+      out.push({ event: "fault_rule_unmatched", data });
+    } else {
+      out.push({
+        event: "fault_rule_unfired",
+        data: f.suppressed > 0 ? { ...data, suppressed: f.suppressed } : data,
+      });
+    }
+  }
+  return out;
+}

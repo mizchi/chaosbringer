@@ -227,7 +227,9 @@ faultInjection: [
 
 To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
 
-Per-rule `matched` / `injected` counters end up in `report.faultInjections`. When a rule's `matched` is `0` at the end of a run, chaosbringer emits a `fault_rule_unmatched` warning on the logger — useful for catching typo'd `urlPattern` regexes and rules that are shadowed by an earlier catch-all.
+Per-rule `matched` / `injected` counters end up in `report.faultInjections`. At the end of a run, chaosbringer warns on the logger about every configured fault that did not take effect — on **all four layers**, not just the network one, and naming which of three things happened: `fault_rule_unmatched` (nothing matched the pattern), `fault_rule_unfired` (it matched and the firing policy said no), `fault_rule_uncounted` (the row carried no usable counter, so nothing measured it). Each carries `rule` and `layer`. Useful for catching typo'd `urlPattern` regexes, rules shadowed by an earlier catch-all, and schedules that never reach the occurrence you meant.
+
+Two exported readers give you the same thing without scraping the log: `faultWarnings(report)` returns those events for a report you already hold, and `unfiredFaults(report)` returns the three diagnoses as strings — an empty array is the assertion you want in a test, since `report.faultInjections[0].injected > 0` only ever covers one layer (and reads `undefined > 0` on the other three).
 
 A third counter, `suppressed`, appears on a row only when it is non-zero. Rules are first-match-wins, but a *scheduled* rule advances its occurrence whenever its pattern matches — that is what lets two rules on one URL agree about what "occurrence 1" means. So a scheduled rule can decide `inject` and still not act, because a rule ahead of it answered the request. Without `suppressed` that reads as `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule reports: a planned fault that did not happen, indistinguishable from one that was never planned. `RuntimeFaultStats` carries the same field for the same reason, and there `fired` counts effects, not decisions.
 
@@ -1370,13 +1372,22 @@ new ChaosCrawler({
 
 ## Troubleshooting
 
-### `fault_rule_unmatched` warning at end of run
+### `fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` at end of run
 
-The logger emits one `fault_rule_unmatched` event per rule whose `matched` counter is `0` at the end of a crawl. Usually one of:
+One event per configured fault that did not take effect, on any of the four layers (`network`, `runtime`, `lifecycle`, `iframe`). Each carries `rule` and `layer`; which event you get says what to go fix.
 
-- The `urlPattern` regex has a typo (escape mismatches and missing `^` / `$` anchors are common).
+**`fault_rule_unmatched`** — the pattern matched nothing (`matched: 0`). Usually one of:
+
+- The `urlPattern` regex has a typo (escape mismatches and missing `^` / `$` anchors are common), or an `iframeFaults` `selector` names an element the page never creates.
 - A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
 - The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
+- For a `runtimeFaults` rule: the app makes the call from a context the init-script patch does not cover, or issues no client-side call at all.
+
+**`fault_rule_unfired`** — the pattern was right and the firing policy declined: `matched` is non-zero and nothing fired. A `schedule` shorter than the number of matching calls, a `probability` that never rolled, or (when `suppressed` is present on the event) a rule ahead of this one answering the request first.
+
+**`fault_rule_uncounted`** — the row carried no usable counter, so nothing measured whether it fired. Not the same finding as the two above: the run decides nothing about that fault. Expect this only from a hand-built or older-version report, not from a completed crawl.
+
+An earlier version emitted only `fault_rule_unmatched`, and only for the network layer — a runtime, lifecycle or iframe fault that never fired ended the run in silence, as did a network rule its own firing policy declined.
 
 ### `fault_rule_shadowed` warning at crawl start
 

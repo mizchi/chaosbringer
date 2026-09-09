@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { faultFirings, unfiredFaults } from "./firings.js";
+import { faultFirings, faultWarnings, unfiredFaults } from "./firings.js";
 import type { CrawlReport } from "./types.js";
 
 const report = (partial: Partial<CrawlReport>) => partial as CrawlReport;
@@ -104,5 +104,87 @@ describe("unfiredFaults", () => {
     expect(unfiredFaults(r, ["typo"])).toEqual([
       expect.stringContaining('no layer reported stats for a fault named "typo"'),
     ]);
+  });
+});
+
+describe("faultWarnings", () => {
+  it("warns on all four layers, not just the network one", () => {
+    // The regression this function exists for: the run-end warning walked the
+    // network layer's compiled rules, so a runtime, lifecycle or iframe fault
+    // that never fired ended the run in silence.
+    expect(
+      faultWarnings(
+        report({
+          faultInjections: [{ rule: "n", matched: 0, injected: 0 }],
+          runtimeFaults: [{ rule: "r", matched: 0, fired: 0 }],
+          lifecycleFaults: [{ name: "l", matched: 0, fired: 0, errored: 0 }],
+          iframeFaults: [
+            { rule: "i", selector: "iframe", action: "never-load", matched: 0, fired: 0 },
+          ],
+        }),
+      ).map((w) => `${w.event}:${w.data.layer}`),
+    ).toEqual([
+      "fault_rule_unmatched:network",
+      "fault_rule_unmatched:runtime",
+      "fault_rule_unmatched:lifecycle",
+      "fault_rule_unmatched:iframe",
+    ]);
+  });
+
+  it("distinguishes matched-but-declined from never-matched", () => {
+    // The second diagnosis had no event at all: a rule whose pattern is right
+    // and whose firing policy said no reported exactly like one that fired.
+    expect(
+      faultWarnings(
+        report({
+          faultInjections: [{ rule: "declined", matched: 3, injected: 0 }],
+          runtimeFaults: [{ rule: "typo", matched: 0, fired: 0 }],
+        }),
+      ),
+    ).toEqual([
+      { event: "fault_rule_unfired", data: { rule: "declined", layer: "network", matched: 3 } },
+      { event: "fault_rule_unmatched", data: { rule: "typo", layer: "runtime", matched: 0 } },
+    ]);
+  });
+
+  it("passes `suppressed` through only when a rule ahead of it answered", () => {
+    const [lost] = faultWarnings(
+      report({ faultInjections: [{ rule: "loser", matched: 3, injected: 0, suppressed: 2 }] }),
+    );
+    expect(lost?.data.suppressed).toBe(2);
+    const [plain] = faultWarnings(
+      report({ faultInjections: [{ rule: "plain", matched: 3, injected: 0 }] }),
+    );
+    expect(plain?.data).not.toHaveProperty("suppressed");
+  });
+
+  it("omits `matched` on an unmeasured row rather than publishing a coerced 0", () => {
+    // `matched: 0` here would assert a measurement nobody made — the same
+    // conflation of "nothing happened" with "nothing was counted" that the
+    // `counted` flag exists to keep apart.
+    const warnings = faultWarnings(report({ faultInjections: [{ rule: "r" } as never] }));
+    expect(warnings).toEqual([
+      { event: "fault_rule_uncounted", data: { rule: "r", layer: "network" } },
+    ]);
+    expect(warnings[0]?.data).not.toHaveProperty("matched");
+  });
+
+  it("stays quiet about faults that fired, on every layer", () => {
+    expect(
+      faultWarnings(
+        report({
+          faultInjections: [{ rule: "n", matched: 1, injected: 1 }],
+          runtimeFaults: [{ rule: "r", matched: 1, fired: 1 }],
+          lifecycleFaults: [{ name: "l", matched: 1, fired: 1, errored: 0 }],
+          iframeFaults: [
+            { rule: "i", selector: "iframe", action: "never-load", matched: 1, fired: 1 },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("says nothing for a run that configured no faults", () => {
+    expect(faultWarnings(report({}))).toEqual([]);
   });
 });
