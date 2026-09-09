@@ -332,6 +332,35 @@ export type MismatchField =
    */
   | "undecided";
 
+/**
+ * Every `MismatchField`, as a value — for a CLI that has to accept one from
+ * an operator and reject a typo (`chaosbringer model shrink --target`).
+ *
+ * A second list of the same thing is normally how one of them rots, so this
+ * one cannot: `satisfies` rejects a name that is not a field, and the
+ * `Exclude<>` assertion below rejects a field that is missing from here. Add
+ * a member to the union without adding it here and `tsc` says so.
+ */
+export const MISMATCH_FIELDS = [
+  "ui",
+  "ui@late",
+  "uiInvariant",
+  "uiInvariant@late",
+  "unhandledRejection",
+  "unhandledRejection@late",
+  "injection",
+  "amplification",
+  "state",
+  "probeError",
+  "undecided",
+] as const satisfies readonly MismatchField[];
+
+// Compile-time exhaustiveness: `never` on both sides or this line fails.
+const _allFieldsListed: Exclude<MismatchField, (typeof MISMATCH_FIELDS)[number]> extends never
+  ? true
+  : never = true;
+void _allFieldsListed;
+
 export interface PlanMismatch {
   plan: string;
   field: MismatchField;

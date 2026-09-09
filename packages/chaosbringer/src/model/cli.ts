@@ -1,5 +1,5 @@
 /**
- * `chaosbringer model <calibrate|compile|run>`.
+ * `chaosbringer model <calibrate|compile|run|shrink>`.
  *
  * Three stages with deliberately different dependency footprints:
  *
@@ -12,6 +12,10 @@
  *            commit the plans.
  *   run      plan JSON files → deterministic browser runs + oracle check.
  *            No Quint, no JVM: CI only ever needs this half.
+ *   shrink   one failing plan → the smallest plan that still fails the same
+ *            way. A model checker returns whichever counterexample its search
+ *            reached first, which is routinely far longer than the bug; this
+ *            re-runs smaller candidates until none of them still fails.
  *
  * Enumeration itself (asking a model checker for one witness per target
  * state) stays out of the CLI on purpose — it is a `quint verify` loop over
@@ -30,10 +34,20 @@ import {
   markOrderSensitivePlans,
   validatePlan,
   DEFAULT_IGNORED_ACTIONS,
+  PLAN_OUTCOMES,
   type CompilePlanOptions,
   type FaultPlan,
 } from "./plan.js";
-import { fingerprintsOf, runPlans, type RunPlanOptions } from "./runner.js";
+import {
+  MISMATCH_FIELDS,
+  fingerprintsOf,
+  resolvePlanTiming,
+  runPlan,
+  runPlans,
+  type MismatchField,
+  type RunPlanOptions,
+} from "./runner.js";
+import { shrinkPlan } from "./shrink.js";
 
 const HELP = `Usage: chaosbringer model <command> [options]
 
@@ -99,11 +113,47 @@ Commands:
       --output <file>    Write the coverage report (JSON) here.
       --json             Print the coverage report instead of the summary.
 
+  shrink --plan <file> --url <url> --config <file>
+      Minimise ONE failing plan: drop the steps that do not matter, weaken
+      the outcomes that do not need to be that strong, and lower the
+      occurrences that do not need to be that late. Each candidate is a real
+      browser run judged by the same oracle as \`model run\`, so the result is
+      a plan that provably still fails — not a guess.
+
+      Exits 0 only when the search finished the job. A plan that did not
+      reproduce, a run budget that ran out, or a candidate the oracle could
+      not judge all exit 1 and say which: a minimum nobody established is not
+      a minimum.
+
+      --out <file>       Write the minimised plan here (as *.plan.json).
+      --target <fields>  Comma-separated mismatch fields the minimum must keep
+                         reproducing. Default: whatever the first run of the
+                         plan reports. Narrow it when one plan trips several
+                         checks and you only care about one.
+
+      Only CONTRACT findings can be shrunk: an escaping rejection (needs
+      \`expect.unhandledRejection: false\`) and a \`uiInvariant\` violation.
+      \`ui\`, \`state\`, \`injection\` and \`amplification\` compare against the
+      model's prediction for that exact schedule, and a smaller schedule has
+      no recomputed prediction — shrinking on them would "minimise" the plan
+      to one that injects nothing and still call it a reproduction. Such a
+      plan exits 1 with \`schedule-relative\`; minimise the model instead.
+      --max-runs <n>     Candidate runs to spend, baseline included
+                         (default 100). Each one boots a browser.
+      --retries <n>      Re-runs to spend on a candidate the oracle could not
+                         judge before giving up on it (default 1).
+      --allow-order-sensitive  Shrink a flagged plan anyway. Without this an
+                         order-sensitive plan is skipped by the runner, so
+                         every candidate is unjudgeable and the search stops.
+      --json             Print the full result, including the run log.
+
 Examples:
   chaosbringer model calibrate --url http://localhost:3000 --out model/profile.json
   chaosbringer model compile --traces model/traces --out model/plans
   chaosbringer model run --plans model/plans --url http://localhost:3000 \\
     --config model/bridge.mjs
+  chaosbringer model shrink --plan model/plans/refresh-storm.plan.json \\
+    --url http://localhost:3000 --config model/bridge.mjs --out min.plan.json
 `;
 
 function listFiles(dir: string, suffix: string): string[] {
@@ -399,6 +449,158 @@ async function runCalibrate(argv: string[]): Promise<void> {
   }
 }
 
+/**
+ * Parse `--target ui,state` into fields, rejecting a name that is not one.
+ *
+ * Silently dropping a typo would leave the search targeting fewer fields than
+ * the operator asked for — and if it drops the *only* field, targeting
+ * nothing, which reproduces on nothing and reports the original plan as its
+ * own minimum. A misspelled flag has to be an error.
+ */
+export function parseTargetFields(raw: string): MismatchField[] {
+  const names = raw
+    .split(",")
+    .map((n) => n.trim())
+    .filter((n) => n.length > 0);
+  if (names.length === 0) {
+    throw new Error(`model shrink: --target was empty; give at least one mismatch field`);
+  }
+  const known = new Set<string>(MISMATCH_FIELDS);
+  const bad = names.filter((n) => !known.has(n));
+  if (bad.length > 0) {
+    throw new Error(
+      `model shrink: --target has no such mismatch field: ${bad.join(", ")}. ` +
+        `Known fields: ${MISMATCH_FIELDS.join(", ")}`,
+    );
+  }
+  return names as MismatchField[];
+}
+
+/** One-line summary of what the shrink achieved, and of what it did not. */
+export function formatShrinkResult(result: {
+  original: { schedule: readonly unknown[] };
+  minimal: { schedule: readonly unknown[] };
+  target: readonly string[];
+  excludedTarget?: readonly string[];
+  runs: number;
+  stop: string;
+  note?: string;
+}): string {
+  const lines = [
+    `${result.original.schedule.length} step(s) -> ${result.minimal.schedule.length} ` +
+      `over ${result.runs} run(s), preserving ${result.target.join(", ") || "(nothing)"}`,
+  ];
+  lines.push(
+    result.stop === "1-minimal"
+      ? `1-minimal: every remaining edit was tried and none of them still fails.`
+      : `NOT minimal (${result.stop}): ${result.note ?? "no reason recorded"}`,
+  );
+  // Printed even on success. A minimum that preserves the escaping rejection
+  // has not been shown to preserve the `ui` finding beside it, and a reader
+  // who is not told will assume it has.
+  if (result.excludedTarget !== undefined && result.excludedTarget.length > 0) {
+    lines.push(
+      `not preserved (compares against the model's prediction, not a contract): ` +
+        result.excludedTarget.join(", "),
+    );
+    if (result.stop === "1-minimal" && result.note !== undefined) lines.push(result.note);
+  }
+  return lines.join("\n");
+}
+
+async function runShrink(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      plan: { type: "string" },
+      url: { type: "string" },
+      config: { type: "string" },
+      out: { type: "string" },
+      target: { type: "string" },
+      "max-runs": { type: "string" },
+      retries: { type: "string" },
+      "allow-order-sensitive": { type: "boolean" },
+      json: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help || !values.plan || !values.url || !values.config) {
+    console.log(HELP);
+    if (!values.help) process.exitCode = 1;
+    return;
+  }
+
+  const plan = JSON.parse(readFileSync(resolve(values.plan), "utf8")) as FaultPlan;
+  validatePlan(plan);
+  const bridge = await loadBridge(values.config);
+  const runOptions: RunPlanOptions = {
+    ...bridge,
+    baseUrl: values.url,
+    ...(values["allow-order-sensitive"] ? { allowOrderSensitive: true } : {}),
+  };
+
+  // `slow-ok`/`slow-trip` need a solved millisecond value, and a bridge
+  // without `appDeadlineMs` has none — the runner throws on such a plan
+  // rather than guessing. Both are weaker than `hang`, so without this the
+  // first candidate generated for a hang plan would kill the shrink on a
+  // bridge that runs `model run` perfectly well.
+  const timingAvailable = resolvePlanTiming(runOptions).delays !== undefined;
+  const allowOutcomes = timingAvailable
+    ? undefined
+    : PLAN_OUTCOMES.filter((o) => o !== "slow-ok" && o !== "slow-trip");
+
+  const result = await shrinkPlan({
+    plan,
+    run: (candidate) => runPlan(candidate, runOptions),
+    ...(allowOutcomes !== undefined ? { allowOutcomes } : {}),
+    ...(values.target !== undefined ? { target: parseTargetFields(values.target) } : {}),
+    ...(values["max-runs"] !== undefined
+      ? { maxRuns: positiveInt(values["max-runs"], "--max-runs") }
+      : {}),
+    ...(values.retries !== undefined ? { retries: nonNegativeInt(values.retries, "--retries") } : {}),
+    onStep: (step) =>
+      console.error(
+        `  run=${step.run} ${step.verdict}${step.kept ? " (kept)" : ""}: ${step.edit}`,
+      ),
+  });
+
+  if (values.json) {
+    // The run log is the audit trail: which candidates were tried, what each
+    // one was judged to be, and which were adopted. Without it a `budget`
+    // stop is unactionable — you cannot tell whether it was one step from
+    // done or had barely started.
+    console.log(JSON.stringify({ ...result, report: undefined }, null, 2));
+  } else {
+    console.log("");
+    console.log(formatShrinkResult(result));
+  }
+
+  if (values.out) {
+    const out = resolve(values.out);
+    mkdirSync(resolve(out, ".."), { recursive: true });
+    // Named for the file it is written to, so `model run` on the output
+    // directory reports it under a name that matches. Keeping the original
+    // name would give two different plans the same identity in one report.
+    const minimal: FaultPlan = { ...result.minimal, name: stemOf(out) };
+    writeFileSync(out, `${JSON.stringify(minimal, null, 2)}\n`);
+    if (!values.json) console.log(`minimised plan -> ${values.out}`);
+  }
+
+  // A result that is not 1-minimal is a question left open, and a zero exit
+  // would let CI treat it as an answer.
+  if (!result.converged) process.exitCode = 1;
+}
+
+/** Like `positiveInt`, for a flag where 0 is a legitimate choice. */
+function nonNegativeInt(raw: string, flag: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`model shrink: ${flag} needs a non-negative integer, got "${raw}"`);
+  }
+  return n;
+}
+
 export async function runModelCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   switch (command) {
@@ -410,6 +612,9 @@ export async function runModelCli(argv: string[]): Promise<void> {
       return;
     case "run":
       await runRun(rest);
+      return;
+    case "shrink":
+      await runShrink(rest);
       return;
     case undefined:
     case "-h":

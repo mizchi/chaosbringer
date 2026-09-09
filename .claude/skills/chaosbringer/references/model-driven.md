@@ -185,7 +185,7 @@ them never run. `"*"` applies to every label.
 
 ## What the runner reports
 
-Nine mismatch fields. The ones whose meaning is easy to guess wrong:
+Eleven mismatch fields. The ones whose meaning is easy to guess wrong:
 
 - `injection` — a planned fault never fired, *or* an `expect.calls` count the app
   came in **under**. Either way the state was not exercised.
@@ -199,6 +199,50 @@ Nine mismatch fields. The ones whose meaning is easy to guess wrong:
 - `undecided` — the probe fired too late to tell a bounded app from an unbounded
   one. Not a pass and not a failure: a refusal to answer. If frequent,
   re-calibrate under the load you actually have.
+
+## Shrinking a counterexample
+
+A checker hands you whichever counterexample its search reached first. A
+twelve-step schedule where two steps matter is a normal output, and the reader
+cannot tell which two.
+
+```bash
+chaosbringer model shrink --plan plans/refresh-storm.plan.json \
+  --url http://localhost:3000 --config bridge.mjs --out min.plan.json
+```
+
+It drops steps that do not matter (delta debugging over the schedule), weakens
+outcomes that do not need to be that strong (`hang` → `status` is a simpler
+claim about your app), and lowers occurrences that do not need to be that late
+(`occurrence: 3` → `0` is "it fails on the first call"). Every candidate is a
+real run judged by the same oracle, so the minimum provably still fails.
+
+Four things worth knowing before you read its output:
+
+- **Contracts shrink; predictions do not.** `expect` is what the *model*
+  predicted for *that* schedule, and shrinking cannot recompute it — weaken
+  every step to `pass` and `expect.ui: "error"` still "fails", against an app
+  behaving perfectly. So only contract findings are shrinkable: an escaping
+  rejection (needs `expect.unhandledRejection: false`) and a `uiInvariant`
+  violation. `ui`, `state`, `injection` and `amplification` exit 1 with
+  `schedule-relative`; minimise the model instead. A plan with one of each is
+  shrunk against the contract, and the output names what the minimum does not
+  cover.
+- **It preserves the *same* failure, not any failure.** The fields the first run
+  reported become the target; a candidate that breaks differently is a different
+  finding and is rejected. `--target unhandledRejection` narrows that when one
+  plan trips several checks and you care about one.
+- **`undecided` and `probeError` are neither "still fails" nor "fixed".** A
+  candidate the oracle could not judge is retried, and if it stays undecidable
+  the search stops and says so rather than voting — either vote is wrong, and a
+  wrong vote silently moves the reported minimum.
+- **It exits 0 only when it finished.** `budget` (ran out of runs, default 100)
+  and `inconclusive` exit 1 with the reason. A minimum nobody established is not
+  a minimum, so do not wire the exit code as "shrink succeeded" without reading
+  `stop`.
+
+`shrinkPlan` is exported if you want the search without the CLI; pass a `run`
+function and it never touches a browser itself.
 
 ## Enumerating
 

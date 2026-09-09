@@ -48,6 +48,7 @@ export {
   runPlan,
   runPlans,
   validateCallCountRules,
+  MISMATCH_FIELDS,
   type MismatchField,
   type PlanMismatch,
   type PlanOracleInput,
@@ -57,6 +58,26 @@ export {
   type RunPlanOptions,
   type UiInvariant,
 } from "./runner.js";
+
+export {
+  classifyVerdict,
+  fieldsOf,
+  planWithSteps,
+  shrinkCandidates,
+  shrinkPlan,
+  shrinkableFields,
+  unrankedOutcomes,
+  weakerOutcomes,
+  INCONCLUSIVE_FIELDS,
+  OUTCOME_STRENGTH,
+  type ShrinkCandidate,
+  type ShrinkOptions,
+  type ShrinkResult,
+  type ShrinkRunResult,
+  type ShrinkStep,
+  type ShrinkStop,
+  type ShrinkVerdict,
+} from "./shrink.js";
 
 export {
   calibrateTiming,

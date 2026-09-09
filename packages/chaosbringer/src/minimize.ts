@@ -2,10 +2,11 @@
  * Delta-debugging (ddmin) over a recorded chaos trace, so the user can ask
  * "which of these 500 actions are actually needed to reproduce this bug?"
  *
- * The core `ddmin` helper is pure: it takes a sequence and an async predicate
- * and returns a 1-minimal subset. The rest of this module wires it up to the
- * trace format and to `chaos()` so the CLI subcommand can minimise against
- * a regex match on error-cluster fingerprints.
+ * The search itself is `ddmin` in `./ddmin.js` — pure, and kept there so
+ * browser-free callers can reach it without importing `ChaosCrawler`. This
+ * module wires it up to the trace format and to `chaos()` so the CLI
+ * subcommand can minimise against a regex match on error-cluster
+ * fingerprints, and re-exports `ddmin` under the path it has always had.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ChaosCrawler } from "./crawler.js";
+import { ddmin } from "./ddmin.js";
 import {
   groupTrace,
   readTrace,
@@ -23,72 +25,10 @@ import {
 } from "./trace.js";
 import type { CrawlReport } from "./types.js";
 
-/**
- * Zeller's ddmin. Narrows `items` down to the minimal subsequence that still
- * satisfies `predicate` ("this reproduces the failure"). `predicate` should
- * return `true` when the subset still reproduces, `false` otherwise.
- *
- * The algorithm preserves order and is deterministic given a deterministic
- * predicate. Complexity is O(n log n) in the happy case and O(n²) worst case.
- */
-export async function ddmin<T>(
-  items: readonly T[],
-  predicate: (subset: T[]) => Promise<boolean>,
-  onStep?: (info: { iteration: number; size: number; keptAfter: number }) => void
-): Promise<T[]> {
-  let current: T[] = [...items];
-  let granularity = 2;
-  let iteration = 0;
-
-  while (current.length >= 2) {
-    const chunkSize = Math.ceil(current.length / granularity);
-    const chunks: T[][] = [];
-    for (let i = 0; i < current.length; i += chunkSize) {
-      chunks.push(current.slice(i, i + chunkSize));
-    }
-
-    let reduced = false;
-
-    // Phase 1 — try each chunk alone.
-    for (const chunk of chunks) {
-      iteration++;
-      if (await predicate(chunk)) {
-        onStep?.({ iteration, size: current.length, keptAfter: chunk.length });
-        current = chunk;
-        granularity = 2;
-        reduced = true;
-        break;
-      }
-    }
-    if (reduced) continue;
-
-    // Phase 2 — try each complement (drop one chunk at a time).
-    for (let ci = 0; ci < chunks.length; ci++) {
-      const chunk = chunks[ci]!;
-      const chunkStart = ci * chunkSize;
-      const complement = [
-        ...current.slice(0, chunkStart),
-        ...current.slice(chunkStart + chunk.length),
-      ];
-      if (complement.length === 0) continue;
-      iteration++;
-      if (await predicate(complement)) {
-        onStep?.({ iteration, size: current.length, keptAfter: complement.length });
-        current = complement;
-        granularity = Math.max(granularity - 1, 2);
-        reduced = true;
-        break;
-      }
-    }
-    if (reduced) continue;
-
-    // Phase 3 — increase granularity. If we can't split finer, we're 1-minimal.
-    if (granularity >= current.length) break;
-    granularity = Math.min(current.length, granularity * 2);
-  }
-
-  return current;
-}
+// `ddmin` moved to its own module so browser-free callers can use it without
+// pulling Playwright in through `ChaosCrawler` above. Re-exported here because
+// this is the path it has always been published under.
+export { ddmin } from "./ddmin.js";
 
 /** True when any error cluster fingerprint matches the regex. */
 export function reportMatches(report: CrawlReport, pattern: RegExp): boolean {

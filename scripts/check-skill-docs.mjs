@@ -258,6 +258,33 @@ for (const rel of workflowFiles) {
   }
 }
 
+// The mismatch-field count the model-driven reference states in prose.
+//
+// It said "Nine" while the union had eleven members, and nothing noticed,
+// because a number in prose is not an identifier. `MISMATCH_FIELDS` makes it
+// checkable, so check it: a field added to the oracle without updating the
+// reference now fails here instead of quietly making the docs wrong.
+const FIELD_WORDS = [
+  "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
+  "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen",
+];
+const modelText = readFileSync(join(skillDir, "references/model-driven.md"), "utf8");
+const fieldCount = mod.MISMATCH_FIELDS?.length;
+if (fieldCount === undefined) {
+  problems.push("MISMATCH_FIELDS is not exported from the package entry, so the documented mismatch-field count cannot be checked");
+} else {
+  const stated = /^(\w+) mismatch fields\./m.exec(modelText);
+  if (!stated) {
+    problems.push('references/model-driven.md: expected a line "<N> mismatch fields." naming how many the runner reports');
+  } else if (stated[1] !== FIELD_WORDS[fieldCount]) {
+    problems.push(
+      `references/model-driven.md: says "${stated[1]} mismatch fields" but MismatchField has ${fieldCount} ` +
+        `(${FIELD_WORDS[fieldCount] ?? fieldCount})`,
+    );
+  }
+  checkedIdentifiers++;
+}
+
 // And the session surface the docs promise.
 const SESSION_METHODS = ["stats", "runtimeStats", "firings", "heldRequests", "release", "dispose"];
 const apiText = readFileSync(join(skillDir, "references/api.md"), "utf8");
