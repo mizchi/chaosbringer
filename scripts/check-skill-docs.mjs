@@ -40,8 +40,21 @@ const exported = new Set(Object.keys(mod));
 // a second copy here would drift, and the copy the checker used would be the
 // one nobody fixed.
 const { KNOWN_OPTION_NAMES } = await import(
-  new URL("../packages/chaosbringer/src/crawler.ts", import.meta.url).href
+  new URL("../packages/chaosbringer/src/validate.ts", import.meta.url).href
 );
+// Without this guard the destructure above yields `undefined` when the export
+// moves or is renamed, `new Set(undefined)` is empty, and every documented
+// option is reported as a misspelling. That is a checker announcing a hundred
+// faults in the thing it checks when the only broken thing was its own import —
+// the failure mode this whole script exists to catch, one level up.
+if (!Array.isArray(KNOWN_OPTION_NAMES) || KNOWN_OPTION_NAMES.length === 0) {
+  console.error(
+    "check-skill-docs: KNOWN_OPTION_NAMES could not be read from " +
+      "packages/chaosbringer/src/validate.ts — the documented option names were " +
+      "not checked at all. Fix the import rather than the docs.",
+  );
+  process.exit(1);
+}
 const faultHelpers = new Set(Object.keys(mod.faults ?? {}));
 
 const files = ["SKILL.md", ...readdirSync(join(skillDir, "references")).map((f) => `references/${f}`)];

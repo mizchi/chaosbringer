@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateOptions } from "./crawler.js";
+import { validateOptions } from "./validate.js";
 
 function base(extra: Record<string, unknown> = {}): any {
   return { baseUrl: "http://localhost:3000", ...extra };

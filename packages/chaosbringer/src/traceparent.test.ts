@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTraceparent } from "./crawler.js";
+import { parseTraceparent } from "./traceparent.js";
 
 describe("parseTraceparent", () => {
   it("parses a well-formed traceparent into traceId and spanId", () => {

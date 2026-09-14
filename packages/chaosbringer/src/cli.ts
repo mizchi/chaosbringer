@@ -24,7 +24,8 @@
  */
 
 import { parseArgs } from "node:util";
-import { ChaosCrawler, COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./crawler.js";
+import { ChaosCrawler } from "./crawler.js";
+import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { axe } from "./invariants.js";

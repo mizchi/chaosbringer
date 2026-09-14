@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IGNORE_PRESETS, resolveIgnorePresets } from "./crawler.js";
+import { IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { matchesAnyPattern } from "./filters.js";
 
 /**

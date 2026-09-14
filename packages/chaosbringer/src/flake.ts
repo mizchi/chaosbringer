@@ -321,7 +321,8 @@ function fail(msg: string): never {
 /** Entry point wired from src/cli.ts when the `flake` subcommand is used. */
 export async function runFlakeCli(argv: string[]): Promise<void> {
   const args = parseFlakeArgs(argv);
-  const { ChaosCrawler, COMMON_IGNORE_PATTERNS } = await import("./crawler.js");
+  const { ChaosCrawler } = await import("./crawler.js");
+  const { COMMON_IGNORE_PATTERNS } = await import("./ignore-presets.js");
   const reports: CrawlReport[] = [];
   for (let i = 0; i < args.runs; i++) {
     if (!args.quiet) console.log(`Run ${i + 1}/${args.runs}...`);

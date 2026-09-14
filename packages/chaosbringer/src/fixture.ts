@@ -19,7 +19,8 @@
  */
 
 import { test as base, expect, type Page } from "@playwright/test";
-import { ChaosCrawler, COMMON_IGNORE_PATTERNS } from "./crawler.js";
+import { ChaosCrawler } from "./crawler.js";
+import { COMMON_IGNORE_PATTERNS } from "./ignore-presets.js";
 import type { ChaosTestOptions, PageResult, CrawlReport } from "./types.js";
 import { runRecipeWithRequires } from "./recipes/composition.js";
 import { investigate as runInvestigate, type InvestigateResult } from "./recipes/investigate.js";

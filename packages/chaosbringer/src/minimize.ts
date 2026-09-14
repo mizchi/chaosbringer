@@ -240,7 +240,7 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
   if (args.maxPages !== undefined) overrides.maxPages = args.maxPages;
   if (args.timeout !== undefined) overrides.timeout = args.timeout;
   if (args.ignoreAnalytics) {
-    const { COMMON_IGNORE_PATTERNS } = await import("./crawler.js");
+    const { COMMON_IGNORE_PATTERNS } = await import("./ignore-presets.js");
     overrides.ignoreErrorPatterns = COMMON_IGNORE_PATTERNS;
   }
 
