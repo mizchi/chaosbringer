@@ -72,13 +72,19 @@ import {
   matchesAnyPattern,
   matchesSpaPattern as matchesSpaPatternPure,
   isExternalUrl as isExternalUrlPure,
-  escapeSelector as escapeSelectorPure,
   summarizePages,
   normalizeUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
 import { faultWarnings } from "./firings.js";
+import { collectRawLinks, resolvePageLinks } from "./links.js";
+import {
+  collectRawTargets,
+  scrollOnlyTargets,
+  weighActionTargets,
+  type RawActionTarget,
+} from "./action-targets.js";
 import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
@@ -1773,80 +1779,8 @@ export class ChaosCrawler {
 
   private async extractLinks(page: Page): Promise<string[]> {
     try {
-      const links = await page.evaluate(() => {
-        const out = new Set<string>();
-        const pushResolved = (raw: string | null | undefined) => {
-          if (!raw) return;
-          const trimmed = raw.trim();
-          if (!trimmed) return;
-          if (
-            trimmed.startsWith("javascript:") ||
-            trimmed.startsWith("mailto:") ||
-            trimmed.startsWith("tel:")
-          ) {
-            return;
-          }
-          try {
-            const absolute = new URL(trimmed, document.baseURI).toString();
-            out.add(absolute);
-          } catch {
-            // Malformed URL — skip.
-          }
-        };
-
-        // <a href> — primary navigation
-        for (const a of Array.from(document.querySelectorAll("a[href]"))) {
-          pushResolved(a.getAttribute("href"));
-        }
-        // <area href> — image map regions
-        for (const area of Array.from(document.querySelectorAll("area[href]"))) {
-          pushResolved(area.getAttribute("href"));
-        }
-        // <iframe src> — embedded pages
-        for (const iframe of Array.from(document.querySelectorAll("iframe[src]"))) {
-          pushResolved(iframe.getAttribute("src"));
-        }
-        // <link rel="canonical"> / rel="alternate" — SEO-level navigation
-        for (const link of Array.from(
-          document.querySelectorAll(
-            'link[rel~="canonical"][href], link[rel~="alternate"][href]'
-          )
-        )) {
-          pushResolved(link.getAttribute("href"));
-        }
-        // <meta http-equiv="refresh" content="N; url=..."> — meta redirect
-        for (const meta of Array.from(
-          document.querySelectorAll('meta[http-equiv]')
-        )) {
-          const httpEquiv = meta.getAttribute("http-equiv");
-          if (!httpEquiv || httpEquiv.toLowerCase() !== "refresh") continue;
-          const content = meta.getAttribute("content");
-          if (!content) continue;
-          const semi = content.indexOf(";");
-          if (semi === -1) continue;
-          const rest = content.slice(semi + 1).trim();
-          const m = rest.match(/^url\s*=\s*(.*)$/i);
-          if (!m) continue;
-          let url = m[1]!.trim();
-          if (url.length === 0) continue;
-          if (url.startsWith('"') || url.startsWith("'")) {
-            const quote = url[0]!;
-            const end = url.indexOf(quote, 1);
-            if (end === -1) continue;
-            url = url.slice(1, end);
-          } else {
-            // Terminate at the next parameter separator — `0;url=/a;foo=bar`
-            // must queue `/a`, not `/a;foo=bar`.
-            const sep = url.indexOf(";");
-            if (sep !== -1) url = url.slice(0, sep).trim();
-          }
-          pushResolved(url);
-        }
-
-        return Array.from(out);
-      });
-
-      return links.filter((link) => !this.isExternalUrl(link));
+      const raw = await page.evaluate(collectRawLinks);
+      return resolvePageLinks(raw).filter((link) => !this.isExternalUrl(link));
     } catch {
       return [];
     }
@@ -1856,209 +1790,24 @@ export class ChaosCrawler {
    * Get action targets from DOM with accessibility-based weighting
    */
   private async getWeightedActionTargets(page: Page): Promise<ActionTarget[]> {
-    const targets: ActionTarget[] = [];
-
+    let raw: RawActionTarget[];
     try {
-      // Collect interactive elements from DOM with ARIA info
-      const domTargets = await page.evaluate(() => {
-        const results: Array<{
-          tag: string;
-          text: string;
-          role: string | null;
-          ariaLabel: string | null;
-          index: number;
-          hasVisibleText: boolean;
-          isNavLink: boolean;
-          href?: string;
-          isInMainContent: boolean;
-        }> = [];
-
-        // Links with priority for navigation
-        document.querySelectorAll("a[href]").forEach((el, i) => {
-          const anchor = el as HTMLAnchorElement;
-          const text = anchor.innerText?.trim() || "";
-          const ariaLabel = anchor.getAttribute("aria-label");
-          const role = anchor.getAttribute("role");
-          // Navigation links are in nav, header, or have specific roles
-          const isNavLink = !!anchor.closest("nav, header, [role='navigation']");
-          // Check if link is in main content area
-          const isInMainContent = !!anchor.closest("main, article, [role='main'], .content, #content");
-
-          if (text.length < 100 || ariaLabel) {
-            results.push({
-              tag: "a",
-              text: text || ariaLabel || "",
-              role,
-              ariaLabel,
-              index: i,
-              hasVisibleText: text.length > 0,
-              isNavLink,
-              href: anchor.href,
-              isInMainContent,
-            });
-          }
-        });
-
-        // Buttons
-        document.querySelectorAll("button, [role='button']").forEach((el, i) => {
-          const text = (el as HTMLElement).innerText?.trim() || "";
-          const ariaLabel = el.getAttribute("aria-label");
-          const role = el.getAttribute("role") || "button";
-          const isInMainContent = !!el.closest("main, article, [role='main'], .content, #content");
-
-          if (text.length < 100 || ariaLabel) {
-            results.push({
-              tag: "button",
-              text: text || ariaLabel || "",
-              role,
-              ariaLabel,
-              index: i,
-              hasVisibleText: text.length > 0,
-              isNavLink: false,
-              isInMainContent,
-            });
-          }
-        });
-
-        // Interactive ARIA roles
-        const ariaSelectors = [
-          "[role='menuitem']",
-          "[role='tab']",
-          "[role='checkbox']",
-          "[role='radio']",
-          "[role='switch']",
-          "[role='slider']",
-          "[role='listbox']",
-          "[role='option']",
-        ];
-
-        document.querySelectorAll(ariaSelectors.join(", ")).forEach((el, i) => {
-          const text = (el as HTMLElement).innerText?.trim() || "";
-          const ariaLabel = el.getAttribute("aria-label");
-          const role = el.getAttribute("role")!;
-          const isInMainContent = !!el.closest("main, article, [role='main'], .content, #content");
-
-          results.push({
-            tag: el.tagName.toLowerCase(),
-            text: text || ariaLabel || "",
-            role,
-            ariaLabel,
-            index: i,
-            hasVisibleText: text.length > 0,
-            isNavLink: false,
-            isInMainContent,
-          });
-        });
-
-        // Input fields
-        document.querySelectorAll("input, textarea, [role='textbox'], [role='searchbox']").forEach((el, i) => {
-          const ariaLabel = el.getAttribute("aria-label");
-          const placeholder = el.getAttribute("placeholder");
-          const role = el.getAttribute("role") || "input";
-          const isInMainContent = !!el.closest("main, article, [role='main'], .content, #content");
-
-          results.push({
-            tag: "input",
-            text: ariaLabel || placeholder || "",
-            role,
-            ariaLabel,
-            index: i,
-            hasVisibleText: false,
-            isNavLink: false,
-            isInMainContent,
-          });
-        });
-
-        return results.slice(0, 50); // Limit to prevent too many targets
-      });
-
-      // Convert to weighted targets
-      for (const t of domTargets) {
-        let weight = 1;
-        let type: ActionTarget["type"] = "interactive";
-
-        if (t.tag === "a") {
-          type = "link";
-          weight = this.actionWeights.navigationLinks;
-          if (t.isNavLink) weight *= 1.5; // Boost navigation links
-
-          // Boost unvisited links significantly
-          if (t.href) {
-            try {
-              const absoluteUrl = normalizeUrl(new URL(t.href, this.baseOrigin).toString());
-              const isQueued = this.queue.some((e) => e.url === absoluteUrl);
-              if (!this.visited.has(absoluteUrl) && !isQueued) {
-                weight *= 3; // Strong boost for unvisited links
-              } else if (this.visited.has(absoluteUrl)) {
-                weight *= 0.2; // Reduce weight for already visited
-              }
-            } catch {
-              // Invalid URL, keep default weight
-            }
-          }
-        } else if (t.tag === "button" || t.role === "button") {
-          type = "button";
-          weight = this.actionWeights.buttons;
-        } else if (t.tag === "input" || t.role === "textbox" || t.role === "searchbox") {
-          type = "input";
-          weight = this.actionWeights.inputs;
-        } else if (t.role) {
-          type = "interactive";
-          weight = this.actionWeights.ariaInteractive;
-        }
-
-        // Boost elements with visible text
-        if (t.hasVisibleText) {
-          weight *= this.actionWeights.visibleText;
-        }
-
-        // Boost elements in main content area
-        if (t.isInMainContent) {
-          weight *= 1.5;
-        }
-
-        // Build selector
-        let selector: string;
-        if (t.text && t.text.length > 0 && t.text.length < 50) {
-          selector = `${t.tag}:has-text("${this.escapeSelector(t.text)}")`;
-        } else if (t.ariaLabel) {
-          selector = `${t.tag}[aria-label="${this.escapeSelector(t.ariaLabel)}"]`;
-        } else if (t.role) {
-          selector = `[role="${t.role}"]:nth-of-type(${t.index + 1})`;
-        } else {
-          selector = `${t.tag}:nth-of-type(${t.index + 1})`;
-        }
-
-        targets.push({
-          selector,
-          role: t.role || undefined,
-          name: t.text || t.ariaLabel || undefined,
-          weight,
-          type,
-          href: t.href,
-        });
-      }
-
-      // Add scroll as low-weight option
-      targets.push({
-        selector: "window",
-        weight: this.actionWeights.scroll,
-        type: "scroll",
-      });
+      // Only the scrape is guarded. A page that refuses to be read leaves
+      // nothing to click, so scrolling is the honest fallback — but a bug in
+      // the weighting below should surface, not quietly reduce every page to
+      // a scroll.
+      raw = await page.evaluate(collectRawTargets);
     } catch {
-      // Fallback to basic scroll
-      targets.push({
-        selector: "window",
-        weight: 1,
-        type: "scroll",
-      });
+      return scrollOnlyTargets();
     }
-
-    return targets;
-  }
-
-  private escapeSelector(text: string): string {
-    return escapeSelectorPure(text);
+    return weighActionTargets(raw, {
+      weights: this.actionWeights,
+      baseOrigin: this.baseOrigin,
+      familiarity: (url) => {
+        if (this.visited.has(url)) return "visited";
+        return this.queue.some((e) => e.url === url) ? "queued" : "new";
+      },
+    });
   }
 
   /**

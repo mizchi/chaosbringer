@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseMetaRefreshUrl } from "./links.js";
+import {
+  parseMetaRefreshUrl,
+  resolvePageLinks,
+  type RawPageLinks,
+} from "./links.js";
 
 describe("parseMetaRefreshUrl", () => {
   it("parses a basic delay;url= value", () => {
@@ -62,5 +66,93 @@ describe("parseMetaRefreshUrl", () => {
   it("returns null on an unterminated quoted URL", () => {
     expect(parseMetaRefreshUrl("0;url='/next")).toBeNull();
     expect(parseMetaRefreshUrl(`0;url="/next`)).toBeNull();
+  });
+});
+
+describe("resolvePageLinks", () => {
+  const scrape = (over: Partial<RawPageLinks> = {}): RawPageLinks => ({
+    hrefs: [],
+    metaRefresh: [],
+    baseUri: "https://example.com/docs/intro",
+    ...over,
+  });
+
+  it("resolves relative hrefs against the page's base URI", () => {
+    expect(resolvePageLinks(scrape({ hrefs: ["./next", "../up", "/root"] }))).toEqual([
+      "https://example.com/docs/next",
+      "https://example.com/up",
+      "https://example.com/root",
+    ]);
+  });
+
+  it("keeps absolute and cross-origin hrefs — origin filtering is the caller's job", () => {
+    expect(resolvePageLinks(scrape({ hrefs: ["https://other.test/x"] }))).toEqual([
+      "https://other.test/x",
+    ]);
+  });
+
+  it("drops schemes that name an action rather than a page", () => {
+    expect(
+      resolvePageLinks(
+        scrape({ hrefs: ["javascript:void(0)", "mailto:a@b.test", "tel:+150", "/real"] })
+      )
+    ).toEqual(["https://example.com/real"]);
+  });
+
+  it("drops those schemes whatever their case — URL schemes are case-insensitive", () => {
+    expect(
+      resolvePageLinks(scrape({ hrefs: ["JavaScript:void(0)", "MAILTO:a@b.test", "Tel:+150"] }))
+    ).toEqual([]);
+  });
+
+  it("ignores blank and whitespace-only values", () => {
+    expect(resolvePageLinks(scrape({ hrefs: ["", "   ", "\t\n"] }))).toEqual([]);
+  });
+
+  it("trims surrounding whitespace before resolving", () => {
+    expect(resolvePageLinks(scrape({ hrefs: ["  /padded  "] }))).toEqual([
+      "https://example.com/padded",
+    ]);
+  });
+
+  it("skips malformed values instead of failing the whole page", () => {
+    expect(resolvePageLinks(scrape({ hrefs: ["http://", "/fine"] }))).toEqual([
+      "https://example.com/fine",
+    ]);
+  });
+
+  it("deduplicates URLs that resolve to the same absolute form", () => {
+    expect(
+      resolvePageLinks(scrape({ hrefs: ["/a", "./" + "../a", "https://example.com/a"] }))
+    ).toEqual(["https://example.com/a"]);
+  });
+
+  it("preserves scrape order and puts meta-refresh targets last", () => {
+    expect(
+      resolvePageLinks(scrape({ hrefs: ["/one", "/two"], metaRefresh: ["0;url=/three"] }))
+    ).toEqual([
+      "https://example.com/one",
+      "https://example.com/two",
+      "https://example.com/three",
+    ]);
+  });
+
+  it("routes meta-refresh content through the shared grammar", () => {
+    // The crawler used to carry its own copy of this parsing inside the
+    // browser-side scrape, so parseMetaRefreshUrl's tests governed nothing the
+    // crawl actually ran. These cases exist to keep the two from drifting apart
+    // again: each is a parseMetaRefreshUrl behaviour observed end-to-end.
+    const resolved = (content: string) =>
+      resolvePageLinks(scrape({ metaRefresh: [content] }));
+
+    expect(resolved("0;url=/next")).toEqual(["https://example.com/next"]);
+    expect(resolved("5 ;   URL = '/quoted'")).toEqual(["https://example.com/quoted"]);
+    expect(resolved("0;url=/next;foo=bar")).toEqual(["https://example.com/next"]);
+    expect(resolved("5")).toEqual([]);
+    expect(resolved("0;url='/unterminated")).toEqual([]);
+  });
+
+  it("applies the scheme filter to meta-refresh targets too", () => {
+    expect(resolvePageLinks(scrape({ metaRefresh: ["0;url=javascript:void(0)"] }))).toEqual([]);
   });
 });
