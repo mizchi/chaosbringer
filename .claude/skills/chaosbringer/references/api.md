@@ -92,6 +92,12 @@ Prefer the readers that normalise it — `session.firings()`, or
 `faultFirings(report)` / `unfiredFaults(report)` — and never spell the field
 yourself.
 
+A finished crawl also warns on its own, without being asked: one
+`fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` event
+per fault that did not take effect, on all four layers, each carrying `rule`
+and `layer`. `faultWarnings(report)` returns the same events for a report you
+already hold.
+
 Note `session.stats` is a **function**: `JSON.stringify(session.stats)` is
 `undefined`, which looks exactly like "nothing fired".
 

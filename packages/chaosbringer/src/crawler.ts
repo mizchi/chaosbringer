@@ -90,6 +90,7 @@ import {
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
+import { faultWarnings } from "./firings.js";
 import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
@@ -888,16 +889,17 @@ export class ChaosCrawler {
     const endTime = Date.now();
     const report = this.generateReport(endTime);
 
-    // Surface fault rules that never matched a request — typically a typo'd
-    // urlPattern, or a rule shadowed by an earlier catch-all (rules are
-    // first-match-wins). Without this, the only signal is matched:0 buried
-    // inside report.faultInjections, which is easy to miss.
-    for (const compiled of this.compiledFaultRules) {
-      if (compiled.matched === 0) {
-        this.logger.warn("fault_rule_unmatched", {
-          rule: compiled.rule.name ?? compiled.pattern.toString(),
-        });
-      }
+    // Surface every configured fault that did not take effect — a typo'd
+    // urlPattern, a rule shadowed by an earlier catch-all (rules are
+    // first-match-wins), or a firing policy that declined. Without this the
+    // only signal is a zero buried in the report, which is easy to miss.
+    //
+    // This walked `compiledFaultRules` and warned only on `matched === 0`
+    // until it read from `faultWarnings`: the network layer alone, one of the
+    // three diagnoses. See that function for why the other three layers being
+    // silent is the same defect the counters themselves were fixed for.
+    for (const { event, data } of faultWarnings(report)) {
+      this.logger.warn(event, data);
     }
 
     // Log crawl end

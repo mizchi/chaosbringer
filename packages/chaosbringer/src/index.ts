@@ -490,9 +490,11 @@ export {
 // "Did my fault actually fire?", in one shape across all four layers.
 export {
   faultFirings,
+  faultWarnings,
   unfiredFaults,
   type Firing,
   type FaultLayer,
+  type FaultWarning,
 } from "./firings.js";
 
 // The network fault layer, applied to a page you drive yourself. Everything
