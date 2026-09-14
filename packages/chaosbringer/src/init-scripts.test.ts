@@ -2,7 +2,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chaos } from "./chaos.js";
-import { validateOptions } from "./crawler.js";
+import { validateOptions } from "./validate.js";
 
 /**
  * `initScripts` exists because "before the page's own scripts" is not a nicety

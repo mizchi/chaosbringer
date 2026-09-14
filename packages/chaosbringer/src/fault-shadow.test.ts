@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findFaultRuleShadows, sampleUrlFromRegex } from "./crawler.js";
+import { findFaultRuleShadows, sampleUrlFromRegex } from "./fault-shadow.js";
 import type { FaultRule } from "./types.js";
 
 function compiled(rules: Array<{
