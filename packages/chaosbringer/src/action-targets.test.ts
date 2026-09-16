@@ -13,6 +13,9 @@ const element = (over: Partial<RawActionTarget> = {}): RawActionTarget => ({
   text: "",
   role: null,
   ariaLabel: null,
+  placeholder: null,
+  name: null,
+  fillable: false,
   index: 0,
   hasVisibleText: false,
   isNavLink: false,
@@ -40,7 +43,9 @@ describe("weighActionTargets: element type", () => {
       DEFAULT_ACTION_WEIGHTS.navigationLinks * 3 // link, and unvisited
     );
     expect(weigh(element({ tag: "button" }))).toBe(DEFAULT_ACTION_WEIGHTS.buttons);
-    expect(weigh(element({ tag: "input" }))).toBe(DEFAULT_ACTION_WEIGHTS.inputs);
+    expect(weigh(element({ tag: "input", fillable: true }))).toBe(
+      DEFAULT_ACTION_WEIGHTS.inputs
+    );
     expect(weigh(element({ tag: "div", role: "tab" }))).toBe(
       DEFAULT_ACTION_WEIGHTS.ariaInteractive
     );
@@ -50,7 +55,7 @@ describe("weighActionTargets: element type", () => {
     const kind = (el: RawActionTarget) => weighActionTargets([el], context())[0]!.type;
     expect(kind(element({ tag: "a" }))).toBe("link");
     expect(kind(element({ tag: "div", role: "button" }))).toBe("button");
-    expect(kind(element({ tag: "div", role: "searchbox" }))).toBe("input");
+    expect(kind(element({ tag: "input", fillable: true }))).toBe("input");
     expect(kind(element({ tag: "div", role: "menuitem" }))).toBe("interactive");
   });
 
@@ -186,12 +191,34 @@ describe("weighActionTargets: selectors", () => {
 
   it("falls back to role position when there is neither text nor label", () => {
     expect(selectorOf(element({ tag: "div", role: "tab", index: 2 }))).toBe(
-      '[role="tab"]:nth-of-type(3)'
+      ':nth-match([role="tab"], 3)'
     );
   });
 
   it("falls back to tag position as a last resort", () => {
-    expect(selectorOf(element({ tag: "span", index: 0 }))).toBe("span:nth-of-type(1)");
+    expect(selectorOf(element({ tag: "span", index: 0 }))).toBe(":nth-match(span, 1)");
+  });
+
+  it("counts page matches, not same-tag siblings, in the positional fallback", () => {
+    // `index` is the element's position among this page's matches for its
+    // query. `:nth-of-type(n)` means something else entirely — the nth child of
+    // that tag under one parent — so a selector built with it points at the
+    // wrong element, or at none.
+    for (const sel of [
+      selectorOf(element({ tag: "span", index: 4 })),
+      selectorOf(element({ tag: "div", role: "tab", index: 4 })),
+    ]) {
+      expect(sel).toContain(":nth-match(");
+      expect(sel).not.toContain(":nth-of-type(");
+    }
+  });
+
+  it("escapes a role value, which comes from the page and not from us", () => {
+    // Reachable: the form-field scrape reads `role` straight off the element,
+    // so a page can put anything there.
+    expect(selectorOf(element({ tag: "input", role: 'we"ird', index: 0 }))).toBe(
+      ':nth-match([role="we\\"ird"], 1)'
+    );
   });
 
   it("escapes quotes in text so the selector stays parseable", () => {
@@ -218,5 +245,79 @@ describe("weighActionTargets: the scroll fallback", () => {
     expect(scrollOnlyTargets()).toEqual([
       { selector: "window", weight: 1, type: "scroll" },
     ]);
+  });
+});
+
+describe("weighActionTargets: form fields", () => {
+  const field = (over: Partial<RawActionTarget> = {}) =>
+    element({ tag: "input", text: "", ...over });
+  const targetFor = (el: RawActionTarget) => weighActionTargets([el], context())[0]!;
+
+  // The bug these cover: every form field used to get a selector that matched
+  // nothing. A label or placeholder was copied into `text`, which sent
+  // selectorFor down the `:has-text()` branch — and an <input> has no text
+  // content, so `input:has-text("Search")` matches zero elements. An unlabelled
+  // field fared no better: `role` defaulted to the invented value "input",
+  // producing `[role="input"]`, which nothing in HTML ever carries. Downstream
+  // a zero-match locator reports `isVisible() === false`, so the crawler
+  // skipped the target silently and the `inputs` weight did nothing at all.
+
+  it("addresses a field by attribute, never by text it does not have", () => {
+    for (const el of [
+      field({ ariaLabel: "Email address" }),
+      field({ placeholder: "Search" }),
+      field({ name: "username" }),
+    ]) {
+      expect(targetFor(el).selector).not.toContain(":has-text(");
+    }
+  });
+
+  it("prefers aria-label, then placeholder, then name", () => {
+    expect(
+      targetFor(field({ ariaLabel: "Email", placeholder: "you@example.com", name: "em" }))
+        .selector
+    ).toBe('input[aria-label="Email"]');
+    expect(targetFor(field({ placeholder: "Search", name: "q" })).selector).toBe(
+      'input[placeholder="Search"]'
+    );
+    expect(targetFor(field({ name: "username" })).selector).toBe('input[name="username"]');
+  });
+
+  it("falls back to page position for a field with no identifying attribute", () => {
+    expect(targetFor(field({ index: 2 })).selector).toBe(":nth-match(input, 3)");
+  });
+
+  it("keeps the element's real tag, so textareas are addressable", () => {
+    expect(targetFor(field({ tag: "textarea", name: "notes" })).selector).toBe(
+      'textarea[name="notes"]'
+    );
+    expect(
+      targetFor(field({ tag: "div", ariaLabel: "Rich editor", fillable: true })).selector
+    ).toBe('div[aria-label="Rich editor"]');
+  });
+
+  it("escapes attribute values so the selector stays parseable", () => {
+    expect(targetFor(field({ placeholder: 'Say "hi"' })).selector).toBe(
+      'input[placeholder="Say \\"hi\\""]'
+    );
+  });
+
+  it("types only fillable fields as input; the rest are clicked", () => {
+    // fill() throws on a checkbox, a submit button, or a role="textbox" div
+    // that is not contenteditable, and a thrown fill is recorded as a failed
+    // action against the page under test. Keeping them as clickable targets
+    // exercises them without inventing failures.
+    expect(targetFor(field({ name: "q", fillable: true })).type).toBe("input");
+    expect(targetFor(field({ name: "agree", fillable: false })).type).toBe("interactive");
+    expect(
+      targetFor(field({ tag: "div", role: "textbox", ariaLabel: "Fake", fillable: false }))
+        .type
+    ).toBe("interactive");
+  });
+
+  it("still offers a non-fillable control at the interactive weight, not weight 1", () => {
+    expect(weigh(field({ name: "agree", fillable: false }))).toBe(
+      DEFAULT_ACTION_WEIGHTS.ariaInteractive
+    );
   });
 });
