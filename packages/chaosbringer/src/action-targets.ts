@@ -31,14 +31,26 @@ export interface RawActionTarget {
   href?: string;
   isInMainContent: boolean;
   /**
-   * Whether Playwright's `fill()` will accept this element with an arbitrary
-   * string. True only for text-ish `<input>`, `<textarea>` and contenteditable
-   * elements — a checkbox, a submit button or a `role="textbox"` div that is
-   * not contenteditable all throw. They are still worth acting on, just by
-   * clicking rather than typing, so the scrape records the fact and leaves the
-   * decision to `weighActionTargets`.
+   * Whether Playwright's `fill()` will accept this element at all. A checkbox,
+   * a submit button or a `role="textbox"` div that is not contenteditable all
+   * throw, and so does a readonly field. They are still worth acting on, just
+   * by clicking rather than typing, so the scrape records the fact and leaves
+   * the decision to `weighActionTargets`.
+   *
+   * Note this says nothing about the *value*: a date or range field is
+   * fillable, but only with a string of the right shape. `fillValueFor`
+   * decides that, from the fields below.
    */
   fillable: boolean;
+  /**
+   * The effective `type` of an `<input>` — the DOM normalises a missing or
+   * unrecognised attribute to "text" — or null for anything that is not an
+   * `<input>`. It decides the shape the fill value has to take.
+   */
+  inputType: string | null;
+  /** `min`/`max` attributes, raw. A range field's value must respect them. */
+  min: string | null;
+  max: string | null;
 }
 
 /**
@@ -67,8 +79,19 @@ export function collectRawTargets(): RawActionTarget[] {
   const elements: Element[] = [];
   const inMainContent = (el: Element) =>
     !!el.closest("main, article, [role='main'], .content, #content");
-  /** Record one scraped element; `index` is filled in once all are collected. */
+  /**
+   * Record one scraped element; `index` is filled in once all are collected.
+   *
+   * A disabled control is dropped outright. Playwright will neither click nor
+   * fill one, so every attempt costs its full one-second actionability timeout
+   * and is then recorded as a failed action against the page under test — the
+   * crawler inventing a failure and blaming the app for it. `:disabled` rather
+   * than `.disabled` because the IDL property does not reflect the state a
+   * control inherits from a disabled <fieldset>, while the pseudo-class does,
+   * and matches what Playwright's own actionability check sees.
+   */
   const push = (el: Element, t: Omit<RawActionTarget, "index">) => {
+    if (el.matches(":disabled")) return;
     elements.push(el);
     results.push({ ...t, index: 0 });
   };
@@ -91,6 +114,9 @@ export function collectRawTargets(): RawActionTarget[] {
         placeholder: null,
         name: null,
         fillable: false,
+        inputType: null,
+        min: null,
+        max: null,
         hasVisibleText: text.length > 0,
         isNavLink,
         href: anchor.href,
@@ -113,6 +139,9 @@ export function collectRawTargets(): RawActionTarget[] {
         placeholder: null,
         name: null,
         fillable: false,
+        inputType: null,
+        min: null,
+        max: null,
         hasVisibleText: text.length > 0,
         isNavLink: false,
         isInMainContent: inMainContent(el),
@@ -144,6 +173,9 @@ export function collectRawTargets(): RawActionTarget[] {
       placeholder: null,
       name: null,
       fillable: false,
+      inputType: null,
+      min: null,
+      max: null,
       hasVisibleText: text.length > 0,
       isNavLink: false,
       isInMainContent: inMainContent(el),
@@ -153,13 +185,20 @@ export function collectRawTargets(): RawActionTarget[] {
   // Form fields. Note `text` stays empty even when the field has a label: a
   // selector built from an input's label with `:has-text()` matches nothing,
   // because an <input> has no text content to match against.
-  const FILLABLE_INPUT_TYPES = [
-    "text",
-    "search",
-    "email",
-    "password",
-    "tel",
-    "url",
+  //
+  // Every `<input>` type is fillable given a value of the right shape, so the
+  // only ones excluded here are those `fill()` refuses outright — the controls
+  // you click (checkbox, radio, submit, button, reset, image), the file picker,
+  // and readonly fields. `fillValueFor` supplies the shape for the rest.
+  const UNFILLABLE_INPUT_TYPES = [
+    "checkbox",
+    "radio",
+    "submit",
+    "button",
+    "reset",
+    "image",
+    "file",
+    "hidden",
   ];
   document
     .querySelectorAll(
@@ -168,11 +207,13 @@ export function collectRawTargets(): RawActionTarget[] {
     .forEach((el) => {
       const tag = el.tagName.toLowerCase();
       // `.type` normalises a missing or unrecognised type attribute to "text".
-      const inputType = tag === "input" ? (el as HTMLInputElement).type : "";
+      const inputType = tag === "input" ? (el as HTMLInputElement).type : null;
+      const readOnly = (el as HTMLInputElement).readOnly === true;
       const fillable =
-        tag === "textarea" ||
-        (el as HTMLElement).isContentEditable ||
-        (tag === "input" && FILLABLE_INPUT_TYPES.indexOf(inputType) !== -1);
+        !readOnly &&
+        (tag === "textarea" ||
+          (el as HTMLElement).isContentEditable ||
+          (inputType !== null && UNFILLABLE_INPUT_TYPES.indexOf(inputType) === -1));
 
       push(el, {
         tag,
@@ -182,6 +223,9 @@ export function collectRawTargets(): RawActionTarget[] {
         placeholder: el.getAttribute("placeholder"),
         name: el.getAttribute("name"),
         fillable,
+        inputType,
+        min: el.getAttribute("min"),
+        max: el.getAttribute("max"),
         hasVisibleText: false,
         isNavLink: false,
         isInMainContent: inMainContent(el),
@@ -214,6 +258,60 @@ export function collectRawTargets(): RawActionTarget[] {
   }
 
   return results.slice(0, 50); // Limit to prevent too many targets
+}
+
+/** What the crawler types into a plain text field. */
+export const DEFAULT_FILL_VALUE = "test input";
+
+/**
+ * Values shaped to satisfy each `<input type>`. `fill()` writes the string
+ * straight through and then checks the control kept it, so a value of the
+ * wrong shape comes back as "Malformed value" — `fill("test input")` on a date
+ * field throws, and the failure is then recorded against the page under test.
+ *
+ * The non-text values are deliberately plausible rather than nonsense: an app
+ * that parses an email or a URL is worth exercising with one it will parse.
+ */
+const FILL_VALUE_BY_TYPE: Record<string, string> = {
+  email: "test@example.com",
+  tel: "+15555550123",
+  url: "https://example.com",
+  number: "42",
+  date: "2024-01-15",
+  "datetime-local": "2024-01-15T10:30",
+  month: "2024-01",
+  week: "2024-W03",
+  time: "10:30",
+  color: "#336699",
+};
+
+/**
+ * Pick the value to type into one field.
+ *
+ * A range field is the fiddly one: its value must land on a step boundary
+ * inside [min, max], so a number that is merely within the range is still
+ * rejected. `min` is the one value guaranteed to satisfy both, since step
+ * counting starts there — and unlike the midpoint it differs from the
+ * control's default position, so filling it actually moves the slider instead
+ * of writing back what was already there.
+ */
+export function fillValueFor(t: RawActionTarget): string {
+  if (t.inputType === "range") {
+    // An unset min defaults to 0, which the implicit max of 100 admits. A
+    // min > max is malformed markup, and the spec clamps such a range to min,
+    // so min stays the value the control will accept either way.
+    // `Number("")` is 0, and finite, so the emptiness check has to come first:
+    // `min=""` is an invalid bound the spec ignores, not a minimum of zero, and
+    // filling "" would be rejected outright.
+    if (t.min === null || t.min.trim() === "" || !Number.isFinite(Number(t.min))) {
+      return "0";
+    }
+    return t.min.trim();
+  }
+  if (t.inputType !== null && t.inputType in FILL_VALUE_BY_TYPE) {
+    return FILL_VALUE_BY_TYPE[t.inputType]!;
+  }
+  return DEFAULT_FILL_VALUE;
 }
 
 /**
@@ -316,6 +414,7 @@ export function weighActionTargets(
       weight,
       type,
       href: t.href,
+      fillValue: type === "input" ? fillValueFor(t) : undefined,
     };
   });
 

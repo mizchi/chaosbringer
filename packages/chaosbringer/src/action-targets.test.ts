@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_FILL_VALUE,
+  fillValueFor,
   scrollOnlyTargets,
   weighActionTargets,
   type RawActionTarget,
@@ -16,6 +18,9 @@ const element = (over: Partial<RawActionTarget> = {}): RawActionTarget => ({
   placeholder: null,
   name: null,
   fillable: false,
+  inputType: null,
+  min: null,
+  max: null,
   index: 0,
   hasVisibleText: false,
   isNavLink: false,
@@ -319,5 +324,86 @@ describe("weighActionTargets: form fields", () => {
     expect(weigh(field({ name: "agree", fillable: false }))).toBe(
       DEFAULT_ACTION_WEIGHTS.ariaInteractive
     );
+  });
+});
+
+describe("fillValueFor", () => {
+  const field = (over: Partial<RawActionTarget> = {}) =>
+    element({ tag: "input", fillable: true, ...over });
+
+  // `fill()` writes the string and then checks the control kept it, so a value
+  // of the wrong shape is rejected as "Malformed value" — and that rejection is
+  // recorded as a failed action against the page under test. Every format here
+  // is pinned end-to-end against Chromium in action-targets.e2e.test.ts; these
+  // cases exist so a change to the table is visible in the diff.
+
+  it("types plain text into a plain text field", () => {
+    for (const inputType of ["text", "search", "password", null]) {
+      expect(fillValueFor(field({ inputType }))).toBe(DEFAULT_FILL_VALUE);
+    }
+  });
+
+  it("gives a typed field a value of that type's shape", () => {
+    const valueFor = (inputType: string) => fillValueFor(field({ inputType }));
+    expect(valueFor("email")).toBe("test@example.com");
+    expect(valueFor("tel")).toBe("+15555550123");
+    expect(valueFor("url")).toBe("https://example.com");
+    expect(valueFor("number")).toBe("42");
+    expect(valueFor("date")).toBe("2024-01-15");
+    expect(valueFor("datetime-local")).toBe("2024-01-15T10:30");
+    expect(valueFor("month")).toBe("2024-01");
+    expect(valueFor("week")).toBe("2024-W03");
+    expect(valueFor("time")).toBe("10:30");
+    expect(valueFor("color")).toBe("#336699");
+  });
+
+  it("falls back to plain text for a type it has no shape for", () => {
+    expect(fillValueFor(field({ inputType: "some-future-type" }))).toBe(
+      DEFAULT_FILL_VALUE
+    );
+  });
+
+  it("gives a range its own minimum, which is always on the step grid", () => {
+    // A range rejects any value off its step grid, so a fixed number fails even
+    // when it sits inside [min, max]. Step counting starts at min, so min is
+    // valid whatever the step — and being the minimum rather than the midpoint,
+    // it also differs from the control's default, so the fill actually moves it.
+    expect(fillValueFor(field({ inputType: "range", min: "5", max: "7" }))).toBe("5");
+    expect(fillValueFor(field({ inputType: "range", min: "0", max: "10" }))).toBe("0");
+    expect(fillValueFor(field({ inputType: "range", min: "-10", max: "-5" }))).toBe(
+      "-10"
+    );
+    expect(fillValueFor(field({ inputType: "range", min: "0.5", max: "1" }))).toBe(
+      "0.5"
+    );
+  });
+
+  it("uses the implicit minimum when a range declares none", () => {
+    expect(fillValueFor(field({ inputType: "range" }))).toBe("0");
+    expect(fillValueFor(field({ inputType: "range", max: "10" }))).toBe("0");
+  });
+
+  it("falls back to 0 rather than passing on a min it cannot read", () => {
+    expect(fillValueFor(field({ inputType: "range", min: "abc" }))).toBe("0");
+    expect(fillValueFor(field({ inputType: "range", min: "" }))).toBe("0");
+  });
+
+  it("is only consulted for targets typed as input", () => {
+    const targets = weighActionTargets(
+      [
+        field({ inputType: "date", name: "d" }),
+        element({ tag: "button", text: "Save" }),
+        element({ tag: "a", href: "https://example.com/x", text: "Link" }),
+        field({ inputType: "checkbox", name: "c", fillable: false }),
+      ],
+      context()
+    );
+    expect(targets.map((t) => [t.type, t.fillValue])).toEqual([
+      ["input", "2024-01-15"],
+      ["button", undefined],
+      ["link", undefined],
+      ["interactive", undefined],
+      ["scroll", undefined],
+    ]);
   });
 });

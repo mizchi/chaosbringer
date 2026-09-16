@@ -579,6 +579,12 @@ export interface ActionTarget {
   type: "link" | "button" | "input" | "interactive" | "scroll";
   /** For links, the href attribute */
   href?: string;
+  /**
+   * For inputs, the string to type — shaped to suit the field's type, since
+   * `fill()` rejects a value the control will not keep (a date field will not
+   * take "test input"). Absent for every other kind of target.
+   */
+  fillValue?: string;
 }
 
 export interface ActionResult {

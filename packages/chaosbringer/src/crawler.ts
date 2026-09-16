@@ -81,6 +81,7 @@ import { faultWarnings } from "./firings.js";
 import { collectRawLinks, resolvePageLinks } from "./links.js";
 import {
   collectRawTargets,
+  DEFAULT_FILL_VALUE,
   scrollOnlyTargets,
   weighActionTargets,
   type RawActionTarget,
@@ -2221,7 +2222,7 @@ export class ChaosCrawler {
       }
 
       if (target.type === "input") {
-        await element.fill("test input", { timeout: 1000 });
+        await element.fill(target.fillValue ?? DEFAULT_FILL_VALUE, { timeout: 1000 });
         return {
           type: "input",
           target: target.name || target.selector,
