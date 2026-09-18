@@ -571,6 +571,56 @@ export interface RecoveryInfo {
   timestamp: number;
 }
 
+/**
+ * Where an element is, and whether a click would actually reach it.
+ *
+ * A description (`button "Continue to delivery"`) reads identically whether
+ * the button is live or sitting under a consent banner that will eat the
+ * click, so a picker told only the description has to guess. Every fact
+ * here is something the browser already knows, measured inside the scrape
+ * that was happening anyway: one `getBoundingClientRect` and one hit test
+ * per target, of which there are at most 50.
+ *
+ * Absent on a `scroll` target, and on everything when the scrape itself
+ * failed and the crawler fell back to scrolling.
+ */
+export interface TargetGeometry {
+  /** Viewport-relative box, from `getBoundingClientRect`. */
+  bbox: { x: number; y: number; width: number; height: number };
+  /**
+   * The box has area and overlaps the viewport, which is the condition for
+   * the hit test below having run. **Not a reason to skip a target**:
+   * Playwright scrolls an element into view before acting on it, so an
+   * off-screen control is perfectly clickable.
+   */
+  inViewport: boolean;
+  /**
+   * What `elementFromPoint` returns at the probe point, when that is
+   * neither the target, one of its descendants, nor one of its ancestors
+   * — i.e. the thing that will receive the click instead. Reported as the
+   * hit element's text plus an identifier, e.g.
+   * `Accept cookies <div#consent-backdrop>`.
+   *
+   * **Only ever set when `inViewport` is true.** Absent therefore means
+   * "nothing found on top", not "nothing is on top": for an off-screen
+   * target there is nothing to hit-test against yet.
+   *
+   * The probe point is the centre of the box's *visible* part, so for a
+   * target taller than the viewport it can differ from the centre
+   * Playwright clicks after scrolling.
+   */
+  coveredBy?: string;
+  /**
+   * `pointer-events: none` — a click aimed here passes through to
+   * whatever is behind. Deliberately narrow: a low opacity is *not*
+   * folded in, because an `opacity: 0.01` button is fully clickable and
+   * the click works. Whether a control was visible enough for a user to
+   * have clicked it is a separate question from whether the click lands,
+   * and only the second one lives here.
+   */
+  inert: boolean;
+}
+
 export interface ActionTarget {
   selector: string;
   role?: string;
@@ -585,6 +635,8 @@ export interface ActionTarget {
    * take "test input"). Absent for every other kind of target.
    */
   fillValue?: string;
+  /** Where it is and whether a click reaches it. See `TargetGeometry`. */
+  geometry?: TargetGeometry;
 }
 
 export interface ActionResult {

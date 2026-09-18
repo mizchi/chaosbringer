@@ -156,6 +156,20 @@ function toDriverCandidates(targets: ReadonlyArray<ActionTarget>): DriverCandida
     type: t.type,
     weight: t.weight,
     href: t.href,
+    // Spread, rather than four assignments: a target with no geometry —
+    // the `scroll` target, or any of them when the page refused to be
+    // scraped — has to leave the keys absent rather than set to
+    // `undefined`, because `isObstructed` reads `coveredBy !== undefined`.
+    ...(t.geometry
+      ? {
+          bbox: t.geometry.bbox,
+          inViewport: t.geometry.inViewport,
+          inert: t.geometry.inert,
+          ...(t.geometry.coveredBy === undefined
+            ? {}
+            : { coveredBy: t.geometry.coveredBy }),
+        }
+      : {}),
   }));
 }
 
