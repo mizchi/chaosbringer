@@ -170,8 +170,10 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
 
     for (let stepIndex = 0; stepIndex < budget && !tracing.getTrace().successful; stepIndex++) {
       const candidates = await discoverCandidates(page);
+      const here = page.url();
       const driverStep: DriverStep = {
-        url: page.url(),
+        url: here,
+        currentUrl: here,
         page,
         candidates,
         history: [],

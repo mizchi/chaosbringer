@@ -8,6 +8,7 @@ const PNG = Buffer.from([0x89, 0x50]);
 
 const makeStep = (overrides: Partial<DriverStep> = {}): DriverStep => ({
   url: "https://example.test/",
+  currentUrl: overrides.url ?? "https://example.test/",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   page: {} as any,
   candidates: [
@@ -24,7 +25,7 @@ const makeStep = (overrides: Partial<DriverStep> = {}): DriverStep => ({
 });
 
 const fixedProvider = (
-  result: { index: number; reasoning: string } | null,
+  result: { index: number; reasoning: string; confidence?: number } | null,
 ): DriverProvider => ({
   name: "test/provider",
   selectAction: vi.fn(async () => result),
@@ -84,6 +85,47 @@ describe("aiDriver", () => {
     };
     const driver = aiDriver({ provider, timeoutMs: 10 });
     expect(await driver.selectAction(makeStep())).toBeNull();
+  });
+
+  it("carries a reported confidence onto the pick", async () => {
+    const driver = aiDriver({
+      provider: fixedProvider({ index: 1, reasoning: "b looks right", confidence: 0.82 }),
+    });
+    expect(await driver.selectAction(makeStep())).toEqual({
+      kind: "select",
+      index: 1,
+      reasoning: "b looks right",
+      source: "test/provider",
+      confidence: 0.82,
+    });
+  });
+
+  it("drops a pick below minConfidence so a composite can fall through", async () => {
+    const provider = fixedProvider({ index: 1, reasoning: "not sure", confidence: 0.42 });
+    const driver = aiDriver({ provider, minConfidence: 0.5 });
+    expect(await driver.selectAction(makeStep())).toBeNull();
+    // The call was made and paid for — only the answer was declined.
+    expect(provider.selectAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("acts on a pick at exactly minConfidence", async () => {
+    const driver = aiDriver({
+      provider: fixedProvider({ index: 0, reasoning: "ok", confidence: 0.5 }),
+      minConfidence: 0.5,
+    });
+    expect(await driver.selectAction(makeStep())).not.toBeNull();
+  });
+
+  it("does not gate a provider that reports no confidence", async () => {
+    // Silence is not zero: gating on it would disable every provider that
+    // does not happen to report the field.
+    const driver = aiDriver({
+      provider: fixedProvider({ index: 0, reasoning: "no confidence field" }),
+      minConfidence: 0.9,
+    });
+    const pick = await driver.selectAction(makeStep());
+    expect(pick).not.toBeNull();
+    expect(pick).not.toHaveProperty("confidence");
   });
 
   it("resets per-page budget on onPageStart", async () => {

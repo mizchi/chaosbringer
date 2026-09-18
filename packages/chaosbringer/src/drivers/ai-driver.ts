@@ -9,6 +9,18 @@
  * the driver returns `null` so the outer composite/fallback can defer
  * to a cheaper driver (e.g. weighted-random). Soft failures still cost
  * budget (the wall clock was spent).
+ *
+ * `minConfidence` puts a hesitant answer on that same path. Providers
+ * already return a confidence with the pick, and a model that is picking
+ * badly tends to report a low one while doing it — so the useful move is
+ * to read it rather than to ask a better question:
+ *
+ * ```ts
+ * compositeDriver([
+ *   aiDriver({ provider, minConfidence: 0.5 }),
+ *   weightedRandomDriver(),
+ * ]);
+ * ```
  */
 import { DriverBudget, type DriverBudgetOptions } from "./budget.js";
 import type {
@@ -28,6 +40,17 @@ export interface AiDriverOptions {
   screenshotMode?: ScreenshotMode;
   /** Skip when fewer than N candidates. Default: 2. */
   minCandidatesToConsult?: number;
+  /**
+   * Least confidence worth acting on, 0..1. A pick the provider reports
+   * below this is dropped — the driver returns `null`, so an enclosing
+   * `compositeDriver` falls through to the next driver rather than
+   * following a guess.
+   *
+   * Providers that report no confidence are never gated; there is no
+   * signal to gate on, and treating silence as zero would disable the
+   * driver. Default: 0 (act on every pick).
+   */
+  minConfidence?: number;
   /** Optional goal string forwarded to the provider. */
   goal?: string;
   /** Cost ceiling — call count / USD. Default: unlimited. */
@@ -45,6 +68,7 @@ export function aiDriver(opts: AiDriverOptions): Driver {
   const timeoutMs = opts.timeoutMs ?? 8_000;
   const screenshotMode: ScreenshotMode = opts.screenshotMode ?? "viewport";
   const minCandidates = opts.minCandidatesToConsult ?? 2;
+  const minConfidence = opts.minConfidence ?? 0;
   const budget = resolveBudget(opts.budget);
   const provider = opts.provider;
 
@@ -99,12 +123,19 @@ export function aiDriver(opts: AiDriverOptions): Driver {
       ) {
         return null;
       }
+      // A model that is unsure usually says so, and a hesitant pick is
+      // worth less than the cheap driver behind it. Standing down here
+      // costs the call that was already made, not the step.
+      if (typeof raw.confidence === "number" && raw.confidence < minConfidence) {
+        return null;
+      }
 
       return {
         kind: "select",
         index: raw.index,
         reasoning: raw.reasoning,
         source: provider.name,
+        ...(typeof raw.confidence === "number" ? { confidence: raw.confidence } : {}),
       };
     },
 

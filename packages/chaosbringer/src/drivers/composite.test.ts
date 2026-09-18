@@ -5,6 +5,7 @@ import type { Driver, DriverPick, DriverStep } from "./types.js";
 
 const makeStep = (overrides: Partial<DriverStep> = {}): DriverStep => ({
   url: "https://example.test/",
+  currentUrl: overrides.url ?? "https://example.test/",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   page: {} as any,
   candidates: [

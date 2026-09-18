@@ -57,6 +57,22 @@ await chaos({
 });
 ```
 
+### Fall back when the model is unsure
+
+Providers return a confidence with the pick. A model that is about to pick badly often says so while doing it — reporting 0.4 on the third attempt at the same disabled button — so `minConfidence` turns that into a fallback rather than asking the model a better question:
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  driver: compositeDriver([
+    aiDriver({ provider, minConfidence: 0.5 }),  // hesitant picks stand down
+    weightedRandomDriver(),                       // which lets breadth take the step
+  ]),
+});
+```
+
+A dropped pick still costs the call that produced it — only the answer is declined, not the spend. Providers that report no confidence are never gated: there is no signal, and reading silence as zero would disable the driver. The confidence that *is* reported lands on the trace entry (`advisor.confidence`), so a run can be audited for where it started guessing.
+
 ### Form-aware crawling
 
 ```ts
@@ -178,3 +194,8 @@ const onlyClickButtons: Driver = {
 ```
 
 Returning `null` means "no opinion, defer to the next driver in the composite". Returning `{ kind: "skip" }` means "deliberately do nothing this step". Returning `{ kind: "custom", perform }` lets you take over the page directly — `perform(page)` returns an `ActionResult` and counts as one chaos action.
+
+### What a step guarantees
+
+- **`step.candidates` is re-collected from the DOM before every step**, so an index is only valid for the step that handed it to you. Do not cache the list across steps: on an app that re-renders in place — hash or History routing, a modal, a wizard — the controls change without a page visit, and last step's index names a different element than it did.
+- **`step.url` is the URL of the page *visit*** and holds still for every step on that page; budgets and `onPageStart` key off it. **`step.currentUrl` is where the app has actually routed to** as of this step. Group by `url`, decide on `currentUrl`.

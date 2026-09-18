@@ -44,9 +44,25 @@ export interface DriverInvariantViolation {
 export type ScreenshotMode = "viewport" | "fullPage";
 
 export interface DriverStep {
+  /**
+   * The URL of the page *visit* this loop belongs to — what the crawl
+   * queued and what `onPageStart` / budgets key off. Stable for every step
+   * on the page, so it does not follow in-page routing.
+   */
   url: string;
+  /**
+   * The live URL as of this step (`page.url()`). On an app that routes by
+   * hash or History API without a fresh page visit, `url` stays where the
+   * crawl queued and `currentUrl` follows the route the user is actually
+   * looking at. Prefer this when reporting or remembering "where am I".
+   */
+  currentUrl: string;
   /** Raw page handle for drivers that need to inspect/interact directly. */
   page: Page;
+  /**
+   * The controls the page offers *right now* — re-collected from the DOM
+   * before every step, so `index` is only valid for this step.
+   */
   candidates: ReadonlyArray<DriverCandidate>;
   /** Most recent action results on this page, oldest first. */
   history: ReadonlyArray<DriverHistoryEntry>;
@@ -69,6 +85,12 @@ export type DriverPick =
       reasoning?: string;
       /** Optional source tag for reporting (e.g. provider name). */
       source?: string;
+      /**
+       * How sure the picker is, 0..1, when it can say. Recorded in the
+       * trace so a run can be audited for the picks it was unsure about;
+       * `aiDriver`'s `minConfidence` turns it into a fallback trigger.
+       */
+      confidence?: number;
     }
   | {
       /**

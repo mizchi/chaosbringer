@@ -160,8 +160,10 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
       }
 
       const candidates = await discoverCandidates(page);
+      const here = page.url();
       const driverStep: DriverStep = {
-        url: page.url(),
+        url: here,
+        currentUrl: here,
         page,
         candidates,
         history: [],

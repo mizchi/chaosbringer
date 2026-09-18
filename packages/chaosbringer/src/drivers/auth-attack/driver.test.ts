@@ -14,6 +14,7 @@ import type { DriverStep } from "../types.js";
 function fakeStep(url: string): DriverStep {
   return {
     url,
+    currentUrl: url,
     page: { url: () => url } as unknown as Page,
     candidates: [],
     history: [],

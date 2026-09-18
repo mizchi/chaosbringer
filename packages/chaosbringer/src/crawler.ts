@@ -142,6 +142,23 @@ function describeTarget(t: ActionTarget): string {
   return parts.join(" ");
 }
 
+/**
+ * The driver's view of the current targets. `index` is positional into the
+ * same array the caller holds, so the two must be rebuilt together — a
+ * candidate list that outlives its targets resolves picks against the
+ * wrong elements.
+ */
+function toDriverCandidates(targets: ReadonlyArray<ActionTarget>): DriverCandidate[] {
+  return targets.map((t, index) => ({
+    index,
+    selector: t.selector,
+    description: describeTarget(t),
+    type: t.type,
+    weight: t.weight,
+    href: t.href,
+  }));
+}
+
 export class ChaosCrawler {
   private options: Required<CrawlerOptions>;
   private actionWeights: Required<ActionWeights>;
@@ -1912,25 +1929,29 @@ export class ChaosCrawler {
    * each step. A `kind: "skip"` pick or a `null` return short-circuits
    * the step; the loop's attempt counter still ticks so a misbehaving
    * driver cannot loop forever.
+   *
+   * Targets are re-collected from the DOM before every step after the
+   * first. A per-step driver that chose from a list built once per page
+   * visit is choosing from a list the page has since thrown away: any app
+   * that routes by hash or History API, or that opens a modal, changes its
+   * controls without a navigation, and every step after the first would
+   * pick from the controls of a screen the user has already left. That hit
+   * `weightedRandomDriver` and `aiDriver` alike — it was never specific to
+   * one driver. The re-collection costs one `page.evaluate` per step,
+   * which is noise next to the model call a per-step driver is making.
    */
   private async performDriverActions(
     page: Page,
     url: string,
-    targets: ReadonlyArray<ActionTarget>,
+    initialTargets: ReadonlyArray<ActionTarget>,
   ): Promise<void> {
     const driver = this.driver;
     if (driver === null) return;
 
     driver.onPageStart?.(url);
 
-    const candidates: DriverCandidate[] = targets.map((t, i) => ({
-      index: i,
-      selector: t.selector,
-      description: describeTarget(t),
-      type: t.type,
-      weight: t.weight,
-      href: t.href,
-    }));
+    let targets = initialTargets;
+    let candidates = toDriverCandidates(targets);
     const recentHistory: DriverHistoryEntry[] = [];
     // Drain any pre-loop violations (e.g. from `afterLoad` invariant checks)
     // so the driver's very first step already sees them.
@@ -1953,13 +1974,32 @@ export class ChaosCrawler {
       attempts++;
       this.currentAction = null;
 
+      // The caller's targets are current on entry; from the second attempt
+      // on, the previous step may have re-rendered the screen.
+      if (attempts > 1) {
+        targets = await this.getWeightedActionTargets(page);
+        if (targets.length === 0) {
+          this.logger.debug("driver_no_targets", { attempts, url });
+          break;
+        }
+        candidates = toDriverCandidates(targets);
+      }
+
       // Drain violations that accumulated since the last step.
       if (this.driverPendingViolations.length > 0) {
         pendingViolations.push(...this.driverPendingViolations.splice(0));
       }
 
+      let currentUrl = url;
+      try {
+        currentUrl = page.url();
+      } catch {
+        // Closed or crashed page — the page-visit URL is the honest answer.
+      }
+
       const step: DriverStep = {
         url,
+        currentUrl,
         page,
         candidates,
         history: recentHistory,
@@ -2039,11 +2079,13 @@ export class ChaosCrawler {
       this.addToHistory(result);
 
       if (this.isRecordingTrace()) {
+        const confidence = pick.kind === "select" ? pick.confidence : undefined;
         const stamp = pick.reasoning
           ? {
               provider: pick.source ?? driver.name,
               reason: "explicit_request" as const,
               reasoning: pick.reasoning,
+              ...(confidence !== undefined ? { confidence } : {}),
             }
           : undefined;
         this.trace.push(actionToTraceEntry(result, url, stamp));
