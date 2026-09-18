@@ -15,6 +15,7 @@ const noFormPage = {
 
 const baseStep = (): DriverStep => ({
   url: "https://example.test/",
+  currentUrl: "https://example.test/",
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   page: noFormPage as any,
   candidates: [{ index: 0, selector: "#a", description: "a", type: "button", weight: 1 }],

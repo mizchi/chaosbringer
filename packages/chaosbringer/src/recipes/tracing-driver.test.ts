@@ -12,6 +12,7 @@ import type { Goal } from "./types.js";
 function fakeStep(url: string): DriverStep {
   return {
     url,
+    currentUrl: url,
     page: {
       url: () => url,
       on: () => {},

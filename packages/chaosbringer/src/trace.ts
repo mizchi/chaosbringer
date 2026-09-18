@@ -53,6 +53,12 @@ export interface TraceAction {
     provider: string;
     reason: "novelty_stall" | "invariant_violation" | "explicit_request";
     reasoning: string;
+    /**
+     * How sure the picker said it was, 0..1, when it reported it. Worth
+     * auditing: a run that went wrong usually said so at the time, and the
+     * low-confidence picks are where it started.
+     */
+    confidence?: number;
   };
 }
 

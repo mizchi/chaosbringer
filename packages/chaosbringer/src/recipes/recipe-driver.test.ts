@@ -36,6 +36,7 @@ function fakeStep(url: string): DriverStep {
   // touched by the selection path. We give it just enough to look real.
   return {
     url,
+    currentUrl: url,
     page: {
       url: () => url,
       waitForSelector: async () => {},
