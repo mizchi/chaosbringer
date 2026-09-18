@@ -9,7 +9,7 @@
  * part that most needs to be reachable from a test.
  */
 
-import type { ActionTarget, ActionWeights } from "./types.js";
+import type { ActionTarget, ActionWeights, TargetGeometry } from "./types.js";
 import { escapeSelector, normalizeUrl } from "./filters.js";
 
 /** One interactive element as scraped from the DOM, before any weighting. */
@@ -51,6 +51,13 @@ export interface RawActionTarget {
   /** `min`/`max` attributes, raw. A range field's value must respect them. */
   min: string | null;
   max: string | null;
+  /**
+   * Where the element is and whether a click reaches it. Optional because
+   * it is filled in by a pass at the end of the scrape rather than by
+   * `push`, and because the hand-built fixtures in the unit tests have no
+   * DOM to measure.
+   */
+  geometry?: TargetGeometry;
 }
 
 /**
@@ -257,7 +264,93 @@ export function collectRawTargets(): RawActionTarget[] {
     t.index = peers.indexOf(elements[i]!);
   }
 
-  return results.slice(0, 50); // Limit to prevent too many targets
+  // Trim first, then measure: the cap is what bounds the hit-test cost, and
+  // measuring 300 elements to throw away 250 of them is the one version of
+  // this that could show up in a profile.
+  const kept = results.slice(0, 50); // Limit to prevent too many targets
+
+  // Geometry last, in one pass, after every DOM read above. `innerText` and
+  // `getBoundingClientRect` both force layout, so doing this here rather
+  // than inside `push` means the layout computed for the first target is
+  // still valid for the fiftieth — nothing between them writes to the DOM.
+  //
+  // `elementFromPoint` answers the question the descriptions cannot: which
+  // element actually receives a click at this spot. It already accounts for
+  // `pointer-events`, stacking order and transforms, so there is nothing to
+  // reimplement.
+  const identify = (el: Element): string => {
+    const text = ((el as HTMLElement).innerText || el.getAttribute("aria-label") || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 60);
+    const cls =
+      typeof el.className === "string" && el.className.trim().length > 0
+        ? `.${el.className.trim().split(/\s+/).join(".")}`
+        : "";
+    const ident = `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : cls}`;
+    return text ? `${text} <${ident}>` : `<${ident}>`;
+  };
+  /**
+   * True when `host` is a shadow host the node lives inside.
+   * `elementFromPoint` returns the host for a point over shadow content,
+   * and `host.contains(inner)` is false because `contains` does not cross
+   * shadow boundaries — so without this every control in a web component
+   * would report itself covered by its own host.
+   */
+  const isShadowHostOf = (host: Element, node: Element): boolean => {
+    let root: Node = node.getRootNode();
+    while ((root as ShadowRoot).host) {
+      const h: Element = (root as ShadowRoot).host;
+      if (h === host) return true;
+      root = h.getRootNode();
+    }
+    return false;
+  };
+  for (let i = 0; i < kept.length; i++) {
+    const el = elements[i]!;
+    const r = el.getBoundingClientRect();
+    // The visible part of the box, which is where the probe point goes.
+    const x0 = Math.max(r.left, 0);
+    const y0 = Math.max(r.top, 0);
+    const x1 = Math.min(r.right, window.innerWidth);
+    const y1 = Math.min(r.bottom, window.innerHeight);
+    const inViewport = x1 > x0 && y1 > y0;
+    const style = window.getComputedStyle(el);
+    let coveredBy: string | undefined;
+    if (inViewport) {
+      const hit = document.elementFromPoint((x0 + x1) / 2, (y0 + y1) / 2);
+      // Ancestors are excluded along with descendants. A returned ancestor
+      // usually means the target is not hit-testable at that point at all,
+      // which is what `inert` is for; calling it "covered" would name the
+      // target's own container as the culprit. Under-reporting is the safe
+      // direction here — a false "covered" makes a driver skip a control
+      // that works.
+      if (
+        hit &&
+        hit !== el &&
+        !el.contains(hit) &&
+        !hit.contains(el) &&
+        !isShadowHostOf(hit, el)
+      ) {
+        coveredBy = identify(hit);
+      }
+    }
+    kept[i]!.geometry = {
+      bbox: { x: r.left, y: r.top, width: r.width, height: r.height },
+      inViewport,
+      // `pointer-events` only. A low opacity is tempting to fold in here
+      // and would be wrong: an `opacity: 0.01` button is fully clickable
+      // and the click works, so reporting it as un-clickable is the false
+      // positive this file is otherwise careful to avoid. Whether a
+      // control is *visible enough for a user to have clicked it* is a
+      // different question from whether the click lands, and only the
+      // second one belongs in `TargetGeometry`.
+      inert: style.pointerEvents === "none",
+      ...(coveredBy === undefined ? {} : { coveredBy }),
+    };
+  }
+
+  return kept;
 }
 
 /** What the crawler types into a plain text field. */
@@ -415,6 +508,7 @@ export function weighActionTargets(
       type,
       href: t.href,
       fillValue: type === "input" ? fillValueFor(t) : undefined,
+      geometry: t.geometry,
     };
   });
 

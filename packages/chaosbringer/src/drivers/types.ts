@@ -26,7 +26,62 @@ export interface DriverCandidate {
   type: ActionTarget["type"];
   weight: number;
   href?: string;
+  /**
+   * Viewport-relative box, so a prompt can cite "the button at top-right".
+   * Absent on the `scroll` target and when the scrape failed.
+   */
   bbox?: { x: number; y: number; width: number; height: number };
+  /**
+   * The box overlaps the viewport. **Not a reason to skip a candidate** —
+   * Playwright scrolls before acting — but it is the condition under which
+   * `coveredBy` was measured.
+   */
+  inViewport?: boolean;
+  /**
+   * The element that will receive a click aimed here, when it is not this
+   * one. The fact a description cannot carry: `button "Continue"` reads
+   * the same whether the button is live or under a consent backdrop that
+   * eats the click, and the click then silently does nothing.
+   *
+   * Set only when `inViewport` is true, so absent means "nothing found on
+   * top", not "nothing is on top". Prefer `isObstructed` over reading this
+   * directly — it gets that distinction right.
+   */
+  coveredBy?: string;
+  /** `pointer-events: none`: a click aimed here passes through. */
+  inert?: boolean;
+}
+
+/**
+ * Does the geometry say a click aimed at this candidate lands elsewhere?
+ *
+ * True only on positive evidence. An off-screen candidate, a `scroll`
+ * target, and anything from a page that could not be scraped all come back
+ * `false`, because "we do not know" and "it is fine" have to be answered
+ * the same way here: a false positive makes a driver skip a control that
+ * works, which is worse than the wasted step it was trying to avoid.
+ *
+ * The measured case for using it, from a gated-checkout SPA with a
+ * transparent full-screen backdrop left behind by a styled-away tip card:
+ * of 13 steps that changed nothing, this flagged 12, and every one of the
+ * 12 was a real dead click. The confidence the model reported on those
+ * same picks was 0.99 or above — it had no way to know.
+ *
+ * ```ts
+ * const liveOnly: Driver = {
+ *   name: "live-only",
+ *   async selectAction(step) {
+ *     const live = step.candidates.filter((c) => !isObstructed(c));
+ *     // Fall back to the full list rather than returning null: a screen
+ *     // whose every control is blocked still has to be leavable.
+ *     const pick = (live.length > 0 ? live : step.candidates)[0];
+ *     return pick ? { kind: "select", index: pick.index } : null;
+ *   },
+ * };
+ * ```
+ */
+export function isObstructed(candidate: DriverCandidate): boolean {
+  return candidate.inert === true || candidate.coveredBy !== undefined;
 }
 
 export interface DriverHistoryEntry {

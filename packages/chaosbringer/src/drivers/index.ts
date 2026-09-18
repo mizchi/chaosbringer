@@ -11,6 +11,7 @@
  * - `openRouterDriverProvider` / `anthropicDriverProvider` — out-of-the-box
  *   providers wired to the cheap vision tiers of each vendor.
  */
+export { isObstructed } from "./types.js";
 export type {
   Driver,
   DriverCandidate,
