@@ -122,6 +122,68 @@ describe("ChaosCrawler against fixture site", () => {
     }
   }, 120000);
 
+  /**
+   * Strict HAR replay has to survive traceparent injection.
+   *
+   * Reported in #129 §2 as "unusable in practice": every request carries a
+   * freshly-generated `traceparent`, so HAR matching supposedly never
+   * succeeds and `notFound: "abort"` fails on every request.
+   *
+   * It does work, and the reason it works is a decision in the route
+   * handler that nothing was holding in place. `setupNavigationBlocking`
+   * installs a PAGE-level catch-all route while HAR replay is a
+   * CONTEXT-level `routeFromHAR`; page routes are matched first, and
+   * `route.continue()` would send the request to the network and never
+   * give the HAR a chance. The handler ends in `route.fallback()`
+   * precisely so it does, passing the injected headers through
+   * `fallback({ headers })` rather than dropping them. Playwright then
+   * matches the HAR on URL and method, which no header can disturb.
+   *
+   * The test above covers `notFound: "abort"` but never with traceparent
+   * on, so the combination the issue names had no coverage and nothing
+   * stopped a later reader from "simplifying" that `fallback()` into a
+   * `continue()`. Now something does.
+   */
+  it("replays from HAR with traceparent injection on and notFound: abort", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "chaosbringer-har-tp-"));
+    const harPath = join(tmp, "traceparent.har");
+    const injected: string[] = [];
+    try {
+      const live = await startFixtureServer(0);
+      const recordReport = await new ChaosCrawler({
+        baseUrl: live.url,
+        maxPages: 2,
+        maxActionsPerPage: 0,
+        headless: true,
+        seed: 11,
+        traceparent: {},
+        har: { path: harPath, mode: "record" },
+      }).start();
+      await live.close();
+      const recordedUrl = recordReport.baseUrl;
+
+      // The server is down. Anything that loads now came out of the HAR,
+      // and `notFound: "abort"` means anything the HAR lacks fails.
+      const replayReport = await new ChaosCrawler({
+        baseUrl: recordedUrl,
+        maxPages: 2,
+        maxActionsPerPage: 0,
+        headless: true,
+        seed: 11,
+        traceparent: { onInject: ({ traceId }) => injected.push(traceId) },
+        har: { path: harPath, mode: "replay", notFound: "abort" },
+      }).start();
+
+      const home = replayReport.pages.find((p) => p.url.startsWith(recordedUrl));
+      expect(home?.status).toBe("success");
+      // And traceparent really was being injected while that happened,
+      // otherwise this passes for the boring reason.
+      expect(injected.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 120000);
+
   it("groups repeated identical errors into a single cluster", async () => {
     const crawler = new ChaosCrawler({
       baseUrl: `${server.url}/broken-link`,
