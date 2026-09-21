@@ -175,6 +175,7 @@ function toDriverCandidates(targets: ReadonlyArray<ActionTarget>): DriverCandida
     type: t.type,
     weight: t.weight,
     href: t.href,
+    selectValue: t.selectValue,
     ...toCandidateGeometry(t),
   }));
 }
@@ -2283,6 +2284,23 @@ export class ChaosCrawler {
       // Skip non-visible elements instead of falling back to hover
       if (!isVisible) {
         return null;
+      }
+
+      if (target.type === "select") {
+        // Nothing to set: one real option and the dropdown is already on
+        // it. Skipped rather than attempted, the same as a non-visible
+        // target — `selectOption` with the current value would succeed
+        // and change nothing, which is a step spent looking productive.
+        if (target.selectValue === undefined) return null;
+        await element.selectOption(target.selectValue, { timeout: 1000 });
+        return {
+          type: "select",
+          target: target.name || target.selector,
+          selector: target.selector,
+          value: target.selectValue,
+          success: true,
+          timestamp,
+        };
       }
 
       if (target.type === "input") {

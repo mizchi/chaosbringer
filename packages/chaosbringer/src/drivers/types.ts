@@ -27,6 +27,15 @@ export interface DriverCandidate {
   weight: number;
   href?: string;
   /**
+   * For a `select` candidate, the option value the crawler will set if
+   * this candidate is picked — one the page itself offered.
+   *
+   * Here because an index alone does not say what will happen: picking a
+   * dropdown asks for a *value*, and a driver that cannot see which one
+   * is choosing the element and guessing the rest.
+   */
+  selectValue?: string;
+  /**
    * Viewport-relative box, so a prompt can cite "the button at top-right".
    * Absent on the `scroll` target and when the scrape failed.
    */
