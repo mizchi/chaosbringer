@@ -46,6 +46,10 @@ function navResult(target: string): ActionResult {
   return { type: "navigate", target, success: true, timestamp: Date.now() };
 }
 
+function clearResult(selector: string): ActionResult {
+  return { type: "clear", selector, target: "coupon", success: true, timestamp: Date.now() };
+}
+
 function selectResult(selector: string, value: string): ActionResult {
   return { type: "select", selector, value, target: "shipping", success: true, timestamp: Date.now() };
 }
@@ -96,6 +100,41 @@ describe("tracingDriver", () => {
     driver.onActionComplete?.(inputResult("[name=email]"), step);
     expect(driver.getTrace().steps).toEqual([
       { kind: "fill", selector: "[name=email]", value: "test input" },
+    ]);
+  });
+
+  it("captures a clear as a fill with an empty value", async () => {
+    // The recipe language has no `clear` kind and needs none: `replay`
+    // calls `page.fill(selector, "")`, which is what `clear()` does. The
+    // step it must not become is no step at all.
+    const goal: Goal = {
+      name: "g", persona: "p", objective: "o", successCheck: async () => false,
+    };
+    const driver = tracingDriver({ inner: scriptedDriver([null]), goal });
+    const step = fakeStep("https://x/");
+    await driver.selectAction(step);
+    driver.onActionComplete?.(clearResult("#coupon"), step);
+    expect(driver.getTrace().steps).toEqual([
+      { kind: "fill", selector: "#coupon", value: "" },
+    ]);
+  });
+
+  it("does not let fillValueFor put a value back into a clear", async () => {
+    // `fillValueFor` answers "what does this field get filled with", and
+    // a clear is the step that says: nothing.
+    const goal: Goal = {
+      name: "g", persona: "p", objective: "o", successCheck: async () => false,
+    };
+    const driver = tracingDriver({
+      inner: scriptedDriver([null]),
+      goal,
+      fillValueFor: () => "COUPON50",
+    });
+    const step = fakeStep("https://x/");
+    await driver.selectAction(step);
+    driver.onActionComplete?.(clearResult("#coupon"), step);
+    expect(driver.getTrace().steps).toEqual([
+      { kind: "fill", selector: "#coupon", value: "" },
     ]);
   });
 

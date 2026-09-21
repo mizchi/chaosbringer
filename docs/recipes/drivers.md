@@ -243,6 +243,30 @@ const useExpress: Driver = {
 - **`selectValue` is absent when there is nothing to set** — a dropdown already on its only real option. Picking it is then skipped rather than attempted, the same as a non-visible target.
 - The action is recorded as `type: "select"` with `value` set, which is the one action whose value the trace carries: an option value came off the page rather than out of a generator. A recipe replays it with no `fillValueFor` hook.
 
+### Emptying a field
+
+A `select` **pick** normally names an element and nothing else: the crawler performs the action the candidate's own `type` implies, and for an `input` that is a fill with a value derived from the field's `inputType` — always a non-empty one. (The pick kind and the candidate type share the word; `kind: "select"` means "act on this candidate", `type: "select"` means "this candidate is a dropdown".)
+
+`operation: "clear"` is the exception, and the one state a pick could not otherwise reach:
+
+```ts
+const emptyThenSubmit: Driver = {
+  name: "empty-then-submit",
+  async selectAction(step) {
+    const field = step.candidates.find((c) => c.type === "input");
+    return field ? { kind: "select", index: field.index, operation: "clear" } : null;
+  },
+};
+```
+
+It is a `clear()`, so it needs a candidate with `type: "input"` — the class `fill()` accepts. On anything else the pick is refused the way an out-of-range index is: the step is not spent, and the driver is asked again.
+
+`boundaryValueProvider` already offers `""` as a value worth trying, but that reaches a field through `formDriver`, which writes **every** field of a form at once. "Empty this one field and leave the rest valid" is the case neither path expressed — the shape that finds a form validating on `input` and caching the answer.
+
+The action is reported as `type: "clear"` rather than `"input"`, because a trace carries no fill value: with one label for both, a report cannot say whether a step put text into a field or took it out. A recorded crawl replays it as a `fill` with an empty value — unlike a `select`, whose value the trace does carry, a clear has only one possible value so there is nothing to record.
+
+`weightedRandomDriver` never emits it, so no existing crawl changes behaviour.
+
 ### What a step guarantees
 
 - **`step.candidates` is re-collected from the DOM before every step**, so an index is only valid for the step that handed it to you. Do not cache the list across steps: on an app that re-renders in place — hash or History routing, a modal, a wizard — the controls change without a page visit, and last step's index names a different element than it did.

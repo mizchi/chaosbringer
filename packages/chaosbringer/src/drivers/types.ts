@@ -148,11 +148,41 @@ export interface DriverStep {
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
 }
 
+/**
+ * What to do to the candidate, when the default is not it.
+ *
+ * A `select` pick normally names an element and nothing else: the crawler
+ * performs the one action the scraped `type` implies, and for an `input`
+ * that is a fill with a value `fillValueFor` derived from the field's
+ * `inputType`. Always a non-empty one — so a driver picking by index can
+ * put text into a field and can never take it out.
+ *
+ * `clear` is the missing end state. `fill()` replaces, so clearing is not
+ * needed to *change* a value; an empty field is a state of its own, and
+ * the value seam that can reach it (`FieldValueProvider`, whose
+ * `boundaryValueProvider` already offers `""`) belongs to `formDriver`,
+ * which writes every field of a form at once. "Empty this one field and
+ * leave the rest valid" is the case neither path expresses.
+ *
+ * Deliberately one operation, not a general operation-and-value pick:
+ * letting a driver choose the text too is a larger question about who
+ * owns the value, and it wants the provider seam thought through with it.
+ */
+export type DriverOperation = "clear";
+
 export type DriverPick =
   | {
       kind: "select";
       /** Index into `step.candidates`. */
       index: number;
+      /**
+       * Override what is done to the candidate. Omit for the crawler's
+       * default. `"clear"` requires a candidate with `type: "input"` —
+       * the class `fill()` accepts, and so the class `clear()` accepts.
+       * On anything else the pick is refused like an out-of-range index:
+       * the step is not spent and the driver is asked again.
+       */
+      operation?: DriverOperation;
       /** Optional explanation, stored in the trace for debugging. */
       reasoning?: string;
       /** Optional source tag for reporting (e.g. provider name). */

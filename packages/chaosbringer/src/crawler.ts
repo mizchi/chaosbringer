@@ -111,6 +111,7 @@ import type {
   DriverCandidate,
   DriverHistoryEntry,
   DriverInvariantViolation,
+  DriverOperation,
   DriverPick,
   DriverStep,
   ScreenshotMode,
@@ -2076,6 +2077,18 @@ export class ChaosCrawler {
           this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
           continue;
         }
+        if (pick.operation === "clear" && selectedTarget.type !== "input") {
+          // Refused rather than attempted: `clear()` on a button throws,
+          // and a thrown action is recorded against the page under test.
+          // An unsupported operation is the driver's mistake, so it reads
+          // like an out-of-range index — the step is not spent.
+          this.logger.warn("driver_operation_unsupported", {
+            driver: driver.name,
+            operation: pick.operation,
+            targetType: selectedTarget.type,
+          });
+          continue;
+        }
         selectorForCoverage = selectedTarget.selector;
         placeholder = {
           type: "click",
@@ -2085,7 +2098,7 @@ export class ChaosCrawler {
           timestamp: Date.now(),
         };
         this.currentAction = placeholder;
-        result = await this.performActionOnTarget(page, selectedTarget, url);
+        result = await this.performActionOnTarget(page, selectedTarget, url, pick.operation);
         if (result === null) {
           this.logger.debug("driver_action_skipped", {
             target: selectedTarget.name || selectedTarget.selector,
@@ -2262,7 +2275,8 @@ export class ChaosCrawler {
   private async performActionOnTarget(
     page: Page,
     target: ActionTarget,
-    url: string
+    url: string,
+    operation?: DriverOperation
   ): Promise<ActionResult | null> {
     const timestamp = Date.now();
 
@@ -2304,6 +2318,18 @@ export class ChaosCrawler {
       }
 
       if (target.type === "input") {
+        if (operation === "clear") {
+          // `clear()` is `fill("")`, so it accepts exactly the controls
+          // that made this target an `input` in the first place.
+          await element.clear({ timeout: 1000 });
+          return {
+            type: "clear",
+            target: target.name || target.selector,
+            selector: target.selector,
+            success: true,
+            timestamp,
+          };
+        }
         await element.fill(target.fillValue ?? DEFAULT_FILL_VALUE, { timeout: 1000 });
         return {
           type: "input",
