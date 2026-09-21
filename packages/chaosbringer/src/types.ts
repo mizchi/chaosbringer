@@ -640,7 +640,13 @@ export interface ActionTarget {
 }
 
 export interface ActionResult {
-  type: "click" | "scroll" | "hover" | "navigate" | "input";
+  /**
+   * `clear` is a fill that emptied the field rather than writing to it.
+   * Reported apart from `input` because the trace records no values: with
+   * one label for both, a report cannot say whether a step put text in a
+   * field or took it out, and those break different things.
+   */
+  type: "click" | "scroll" | "hover" | "navigate" | "input" | "clear";
   target?: string;
   selector?: string;
   success: boolean;

@@ -241,6 +241,7 @@ export {
   type DriverCandidate,
   type DriverHistoryEntry,
   type DriverInvariantViolation,
+  type DriverOperation,
   type DriverPick,
   type DriverProvider,
   type DriverProviderCandidate,

@@ -10,10 +10,10 @@
  * library; subsequent runs replay the verified recipes for free.
  *
  * Action → RecipeStep mapping is conservative — we capture the
- * verbs that round-trip safely (click, navigate, fill) and skip the
- * rest (scroll, hover). A captured recipe with no fills will still
- * replay; a captured recipe with the wrong fill value WON'T, so we'd
- * rather drop than fake.
+ * verbs that round-trip safely (click, navigate, fill, and a clear as a
+ * fill with an empty value) and skip the rest (scroll, hover). A
+ * captured recipe with no fills will still replay; a captured recipe
+ * with the wrong fill value WON'T, so we'd rather drop than fake.
  */
 import type { Page } from "playwright";
 import type { ActionResult } from "../types.js";
@@ -203,6 +203,15 @@ function actionToRecipeStep(
       if (!action.selector) return null;
       const value = fillValueFor?.(action.selector, step) ?? "test input";
       return { kind: "fill", selector: action.selector, value };
+    }
+    case "clear": {
+      // A fill with an empty value, which is what `clear()` is — the
+      // recipe language needs no new step kind, and `replay` already
+      // calls `page.fill(selector, "")`. Without this case the `default`
+      // below drops the step, so a crawl that emptied a field would
+      // replay as one that never touched it.
+      if (!action.selector) return null;
+      return { kind: "fill", selector: action.selector, value: "" };
     }
     case "navigate": {
       if (!action.target) return null;
