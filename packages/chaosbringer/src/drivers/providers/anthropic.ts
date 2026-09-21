@@ -57,6 +57,15 @@ export function anthropicDriverProvider(opts: AnthropicDriverProviderOptions): D
       const prompt = loadPrompt(promptPath);
       const userText = renderUserPrompt(prompt.userTemplate, input);
 
+      // This provider is a vision one, so it does pay the capture — but
+      // it pays it here, where a failure is just another soft failure.
+      let screenshot: Buffer;
+      try {
+        screenshot = await input.screenshot();
+      } catch {
+        return null;
+      }
+
       const body = {
         model,
         max_tokens: maxTokens,
@@ -70,7 +79,7 @@ export function anthropicDriverProvider(opts: AnthropicDriverProviderOptions): D
                 source: {
                   type: "base64",
                   media_type: "image/png",
-                  data: input.screenshot.toString("base64"),
+                  data: screenshot.toString("base64"),
                 },
               },
               { type: "text", text: userText },

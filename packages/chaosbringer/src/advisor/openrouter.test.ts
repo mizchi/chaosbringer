@@ -8,11 +8,11 @@ const sampleContext = (
   overrides: Partial<AdvisorContext> = {},
 ): AdvisorContext => ({
   url: "https://example.test/page",
-  screenshot: PNG,
+  screenshot: async () => PNG,
   candidates: [
-    { index: 0, selector: "#a", description: "button A" },
-    { index: 1, selector: "#b", description: "link B" },
-    { index: 2, selector: "#c", description: "input C" },
+    { index: 0, selector: "#a", description: "button A", type: "button" },
+    { index: 1, selector: "#b", description: "link B", type: "link" },
+    { index: 2, selector: "#c", description: "input C", type: "input" },
   ],
   reason: "novelty_stall",
   budgetRemaining: 19,

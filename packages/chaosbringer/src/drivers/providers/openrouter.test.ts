@@ -6,11 +6,11 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 const makeInput = (overrides: Partial<DriverProviderInput> = {}): DriverProviderInput => ({
   url: "https://example.test/",
-  screenshot: PNG,
+  screenshot: async () => PNG,
   candidates: [
-    { index: 0, description: "button A" },
-    { index: 1, description: "link B" },
-    { index: 2, description: "input C" },
+    { index: 0, description: "button A", type: "button", weight: 1 },
+    { index: 1, description: "link B", type: "link", weight: 1 },
+    { index: 2, description: "input C", type: "input", weight: 1 },
   ],
   history: [],
   invariantViolations: [],

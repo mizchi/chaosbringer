@@ -2,7 +2,15 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
-import { isObstructed, type Driver, type DriverCandidate, type DriverStep } from "./drivers/types.js";
+import { aiDriver } from "./drivers/ai-driver.js";
+import {
+  isObstructed,
+  type Driver,
+  type DriverCandidate,
+  type DriverProvider,
+  type DriverProviderCandidate,
+  type DriverStep,
+} from "./drivers/types.js";
 
 /**
  * The geometry has to survive the trip from the page to the driver, and it
@@ -124,5 +132,81 @@ describe("a driver is told what will receive its click", () => {
     expect(scroll).toBeDefined();
     expect(scroll!.bbox).toBeUndefined();
     expect(isObstructed(scroll!)).toBe(false);
+  });
+});
+
+/**
+ * And it has to survive the rest of the trip — to the model.
+ *
+ * The same page, reached through `aiDriver` rather than a hand-written
+ * driver, because that is the seam a model actually sits behind. A
+ * provider that is told `button "Buy a widget"` and nothing else has no
+ * way to know the click is going into a backdrop, and the run above is
+ * what that costs: 12 dead clicks the model reported 0.99 on.
+ */
+describe("a provider is told what will receive its click", () => {
+  let server: http.Server;
+  const seen: DriverProviderCandidate[][] = [];
+  const screenshotShapes: string[] = [];
+
+  beforeAll(async () => {
+    server = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(BACKDROP);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+
+    const recording: DriverProvider = {
+      name: "recording",
+      async selectAction(input) {
+        seen.push(input.candidates.map((c) => ({ ...c })));
+        screenshotShapes.push(typeof input.screenshot);
+        // Stand down: this test is about what arrived, not what it picks.
+        return null;
+      },
+    };
+
+    await new ChaosCrawler({
+      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      maxPages: 1,
+      maxActionsPerPage: 1,
+      headless: true,
+      timeout: 5000,
+      logLevel: "silent",
+      driver: aiDriver({ provider: recording }),
+    }).start();
+  }, 120_000);
+
+  afterAll(async () => {
+    await new Promise<void>((r) => server?.close(() => r()));
+  });
+
+  const byName = (name: string): DriverProviderCandidate | undefined =>
+    (seen[0] ?? []).find((c) => c.description.includes(name));
+
+  it("hands the provider the hit-test result", () => {
+    expect(seen.length).toBeGreaterThan(0);
+    const buy = byName("Buy a widget")!;
+    expect(buy.coveredBy).toContain("consent-backdrop");
+    expect(isObstructed(buy)).toBe(true);
+    expect(isObstructed(byName("Accept cookies")!)).toBe(false);
+  });
+
+  it("hands the provider the target type", () => {
+    // Whether a candidate takes a click or a value, which decides what
+    // there even is to answer about it.
+    expect(byName("Buy a widget")!.type).toBe("button");
+    expect((seen[0] ?? []).some((c) => c.type === "scroll")).toBe(true);
+  });
+
+  it("keeps the selector on this side of the seam", () => {
+    for (const c of seen[0] ?? []) expect(c).not.toHaveProperty("selector");
+  });
+
+  it("hands the provider a capture it may decline, not bytes", () => {
+    // The whole crawl above ran a provider that never looked at a pixel,
+    // and nothing captured. What reached it was a thunk.
+    expect(screenshotShapes.length).toBeGreaterThan(0);
+    for (const shape of screenshotShapes) expect(shape).toBe("function");
   });
 });

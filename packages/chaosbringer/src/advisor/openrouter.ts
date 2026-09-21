@@ -90,7 +90,10 @@ export function openRouterAdvisor(opts: OpenRouterAdvisorOptions): ActionAdvisor
         budgetRemaining: ctx.budgetRemaining,
       });
 
-      const imageDataUrl = `data:image/png;base64,${ctx.screenshot.toString("base64")}`;
+      // A vision advisor, so it does pay the capture. `consultAdvisor`
+      // turns a failure here into this consult's soft failure.
+      const screenshot = await ctx.screenshot();
+      const imageDataUrl = `data:image/png;base64,${screenshot.toString("base64")}`;
 
       const body = {
         model,

@@ -1,14 +1,18 @@
 /**
  * Per-step AI driver. Asks a `DriverProvider` what to do next, every
- * step (subject to budget + timeout). The provider sees the page
- * screenshot, the candidate list, recent action history, and the most
- * recent invariant violations — enough to reason about which interaction
- * is most likely to surface a bug.
+ * step (subject to budget + timeout). The provider sees the candidate
+ * list — with the `type` and hit-test geometry the scrape measured —
+ * recent action history, the most recent invariant violations, and a
+ * screenshot thunk it may or may not call. Enough to reason about which
+ * interaction is most likely to surface a bug, and enough to tell a live
+ * control from one under a backdrop, which no description can say.
  *
  * Soft-failure protocol: provider returns `null`, throws, or times out →
  * the driver returns `null` so the outer composite/fallback can defer
  * to a cheaper driver (e.g. weighted-random). Soft failures still cost
- * budget (the wall clock was spent).
+ * budget (the wall clock was spent). A failed screenshot is one of them:
+ * it throws out of the thunk, inside the provider, on the providers that
+ * asked for one.
  *
  * `minConfidence` puts a hesitant answer on that same path. Providers
  * already return a confidence with the pick, and a model that is picking
@@ -83,20 +87,18 @@ export function aiDriver(opts: AiDriverOptions): Driver {
       // race past the cap with concurrent steps (future-proofing).
       budget.recordCall(step.url);
 
-      let screenshot: Buffer;
-      try {
-        screenshot = await step.screenshot(screenshotMode);
-      } catch {
-        return null;
-      }
-
       const input: DriverProviderInput = {
         url: step.url,
-        screenshot,
-        candidates: step.candidates.map((c) => ({
-          index: c.index,
-          description: c.description,
-        })),
+        // Lazy on purpose. A provider that reads pixels awaits this and
+        // pays the capture; one that reasons over the candidate text does
+        // not, and the capture no longer runs before the provider has
+        // said whether it wants one.
+        screenshot: (mode) => step.screenshot(mode ?? screenshotMode),
+        // Destructure-to-omit: the selector is the one field that must
+        // not cross, and `DriverProviderCandidate` is defined as exactly
+        // this, so a field added to `DriverCandidate` reaches providers
+        // without a second edit here.
+        candidates: step.candidates.map(({ selector, ...visible }) => visible),
         history: step.history,
         invariantViolations: step.invariantViolations,
         goal: opts.goal,

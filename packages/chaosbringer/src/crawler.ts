@@ -143,6 +143,25 @@ function describeTarget(t: ActionTarget): string {
 }
 
 /**
+ * The geometry fields a decider is given, flattened off `ActionTarget`.
+ *
+ * Spread at the call site, rather than assigned field by field: a target
+ * with no geometry — the `scroll` target, or any of them when the page
+ * refused to be scraped — has to leave the keys *absent* rather than set
+ * to `undefined`, because `isObstructed` reads `coveredBy !== undefined`.
+ * Shared by both candidate views so that rule is written once.
+ */
+function toCandidateGeometry(t: ActionTarget) {
+  if (!t.geometry) return {};
+  return {
+    bbox: t.geometry.bbox,
+    inViewport: t.geometry.inViewport,
+    inert: t.geometry.inert,
+    ...(t.geometry.coveredBy === undefined ? {} : { coveredBy: t.geometry.coveredBy }),
+  };
+}
+
+/**
  * The driver's view of the current targets. `index` is positional into the
  * same array the caller holds, so the two must be rebuilt together — a
  * candidate list that outlives its targets resolves picks against the
@@ -156,20 +175,7 @@ function toDriverCandidates(targets: ReadonlyArray<ActionTarget>): DriverCandida
     type: t.type,
     weight: t.weight,
     href: t.href,
-    // Spread, rather than four assignments: a target with no geometry —
-    // the `scroll` target, or any of them when the page refused to be
-    // scraped — has to leave the keys absent rather than set to
-    // `undefined`, because `isObstructed` reads `coveredBy !== undefined`.
-    ...(t.geometry
-      ? {
-          bbox: t.geometry.bbox,
-          inViewport: t.geometry.inViewport,
-          inert: t.geometry.inert,
-          ...(t.geometry.coveredBy === undefined
-            ? {}
-            : { coveredBy: t.geometry.coveredBy }),
-        }
-      : {}),
+    ...toCandidateGeometry(t),
   }));
 }
 
@@ -1116,6 +1122,8 @@ export class ChaosCrawler {
       index,
       selector: t.selector,
       description: describeTarget(t),
+      type: t.type,
+      ...toCandidateGeometry(t),
     }));
 
     const result = await consultAdvisor({

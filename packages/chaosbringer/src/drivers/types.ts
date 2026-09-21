@@ -79,8 +79,16 @@ export interface DriverCandidate {
  *   },
  * };
  * ```
+ *
+ * Takes the two fields it reads rather than a whole `DriverCandidate`, so
+ * the model-facing candidate types can be handed to it too — a provider
+ * that is given the geometry has to be able to ask the question the same
+ * way a hand-written driver does.
  */
-export function isObstructed(candidate: DriverCandidate): boolean {
+export function isObstructed(candidate: {
+  inert?: boolean;
+  coveredBy?: string;
+}): boolean {
   return candidate.inert === true || candidate.coveredBy !== undefined;
 }
 
@@ -186,16 +194,45 @@ export interface Driver {
  * Low-level provider — the thing that actually talks to a model.
  * Drivers (`aiDriver`) own the policy (when to call, how to budget); the
  * provider owns the wire protocol (OpenRouter, Anthropic SDK, etc.).
+ *
+ * A provider is handed the facts, not a rendering of them: the candidate
+ * list carries `type` and the hit-test geometry, and the screenshot is a
+ * thunk. A provider that reasons over text alone therefore costs one HTTP
+ * call and no capture.
  */
 export interface DriverProvider {
   readonly name: string;
   selectAction(input: DriverProviderInput): Promise<DriverProviderResult | null>;
 }
 
+/**
+ * What a provider is allowed to see about one candidate: everything the
+ * scrape measured, minus the selector.
+ *
+ * Derived rather than hand-listed so the rule is the type. `selector` is
+ * internal — a model that is shown one starts citing it back, and a pick
+ * is an `index` into this array precisely so the mapping from answer to
+ * element stays on this side. Every other field is a fact about the page
+ * and belongs on the other side of the seam: `type` says whether the
+ * candidate takes a click or a value, and the geometry says whether a
+ * click aimed at it lands (see `isObstructed`) — which is exactly what
+ * `description` cannot carry.
+ */
+export type DriverProviderCandidate = Omit<DriverCandidate, "selector">;
+
 export interface DriverProviderInput {
   url: string;
-  screenshot: Buffer;
-  candidates: ReadonlyArray<{ index: number; description: string }>;
+  /**
+   * Capture the page, when the provider actually reads pixels. Lazy: a
+   * text-only provider that never calls this pays nothing for it, and a
+   * capture that fails surfaces as the provider's own soft failure rather
+   * than standing the driver down before it was ever consulted.
+   *
+   * Each call captures — call it once. `mode` defaults to the driver's
+   * configured `screenshotMode`.
+   */
+  screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
+  candidates: ReadonlyArray<DriverProviderCandidate>;
   history: ReadonlyArray<DriverHistoryEntry>;
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
   /** Free-form goal hint forwarded by the driver — e.g. "find bugs". */
