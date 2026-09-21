@@ -626,7 +626,11 @@ export interface ActionTarget {
   role?: string;
   name?: string;
   weight: number;
-  type: "link" | "button" | "input" | "interactive" | "scroll";
+  /**
+   * What the crawler will do with it. `input` is filled, `select` is set
+   * to one of its own options, the rest are clicked.
+   */
+  type: "link" | "button" | "input" | "select" | "interactive" | "scroll";
   /** For links, the href attribute */
   href?: string;
   /**
@@ -635,6 +639,16 @@ export interface ActionTarget {
    * take "test input"). Absent for every other kind of target.
    */
   fillValue?: string;
+  /**
+   * For a `<select>`, the option value to set — one the page itself
+   * offered. Absent for every other kind of target.
+   *
+   * Separate from `fillValue` because they are different operations:
+   * `fill()` throws on a `<select>` and `selectOption` throws on an
+   * `<input>`, so one field carrying both would be a value whose meaning
+   * depends on a second field.
+   */
+  selectValue?: string;
   /** Where it is and whether a click reaches it. See `TargetGeometry`. */
   geometry?: TargetGeometry;
 }
@@ -642,13 +656,25 @@ export interface ActionTarget {
 export interface ActionResult {
   /**
    * `clear` is a fill that emptied the field rather than writing to it.
-   * Reported apart from `input` because the trace records no values: with
-   * one label for both, a report cannot say whether a step put text in a
-   * field or took it out, and those break different things.
+   * Reported apart from `input` because a trace carries no fill value:
+   * with one label for both, a report cannot say whether a step put text
+   * into a field or took it out, and those break different things.
    */
-  type: "click" | "scroll" | "hover" | "navigate" | "input" | "clear";
+  type: "click" | "scroll" | "hover" | "navigate" | "input" | "select" | "clear";
   target?: string;
   selector?: string;
+  /**
+   * The value this action set, when it came from a fixed list the page
+   * offered — today only a `select`.
+   *
+   * Deliberately not populated for a fill. A fill value is generated, and
+   * a trace that carried one would be recording a string the crawler
+   * invented; `tracingDriver`'s `fillValueFor` hook exists because that
+   * value is the caller's to supply. An option value is not invented, so
+   * it can be recorded, and a recipe can then replay the step without a
+   * hook at all.
+   */
+  value?: string;
   success: boolean;
   error?: string;
   blockedExternal?: boolean;

@@ -3,6 +3,7 @@ import {
   DEFAULT_FILL_VALUE,
   fillValueFor,
   scrollOnlyTargets,
+  selectValueFor,
   weighActionTargets,
   type RawActionTarget,
   type UrlFamiliarity,
@@ -21,6 +22,8 @@ const element = (over: Partial<RawActionTarget> = {}): RawActionTarget => ({
   inputType: null,
   min: null,
   max: null,
+  options: [],
+  currentValue: null,
   index: 0,
   hasVisibleText: false,
   isNavLink: false,
@@ -405,5 +408,96 @@ describe("fillValueFor", () => {
       ["interactive", undefined],
       ["scroll", undefined],
     ]);
+  });
+});
+
+describe("selectValueFor", () => {
+  const dropdown = (over: Partial<RawActionTarget> = {}) =>
+    element({ tag: "select", ...over });
+
+  it("takes the first offered value that is not the one already set", () => {
+    expect(
+      selectValueFor(
+        dropdown({
+          currentValue: "standard",
+          options: [
+            { value: "standard", label: "Standard" },
+            { value: "express", label: "Express" },
+          ],
+        }),
+      ),
+    ).toBe("express");
+  });
+
+  it("does not choose the value already set, even when it is first", () => {
+    // Setting what is set costs a step, succeeds, and reads in the report
+    // as an action that did something. A driver that keeps picking it
+    // oscillates on a dropdown that never moves.
+    expect(
+      selectValueFor(
+        dropdown({
+          currentValue: "standard",
+          options: [{ value: "standard", label: "Standard" }],
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("is undefined when the page offers nothing", () => {
+    // Every option was a placeholder, so the scrape kept none.
+    expect(selectValueFor(dropdown({ currentValue: "", options: [] }))).toBeUndefined();
+  });
+
+  it("is deterministic — the same dropdown gives the same value", () => {
+    const d = dropdown({
+      currentValue: "a",
+      options: [
+        { value: "a", label: "A" },
+        { value: "b", label: "B" },
+        { value: "c", label: "C" },
+      ],
+    });
+    expect(selectValueFor(d)).toBe(selectValueFor(d));
+    expect(selectValueFor(d)).toBe("b");
+  });
+});
+
+describe("weighActionTargets: a dropdown", () => {
+  it("is a select target, not an interactive one", () => {
+    // `interactive` would mean "click it", and clicking a native <select>
+    // opens its list and selects nothing.
+    const [target] = weighActionTargets(
+      [
+        element({
+          tag: "select",
+          name: "shipping",
+          currentValue: "standard",
+          options: [
+            { value: "standard", label: "Standard" },
+            { value: "express", label: "Express" },
+          ],
+        }),
+      ],
+      context(),
+    );
+    expect(target!.type).toBe("select");
+    expect(target!.selectValue).toBe("express");
+    // Not a fill target: `fill()` throws on a <select>.
+    expect(target!.fillValue).toBeUndefined();
+  });
+
+  it("is weighted like the field it is", () => {
+    expect(
+      weigh(element({ tag: "select", options: [{ value: "x", label: "X" }] })),
+    ).toBe(DEFAULT_ACTION_WEIGHTS.inputs);
+  });
+
+  it("carries no selectValue when there is nothing to set", () => {
+    const [target] = weighActionTargets(
+      [element({ tag: "select", currentValue: "only", options: [{ value: "only", label: "Only" }] })],
+      context(),
+    );
+    expect(target!.type).toBe("select");
+    expect(target!.selectValue).toBeUndefined();
   });
 });

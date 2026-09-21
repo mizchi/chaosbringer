@@ -10,10 +10,10 @@
  * library; subsequent runs replay the verified recipes for free.
  *
  * Action → RecipeStep mapping is conservative — we capture the
- * verbs that round-trip safely (click, navigate, fill, and a clear as a
- * fill with an empty value) and skip the rest (scroll, hover). A
- * captured recipe with no fills will still replay; a captured recipe
- * with the wrong fill value WON'T, so we'd rather drop than fake.
+ * verbs that round-trip safely (click, navigate, fill, select, and a
+ * clear as a fill with an empty value) and skip the rest (scroll,
+ * hover). A captured recipe with no fills will still replay; a captured
+ * recipe with the wrong fill value WON'T, so we'd rather drop than fake.
  */
 import type { Page } from "playwright";
 import type { ActionResult } from "../types.js";
@@ -204,12 +204,22 @@ function actionToRecipeStep(
       const value = fillValueFor?.(action.selector, step) ?? "test input";
       return { kind: "fill", selector: action.selector, value };
     }
+    case "select": {
+      // The one action whose value the trace carries, so this needs no
+      // `fillValueFor` hook: an option value came off the page rather
+      // than out of a generator. Without this case the `default` drops
+      // the step and a recipe replays a dropdown it never set.
+      if (!action.selector || action.value === undefined) return null;
+      return { kind: "select", selector: action.selector, value: action.value };
+    }
     case "clear": {
       // A fill with an empty value, which is what `clear()` is — the
       // recipe language needs no new step kind, and `replay` already
-      // calls `page.fill(selector, "")`. Without this case the `default`
-      // below drops the step, so a crawl that emptied a field would
-      // replay as one that never touched it.
+      // calls `page.fill(selector, "")`. The value is not read off the
+      // action: emptying a field has one possible value, so unlike a
+      // select there is nothing to carry. Without this case the
+      // `default` drops the step and a crawl that emptied a field
+      // replays as one that never touched it.
       if (!action.selector) return null;
       return { kind: "fill", selector: action.selector, value: "" };
     }

@@ -46,12 +46,16 @@ function navResult(target: string): ActionResult {
   return { type: "navigate", target, success: true, timestamp: Date.now() };
 }
 
-function inputResult(selector: string): ActionResult {
-  return { type: "input", selector, target: "test input", success: true, timestamp: Date.now() };
-}
-
 function clearResult(selector: string): ActionResult {
   return { type: "clear", selector, target: "coupon", success: true, timestamp: Date.now() };
+}
+
+function selectResult(selector: string, value: string): ActionResult {
+  return { type: "select", selector, value, target: "shipping", success: true, timestamp: Date.now() };
+}
+
+function inputResult(selector: string): ActionResult {
+  return { type: "input", selector, target: "test input", success: true, timestamp: Date.now() };
 }
 
 describe("tracingDriver", () => {
@@ -132,6 +136,42 @@ describe("tracingDriver", () => {
     expect(driver.getTrace().steps).toEqual([
       { kind: "fill", selector: "#coupon", value: "" },
     ]);
+  });
+
+  it("captures a select with the value the action recorded", async () => {
+    // The value came off the page, so the trace could carry it and this
+    // needs no `fillValueFor` hook. Without the case the `default` drops
+    // the step and the recipe replays a dropdown it never set.
+    const goal: Goal = {
+      name: "g", persona: "p", objective: "o", successCheck: async () => false,
+    };
+    const driver = tracingDriver({ inner: scriptedDriver([null]), goal });
+    const step = fakeStep("https://x/");
+    await driver.selectAction(step);
+    driver.onActionComplete?.(selectResult("[name=shipping]", "express"), step);
+    expect(driver.getTrace().steps).toEqual([
+      { kind: "select", selector: "[name=shipping]", value: "express" },
+    ]);
+  });
+
+  it("drops a select whose value was not recorded", async () => {
+    // Rather than invent one. A recipe with the wrong value does not
+    // replay, and this file would rather drop than fake.
+    const goal: Goal = {
+      name: "g", persona: "p", objective: "o", successCheck: async () => false,
+    };
+    const driver = tracingDriver({
+      inner: scriptedDriver([null]),
+      goal,
+      fillValueFor: () => "express",
+    });
+    const step = fakeStep("https://x/");
+    await driver.selectAction(step);
+    driver.onActionComplete?.(
+      { type: "select", selector: "[name=shipping]", success: true, timestamp: Date.now() },
+      step,
+    );
+    expect(driver.getTrace().steps).toEqual([]);
   });
 
   it("honours fillValueFor for callers that know real values", async () => {

@@ -221,9 +221,33 @@ const onlyClickButtons: Driver = {
 
 Returning `null` means "no opinion, defer to the next driver in the composite". Returning `{ kind: "skip" }` means "deliberately do nothing this step". Returning `{ kind: "custom", perform }` lets you take over the page directly — `perform(page)` returns an `ActionResult` and counts as one chaos action.
 
+### Setting a dropdown
+
+A `select` candidate is one the crawler will set with `selectOption`, not click — clicking a native `<select>` opens its list and selects nothing. It carries `selectValue`: the option the crawler will set if you pick it, chosen as the first value the page offers that is not the one already selected.
+
+```ts
+const useExpress: Driver = {
+  name: "express",
+  async selectAction(step) {
+    const shipping = step.candidates.find(
+      (c) => c.type === "select" && c.description.includes("shipping"),
+    );
+    // `selectValue` is what picking this would set. An index alone does
+    // not say — picking a dropdown asks for a value.
+    return shipping?.selectValue ? { kind: "select", index: shipping.index } : null;
+  },
+};
+```
+
+- **A placeholder and a disabled option are never offered.** `""` would set the dropdown to nothing and read in the report as an action that did something; Playwright refuses a disabled option outright.
+- **`selectValue` is absent when there is nothing to set** — a dropdown already on its only real option. Picking it is then skipped rather than attempted, the same as a non-visible target.
+- The action is recorded as `type: "select"` with `value` set, which is the one action whose value the trace carries: an option value came off the page rather than out of a generator. A recipe replays it with no `fillValueFor` hook.
+
 ### Emptying a field
 
-A `select` pick normally names an element and nothing else: the crawler performs the action the scraped `type` implies, and for an `input` that is a fill with a value derived from the field's `inputType` — always a non-empty one. `operation: "clear"` is the exception, and the one state a pick could not otherwise reach:
+A `select` **pick** normally names an element and nothing else: the crawler performs the action the candidate's own `type` implies, and for an `input` that is a fill with a value derived from the field's `inputType` — always a non-empty one. (The pick kind and the candidate type share the word; `kind: "select"` means "act on this candidate", `type: "select"` means "this candidate is a dropdown".)
+
+`operation: "clear"` is the exception, and the one state a pick could not otherwise reach:
 
 ```ts
 const emptyThenSubmit: Driver = {
@@ -239,7 +263,7 @@ It is a `clear()`, so it needs a candidate with `type: "input"` — the class `f
 
 `boundaryValueProvider` already offers `""` as a value worth trying, but that reaches a field through `formDriver`, which writes **every** field of a form at once. "Empty this one field and leave the rest valid" is the case neither path expressed — the shape that finds a form validating on `input` and caching the answer.
 
-The action is reported as `type: "clear"` rather than `"input"`, because the trace records no values: with one label for both, a report cannot say whether a step put text into a field or took it out. A recorded crawl replays it as a `fill` with an empty value.
+The action is reported as `type: "clear"` rather than `"input"`, because a trace carries no fill value: with one label for both, a report cannot say whether a step put text into a field or took it out. A recorded crawl replays it as a `fill` with an empty value — unlike a `select`, whose value the trace does carry, a clear has only one possible value so there is nothing to record.
 
 `weightedRandomDriver` never emits it, so no existing crawl changes behaviour.
 
@@ -247,6 +271,7 @@ The action is reported as `type: "clear"` rather than `"input"`, because the tra
 
 - **`step.candidates` is re-collected from the DOM before every step**, so an index is only valid for the step that handed it to you. Do not cache the list across steps: on an app that re-renders in place — hash or History routing, a modal, a wizard — the controls change without a page visit, and last step's index names a different element than it did.
 - **`step.url` is the URL of the page *visit*** and holds still for every step on that page; budgets and `onPageStart` key off it. **`step.currentUrl` is where the app has actually routed to** as of this step. Group by `url`, decide on `currentUrl`.
+- **A form field's description falls back to its `name` attribute** when it has neither text nor an `aria-label`, which is the usual case: without it two fields on one page both read `(input)`.
 - **Every candidate carries geometry**: `bbox`, `inViewport`, `inert` (`pointer-events: none`), and `coveredBy`. Absent only on the `scroll` target and on a page the scrape could not read.
 
 ### Skipping a control the click will not reach
