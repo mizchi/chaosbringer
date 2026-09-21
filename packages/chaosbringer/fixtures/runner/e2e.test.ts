@@ -873,8 +873,8 @@ describe("ChaosCrawler against fixture site", () => {
     const seenSizes: number[] = [];
     const stubAdvisor = {
       name: "stub/test",
-      async suggest(ctx: { screenshot: Buffer }) {
-        seenSizes.push(ctx.screenshot.byteLength);
+      async suggest(ctx: { screenshot: () => Promise<Buffer> }) {
+        seenSizes.push((await ctx.screenshot()).byteLength);
         return { chosenIndex: 0, reasoning: "ok" };
       },
     };

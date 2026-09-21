@@ -9,7 +9,7 @@ Drivers are activated by passing `driver` to `chaos()` / `ChaosCrawler`. The leg
 | Driver | What it does | When to reach for it |
 |---|---|---|
 | `weightedRandomDriver()` | The classic monkey-test heuristic, extracted as a Driver | Composing with other drivers as the cheap base |
-| `aiDriver({ provider })` | Asks a vision model on every step what to click | Hard-to-reach UI state; AI sees screenshot + history + invariant violations |
+| `aiDriver({ provider })` | Asks a model on every step what to click | Hard-to-reach UI state; the model sees the candidates with their geometry, history, invariant violations, and a screenshot if it asks |
 | `formDriver()` | Detects `<form>`s, fills every supported field, submits | Apps with login / signup / settings / data-entry forms |
 | `payloadDriver({ payloads })` | `formDriver` with attack payload sets (XSS / SQLi / path / large / unicode) | **Authorized** pentest of your own app; pair with invariants that detect the attack class |
 | `flowDriver({ steps })` | Walks a scripted user journey (register → verify → login → …) across pages | Critical-path coverage under fault injection |
@@ -31,6 +31,32 @@ Drivers are activated by passing `driver` to `chaos()` / `ChaosCrawler`. The leg
 - `anthropicDriverProvider({ apiKey })` — default `claude-haiku-4-5-20251001`.
 
 Both return `null` on every soft failure (5xx, timeout, budget exhausted, malformed JSON) so the surrounding composite driver can fall back without branching on error.
+
+### Writing a provider
+
+A provider is handed the facts the scrape measured, not a rendering of them. `input.candidates` is a `DriverProviderCandidate[]` — the shape a hand-written `Driver` sees in `step.candidates`, minus the `selector`, which stays on this side of the seam because the answer is an `index` into that array. So `type` and the hit-test geometry are there, and `isObstructed` works from inside a provider:
+
+```ts
+import { isObstructed, type DriverProvider } from "chaosbringer";
+
+const textOnly: DriverProvider = {
+  name: "text-only",
+  async selectAction(input) {
+    // The description reads `button "Continue"` whether or not the click
+    // lands. The geometry is what says which.
+    const live = input.candidates.filter((c) => !isObstructed(c));
+    const pool = live.length > 0 ? live : input.candidates;
+    const target = pool.find((c) => c.type === "button") ?? pool[0];
+    return target ? { index: target.index, reasoning: "first live button" } : null;
+  },
+};
+```
+
+`input.screenshot` is a thunk, not bytes. `await input.screenshot()` captures; a provider that never calls it never pays for a capture. The mode defaults to the driver's `screenshotMode`, and passing one (`input.screenshot("fullPage")`) overrides it for that call. Each call captures, so call it once.
+
+A capture that fails throws out of the thunk. In a provider that already collapses its failures to `null` that needs no extra handling — the driver stands down and the composite falls through, the same as for a 5xx.
+
+The advisor seam matches: `AdvisorCandidate` carries `type` and the same geometry, and `ctx.screenshot` is a thunk whose failure becomes that consult's soft failure.
 
 ## Recipes
 

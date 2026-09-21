@@ -243,6 +243,7 @@ export {
   type DriverInvariantViolation,
   type DriverPick,
   type DriverProvider,
+  type DriverProviderCandidate,
   type DriverProviderInput,
   type DriverProviderResult,
   type DriverStep,

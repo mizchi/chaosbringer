@@ -5,6 +5,7 @@
  * (OpenRouter google/gemini-2.5-flash) lands in a follow-up PR per
  * `docs/superpowers/specs/2026-05-01-vlm-action-advisor-design.md` §10.
  */
+import type { ActionTarget } from "../types.js";
 
 export interface AdvisorCandidate {
   /** Stable index inside the candidate batch. The advisor returns this. */
@@ -13,8 +14,26 @@ export interface AdvisorCandidate {
   selector: string;
   /** What the model sees: role + accessible name + visible text. */
   description: string;
+  /** Whether it takes a click or a value. From `ActionTarget.type`. */
+  type: ActionTarget["type"];
   /** Optional bbox in viewport coords; lets the prompt cite "the button at top-right". */
   bbox?: { x: number; y: number; width: number; height: number };
+  /**
+   * The box has area and overlaps the viewport — the condition under
+   * which `coveredBy` was measured, and **not** a reason to skip a
+   * candidate. See `TargetGeometry` in `../types.ts`.
+   */
+  inViewport?: boolean;
+  /**
+   * What will receive a click aimed here, when it is not this candidate.
+   * The fact a description cannot carry: `button "Continue"` reads the
+   * same whether the button is live or under a consent backdrop that
+   * eats the click. Prefer `isObstructed` over reading this directly —
+   * absent means "nothing found on top", not "nothing is on top".
+   */
+  coveredBy?: string;
+  /** `pointer-events: none`: a click aimed here passes through. */
+  inert?: boolean;
 }
 
 export type AdvisorConsultReason =
@@ -24,8 +43,15 @@ export type AdvisorConsultReason =
 
 export interface AdvisorContext {
   url: string;
-  /** PNG bytes of the page screenshot at the moment of consult. */
-  screenshot: Buffer;
+  /**
+   * Capture the page as PNG bytes, when the advisor actually reads
+   * pixels. Lazy: a text-only advisor that never calls this pays nothing
+   * for it, and a capture that fails becomes this consult's soft failure
+   * (`outcome: "threw"`) instead of propagating out of the crawl.
+   *
+   * Each call captures — call it once.
+   */
+  screenshot: () => Promise<Buffer>;
   candidates: AdvisorCandidate[];
   /** Why the crawler is asking — drives prompt framing. */
   reason: AdvisorConsultReason;

@@ -64,8 +64,8 @@ describe("renderUserPrompt", () => {
       "URL: {{url}} step {{stepIndex}}\n{{goalLine}}H={{history}} V={{violations}} C={{candidates}}",
       {
         url: "https://x",
-        screenshot: Buffer.from([]),
-        candidates: [{ index: 0, description: "a" }],
+        screenshot: async () => Buffer.from([]),
+        candidates: [{ index: 0, description: "a", type: "button", weight: 1 }],
         history: [],
         invariantViolations: [],
         goal: "find bugs",
@@ -82,7 +82,7 @@ describe("renderUserPrompt", () => {
   it("omits the goal line when goal is not set", () => {
     const out = renderUserPrompt("{{goalLine}}rest", {
       url: "",
-      screenshot: Buffer.from([]),
+      screenshot: async () => Buffer.from([]),
       candidates: [],
       history: [],
       invariantViolations: [],

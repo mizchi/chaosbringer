@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createRng } from "../random.js";
 import { aiDriver } from "./ai-driver.js";
 import { DriverBudget } from "./budget.js";
-import type { DriverProvider, DriverStep } from "./types.js";
+import { isObstructed } from "./types.js";
+import type { DriverProvider, DriverProviderCandidate, DriverStep } from "./types.js";
 
 const PNG = Buffer.from([0x89, 0x50]);
 
@@ -126,6 +127,128 @@ describe("aiDriver", () => {
     const pick = await driver.selectAction(makeStep());
     expect(pick).not.toBeNull();
     expect(pick).not.toHaveProperty("confidence");
+  });
+
+  it("does not capture a screenshot for a provider that never asks", async () => {
+    // The point of the thunk. A text-only provider used to pay for a
+    // capture it could not read, and the capture ran before the provider
+    // had been consulted at all.
+    const screenshot = vi.fn(async () => PNG);
+    const provider = fixedProvider({ index: 0, reasoning: "read the labels" });
+    const driver = aiDriver({ provider });
+    expect(await driver.selectAction(makeStep({ screenshot }))).not.toBeNull();
+    expect(screenshot).not.toHaveBeenCalled();
+  });
+
+  it("captures at the driver's configured mode when a provider asks", async () => {
+    const screenshot = vi.fn(async () => PNG);
+    const provider: DriverProvider = {
+      name: "vision",
+      async selectAction(input) {
+        await input.screenshot();
+        return { index: 0, reasoning: "looked" };
+      },
+    };
+    const driver = aiDriver({ provider, screenshotMode: "fullPage" });
+    await driver.selectAction(makeStep({ screenshot }));
+    expect(screenshot).toHaveBeenCalledWith("fullPage");
+  });
+
+  it("lets a provider override the capture mode per call", async () => {
+    const screenshot = vi.fn(async () => PNG);
+    const provider: DriverProvider = {
+      name: "vision",
+      async selectAction(input) {
+        await input.screenshot("viewport");
+        return { index: 0, reasoning: "looked" };
+      },
+    };
+    const driver = aiDriver({ provider, screenshotMode: "fullPage" });
+    await driver.selectAction(makeStep({ screenshot }));
+    expect(screenshot).toHaveBeenCalledWith("viewport");
+  });
+
+  it("treats a failed capture as the asking provider's soft failure", async () => {
+    // Same outcome as before — the driver stands down — but now only for
+    // providers that wanted pixels.
+    const provider: DriverProvider = {
+      name: "vision",
+      async selectAction(input) {
+        await input.screenshot();
+        return { index: 0, reasoning: "unreachable" };
+      },
+    };
+    const driver = aiDriver({ provider });
+    const step = makeStep({
+      screenshot: async () => {
+        throw new Error("page closed");
+      },
+    });
+    expect(await driver.selectAction(step)).toBeNull();
+  });
+
+  it("gives the provider the candidate facts, without the selector", async () => {
+    let seen: DriverProviderCandidate[] = [];
+    const provider: DriverProvider = {
+      name: "inspect",
+      async selectAction(input) {
+        seen = [...input.candidates];
+        return { index: 0, reasoning: "x" };
+      },
+    };
+    await aiDriver({ provider }).selectAction(
+      makeStep({
+        candidates: [
+          {
+            index: 0,
+            selector: "#covered",
+            description: 'button "Continue"',
+            type: "button",
+            weight: 1,
+            bbox: { x: 1, y: 2, width: 3, height: 4 },
+            inViewport: true,
+            coveredBy: "Accept cookies <div#consent-backdrop>",
+          },
+          { index: 1, selector: "#b", description: "b", type: "button", weight: 1 },
+        ],
+      }),
+    );
+    expect(seen).toEqual([
+      {
+        index: 0,
+        description: 'button "Continue"',
+        type: "button",
+        weight: 1,
+        bbox: { x: 1, y: 2, width: 3, height: 4 },
+        inViewport: true,
+        coveredBy: "Accept cookies <div#consent-backdrop>",
+      },
+      { index: 1, description: "b", type: "button", weight: 1 },
+    ]);
+    // The index is the whole mapping from answer to element, so the
+    // selector stays on this side of the seam.
+    for (const c of seen) expect(c).not.toHaveProperty("selector");
+    // And the facts are usable as facts, from the provider's side.
+    expect(isObstructed(seen[0])).toBe(true);
+    expect(isObstructed(seen[1])).toBe(false);
+  });
+
+  it("leaves geometry keys absent rather than undefined", async () => {
+    // The scroll target and a failed scrape both look like this, and
+    // `isObstructed` distinguishes "nothing on top" from "not measured"
+    // by reading `coveredBy !== undefined` — so an explicit `undefined`
+    // would answer the wrong question.
+    let seen: DriverProviderCandidate[] = [];
+    const provider: DriverProvider = {
+      name: "inspect",
+      async selectAction(input) {
+        seen = [...input.candidates];
+        return { index: 0, reasoning: "x" };
+      },
+    };
+    await aiDriver({ provider }).selectAction(makeStep());
+    expect(seen[0]).not.toHaveProperty("coveredBy");
+    expect(seen.every((c) => !isObstructed(c))).toBe(true);
   });
 
   it("resets per-page budget on onPageStart", async () => {

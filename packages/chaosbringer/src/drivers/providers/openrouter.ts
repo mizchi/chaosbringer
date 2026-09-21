@@ -60,7 +60,16 @@ export function openRouterDriverProvider(opts: OpenRouterDriverProviderOptions):
 
       const prompt = loadPrompt(promptPath);
       const userText = renderUserPrompt(prompt.userTemplate, input);
-      const imageDataUrl = `data:image/png;base64,${input.screenshot.toString("base64")}`;
+
+      // This provider is a vision one, so it does pay the capture — but
+      // it pays it here, where a failure is just another soft failure.
+      let screenshot: Buffer;
+      try {
+        screenshot = await input.screenshot();
+      } catch {
+        return null;
+      }
+      const imageDataUrl = `data:image/png;base64,${screenshot.toString("base64")}`;
 
       const body = {
         model,

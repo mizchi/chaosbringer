@@ -3,9 +3,9 @@
  * The crawler calls `consultAdvisor` once per chaos action attempt; the
  * policy decides whether to actually invoke the model. Soft failures —
  * provider returning null, throwing, timing out, returning an
- * out-of-range index — all collapse to a null suggestion so the caller
- * can fall back to its heuristic without branching on every failure
- * mode.
+ * out-of-range index, a screenshot that would not capture — all collapse
+ * to a null suggestion so the caller can fall back to its heuristic
+ * without branching on every failure mode.
  */
 
 import { AdvisorBudget } from "./budget.js";
@@ -51,7 +51,6 @@ export async function consultAdvisor(deps: ConsultDeps): Promise<ConsultResult> 
   // failed call still cost the wall clock and may have cost money.
   deps.budget.recordCall(deps.url);
 
-  const screenshot = await deps.screenshotSupplier();
   const remaining = Math.max(0, deps.policy.maxCallsPerCrawl - deps.budget.callsThisCrawl());
 
   const start = Date.now();
@@ -60,7 +59,10 @@ export async function consultAdvisor(deps: ConsultDeps): Promise<ConsultResult> 
     raw = await Promise.race([
       deps.provider.suggest({
         url: deps.url,
-        screenshot,
+        // Forwarded unresolved: an advisor that reads only the candidate
+        // text never pays the capture, and one that does pay it inside
+        // the try below, where a failure is already a soft failure.
+        screenshot: deps.screenshotSupplier,
         candidates: deps.candidates,
         reason: decision.reason,
         budgetRemaining: remaining,

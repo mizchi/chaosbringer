@@ -7,9 +7,9 @@ import type { ActionAdvisor, AdvisorCandidate } from "./types.js";
 const sampleScreenshot = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 const sampleCandidates = (): AdvisorCandidate[] => [
-  { index: 0, selector: "#a", description: "button A" },
-  { index: 1, selector: "#b", description: "button B" },
-  { index: 2, selector: "#c", description: "button C" },
+  { index: 0, selector: "#a", description: "button A", type: "button" },
+  { index: 1, selector: "#b", description: "button B", type: "button" },
+  { index: 2, selector: "#c", description: "button C", type: "button" },
 ];
 
 const makeProvider = (
@@ -73,6 +73,40 @@ describe("consultAdvisor", () => {
     });
     await consultAdvisor(deps);
     expect(screenshotSupplier).not.toHaveBeenCalled();
+  });
+
+  it("does not request a screenshot when the advisor never looks", async () => {
+    // The trigger fires and the provider is consulted — it just reasons
+    // over the candidate text, so nothing captures.
+    const screenshotSupplier = vi.fn(async () => sampleScreenshot);
+    const provider = makeProvider(
+      vi.fn(async () => ({ chosenIndex: 1, reasoning: "read the labels" })),
+    );
+    const deps = baseDeps({ screenshotSupplier, provider });
+    const result = await consultAdvisor(deps);
+    expect(result.outcome).toBe("consulted");
+    expect(provider.suggest).toHaveBeenCalledTimes(1);
+    expect(screenshotSupplier).not.toHaveBeenCalled();
+  });
+
+  it("collapses a failed capture into this consult's soft failure", async () => {
+    // Forwarding the supplier unresolved moves the throw inside the
+    // provider call, which is already guarded — it used to propagate out
+    // of consultAdvisor and past the caller's fallback.
+    const deps = baseDeps({
+      screenshotSupplier: async () => {
+        throw new Error("page closed");
+      },
+      provider: makeProvider(async (ctx) => {
+        await ctx.screenshot();
+        return { chosenIndex: 0, reasoning: "unreachable" };
+      }),
+    });
+    const result = await consultAdvisor(deps);
+    expect(result.outcome).toBe("threw");
+    expect(result.suggestion).toBeNull();
+    // Still paid for: the wall clock was spent.
+    expect(deps.budget.callsThisCrawl()).toBe(1);
   });
 
   it("calls the provider and records budget on success", async () => {
