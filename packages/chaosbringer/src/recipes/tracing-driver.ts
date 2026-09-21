@@ -10,8 +10,8 @@
  * library; subsequent runs replay the verified recipes for free.
  *
  * Action → RecipeStep mapping is conservative — we capture the
- * verbs that round-trip safely (click, navigate, fill) and skip the
- * rest (scroll, hover). A captured recipe with no fills will still
+ * verbs that round-trip safely (click, navigate, fill, select) and skip
+ * the rest (scroll, hover). A captured recipe with no fills will still
  * replay; a captured recipe with the wrong fill value WON'T, so we'd
  * rather drop than fake.
  */
@@ -203,6 +203,14 @@ function actionToRecipeStep(
       if (!action.selector) return null;
       const value = fillValueFor?.(action.selector, step) ?? "test input";
       return { kind: "fill", selector: action.selector, value };
+    }
+    case "select": {
+      // The one action whose value the trace carries, so this needs no
+      // `fillValueFor` hook: an option value came off the page rather
+      // than out of a generator. Without this case the `default` drops
+      // the step and a recipe replays a dropdown it never set.
+      if (!action.selector || action.value === undefined) return null;
+      return { kind: "select", selector: action.selector, value: action.value };
     }
     case "navigate": {
       if (!action.target) return null;

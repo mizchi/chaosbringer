@@ -52,6 +52,20 @@ export interface RawActionTarget {
   min: string | null;
   max: string | null;
   /**
+   * A `<select>`'s own options, in document order, with the placeholder
+   * dropped. Empty for everything else.
+   *
+   * Read off the page rather than generated, because the value of a
+   * dropdown is never the crawler's to invent: the set of legal values is
+   * the one the page is offering. `selectValueFor` picks from here.
+   */
+  options: { value: string; label: string }[];
+  /**
+   * What a field holds right now. Only used for a `<select>`, where
+   * setting the value it already has is an action with no end state.
+   */
+  currentValue: string | null;
+  /**
    * Where the element is and whether a click reaches it. Optional because
    * it is filled in by a pass at the end of the scrape rather than by
    * `push`, and because the hand-built fixtures in the unit tests have no
@@ -124,6 +138,8 @@ export function collectRawTargets(): RawActionTarget[] {
         inputType: null,
         min: null,
         max: null,
+        options: [],
+        currentValue: null,
         hasVisibleText: text.length > 0,
         isNavLink,
         href: anchor.href,
@@ -149,6 +165,8 @@ export function collectRawTargets(): RawActionTarget[] {
         inputType: null,
         min: null,
         max: null,
+        options: [],
+        currentValue: null,
         hasVisibleText: text.length > 0,
         isNavLink: false,
         isInMainContent: inMainContent(el),
@@ -183,6 +201,8 @@ export function collectRawTargets(): RawActionTarget[] {
       inputType: null,
       min: null,
       max: null,
+      options: [],
+      currentValue: null,
       hasVisibleText: text.length > 0,
       isNavLink: false,
       isInMainContent: inMainContent(el),
@@ -233,11 +253,60 @@ export function collectRawTargets(): RawActionTarget[] {
         inputType,
         min: el.getAttribute("min"),
         max: el.getAttribute("max"),
+        options: [],
+        currentValue: typeof (el as HTMLInputElement).value === "string"
+          ? (el as HTMLInputElement).value
+          : null,
         hasVisibleText: false,
         isNavLink: false,
         isInMainContent: inMainContent(el),
       });
     });
+
+  // Dropdowns, which the query above deliberately does not reach: `fill()`
+  // refuses a <select>, so it was never a fill target, and nothing else
+  // picked it up either — it has no `role` attribute to match the ARIA
+  // query and it is not a button.
+  //
+  // The rest of the library already knows about them: `formDriver`'s
+  // FIELD_QUERY includes `select:not([disabled])`, `fillField` calls
+  // `selectOption`, `FormFieldInfo` carries `options`,
+  // `defaultValueProvider` has a `select` case, and a recipe already has a
+  // `{ kind: "select" }` step that `replay` performs. Only this scrape did
+  // not, so a driver picking a candidate by index could never set one —
+  // the whole form path could, all at once, and nothing else could at all.
+  document.querySelectorAll("select").forEach((el) => {
+    const select = el as HTMLSelectElement;
+    const options: { value: string; label: string }[] = [];
+    for (const o of Array.prototype.slice.call(select.options) as HTMLOptionElement[]) {
+      // A placeholder is not a value. Offering it back would set the
+      // dropdown to nothing, which reads as an action that did something.
+      if (o.value === "") continue;
+      if (o.disabled) continue;
+      options.push({
+        value: o.value,
+        label: (o.label || o.textContent || o.value).trim(),
+      });
+    }
+    push(select, {
+      tag: "select",
+      text: "",
+      role: select.getAttribute("role"),
+      ariaLabel: select.getAttribute("aria-label"),
+      placeholder: null,
+      name: select.getAttribute("name"),
+      // `fill()` throws on a <select>; `selectOption` is the operation.
+      fillable: false,
+      inputType: null,
+      min: null,
+      max: null,
+      options,
+      currentValue: select.value,
+      hasVisibleText: false,
+      isNavLink: false,
+      isInMainContent: inMainContent(select),
+    });
+  });
 
   // Number each element within the set its positional selector will count, and
   // only within that set. A per-query counter cannot do this: the ARIA query
@@ -408,6 +477,28 @@ export function fillValueFor(t: RawActionTarget): string {
 }
 
 /**
+ * Pick the option to set on one dropdown.
+ *
+ * The first offered value that is not the one already selected. Two
+ * things that rule is deliberately not:
+ *
+ *  - not random, so `seed` still determines the run;
+ *  - not "the first option", because on a dropdown that is already on its
+ *    first value that sets what is already set. An action with no end
+ *    state costs a step and reads in the report as though it did
+ *    something, and a driver that keeps choosing it oscillates.
+ *
+ * `undefined` when there is nothing to set — a dropdown with one real
+ * option, already on it.
+ */
+export function selectValueFor(t: RawActionTarget): string | undefined {
+  for (const o of t.options) {
+    if (o.value !== t.currentValue) return o.value;
+  }
+  return undefined;
+}
+
+/**
  * Build the Playwright selector the crawler will use to re-find an element.
  *
  * Every branch here has to actually match the element it was built from —
@@ -471,6 +562,12 @@ function weightFor(
   } else if (t.tag === "button" || t.role === "button") {
     type = "button";
     weight = ctx.weights.buttons;
+  } else if (t.tag === "select") {
+    // A field, so it is weighted like one. Not `interactive`: clicking a
+    // native <select> opens its list and selects nothing, so a click is
+    // an action with no end state.
+    type = "select";
+    weight = ctx.weights.inputs;
   } else if (t.fillable) {
     type = "input";
     weight = ctx.weights.inputs;
@@ -503,11 +600,17 @@ export function weighActionTargets(
     return {
       selector: selectorFor(t),
       role: t.role || undefined,
-      name: t.text || t.ariaLabel || undefined,
+      // The `name` attribute last, because it is an identifier rather
+      // than a label — but a form field has no text and usually no
+      // aria-label, so without it the description is `(select)` or
+      // `(input)` and two fields on one page are indistinguishable. This
+      // only fires where there was nothing to say.
+      name: t.text || t.ariaLabel || t.name || undefined,
       weight,
       type,
       href: t.href,
       fillValue: type === "input" ? fillValueFor(t) : undefined,
+      selectValue: type === "select" ? selectValueFor(t) : undefined,
       geometry: t.geometry,
     };
   });

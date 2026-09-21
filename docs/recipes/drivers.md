@@ -221,10 +221,33 @@ const onlyClickButtons: Driver = {
 
 Returning `null` means "no opinion, defer to the next driver in the composite". Returning `{ kind: "skip" }` means "deliberately do nothing this step". Returning `{ kind: "custom", perform }` lets you take over the page directly — `perform(page)` returns an `ActionResult` and counts as one chaos action.
 
+### Setting a dropdown
+
+A `select` candidate is one the crawler will set with `selectOption`, not click — clicking a native `<select>` opens its list and selects nothing. It carries `selectValue`: the option the crawler will set if you pick it, chosen as the first value the page offers that is not the one already selected.
+
+```ts
+const useExpress: Driver = {
+  name: "express",
+  async selectAction(step) {
+    const shipping = step.candidates.find(
+      (c) => c.type === "select" && c.description.includes("shipping"),
+    );
+    // `selectValue` is what picking this would set. An index alone does
+    // not say — picking a dropdown asks for a value.
+    return shipping?.selectValue ? { kind: "select", index: shipping.index } : null;
+  },
+};
+```
+
+- **A placeholder and a disabled option are never offered.** `""` would set the dropdown to nothing and read in the report as an action that did something; Playwright refuses a disabled option outright.
+- **`selectValue` is absent when there is nothing to set** — a dropdown already on its only real option. Picking it is then skipped rather than attempted, the same as a non-visible target.
+- The action is recorded as `type: "select"` with `value` set, which is the one action whose value the trace carries: an option value came off the page rather than out of a generator. A recipe replays it with no `fillValueFor` hook.
+
 ### What a step guarantees
 
 - **`step.candidates` is re-collected from the DOM before every step**, so an index is only valid for the step that handed it to you. Do not cache the list across steps: on an app that re-renders in place — hash or History routing, a modal, a wizard — the controls change without a page visit, and last step's index names a different element than it did.
 - **`step.url` is the URL of the page *visit*** and holds still for every step on that page; budgets and `onPageStart` key off it. **`step.currentUrl` is where the app has actually routed to** as of this step. Group by `url`, decide on `currentUrl`.
+- **A form field's description falls back to its `name` attribute** when it has neither text nor an `aria-label`, which is the usual case: without it two fields on one page both read `(input)`.
 - **Every candidate carries geometry**: `bbox`, `inViewport`, `inert` (`pointer-events: none`), and `coveredBy`. Absent only on the `scroll` target and on a page the scrape could not read.
 
 ### Skipping a control the click will not reach
