@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.10.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.9.0...chaosbringer-v0.10.0) (2026-09-23)
+
+### Breaking Changes
+
+* Custom driver providers and advisors must now await `screenshot()` instead of reading a `Buffer`. `AdvisorCandidate.type` is required. ([#145](https://github.com/mizchi/chaosbringer/pull/145))
+
+### Features
+
+* Expose candidate geometry and obstruction information to drivers, providers, and advisors, with screenshots captured on demand. (#143, #145)
+* Let drivers select dropdown values and empty selected fields. (#146, #147)
+* Add model-driven Promise fault coverage, deterministic replay, and failing fault-plan shrinking. (#135, #137)
+* Detect shadowed fault rules at crawl start. (#133)
+
+### Bug Fixes
+
+* Interact with form fields using values accepted by each field type, and refresh driver candidates before every step. (#140, #141, #142)
+* Report unavailable checks and run-end fault warnings across all fault layers. (#136, #138)
+* Address crawler configuration and diagnostic usability gaps. (#131)
+
 ## [0.9.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.8.1...chaosbringer-v0.9.0) (2026-05-15)
 
 
