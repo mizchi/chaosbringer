@@ -85,6 +85,29 @@ chaosbringer --url http://localhost:3000 --strict --compact --ignore-analytics
 chaosbringer --url http://localhost:3000 --seed 1234567 --max-pages 20
 ```
 
+### Preview a crawl in an existing Chromium tab
+
+Start your app server first. In one terminal tab, open the site in terminal-browser and leave it running. In another terminal tab, run chaosbringer. The `terminal-browser` command must be on `PATH`:
+
+```bash
+# Terminal tab 1: keep this open so the crawl stays visible
+terminal-browser open http://localhost:3000
+
+# Terminal tab 2: crawl the visible tab
+chaosbringer --url http://localhost:3000 --terminal-browser
+```
+
+`--terminal-browser` runs `terminal-browser ls --all --json` and selects a tab with the same URL as `--url`, or an active tab on the same origin. The URLs must use the same hostname, such as `localhost` in both commands. If more than one tab matches, select one explicitly with `--cdp <port> --cdp-target <targetId>`:
+
+```bash
+terminal-browser ls --all --json
+chaosbringer --url http://localhost:3000 --cdp 9222 --cdp-target TARGET_ID
+```
+
+Use the `cdpPort` and `targetId` values from `ls` in place of `9222` and `TARGET_ID`. The crawl navigates the selected visible tab, including subsequent pages, and leaves the tab and browser open when it finishes. `--cdp` also accepts an HTTP or WebSocket CDP endpoint. For a programmatic crawl, set `terminalBrowser: true` in `CrawlerOptions`.
+
+This mode uses the tab's existing browser context. `launchOptions`, device/viewport/user-agent emulation, storage state, and HAR record/replay cannot be used with an attached browser.
+
 ## Quick start — programmatic
 
 The shortest path, using the `chaos()` convenience and the `faults` helpers:
@@ -1257,6 +1280,9 @@ chaosbringer --url http://localhost:3000 \
 | `--max-actions <n>` | Max random actions per page | 5 |
 | `--timeout <ms>` | Page load timeout | 30000 |
 | `--no-headless` | Show the browser window | headless |
+| `--terminal-browser` | Attach to a matching terminal-browser tab | false |
+| `--cdp <port\|url>` | Attach to an existing Chromium CDP endpoint | — |
+| `--cdp-target <id>` | Select a tab from that endpoint | — |
 | `--screenshots` | Take screenshots | false |
 | `--screenshot-dir <path>` | Screenshot directory | `./screenshots` |
 | `--output <path>` | Report path | `chaos-report.json` |

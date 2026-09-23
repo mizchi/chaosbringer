@@ -36,6 +36,8 @@ npx playwright install chromium
 chaosbringer --url http://localhost:3000 --max-pages 20 --strict
 ```
 
+To watch a crawl in an existing terminal-browser tab, run `terminal-browser open http://localhost:3000`, then `chaosbringer --url http://localhost:3000 --terminal-browser`. See the [package guide](packages/chaosbringer/README.md#preview-a-crawl-in-an-existing-chromium-tab).
+
 ```ts
 // or programmatically — fault injection + invariants in 15 lines
 import { chaos, faults } from "chaosbringer";

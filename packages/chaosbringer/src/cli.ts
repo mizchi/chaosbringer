@@ -13,6 +13,8 @@
  *   --timeout <ms>        Page load timeout (default: 30000)
  *   --headless            Run headless (default: true)
  *   --no-headless         Show browser window
+ *   --cdp <port|url>      Connect to an existing Chromium tab
+ *   --cdp-target <id>     Select a CDP target
  *   --screenshots         Take screenshots
  *   --screenshot-dir      Screenshot directory (default: ./screenshots)
  *   --output <path>       Output report path (default: chaos-report.json)
@@ -85,6 +87,9 @@ const { values, positionals } = parseArgs({
     "max-actions-per-page": { type: "string" },
     timeout: { type: "string" },
     headless: { type: "boolean", default: true },
+    cdp: { type: "string" },
+    "cdp-target": { type: "string" },
+    "terminal-browser": { type: "boolean", default: false },
     screenshots: { type: "boolean", default: false },
     "screenshot-dir": { type: "string" },
     output: { type: "string" },
@@ -148,6 +153,9 @@ OPTIONS:
                         (alias: --max-actions-per-page)
   --timeout <ms>        Page load timeout (default: 30000)
   --no-headless         Show the browser window (headless is the default)
+  --cdp <port|url>      Crawl in an existing Chromium tab over CDP
+  --cdp-target <id>     Select a tab by its CDP target id
+  --terminal-browser    Find the visible terminal-browser tab for --url
   --screenshots         Take screenshots
   --screenshot-dir      Screenshot directory (default: ./screenshots)
   --output <path>       Output report path (default: chaos-report.json)
@@ -398,6 +406,9 @@ const options: CrawlerOptions = {
   })(),
   timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
   headless: values.headless,
+  cdpEndpoint: values.cdp,
+  cdpTargetId: values["cdp-target"],
+  terminalBrowser: values["terminal-browser"],
   screenshots: values.screenshots,
   screenshotDir: values["screenshot-dir"],
   excludePatterns: values.exclude,
