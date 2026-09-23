@@ -6,6 +6,28 @@ function base(extra: Record<string, unknown> = {}): any {
 }
 
 describe("validateOptions", () => {
+  it("accepts a CDP endpoint and target", () => {
+    expect(() => validateOptions(base({ cdpEndpoint: "9222", cdpTargetId: "target-1" }))).not.toThrow();
+  });
+
+  it("accepts automatic terminal-browser discovery", () => {
+    expect(() => validateOptions(base({ terminalBrowser: true }))).not.toThrow();
+  });
+
+  it("rejects mixing terminal-browser discovery with explicit CDP selection", () => {
+    expect(() => validateOptions(base({ terminalBrowser: true, cdpEndpoint: "9222" }))).toThrow(/terminalBrowser.*cdpEndpoint/);
+    expect(() => validateOptions(base({ terminalBrowser: true, cdpTargetId: "target-1" }))).toThrow(/terminalBrowser.*cdpTargetId/);
+  });
+
+  it("requires an endpoint when a CDP target is specified", () => {
+    expect(() => validateOptions(base({ cdpTargetId: "target-1" }))).toThrow(/cdpTargetId.*cdpEndpoint/);
+  });
+
+  it("rejects context creation options for an attached browser", () => {
+    expect(() => validateOptions(base({ cdpEndpoint: "9222", storageState: "state.json" }))).toThrow(/storageState/);
+    expect(() => validateOptions(base({ cdpEndpoint: "9222", har: { mode: "replay", path: "site.har" } }))).toThrow(/HAR/);
+  });
+
   it("accepts a minimal valid config", () => {
     expect(() => validateOptions(base())).not.toThrow();
   });

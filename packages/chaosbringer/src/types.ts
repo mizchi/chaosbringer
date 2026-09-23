@@ -31,6 +31,9 @@ export interface CrawlerOptions {
   launchOptions?: Omit<Parameters<typeof import("playwright").chromium.launch>[0], "headless"> & {
     headless?: boolean;
   };
+  cdpEndpoint?: string;
+  cdpTargetId?: string;
+  terminalBrowser?: boolean;
   /** Run browser in headless mode */
   headless?: boolean;
   /** Take screenshots of visited pages */
