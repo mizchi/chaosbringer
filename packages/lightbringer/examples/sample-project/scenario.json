@@ -1,0 +1,9 @@
+{
+  "url": "http://localhost:4321",
+  "viewport": { "width": 1280, "height": 800 },
+  "steps": [
+    { "name": "initial-load", "goto": "/", "waitFor": "li" },
+    { "name": "load-more", "click": "#more", "waitFor": "li:nth-child(301)" },
+    { "name": "filter", "fill": "#filter", "text": "Lamp", "waitFor": "#status" }
+  ]
+}

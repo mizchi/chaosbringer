@@ -1,0 +1,11 @@
+node_modules/
+/perf-results/
+/perf-baseline/
+/test-results/
+/playwright-report/
+/dist/
+/dist-bundle/
+fixtures/bundle/public/
+.direnv/
+*.tsbuildinfo
+.DS_Store

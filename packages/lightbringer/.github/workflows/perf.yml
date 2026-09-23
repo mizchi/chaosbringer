@@ -1,0 +1,70 @@
+# Perf budget gate — lightbringer measuring its own bench fixtures.
+#
+# This is the copy-this template for a consumer repo: run your perf specs N times,
+# then median.mjs fails the build if any median exceeds a declared budget. The
+# gate is on the MEDIAN (robust to the JIT/GC/cache noise of a single run); CI
+# runners have no GPU (SwiftShader), so gate on main-thread metrics (scriptMs /
+# layoutCount / nodes / requestCount / waves / recalcStyleMs), not GPU/paint.
+#
+# Here we pass BENCH_FIXED=1 so the fixtures run their optimized path and the gate
+# is green; remove that in your repo (your specs have no such toggle). Break a
+# budgeted path and the job goes red. The heavier baseline-relative regress gate
+# (compare against main) is documented in the README.
+name: perf
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: measure (median of 5 runs)
+        env:
+          BENCH_FIXED: "1"
+        run: >
+          pnpm exec playwright test
+          rerender reflow huge-dom nplus1 chain network
+          init-eager init-reflow init-waterfall selector-cost
+          --repeat-each=5
+      - name: budget gate (median)
+        shell: bash
+        run: |
+          { echo '## perf budget'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node scripts/median.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          code=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
+
+  # Production-build fixture: chunk coverage / render-blocking / real-byte
+  # over-fetch. Informational (coverage isn't a budget) — surfaced in the summary.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: measure production build with coverage
+        env:
+          PERF_COV: "1"
+        run: pnpm exec playwright test -c playwright.bundle.config.ts
+      - name: coverage union
+        shell: bash
+        run: |
+          { echo '## bundle coverage'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node scripts/coverage.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

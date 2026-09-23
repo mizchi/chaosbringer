@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lightbringer sample app</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        font: 15px/1.5 system-ui, sans-serif;
+        margin: 0;
+        padding: 24px;
+        max-width: 720px;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      p.sub { margin: 0 0 16px; opacity: 0.7; }
+      .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+      input, button {
+        font: inherit;
+        padding: 6px 10px;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+      }
+      input { flex: 1; }
+      button { cursor: pointer; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li {
+        padding: 8px 10px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+        display: flex;
+        justify-content: space-between;
+      }
+      li .price { opacity: 0.7; font-variant-numeric: tabular-nums; }
+      #status { opacity: 0.6; font-size: 13px; min-height: 18px; }
+    </style>
+  </head>
+  <body>
+    <h1>lightbringer sample app</h1>
+    <p class="sub">A tiny store list. Loads data over the network, filters on
+      keystroke, and (deliberately) leaks when you "watch" rows.</p>
+
+    <div class="row">
+      <input id="filter" type="search" placeholder="Filter products…" autocomplete="off" />
+      <button id="more">Load more</button>
+      <button id="watch">Watch all</button>
+    </div>
+    <div id="status">loading…</div>
+    <ul id="list"></ul>
+
+    <script type="module">
+      // ---- state -----------------------------------------------------------
+      let items = [];
+      let page = 0;
+      // Deliberate leak sink: "Watch all" pushes a closure + a detached node per
+      // row into here on every click and never releases them. measureRepeat over
+      // the watch step makes the growth show up as a trend.
+      const watchers = [];
+
+      const $ = (id) => document.getElementById(id);
+      const list = $("list");
+      const status = $("status");
+
+      // ---- data ------------------------------------------------------------
+      // Each "Load more" is a separate request -> a new network wave in the report.
+      async function fetchPage(p) {
+        const res = await fetch(`/api/items?page=${p}`);
+        return res.json();
+      }
+
+      function render(filter = "") {
+        const f = filter.trim().toLowerCase();
+        // Intentionally O(n) per keystroke over the full set so the filter step
+        // has a measurable script/INP cost (this is the thing you'd optimize).
+        const shown = f ? items.filter((it) => it.name.toLowerCase().includes(f)) : items;
+        list.replaceChildren(
+          ...shown.map((it) => {
+            const li = document.createElement("li");
+            const name = document.createElement("span");
+            name.textContent = it.name;
+            const price = document.createElement("span");
+            price.className = "price";
+            price.textContent = `$${it.price.toFixed(2)}`;
+            li.append(name, price);
+            return li;
+          }),
+        );
+        status.textContent = `${shown.length} / ${items.length} products`;
+      }
+
+      async function loadMore() {
+        page += 1;
+        status.textContent = "loading…";
+        const batch = await fetchPage(page);
+        items = items.concat(batch);
+        render($("filter").value);
+      }
+
+      // ---- interactions ----------------------------------------------------
+      $("filter").addEventListener("input", (e) => render(e.target.value));
+      $("more").addEventListener("click", loadMore);
+      $("watch").addEventListener("click", () => {
+        // leak: retain a closure capturing a big array + a detached DOM node per row
+        for (const it of items) {
+          const blob = new Array(2000).fill(it.name);
+          const ghost = document.createElement("div");
+          ghost.textContent = it.name;
+          const handler = () => blob.length + ghost.childNodes.length;
+          ghost.addEventListener("click", handler);
+          watchers.push({ blob, ghost, handler });
+        }
+        status.textContent = `watching ${watchers.length} rows`;
+      });
+
+      // ---- boot ------------------------------------------------------------
+      await loadMore();
+    </script>
+  </body>
+</html>
