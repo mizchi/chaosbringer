@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-23
 **Project:** chaosbringer
-**Status:** Proposal (no implementation in this PR)
+**Status:** Accepted, with the decisions in §10 (no implementation in this PR)
 
 **Goal:** Bring [mizchi/lightbringer](https://github.com/mizchi/lightbringer)'s per-step resource measurement (network / CPU / render / INP / frames / memory / media / coverage, split per span) into this repo, and wire it into the crawler so every page load and every action chaosbringer performs becomes a measured span.
 
@@ -53,7 +53,8 @@ Three properties matter for porting:
 
 ```
 packages/
-├── playwright-perf/            # NEW — @mizchi/playwright-perf (lightbringer core, runner-agnostic)
+├── lightbringer/               # NEW — npm `lightbringer`, moved here from mizchi/lightbringer
+│   ├── scripts/                # median / regress / drilldown / coverage bins + the spec-mode loader shim
 │   └── src/
 │       ├── analyze/            # ported as-is (pure) + sibling tests
 │       ├── collector.ts        # was browser.ts — in-page init script
@@ -62,8 +63,9 @@ packages/
 │       ├── report.ts / report-types.ts / summary.ts
 │       ├── budget.ts           # checkBudgets, emitBudgets(median×headroom), median/IQR, regress
 │       ├── app-spans.ts        # was trace.ts + otel.ts (performance.measure spans)
-│       └── index.ts
-├── playwright-perf/fixture     # subpath export: lightbringer's `test`/`perf` fixture + `auto`
+│       ├── fixture.ts / auto.ts / autowrap.ts   # `@playwright/test` edges, unchanged role
+│       ├── cli.ts              # `lightbringer run` (JSON scenario + spec mode), unchanged role
+│       └── index.ts            # runner-agnostic core; `./fixture`, `./auto`, `./analyze` subpaths
 └── chaosbringer/
     └── src/
         ├── page-cdp.ts         # NEW — one shared CDPSession per page (see §4)
@@ -74,10 +76,9 @@ packages/
 
 **Why a separate package rather than `chaosbringer/src/perf/`:** this is the same reason `playwright-v8-coverage` and `playwright-faults` are separate. The measurement core is useful without the crawler, which is lightbringer's entire user base. It has one dependency that chaosbringer doesn't need (`web-vitals`), and it gets its own release-please line. chaosbringer depends on it via `workspace:*`.
 
-**The lightbringer repo afterwards** (see §9, Phase 4):
-- `lightbringer` becomes a thin package re-exporting `@mizchi/playwright-perf` and `@mizchi/playwright-perf/fixture`, keeping its bin names, and is marked deprecated in its README.
-- The JSON-scenario CLI moves to `chaosbringer perf run scenario.json`.
-- The spec-mode CLI (the loader shim) moves along with the fixture.
+**Name (decided):** the package keeps the name `lightbringer`. It is the same npm package, with the same bins (`lightbringer`, `lightbringer-{median,drilldown,regress,coverage}`) and the same subpaths (`.`, `./auto`, `./analyze`). Its versions continue from the last release (0.3.x), now published by this repo's release-please. Existing users change nothing. The core becomes importable without `@playwright/test`: `index.ts` stays runner-agnostic, and the fixture moves behind `./fixture`. `.` keeps re-exporting `test` until the next minor version, so the move is not a breaking change.
+
+**The lightbringer repo afterwards (decided):** it is **archived** once the port is complete (§9, Phase 4). The repo does not keep a re-export shim, because npm `lightbringer` itself now comes from here. Before archiving, its README points to `packages/lightbringer` in this repo.
 
 ---
 
@@ -221,7 +222,6 @@ Violations reuse `checkPerformanceBudget`'s existing path: an `invariant-violati
 
 ```
 chaosbringer --url … --perf [--perf-trace] [--perf-mem] [--perf-cov]
-chaosbringer perf run scenario.json            # lightbringer's JSON scenario CLI
 chaosbringer perf emit-budgets <reports…>      # median × 1.25 per perfKey → chaosbringer.perf-budgets.json
 chaosbringer perf gate <reports…>              # median/IQR gate; noisy metrics warn
 chaosbringer perf regress <baseline> <current> # lightbringer regress.mjs, threshold 0.15 + abs floors
@@ -231,6 +231,7 @@ chaosbringer perf drilldown <report> <key>     # trace drilldown (level: "trace"
 - `emit-budgets` / `gate` / `regress` read `CrawlReport`s. Repeats come from running the crawl N times with a fixed seed, or from `shard` + `mergeReports`, which already exists.
 - lightbringer's `<slug>.run<N>.json` filename convention is dropped. Reports carry their own seed and run index.
 - `regress` fits the existing `chaos-baseline` workflow: baseline artefact vs PR run.
+- `lightbringer run scenario.json` / `lightbringer run e2e/x.spec.ts` stay in the `lightbringer` package unchanged. The `chaosbringer perf *` subcommands are the crawl-report counterparts, and they call the same `lightbringer` budget/median/regress functions, so the two CLIs cannot drift.
 
 ---
 
@@ -254,7 +255,7 @@ settle: "adaptive" | "networkidle" /* today */ | number
 - `timing.ts` already solves settle/quiesce from a calibrated `TimingProfile`. Adaptive settle is the runtime counterpart of that solver, and `model calibrate` can seed Q from measured spans instead of wall-clock probes.
 - **Expected effect:** on a static page, the per-step floor drops from roughly 600 ms to roughly one or two frames.
 - **Safety:** `capped` is recorded on the span. A step that hits the cap is exactly the "never quiesces" finding the model-fault oracles care about, so it becomes a signal instead of a silent 2 s.
-- **Rollout:** stays opt-in until an e2e compares crawl results (same seed, same set of visited pages, same errors) between `networkidle` and `adaptive`.
+- **Rollout (decided): opt-in, permanently.** The default stays `networkidle`, so existing crawls, recorded traces and calibrated `TimingProfile`s keep their timing. `--settle adaptive` / `settle: "adaptive"` enables it. Phase 3 still ships the same-seed parity e2e between `networkidle` and `adaptive` (same visited pages, same errors), but as a correctness check for the opt-in path, not as a gate for flipping the default.
 
 ### 6.2 The app gets faster: perf under chaos
 
@@ -318,19 +319,19 @@ The "always" row is the one behaviour change for users who never pass `--perf`. 
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| **0: extract** | `packages/playwright-perf`: `analyze/` ported with sibling tests; `PerfOptions` replaces import-time env; per-span drain (§3.2); clock-skew immunity (§3.3); fixture subpath; the accuracy e2e | lightbringer's example specs pass against the new package; the multi-navigation e2e keeps pre-navigation long tasks |
+| **0: move** | `packages/lightbringer` (npm name, bins and subpaths unchanged; history imported with `git subtree` or `git filter-repo` so blame survives); `analyze/` ported with sibling tests; `PerfOptions` replaces import-time env; per-span drain (§3.2); clock-skew immunity (§3.3); `./fixture` subpath (`.` still re-exports `test`); the accuracy e2e; release-please entry continuing from 0.3.x | lightbringer's example specs pass against the moved package, and `lightbringer run` works from the workspace build; the multi-navigation e2e keeps pre-navigation long tasks |
 | **1: wire** | `PageCdp` (§4) adopted by network profile, coverage and lifecycle; `collectMetrics` replaced (§5.4, **fixes LCP/TBT**); `load`/`action` spans + `perf` on results; reporter lines; `--perf` flags | an e2e fixture page with a known 120 ms long task on click yields `blockingMs ≈ 70` on that action; an LCP budget fires |
-| **2: gate** | `perfBudgets` (§5.5); `chaosbringer perf emit-budgets / gate / regress / drilldown / run`; `CrawlPerfSummary`; wired into the `chaos-baseline` / `chaos-pr-gate` workflows | the PR gate fails on an injected regression in the playground v2 |
-| **3: exploit** | adaptive settle (§6.1); `faults` tag + degradation report (§6.2); crawl-wide coverage union and trends (§6.3–6.4); `lastActionPerf` + `perfSeekingDriver` (§6.5) | same-seed crawl parity between `networkidle` and `adaptive`, with measured wall-clock savings reported in the PR |
-| **4: retire** | lightbringer repo → a deprecated re-export of `@mizchi/playwright-perf`; its docs guide moves to `docs/recipes/perf.md` | `npx lightbringer run` still works via the re-export |
+| **2: gate** | `perfBudgets` (§5.5); `chaosbringer perf emit-budgets / gate / regress / drilldown`; `CrawlPerfSummary`; wired into the `chaos-baseline` / `chaos-pr-gate` workflows | the PR gate fails on an injected regression in the playground v2 |
+| **3: exploit** | adaptive settle, opt-in (§6.1); `faults` tag + degradation report (§6.2); crawl-wide coverage union and trends (§6.3–6.4); `lastActionPerf` + `perfSeekingDriver` (§6.5) | same-seed crawl parity between `networkidle` and `adaptive`, with measured wall-clock savings reported in the PR |
+| **4: archive** | first npm release of `lightbringer` from this repo; `docs/guide.md` moves to `packages/lightbringer/docs/`; the mizchi/lightbringer README points here; then the repo is **archived** | `npx lightbringer@latest run scenario.json` works from the monorepo-published package; the old repo has no open work left |
 
 Each phase is one PR, or a small PR stack, with its own release-please entry.
 
 ---
 
-## 10. Open questions
+## 10. Decisions
 
-1. **Package name.** `@mizchi/playwright-perf` (it matches the `playwright-*` siblings), or keep the `lightbringer` name inside this monorepo?
-2. **lightbringer repo.** Thin re-export (proposed), or archive outright?
-3. **Always-on collector (§5.4 / §7).** Is fixing LCP/TBT worth a default-on init script, or should the LCP/TBT budget keys require `--perf`?
-4. **Adaptive settle default.** Keep it opt-in permanently, or flip the default after Phase 3's parity e2e?
+1. **Package name:** keep `lightbringer`, as `packages/lightbringer` publishing the existing npm package (§2).
+2. **lightbringer repo:** archived once the port is complete (§9, Phase 4). There is no re-export shim, because npm `lightbringer` is published from here.
+3. **Always-on collector:** yes. The collector init script runs on every crawl, including without `--perf`, so the LCP/TBT budgets actually fire (§5.4, §7).
+4. **Adaptive settle:** opt-in, permanently. The default stays `networkidle` (§6.1).
