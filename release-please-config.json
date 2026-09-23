@@ -27,6 +27,11 @@
       "package-name": "@mizchi/cf-faults",
       "component": "cf-faults",
       "changelog-path": "CHANGELOG.md"
+    },
+    "packages/lightbringer": {
+      "package-name": "lightbringer",
+      "component": "lightbringer",
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }
