@@ -1,0 +1,18 @@
+# Inspect product code and tests; generated files and example fixtures stay
+# outside the roots. Keep the first set small enough to review by hand.
+files: [packages, scripts, package.json]
+exclude: [packages/chaosbringer/fixtures]
+
+rules:
+  typescript/catch-hides-failure: on
+  typescript/comment-describes-declaration: on
+  typescript/doc-errors-match-body: on
+  typescript/error-message-matches-condition: on
+  typescript/fn-name-promises: on
+  typescript/log-level-matches-event: on
+  typescript/pure-name-is-pure: on
+  typescript/safe-name-is-safe: on
+  json/script-name-does: on
+  typescript/test-name-verifies-claim: on
+  typescript/tests-cover-failure-paths: on
+  typescript/type-name-describes-shape: on
