@@ -19,6 +19,8 @@ import {
   type MemoryTrend,
 } from "lightbringer/core";
 import { buildDegradation } from "./perf-faults.js";
+import { round1 } from "./perf-math.js";
+import { spanCost } from "./perf-trim.js";
 import type {
   ActionResult,
   CrawlCoverageKind,
@@ -34,16 +36,18 @@ export const SUMMARY_VITALS = ["LCP", "INP", "CLS", "TTFB", "FCP"] as const;
 /** How many rows each list in the summary keeps. */
 export const PERF_SUMMARY_TOP_N = 10;
 
-/** Round to one decimal, the precision lightbringer reports in. */
-const round1 = (n: number) => Math.round(n * 10) / 10;
+/** One "slowest action" row; `interactionMs` is absent when the span contained no interaction. */
+export type SlowActionRow = CrawlPerfSummary["slowestActions"][number];
 
-/** One "slowest action" row. */
-export interface SlowActionRow {
-  key: string;
-  durationMs: number;
-  blockingMs: number;
-  /** Absent when the span contained no interaction. */
-  interactionMs?: number;
+/** Every measured span of a report: load spans, then action spans. */
+export function reportSpans(report: {
+  pages: readonly PageResult[];
+  actions: readonly ActionResult[];
+}): PerfSpanReport[] {
+  const out: PerfSpanReport[] = [];
+  for (const p of report.pages) if (p.perf) out.push(p.perf);
+  for (const a of report.actions) if (a.perf) out.push(a.perf);
+  return out;
 }
 
 /** The `n` measured actions with the longest spans, slowest first. */
@@ -51,12 +55,7 @@ export function slowestActions(actions: readonly ActionResult[], n = 5): SlowAct
   const rows: SlowActionRow[] = [];
   for (const a of actions) {
     if (!a.perf) continue;
-    rows.push({
-      key: a.perf.key,
-      durationMs: a.perf.durationMs,
-      blockingMs: a.perf.cpu.blockingMs,
-      ...(a.perf.interaction ? { interactionMs: a.perf.interaction.maxDurationMs } : {}),
-    });
+    rows.push({ key: a.perf.key, ...spanCost(a.perf) });
   }
   return rows.sort((a, b) => b.durationMs - a.durationMs).slice(0, n);
 }
@@ -79,6 +78,7 @@ function vitalSummaries(pages: readonly PageResult[]): Record<string, CrawlVital
     // p75 are values some page really had. lightbringer's `median` is not
     // used because it rounds to 0.1, which would turn every CLS into 0 or 0.1.
     const sorted = samples.map((s) => s.value).sort((a, b) => a - b);
+    // lightbringer `percentile`: nearest rank with rounding, the element at `round((n - 1) * p)`, `p` in 0–1.
     // First page wins a tie, so the worst page is stable across reruns.
     const worst = samples.reduce((w, s) => (s.value > w.value ? s : w));
     // CLS is a unitless score in the thousandths; rounding it to 0.1 like
@@ -215,17 +215,12 @@ export function buildCrawlPerfSummary(
   actions: readonly ActionResult[],
   { coverage }: { coverage?: Partial<CoverageArtifact> } = {},
 ): CrawlPerfSummary | undefined {
-  const spans: PerfSpanReport[] = [];
-  for (const p of pages) if (p.perf) spans.push(p.perf);
-  for (const a of actions) if (a.perf) spans.push(a.perf);
+  const spans = reportSpans({ pages, actions });
   const measuredPages = pages.filter((p) => p.perf || p.perfPage).length;
   if (spans.length === 0 && measuredPages === 0) return undefined;
 
-  const initiators = new Map<string, { frame: string; requestCount: number; encodedKB: number }>();
-  const domains = new Map<
-    string,
-    { domain: string; requestCount: number; encodedKB: number; busyMs: number }
-  >();
+  const initiators = new Map<string, CrawlPerfSummary["hotInitiators"][number]>();
+  const domains = new Map<string, CrawlPerfSummary["thirdParty"][number]>();
   for (const s of spans) {
     for (const i of s.network.byInitiator ?? []) {
       addUp(initiators, i.frame, { frame: i.frame, requestCount: i.requestCount, encodedKB: i.encodedKB }, [

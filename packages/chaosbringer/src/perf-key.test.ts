@@ -4,18 +4,18 @@ import {
   actionKind,
   attemptedActionType,
   candidatePerfKey,
-  DEFAULT_PERF_TRACE_DIR,
-  formatLastActionPerf,
   loadSpanName,
-  PERF_REPORT_LIST_CAP,
   perfKey,
-  perfOptionsFromCliFlags,
   perfSlug,
-  resolvePerfOptions,
-  toLastActionPerf,
-  toPerfSpanReport,
   urlPattern,
 } from "./perf-key.js";
+import { DEFAULT_PERF_TRACE_DIR, perfOptionsFromCliFlags, resolvePerfOptions } from "./perf-options.js";
+import {
+  formatLastActionPerf,
+  PERF_REPORT_LIST_CAP,
+  toLastActionPerf,
+  toPerfSpanReport,
+} from "./perf-trim.js";
 
 describe("urlPattern", () => {
   it("keeps only the pathname, so a baseline survives a port or host change", () => {

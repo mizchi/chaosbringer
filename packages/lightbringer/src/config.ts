@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import type { SessionOptions } from "./session";
+import { DEFAULT_SETTLE_TIMEOUT_MS, netProfileByName, type NetProfile } from "./defaults";
 
 // ---------------------------------------------------------------------------
 // Configuration edges. Nothing here reads the environment or the filesystem at
@@ -36,36 +37,6 @@ export function webVitalsIife(): string {
   }
   return webVitalsCache;
 }
-
-/** Network emulation profile (throughput in bytes/s, latency in ms). */
-export interface NetProfile {
-  latency: number;
-  downloadThroughput: number;
-  uploadThroughput: number;
-}
-
-/** Approximate DevTools-style presets, selectable by PERF_NET / --net. */
-export const NET_PROFILES: Readonly<Record<string, NetProfile>> = {
-  "slow-3g": { latency: 400, downloadThroughput: 51_200, uploadThroughput: 51_200 },
-  "fast-3g": { latency: 150, downloadThroughput: 196_608, uploadThroughput: 98_304 },
-  "4g": { latency: 40, downloadThroughput: 1_179_648, uploadThroughput: 589_824 },
-};
-
-/** Look up a NET_PROFILES preset by name (own keys only); null when unknown/unset. */
-export function netProfileByName(name: string | undefined): NetProfile | null {
-  return name && Object.hasOwn(NET_PROFILES, name) ? NET_PROFILES[name] : null;
-}
-
-/** Default max time to wait for settle before marking a span capped (ms). */
-export const DEFAULT_SETTLE_TIMEOUT_MS = 5000;
-
-/**
- * Default max time one in-page read (page.evaluate) at a span boundary or in
- * finish() may take before its fallback is used (ms). The reads themselves take
- * milliseconds; only a page that cannot answer (a navigation whose document
- * request never completes, a main thread that never yields) reaches this.
- */
-export const DEFAULT_EVALUATE_TIMEOUT_MS = 5000;
 
 /** What sessionOptionsFromEnv resolves: SessionOptions plus the edge-only knobs. */
 export type EnvSessionOptions = SessionOptions & {
@@ -117,5 +88,29 @@ export function sessionOptionsFromEnv(
     memGc: env.PERF_MEM === "1",
     settleTimeoutMs: Number(env.PERF_SETTLE_TIMEOUT ?? String(DEFAULT_SETTLE_TIMEOUT_MS)),
     assert: env.PERF_ASSERT === "1",
+  };
+}
+
+/**
+ * The SessionOptions subset the runner edges derive from their resolved knobs
+ * (env for the test fixtures, flags for the CLI). Every key is always passed,
+ * as the edges' literals did before this was shared.
+ */
+export function toSessionOptions(
+  o: Pick<
+    EnvSessionOptions,
+    "cpuRate" | "netProfile" | "cssStats" | "trace" | "coverage" | "memGc" | "settleTimeoutMs"
+  >,
+  tracePath: string,
+): SessionOptions {
+  return {
+    cpuRate: o.cpuRate,
+    netProfile: o.netProfile,
+    cssStats: o.cssStats,
+    trace: o.trace,
+    tracePath,
+    coverage: o.coverage,
+    memGc: o.memGc,
+    settleTimeoutMs: o.settleTimeoutMs,
   };
 }

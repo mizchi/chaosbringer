@@ -22,7 +22,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { formatRegress, regress } from "../dist/core.js";
+import { DEFAULT_REGRESS_THRESHOLD, formatRegress, regress } from "../dist/core.js";
 
 // The comparison (thresholds, per-metric floors, noisy downgrade) lives in
 // src/regress.ts, shared with chaosbringer's `perf regress`; this script only
@@ -36,7 +36,7 @@ const positional = args.filter((a) => !a.startsWith("--"));
 const baselineDir = positional[0];
 const currentDir =
   positional[1] ?? process.env.PERF_OUT_DIR ?? "perf-results";
-const threshold = Number(flags.threshold ?? "0.15");
+const threshold = flags.threshold != null ? Number(flags.threshold) : DEFAULT_REGRESS_THRESHOLD;
 
 if (!baselineDir) {
   console.error(

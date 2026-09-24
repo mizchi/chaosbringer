@@ -982,11 +982,6 @@ await chaos({
 });
 ```
 
-- `PageResult.perf` is the **load span**: from just before `page.goto`, through `afterLoad` faults and invariants, to the metrics read. `PageResult.perfPage` holds page-level extras: web-vitals, per-document vitals when the page navigated, network totals.
-- `ActionResult.perf` is that action's span: from just before the action to just after it returned, including the crawler's post-click settle. A skipped action (target not visible) records no span.
-- Every span has a `key`, `<route> :: <kind>`, that stays the same from run to run: `/items/:id :: load`, `/cart :: click button:has-text("Add")`. The route is the pathname with id-like segments collapsed, so the key survives a port change; fill values never appear in it.
-- Fields that were not measured are absent, never 0.
-
 The text report gains one line per page and the five slowest actions:
 
 ```
@@ -996,7 +991,7 @@ Slowest actions:
     2104ms  blocking 132ms  interaction 148ms  /items/:id :: click #buy
 ```
 
-In the JSON report each span keeps its top five requests and initiators; the full lists go to `<outDir>/<run>-<NNN>-<route>.json` when `--perf-out` / `perf.outDir` is set. Off, the crawler opens no extra CDP session and records nothing. Measured on the fixture site (10 pages, 46 actions), `--perf` added about 4% wall-clock. See [docs/recipes/perf.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md) for levels, overhead and artefacts.
+Spans (`PageResult.perf`, `ActionResult.perf`), their stable `perfKey`s, levels, overhead and artefacts are in [docs/recipes/perf.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md).
 
 ## Trace record / replay / minimize
 

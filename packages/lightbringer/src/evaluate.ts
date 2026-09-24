@@ -16,6 +16,24 @@ export type EvaluateOutcome<R> =
 
 const TIMED_OUT = Symbol("timeout");
 
+/**
+ * Race p against a timer of ms; onTimeout's value wins when the timer fires
+ * first. The timer is cleared either way so a settled race never keeps the
+ * event loop alive. p itself is not cancelled (callers decide what to do with
+ * the abandoned promise).
+ */
+export async function raceTimeout<T, F>(p: Promise<T>, ms: number, onTimeout: () => F): Promise<T | F> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<F>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export class BoundedEvaluator {
   /**
    * The evaluate that last timed out, while it is still pending. Playwright
@@ -35,33 +53,26 @@ export class BoundedEvaluator {
   async attempt<R>(fn: () => R | Promise<R>): Promise<EvaluateOutcome<R>> {
     if (this.stalled) return { kind: "timeout" };
     const pending = this.page.evaluate(fn) as Promise<R>;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
-      timer = setTimeout(() => resolve(TIMED_OUT), this.timeoutMs);
+    const result = await raceTimeout(
+      pending.then(
+        (value): EvaluateOutcome<R> => ({ kind: "ok", value }),
+        (error: unknown): EvaluateOutcome<R> => ({ kind: "error", error }),
+      ),
+      this.timeoutMs,
+      (): typeof TIMED_OUT => TIMED_OUT,
+    );
+    if (result !== TIMED_OUT) return result;
+    // Keep the abandoned evaluate observed (its eventual rejection must not
+    // surface as unhandled) and remember it until it settles.
+    const stalled = pending.then(
+      () => {},
+      () => {},
+    );
+    this.stalled = stalled;
+    void stalled.then(() => {
+      if (this.stalled === stalled) this.stalled = undefined;
     });
-    try {
-      const result = await Promise.race([
-        pending.then(
-          (value): EvaluateOutcome<R> => ({ kind: "ok", value }),
-          (error: unknown): EvaluateOutcome<R> => ({ kind: "error", error }),
-        ),
-        timeout,
-      ]);
-      if (result !== TIMED_OUT) return result;
-      // Keep the abandoned evaluate observed (its eventual rejection must not
-      // surface as unhandled) and remember it until it settles.
-      const stalled = pending.then(
-        () => {},
-        () => {},
-      );
-      this.stalled = stalled;
-      void stalled.then(() => {
-        if (this.stalled === stalled) this.stalled = undefined;
-      });
-      return { kind: "timeout" };
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    return { kind: "timeout" };
   }
 
   /** attempt() reduced to a value: the fallback on error or timeout. */

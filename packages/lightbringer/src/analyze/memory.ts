@@ -95,11 +95,6 @@ const TREND_METRICS: Array<{
   { key: "arrayBuffers", get: (m) => m.arrayBuffers, floor: 5 },
 ];
 
-const repeatIndex = (name: string): number => {
-  const m = /#(\d+)$/.exec(name);
-  return m ? Number(m[1]) : -1;
-};
-
 /**
  * Detect monotonic memory growth across the `${name}#${i}` spans of a measureRepeat.
  * A metric is reported only when it grows past its floor; `leak` is set when that
@@ -110,17 +105,26 @@ const repeatIndex = (name: string): number => {
 export function buildTrends(
   spans: Array<{ name: string; memory: SpanMemory }>,
 ): MemoryTrend[] {
-  const groups = new Map<string, Array<{ name: string; memory: SpanMemory }>>();
+  // Parse each name once: prefix groups the repeats, the index orders them.
+  const groups = new Map<
+    string,
+    Array<{ index: number; span: { name: string; memory: SpanMemory } }>
+  >();
   for (const s of spans) {
     const m = /^(.*)#(\d+)$/.exec(s.name);
     if (!m) continue;
     const prefix = m[1];
-    (groups.get(prefix) ?? groups.set(prefix, []).get(prefix)!).push(s);
+    (groups.get(prefix) ?? groups.set(prefix, []).get(prefix)!).push({
+      index: Number(m[2]),
+      span: s,
+    });
   }
   const trends: MemoryTrend[] = [];
-  for (const [prefix, group] of groups) {
-    if (group.length < 3) continue; // too few points to call a trend
-    group.sort((a, b) => repeatIndex(a.name) - repeatIndex(b.name));
+  for (const [prefix, entries] of groups) {
+    if (entries.length < 3) continue; // too few points to call a trend
+    const group = entries
+      .sort((a, b) => a.index - b.index)
+      .map((e) => e.span);
     for (const tm of TREND_METRICS) {
       const values = group.map((s) => round(tm.get(s.memory)));
       const growth = round(values[values.length - 1] - values[0]);

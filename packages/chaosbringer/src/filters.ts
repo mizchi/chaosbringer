@@ -52,6 +52,11 @@ export function escapeSelector(text: string): string {
   return text.replace(/"/g, '\\"').replace(/\n/g, " ").slice(0, 50);
 }
 
+/** Escape every RegExp metacharacter so `s` matches literally. */
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Canonical form used for queue dedupe. Drops the fragment, lowercases the
  * host, and treats `http://x` and `http://x/` as the same URL. Trailing

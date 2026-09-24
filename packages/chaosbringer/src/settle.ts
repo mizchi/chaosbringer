@@ -32,7 +32,9 @@
  * machine is tested without a browser.
  */
 
+import type { PerfWindow } from "lightbringer/core";
 import type { Page, Request } from "playwright";
+import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import type { SettleMode } from "./types.js";
 
 export type { SettleMode };
@@ -383,10 +385,6 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
     wait: (ms) => tracker.wait(ms),
     async probe(frames, timeoutMs) {
       if (page.isClosed()) return { kind: "gone" };
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<SettleProbe>((resolve) => {
-        timer = setTimeout(() => resolve({ kind: "timeout" }), Math.max(0, timeoutMs));
-      });
       const read = page
         .evaluate(async (minFrames) => {
           if (minFrames > 0 && document.visibilityState !== "hidden") {
@@ -394,16 +392,7 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
               await new Promise((r) => requestAnimationFrame(() => r(null)));
             }
           }
-          const store = (
-            window as unknown as {
-              __perf?: {
-                __lb?: true;
-                longTasks: { start: number; duration: number }[];
-                flush?: () => void;
-                now?: () => number;
-              };
-            }
-          ).__perf;
+          const store = (window as unknown as PerfWindow).__perf;
           if (!store || store.__lb !== true) return null;
           store.flush?.();
           let lastEnd = Number.NEGATIVE_INFINITY;
@@ -420,11 +409,8 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
           (age): SettleProbe => ({ kind: "ok", longTaskAgeMs: age }),
           (): SettleProbe => (page.isClosed() ? { kind: "gone" } : { kind: "navigated" }),
         );
-      try {
-        return await Promise.race([read, timeout]);
-      } finally {
-        clearTimeout(timer);
-      }
+      const outcome = await raceTimeout(read, Math.max(0, timeoutMs));
+      return outcome === TIMED_OUT ? { kind: "timeout" } : outcome;
     },
   };
 }

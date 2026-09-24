@@ -18,6 +18,7 @@
  */
 
 import { chromium, type Route } from "playwright";
+import { escapeRegExp } from "../filters.js";
 import type { TimingProfile } from "../timing.js";
 
 export interface CalibrateOptions {
@@ -81,7 +82,7 @@ async function oneRun(opts: CalibrateOptions): Promise<CalibrationRun> {
     // A RegExp, not a glob: a glob will not match the cache-busting query the
     // probe appends, and a matcher that silently matches nothing produces a
     // profile that claims this environment has no overhead at all.
-    await page.route(new RegExp(probe.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), async (route: Route) => {
+    await page.route(new RegExp(escapeRegExp(probe)), async (route: Route) => {
       if (nominal > 0) await new Promise((r) => setTimeout(r, nominal));
       await route.fallback();
     });

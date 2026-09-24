@@ -35,10 +35,9 @@ import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { perfBudgetRulesFromJson } from "./budget.js";
-import { perfOptionsFromCliFlags } from "./perf-key.js";
+import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg } from "./settle.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
@@ -359,10 +358,9 @@ let perfBudgets: CrawlerOptions["perfBudgets"];
 const perfBudgetsFile = values["perf-budgets"];
 if (perfBudgetsFile !== undefined) {
   try {
-    perfBudgets = perfBudgetRulesFromJson(
-      JSON.parse(readFileSync(perfBudgetsFile, "utf-8")),
-      `--perf-budgets ${perfBudgetsFile}`,
-    );
+    // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
+    const { readPerfBudgetRulesFile } = await import("./perf-cli.js");
+    perfBudgets = readPerfBudgetRulesFile(perfBudgetsFile, `--perf-budgets ${perfBudgetsFile}`);
   } catch (err) {
     console.error(`Error: ${err instanceof Error ? err.message : err}`);
     process.exit(1);

@@ -12,6 +12,7 @@ import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 import type { CrawlerOptions, UrlMatcher } from "./types.js";
 import { cdpEndpointUrl } from "./cdp.js";
 import { validateSettle } from "./settle.js";
+import { validatePerf } from "./perf-options.js";
 
 /**
  * Validate user-supplied options up front so downstream code can assume
@@ -569,57 +570,6 @@ export function validateOptions(options: CrawlerOptions): void {
         );
       }
     }
-  }
-}
-
-const PERF_OPTION_NAMES = new Set([
-  "level", "memory", "coverage", "cssSelectorStats", "outDir", "actions",
-]);
-
-/**
- * `perf` is a boolean or an object of flags. Unknown keys are refused outright
- * rather than only near misses: the object is small and closed, and a
- * `{ trace: true }` that silently measured at light level would be read as
- * "the trace was empty".
- */
-function validatePerf(perf: unknown): void {
-  if (typeof perf === "boolean") return;
-  if (perf === null || typeof perf !== "object" || Array.isArray(perf)) {
-    throw new Error(
-      `chaosbringer: "perf" must be a boolean or an options object (got ${JSON.stringify(perf)})`
-    );
-  }
-  const p = perf as Record<string, unknown>;
-  for (const key of Object.keys(p)) {
-    if (!PERF_OPTION_NAMES.has(key)) {
-      throw new Error(
-        `chaosbringer: "perf.${key}" is not a perf option (allowed: ${[...PERF_OPTION_NAMES].join(", ")})`
-      );
-    }
-  }
-  if (p.level !== undefined && p.level !== "light" && p.level !== "trace") {
-    throw new Error(
-      `chaosbringer: "perf.level" must be "light" or "trace" (got ${JSON.stringify(p.level)})`
-    );
-  }
-  for (const key of ["coverage", "cssSelectorStats", "actions"] as const) {
-    if (p[key] !== undefined && typeof p[key] !== "boolean") {
-      throw new Error(`chaosbringer: "perf.${key}" must be a boolean (got ${JSON.stringify(p[key])})`);
-    }
-  }
-  if (p.memory !== undefined) {
-    const m = p.memory as Record<string, unknown> | null;
-    if (m === null || typeof m !== "object" || Array.isArray(m)) {
-      throw new Error(`chaosbringer: "perf.memory" must be an object like { forceGc: true }`);
-    }
-    if (m.forceGc !== undefined && typeof m.forceGc !== "boolean") {
-      throw new Error(
-        `chaosbringer: "perf.memory.forceGc" must be a boolean (got ${JSON.stringify(m.forceGc)})`
-      );
-    }
-  }
-  if (p.outDir !== undefined && (typeof p.outDir !== "string" || p.outDir.length === 0)) {
-    throw new Error(`chaosbringer: "perf.outDir" must be a non-empty string`);
   }
 }
 

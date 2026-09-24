@@ -4,6 +4,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
 import type { CrawlReport, PageResult, PerfDegradationEntry } from "./types.js";
 
@@ -340,7 +341,7 @@ function formatPerfSection(report: CrawlReport): string[] {
     if (lcp !== undefined) parts.push(`LCP ${ms(lcp)}`);
     const inp = page.perfPage?.vitals.INP?.value;
     if (inp !== undefined) parts.push(`INP ${ms(inp)}`);
-    out.push(`  ${load.key.replace(/ :: load$/, "")}  ${parts.join("  ")}`);
+    out.push(`  ${perfKeyRoute(load.key)}  ${parts.join("  ")}`);
   }
   const slow = slowestActions(report.actions);
   if (slow.length > 0) {

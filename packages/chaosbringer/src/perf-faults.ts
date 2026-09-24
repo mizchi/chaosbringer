@@ -10,6 +10,7 @@
  */
 
 import { median } from "lightbringer/core";
+import { round1 } from "./perf-math.js";
 import type {
   PerfDegradationEntry,
   PerfDegradationSide,
@@ -88,8 +89,6 @@ export function tagServerFaults(
 
 /** How many `(key, fault)` pairs the degradation report keeps. */
 export const DEGRADATION_TOP_N = 10;
-
-const round1 = (n: number) => Math.round(n * 10) / 10;
 
 function side(spans: readonly PerfSpanReport[]): PerfDegradationSide {
   const interactions = spans.flatMap((s) => (s.interaction ? [s.interaction.maxDurationMs] : []));

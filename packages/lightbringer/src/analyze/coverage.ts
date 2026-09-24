@@ -61,8 +61,43 @@ export function mergeRanges(
   return out;
 }
 
-const rangesLen = (r: Array<[number, number]>): number =>
+// Internal helpers shared with coverage-union.ts — exported from this module
+// only, not from analyze/index.ts or core.ts.
+
+/** One per-resource entry of a CoverageArtifact. */
+export type CoverageRangeItem = CoverageArtifact["js"][number];
+
+/** Total bytes covered by a set of (merged, non-overlapping) ranges. */
+export const rangesLen = (r: Array<[number, number]>): number =>
   r.reduce((a, [s, e]) => a + (e - s), 0);
+
+/** used / total as a percentage with one decimal; 0 for an empty total. */
+export const pctOf = (used: number, total: number): number =>
+  total > 0 ? Math.round((used / total) * 1000) / 10 : 0;
+
+/**
+ * Group by url (Map insertion order), keeping the largest total any item saw
+ * and the union of their used ranges (merged). `skipEmptyUrl` drops
+ * inline/anonymous entries, which have no url to attribute bytes to.
+ */
+export function groupRangesByUrl(
+  items: Iterable<CoverageRangeItem>,
+  { skipEmptyUrl }: { skipEmptyUrl: boolean },
+): CoverageRangeItem[] {
+  const by = new Map<string, { total: number; used: Array<[number, number]> }>();
+  for (const it of items) {
+    if (skipEmptyUrl && !it.url) continue;
+    const b = by.get(it.url) ?? { total: 0, used: [] };
+    b.total = Math.max(b.total, it.total);
+    b.used.push(...it.used);
+    by.set(it.url, b);
+  }
+  return [...by.entries()].map(([url, b]) => ({
+    url,
+    total: b.total,
+    used: mergeRanges(b.used),
+  }));
+}
 
 /**
  * V8 block coverage → used byte ranges. Ranges are nested: a byte's coverage is
@@ -98,28 +133,6 @@ export function jsUsedRanges(
   return out;
 }
 
-/** Group by url, merge used ranges; total = source/text length (or max offset). */
-function collectCoverage(
-  items: Array<{ url: string; total: number; used: Array<[number, number]> }>,
-): Array<{ url: string; total: number; used: Array<[number, number]> }> {
-  const by = new Map<
-    string,
-    { total: number; used: Array<[number, number]> }
-  >();
-  for (const it of items) {
-    if (!it.url) continue; // skip inline/anonymous
-    const b = by.get(it.url) ?? { total: 0, used: [] };
-    b.total = Math.max(b.total, it.total);
-    b.used.push(...it.used);
-    by.set(it.url, b);
-  }
-  return [...by.entries()].map(([url, b]) => ({
-    url,
-    total: b.total,
-    used: mergeRanges(b.used),
-  }));
-}
-
 function toCoverageReport(
   perUrl: Array<{ url: string; total: number; used: Array<[number, number]> }>,
 ): CoverageReport {
@@ -133,7 +146,7 @@ function toCoverageReport(
       url: f.url,
       totalBytes: f.total,
       usedBytes: used,
-      usedPct: f.total > 0 ? Math.round((used / f.total) * 1000) / 10 : 0,
+      usedPct: pctOf(used, f.total),
     };
   });
   // heaviest unused first — the best split/drop candidates
@@ -141,7 +154,7 @@ function toCoverageReport(
   return {
     totalBytes,
     usedBytes,
-    usedPct: totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 1000) / 10 : 0,
+    usedPct: pctOf(usedBytes, totalBytes),
     files: files.slice(0, 40),
   };
 }
@@ -163,8 +176,9 @@ export function buildCoverage(
     total: e.text?.length ?? 0,
     used: e.ranges.map((r) => [r.start, r.end] as [number, number]),
   }));
-  const jsPerUrl = collectCoverage(jsItems);
-  const cssPerUrl = collectCoverage(cssItems);
+  // total = source/text length (or max offset); inline/anonymous entries skipped
+  const jsPerUrl = groupRangesByUrl(jsItems, { skipEmptyUrl: true });
+  const cssPerUrl = groupRangesByUrl(cssItems, { skipEmptyUrl: true });
   return {
     coverage: { js: toCoverageReport(jsPerUrl), css: toCoverageReport(cssPerUrl) },
     artifact: { js: jsPerUrl, css: cssPerUrl },

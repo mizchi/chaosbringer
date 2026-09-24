@@ -14,6 +14,7 @@
  */
 import type { ActionRecipe, ActionTrace, RecipePrecondition, RecipeStep } from "./types.js";
 import { emptyStats } from "./types.js";
+import { escapeRegExp } from "../filters.js";
 
 export interface ExtractCandidateOptions {
   name: string;
@@ -95,6 +96,6 @@ function dedupAdjacentWaits(steps: ReadonlyArray<RecipeStep>): RecipeStep[] {
  * because URLs may include trailing query/fragment captured upstream.
  */
 function escapePathForRegex(path: string): string {
-  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeRegExp(path);
   return `${escaped}(?:[/?#]|$)`;
 }

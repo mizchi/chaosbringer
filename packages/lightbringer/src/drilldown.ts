@@ -5,15 +5,12 @@
 // Needs a trace captured with the span (PERF_TRACE=1): the span's
 // traceWindowUs is matched against the trace events' ts.
 import { round } from "./analyze/util";
-import { hostOf, registrableDomain, type InitiatorStat } from "./analyze/network";
+import { domainOfUrl, stripOrigin, type InitiatorStat } from "./analyze/network";
+import type { TraceEvent } from "./analyze/render";
 import type { SpanReport } from "./report-types";
 
 /** The Chrome trace event fields the drilldown reads. */
-export interface DrilldownTraceEvent {
-  name?: string;
-  ph?: string;
-  ts?: number;
-  dur?: number;
+export interface DrilldownTraceEvent extends TraceEvent {
   // Trace args vary per event name; each reader below narrows what it needs.
   args?: any;
 }
@@ -93,15 +90,7 @@ export interface DrilldownAnalysis {
 /** Default number of rows in the function / self / selector rankings. */
 export const DRILLDOWN_TOP_N = 15;
 
-function shorten(url: string): string {
-  return url.replace(/^https?:\/\/[^/]+/, "").slice(0, 70);
-}
-
-/** Registrable domain of a URL; null for a URL without a host. */
-function domainOf(url: string): string | null {
-  const h = hostOf(url);
-  return h ? registrableDomain(h) : null;
-}
+const shorten = (url: string): string => stripOrigin(url, 70, "none");
 
 /**
  * Known harness frames: Playwright's injected actionability / visibility
@@ -161,7 +150,7 @@ export function analyseDrilldown(
   { pageUrl, topN = DRILLDOWN_TOP_N }: { pageUrl?: string; topN?: number } = {},
 ): DrilldownAnalysis {
   const [startUs, endUs] = span.traceWindowUs;
-  const firstPartyDomain = pageUrl ? domainOf(pageUrl) : null;
+  const firstPartyDomain = pageUrl ? domainOfUrl(pageUrl) : null;
 
   // Complete ("X") events that start inside the window.
   const inWindow = events.filter(
@@ -237,7 +226,7 @@ export function analyseDrilldown(
       // app = has a script URL; harness = known injected/collector name; native = rest
       const kind: FrameKind = cf.url ? "app" : HARNESS_FRAME_NAMES.has(fn) ? "harness" : "native";
       const loc = cf.url ? `${shorten(cf.url)}:${(cf.lineNumber ?? 0) + 1}` : "";
-      const domain = kind === "app" ? domainOf(cf.url) : null;
+      const domain = kind === "app" ? domainOfUrl(cf.url) : null;
       const party =
         kind === "app" && firstPartyDomain ? (domain === firstPartyDomain ? "first" : "third") : null;
       nodeFrame.set(n.id, { label: `${fn}  ${loc}`, kind, party, domain });

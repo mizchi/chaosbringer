@@ -17,24 +17,17 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CDPSession, Page } from "playwright";
+import type { CoverageArtifact, PerfReport, PerfSession, SpanHandle } from "lightbringer/core";
 import {
-  startSession,
-  type CoverageArtifact,
-  type PerfReport,
-  type PerfSession,
-  type SpanHandle,
-} from "lightbringer/core";
-import { pageCdp } from "./page-cdp.js";
+  endIfRecorded,
+  FINISH_TIMEOUT_MS,
+  openPerfSession,
+} from "./perf-session.js";
+import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import { SpanFaultTags } from "./perf-faults.js";
-import {
-  actionKind,
-  loadSpanName,
-  perfKey,
-  perfSlug,
-  toLastActionPerf,
-  toPerfSpanReport,
-  type ResolvedPerfOptions,
-} from "./perf-key.js";
+import { actionKind, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
+import type { ResolvedPerfOptions } from "./perf-options.js";
+import { toLastActionPerf, toPerfSpanReport } from "./perf-trim.js";
 import type {
   ActionResult,
   LastActionPerf,
@@ -55,16 +48,8 @@ type SpanOwner = (
   | { kind: "action"; action: ActionResult; settleCapped: boolean }
 ) & { faults?: string[] };
 
-/**
- * How long `finish()` may take before the page is given up on. lightbringer
- * bounds its in-page reads (`evaluateTimeoutMs`), but not every call
- * `finish()` makes goes through that bound: stopping JS/CSS coverage
- * (`--perf-cov`) and a forced GC (`--perf-mem`, when the load span is closed
- * here) are CDP calls that need the renderer's main thread, and on a page
- * whose main thread never yields they never answer. A crawl must not hang
- * on measurement, so the whole of `finish()` is raced against this.
- */
-export const FINISH_TIMEOUT_MS = 15_000;
+// Moved to the leaf `perf-session.ts` (shared with the load runner); kept
+// exported here for existing importers.
 
 export class PagePerf {
   private loadHandle: SpanHandle | null = null;
@@ -110,7 +95,8 @@ export class PagePerf {
    *
    * CPU and network throttling are never passed: the crawler owns both
    * (`faults.cpu()`, `network`), and lightbringer applying its own would
-   * overwrite them on the same CDP session.
+   * overwrite them on the same CDP session. `PerfSessionOptions` has no field
+   * for either, so the compiler holds this.
    *
    * `pageFaults` are faults in effect for the whole visit (the crawl's
    * runtime faults); every span of the page is tagged with them.
@@ -137,8 +123,7 @@ export class PagePerf {
       mkdirSync(opts.outDir, { recursive: true });
       tracePath = join(opts.outDir, `${slug}.trace.json`);
     }
-    const client = await pageCdp(page.context(), page).session();
-    const session = await startSession(page, client, {
+    const { client, session } = await openPerfSession(page, {
       installCollector,
       trace: tracePath !== undefined,
       ...(tracePath !== undefined ? { tracePath } : {}),
@@ -269,15 +254,9 @@ export class PagePerf {
     }: { navigationFailed?: boolean; timeoutMs?: number } = {},
   ): Promise<PerfSpanReport[]> {
     if (navigationFailed) await this.client.send("Page.stopLoading").catch(() => {});
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), timeoutMs);
-    });
-    const outcome = await Promise.race([this.build(result), timeout]).finally(() =>
-      clearTimeout(timer),
-    );
+    const outcome = await raceTimeout(this.build(result), timeoutMs);
     // The crawler logs this as `perf_finish_failed` and keeps crawling.
-    if (outcome === "timeout") throw new Error(`perf finish timed out after ${timeoutMs}ms`);
+    if (outcome === TIMED_OUT) throw new Error(`perf finish timed out after ${timeoutMs}ms`);
     return outcome;
   }
 
@@ -301,9 +280,15 @@ export class PagePerf {
       const kind = owner.kind === "load" ? "load" : actionKind(owner.action);
       const name = owner.kind === "load" ? loadSpanName(this.url) : kind;
       const key = perfKey(this.url, kind);
-      const trimmed = toPerfSpanReport(span, key, name);
-      if (owner.settleCapped) trimmed.capped = true;
-      if (owner.faults) trimmed.faults = owner.faults;
+      // Re-spreading `name`/`key` keeps the positions `toPerfSpanReport` gave
+      // them; `capped`/`faults` land where the old assignments put them.
+      const decor = {
+        name,
+        key,
+        ...(owner.settleCapped ? { capped: true } : {}),
+        ...(owner.faults ? { faults: owner.faults } : {}),
+      };
+      const trimmed: PerfSpanReport = { ...toPerfSpanReport(span, key, name), ...decor };
       if (owner.kind === "load") {
         this.loadReport = trimmed;
         result.perf = trimmed;
@@ -312,13 +297,7 @@ export class PagePerf {
         owner.action.perf = trimmed;
         attached.push(trimmed);
       }
-      return {
-        ...span,
-        name,
-        key,
-        ...(owner.settleCapped ? { capped: true } : {}),
-        ...(owner.faults ? { faults: owner.faults } : {}),
-      };
+      return { ...span, ...decor };
     });
 
     const summary = pageSummary(report);
@@ -349,12 +328,12 @@ export class PagePerf {
    * or null when nothing was recorded.
    */
   private async record(handle: SpanHandle, owner: SpanOwner): Promise<number | null> {
-    const before = this.session.controller.spans.length;
     // Read the tags before `end()` awaits: a fault that fires while lightbringer
     // is still reading the span's metrics happened after the span closed.
+    // (`faultTags.end` is synchronous and leaves `controller.spans` alone, so
+    // reading it before `endIfRecorded` takes its `before` count is the same.)
     const faults = this.faultTags.end(handle);
-    await this.session.controller.end(handle, { settle: false });
-    if (this.session.controller.spans.length <= before) return null;
+    if (!(await endIfRecorded(this.session.controller, handle))) return null;
     this.owners.push(faults ? { ...owner, faults } : owner);
     return this.session.controller.spans.length - 1;
   }

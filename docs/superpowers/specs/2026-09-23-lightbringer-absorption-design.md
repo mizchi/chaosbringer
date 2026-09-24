@@ -57,7 +57,7 @@ packages/
 │   ├── scripts/                # median / regress / drilldown / coverage bins + the spec-mode loader shim
 │   └── src/
 │       ├── analyze/            # ported as-is (pure) + sibling tests
-│       ├── collector.ts        # was browser.ts — in-page init script
+│       ├── browser.ts          # in-page collector init script
 │       ├── capture.ts          # Network + Tracing capture
 │       ├── session.ts          # PerfSession: open/close spans on a Page + CDPSession
 │       ├── report.ts / report-types.ts / summary.ts

@@ -9,9 +9,6 @@ import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   collectorInitScript,
-  mergeCoverageArtifacts,
-  type CoverageArtifact,
-  type PerfWindow,
   type SpanHandle,
 } from "lightbringer/core";
 import { cdpEndpointUrl, selectCdpPage } from "./cdp.js";
@@ -25,7 +22,6 @@ import type {
   ActionTarget,
   ActionWeights,
   PerformanceMetrics,
-  PerfSpanReport,
   CrawlReport,
   CrawlSummary,
   RecoveryInfo,
@@ -74,9 +70,11 @@ import {
   targetKey,
 } from "./coverage.js";
 import {
+  drainSpaNavigations,
+  installSpaNavigationHook,
   resolveSpaNavigationUrls,
-  type RawSpaNavigation,
 } from "./spa-navigation.js";
+import { collectLoadMetrics } from "./page-metrics.js";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -96,7 +94,7 @@ import {
   weighActionTargets,
   type RawActionTarget,
 } from "./action-targets.js";
-import { checkPerfBudgets, checkPerformanceBudget } from "./budget.js";
+import { checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
@@ -134,10 +132,12 @@ import { findFaultRuleShadows } from "./fault-shadow.js";
 import { buildReproCommand } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
-import { PagePerf } from "./perf.js";
+import { CrawlPerf } from "./crawl-perf.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { tagServerFaults } from "./perf-faults.js";
-import { attemptedActionType, resolvePerfOptions, type ResolvedPerfOptions } from "./perf-key.js";
+import { attemptedActionType } from "./perf-key.js";
+import { resolvePerfOptions } from "./perf-options.js";
+import { errorMessage } from "./errors.js";
 import {
   ACTION_SETTLE_CAP_MS,
   pageSettleEnv,
@@ -203,6 +203,27 @@ function toDriverCandidates(targets: ReadonlyArray<ActionTarget>): DriverCandida
     selectValue: t.selectValue,
     ...toCandidateGeometry(t),
   }));
+}
+
+/** The picker stamp a trace entry carries: `actionToTraceEntry`'s third parameter. */
+type TraceStamp = TraceAction["advisor"];
+
+/**
+ * The trace stamp for a driver pick. Only a pick that explained itself is
+ * stamped — an unexplained pick reads as a plain action in the trace.
+ */
+function driverTraceStamp(
+  pick: Exclude<DriverPick, { kind: "skip" }>,
+  driverName: string,
+): TraceStamp {
+  if (!pick.reasoning) return undefined;
+  const confidence = pick.kind === "select" ? pick.confidence : undefined;
+  return {
+    provider: pick.source ?? driverName,
+    reason: "explicit_request",
+    reasoning: pick.reasoning,
+    ...(confidence !== undefined ? { confidence } : {}),
+  };
 }
 
 export class ChaosCrawler {
@@ -332,13 +353,8 @@ export class ChaosCrawler {
   private currentAction: ActionResult | null = null;
   /** Resolved driver (null when caller did not pass `options.driver`). */
   private readonly driver: Driver | null;
-  /** Resolved `perf` option; null when per-step measurement is off. */
-  private readonly perfOptions: ResolvedPerfOptions | null;
-  /**
-   * The current page's measurement, from just before its `goto` to the end
-   * of `crawlPageWithExistingPage`. Null with perf off, and between pages.
-   */
-  private pagePerf: PagePerf | null = null;
+  /** Per-step perf measurement: the current page's session and the crawl's perf state. */
+  private readonly perf: CrawlPerf;
   /** Resolved `settle` option: how each load and each action waits. */
   private readonly settle: ResolvedSettle;
   /**
@@ -350,33 +366,6 @@ export class ChaosCrawler {
   private pageRequests: RequestTracker | null = null;
   /** Settles of the current page that hit their cap (adaptive only). */
   private pageSettleCapped = 0;
-  /** Pages measured so far this run; numbers the per-page sidecar files. */
-  private perfPageIndex = 0;
-  /**
-   * Prefix of this run's sidecar file names. The page index alone restarts at
-   * 0 in every crawler, and the Playwright fixture builds a crawler per test,
-   * so without it every test's first page would write `000-<route>.json` and
-   * overwrite the previous test's report (or race it, across workers).
-   */
-  private perfRunId = randomBytes(4).toString("hex");
-  /**
-   * Lifecycle faults that fired on the current page before its perf session
-   * opened (`beforeNavigation` runs ahead of the load span). They are still
-   * in effect when the load runs, so the load span is tagged with them.
-   */
-  private pendingPerfFaults: string[] = [];
-  /**
-   * Each measured page's load span with the trace ids its requests carried,
-   * for the server-fault join in `generateReport` (actions carry theirs on
-   * `ActionResult.traceIds`).
-   */
-  private perfLoadTraceIds: Array<{ span: PerfSpanReport; traceIds: string[] }> = [];
-  /**
-   * The crawl's JS/CSS coverage, every measured page's artifact folded in as
-   * the page finishes (`perf.coverage` only). One merged artifact rather
-   * than one per page: its size is bounded by the site's resources.
-   */
-  private perfCoverage: CoverageArtifact | null = null;
   /**
    * Buffer of invariant violations observed since the driver's previous
    * step. Drained at the top of every driver-loop iteration. Empty when
@@ -416,7 +405,7 @@ export class ChaosCrawler {
     this.settle = resolveSettle(options.settle);
     // `perfBudgets` needs spans to check, so rules without `perf` turn it on
     // at light level (validateOptions refuses rules with `perf: false`).
-    this.perfOptions = resolvePerfOptions(
+    const perfOptions = resolvePerfOptions(
       options.perf ?? (options.perfBudgets && options.perfBudgets.length > 0 ? true : undefined),
     );
 
@@ -457,6 +446,7 @@ export class ChaosCrawler {
     } else {
       this.logger = createNullLogger();
     }
+    this.perf = new CrawlPerf(perfOptions, this.logger, this.options.perfBudgets);
   }
 
   /** Seed used for this run (useful for reproducing failures). */
@@ -490,9 +480,7 @@ export class ChaosCrawler {
         url,
         timestamp: Date.now(),
       };
-      errors.push(error);
-      this.events.onError?.(error);
-      this.logger.logPageError(error);
+      this.emitPageError(errors, error);
     }
   }
 
@@ -526,7 +514,7 @@ export class ChaosCrawler {
           failureReason = result;
         }
       } catch (err) {
-        failureReason = err instanceof Error ? err.message : String(err);
+        failureReason = errorMessage(err);
       }
 
       if (failureReason !== null) {
@@ -537,9 +525,7 @@ export class ChaosCrawler {
           url,
           timestamp: Date.now(),
         };
-        errors.push(error);
-        this.events.onError?.(error);
-        this.logger.logPageError(error);
+        this.emitPageError(errors, error);
         this.advisorRuntime?.stall.recordInvariantViolation();
         if (this.driver !== null) {
           this.driverPendingViolations.push({ name: inv.name, message: failureReason });
@@ -549,23 +535,13 @@ export class ChaosCrawler {
   }
 
   /**
-   * Pop and return SPA navigations recorded by the in-page hook since the
-   * previous drain. Used to surface History-API routing as discovered links
-   * the BFS queue can pick up.
+   * Drain the History-API navigations recorded since the previous drain and
+   * append them to `links`, resolved against the page's current URL. The
+   * queue feeder de-dups, so overlap with `extractLinks` is fine.
    */
-  private async drainSpaNavigations(page: Page): Promise<RawSpaNavigation[]> {
-    try {
-      return await page.evaluate(() => {
-        // @ts-ignore - bag installed via addInitScript
-        const bag = (window.__chaosNavigations || []) as RawSpaNavigation[];
-        // @ts-ignore
-        window.__chaosNavigations = [];
-        return bag;
-      });
-    } catch {
-      // Page may have navigated away or closed — drop and move on.
-      return [];
-    }
+  private async appendSpaLinks(page: Page, links: string[]): Promise<void> {
+    const urls = resolveSpaNavigationUrls(await drainSpaNavigations(page), page.url());
+    for (const u of urls) links.push(u);
   }
 
   /** Pop and return any unhandled promise rejections captured since last call. */
@@ -619,10 +595,7 @@ export class ChaosCrawler {
     this.globalCoverage = new Set();
     this.pageCoverageDeltas = [];
     this.targetNovelty = new Map();
-    this.perfPageIndex = 0;
-    this.perfRunId = randomBytes(4).toString("hex");
-    this.perfLoadTraceIds = [];
-    this.perfCoverage = null;
+    this.perf.reset();
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
@@ -724,7 +697,7 @@ export class ChaosCrawler {
       }
 
       // lightbringer's in-page collector (web-vitals + long-task observers),
-      // which is what `collectMetrics` reads LCP and TBT from. It is installed
+      // which is what `collectLoadMetrics` reads LCP and TBT from. It is installed
       // first, before every other init script, and the order is load-bearing:
       // init scripts run in registration order, and the collector captures the
       // native `performance.now` / `timeOrigin` when it runs. Installed after
@@ -741,7 +714,7 @@ export class ChaosCrawler {
       // the span is really about would never start its probe and those spans
       // would carry no frames.
       await (this.cdpPage ?? this.context).addInitScript({
-        content: collectorInitScript({ frames: this.perfOptions !== null }),
+        content: collectorInitScript({ frames: this.perf.enabled }),
       });
 
       // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
@@ -901,11 +874,7 @@ export class ChaosCrawler {
     this.baseOrigin = new URL(url).origin;
 
     // Set up external navigation blocking and/or fault injection routing.
-    if (
-      this.options.blockExternalNavigation ||
-      this.compiledFaultRules.length > 0 ||
-      this.options.traceparent
-    ) {
+    if (this.needsRouting()) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -987,7 +956,7 @@ export class ChaosCrawler {
       mergeRuntimeStats(this.compiledRuntimeFaults, pageStats);
     } catch (err) {
       this.logger.warn("runtime_fault_stats_failed", {
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
     }
   }
@@ -1008,7 +977,7 @@ export class ChaosCrawler {
       mergeIframeStats(this.compiledIframeFaults, pageStats);
     } catch (err) {
       this.logger.warn("iframe_fault_stats_failed", {
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
     }
   }
@@ -1034,7 +1003,7 @@ export class ChaosCrawler {
       } catch (err) {
         this.logger.warn("failure_artifact_screenshot_failed", {
           url: result.url,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
       }
     }
@@ -1046,7 +1015,7 @@ export class ChaosCrawler {
       } catch (err) {
         this.logger.warn("failure_artifact_html_failed", {
           url: result.url,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
       }
     }
@@ -1066,7 +1035,7 @@ export class ChaosCrawler {
     } catch (err) {
       this.logger.warn("failure_artifact_write_failed", {
         url: result.url,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
     }
   }
@@ -1104,7 +1073,7 @@ export class ChaosCrawler {
     } catch (err) {
       this.logger.warn("sitemap_fetch_failed", {
         source,
-        reason: err instanceof Error ? err.message : String(err),
+        reason: errorMessage(err),
       });
       return;
     }
@@ -1158,7 +1127,7 @@ export class ChaosCrawler {
       this.logger.warn("coverage_take_failed", {
         url,
         phase: "page-load",
-        reason: err instanceof Error ? err.message : String(err),
+        reason: errorMessage(err),
       });
       this.lastCoverageSnapshot = new Set();
       return;
@@ -1185,7 +1154,7 @@ export class ChaosCrawler {
         url,
         selector,
         phase: "action",
-        reason: err instanceof Error ? err.message : String(err),
+        reason: errorMessage(err),
       });
       return;
     }
@@ -1226,7 +1195,7 @@ export class ChaosCrawler {
     if (!this.currentAction) {
       // A request of the page load: the load span keeps it for the
       // server-fault join (no-op unless the load span is open).
-      this.pagePerf?.noteLoadTraceId(traceId);
+      this.perf.noteLoadTraceId(traceId);
       return;
     }
     if (!this.currentAction.traceIds) this.currentAction.traceIds = [];
@@ -1249,7 +1218,7 @@ export class ChaosCrawler {
       ...toCandidateGeometry(t),
     }));
 
-    const lastActionPerf = this.pagePerf?.lastActionPerf();
+    const lastActionPerf = this.perf.lastActionPerf();
     const result = await consultAdvisor({
       state: {
         callsThisCrawl: runtime.budget.callsThisCrawl(),
@@ -1369,7 +1338,7 @@ export class ChaosCrawler {
       // shared one, so a CPU throttle does not attach a second session.
       const context = page.context();
       this.lifecycleExecutor = new PlaywrightLifecycleExecutor(page, context, () =>
-        pageCdp(context, page).session(),
+        pageCdp(page).session(),
       );
     }
     const executor = this.lifecycleExecutor;
@@ -1383,15 +1352,15 @@ export class ChaosCrawler {
         await executeLifecycleAction(c.fault.action, executor);
         c.fired++;
         // Persistent: a throttle or wiped storage lasts the rest of the visit.
-        if (this.pagePerf) this.pagePerf.noteFault(c.name, { persistent: true });
-        else if (this.perfOptions) this.pendingPerfFaults.push(c.name);
+        // Before the page's perf session opens it is kept for the load span.
+        this.perf.noteFault(c.name, { persistent: true });
       } catch (err) {
         c.errored++;
         this.logger.warn("lifecycle_fault_failed", {
           name: c.name,
           stage,
           url,
-          reason: err instanceof Error ? err.message : String(err),
+          reason: errorMessage(err),
         });
       }
     }
@@ -1404,16 +1373,21 @@ export class ChaosCrawler {
    */
   private async applyNetworkProfile(page: Page, profile: NetworkProfile): Promise<void> {
     try {
-      const cdp = pageCdp(page.context(), page);
+      const cdp = pageCdp(page);
       await cdp.enable("Network");
       const client = await cdp.session();
       await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
     } catch (err) {
       this.logger.warn("network_profile_failed", {
         profile,
-        reason: err instanceof Error ? err.message : String(err),
+        reason: errorMessage(err),
       });
     }
+  }
+
+  /** Whether a page needs the route handler (navigation blocking, faults, traceparent). */
+  private needsRouting(): boolean {
+    return !!(this.options.blockExternalNavigation || this.compiledFaultRules.length > 0 || this.options.traceparent);
   }
 
   private async setupNavigationBlocking(page: Page): Promise<void> {
@@ -1480,7 +1454,7 @@ export class ChaosCrawler {
         // Before the fault runs: a delay's span is the one open when the
         // request was made, not the one open when the delay ends. The label
         // is `faultInjections[].rule`'s, so the two join by name.
-        this.pagePerf?.noteFault(winner.rule.name ?? winner.pattern.toString());
+        this.perf.noteFault(winner.rule.name ?? winner.pattern.toString());
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
@@ -1511,6 +1485,57 @@ export class ChaosCrawler {
     if (page === this.cdpPage) this.routeHandlers.set(page, handler);
   }
 
+  /**
+   * Reclassify a 404 / 5xx page as recovered (navigating back to the last
+   * good URL when recovery is on), or remember a clean 200 as the next
+   * recovery target. Runs after the failure bundle and fault stats are
+   * collected, since the recovery navigation takes the page away.
+   */
+  private async applyRecovery(page: Page, entry: QueueEntry, result: PageResult): Promise<void> {
+    const { url, sourceUrl, method, sourceElement } = entry;
+    // Handle recovery from 404 or error status
+    if (
+      this.options.enableRecovery &&
+      result.statusCode &&
+      (result.statusCode === 404 || result.statusCode >= 500)
+    ) {
+      // Track dead link with source information
+      this.discoveryMetrics.deadLinks.push({
+        url,
+        statusCode: result.statusCode,
+        sourceUrl,
+        sourceElement,
+        method,
+      });
+
+      const recovery = this.createRecoveryInfo(
+        url,
+        `HTTP ${result.statusCode}`
+      );
+      this.logger.logRecovery(recovery);
+      this.logger.logNavigationError(url, result.statusCode, `HTTP ${result.statusCode}`);
+      this.recoveryCount++;
+
+      // Try to recover by going back to last successful URL
+      if (this.lastSuccessfulUrl && this.lastSuccessfulUrl !== url) {
+        try {
+          await this.gotoAndSettle(page, this.lastSuccessfulUrl);
+          this.logger.info("recovery_success", { recoveredTo: this.lastSuccessfulUrl });
+        } catch {
+          // Recovery navigation failed, just continue
+          this.logger.warn("recovery_failed", { url: this.lastSuccessfulUrl });
+        }
+      }
+
+      // Mark result as recovered
+      result.recovery = recovery;
+      result.status = "recovered";
+    } else if (result.status === "success" && result.statusCode === 200) {
+      // Update last successful URL
+      this.lastSuccessfulUrl = url;
+    }
+  }
+
   private async crawlPage(entry: QueueEntry): Promise<PageResult> {
     const page = this.cdpPage ?? await this.context!.newPage();
     const { url, sourceUrl, method, sourceElement } = entry;
@@ -1534,23 +1559,19 @@ export class ChaosCrawler {
       // cannot pull CDP out from under the network profile or a lifecycle
       // fault using the same session.
       try {
-        const cdp = await pageCdp(page.context(), page).session();
+        const cdp = await pageCdp(page).session();
         this.coverageCollector = new CoverageCollector(cdp);
         await this.coverageCollector.start();
       } catch (err) {
         this.logger.warn("coverage_attach_failed", {
           url,
-          reason: err instanceof Error ? err.message : String(err),
+          reason: errorMessage(err),
         });
         this.coverageCollector = null;
       }
     }
 
-    if (
-      this.options.blockExternalNavigation ||
-      this.compiledFaultRules.length > 0 ||
-      this.options.traceparent
-    ) {
+    if (this.needsRouting()) {
       await this.setupNavigationBlocking(page);
     }
 
@@ -1572,47 +1593,7 @@ export class ChaosCrawler {
       await this.collectRuntimeFaultStats(page);
       await this.collectIframeFaultStats(page);
 
-      // Handle recovery from 404 or error status
-      if (
-        this.options.enableRecovery &&
-        result.statusCode &&
-        (result.statusCode === 404 || result.statusCode >= 500)
-      ) {
-        // Track dead link with source information
-        this.discoveryMetrics.deadLinks.push({
-          url,
-          statusCode: result.statusCode,
-          sourceUrl,
-          sourceElement,
-          method,
-        });
-
-        const recovery = this.createRecoveryInfo(
-          url,
-          `HTTP ${result.statusCode}`
-        );
-        this.logger.logRecovery(recovery);
-        this.logger.logNavigationError(url, result.statusCode, `HTTP ${result.statusCode}`);
-        this.recoveryCount++;
-
-        // Try to recover by going back to last successful URL
-        if (this.lastSuccessfulUrl && this.lastSuccessfulUrl !== url) {
-          try {
-            await this.gotoAndSettle(page, this.lastSuccessfulUrl);
-            this.logger.info("recovery_success", { recoveredTo: this.lastSuccessfulUrl });
-          } catch {
-            // Recovery navigation failed, just continue
-            this.logger.warn("recovery_failed", { url: this.lastSuccessfulUrl });
-          }
-        }
-
-        // Mark result as recovered
-        result.recovery = recovery;
-        result.status = "recovered";
-      } else if (result.status === "success" && result.statusCode === 200) {
-        // Update last successful URL
-        this.lastSuccessfulUrl = url;
-      }
+      await this.applyRecovery(page, entry, result);
 
       this.events.onPageComplete?.(result);
       this.logger.logPageComplete(result);
@@ -1633,18 +1614,22 @@ export class ChaosCrawler {
     }
   }
 
-  private async crawlPageWithExistingPage(page: Page, url: string): Promise<PageResult> {
-    const errors: PageError[] = [];
-    const warnings: string[] = [];
-    const blockedNavigations: string[] = [];
-    const startTime = Date.now();
+  /**
+   * Register the per-page error / warning / server-fault collectors. They
+   * register in their original order: console, pageerror, response, then —
+   * after `betweenRegistrations` (the page's init scripts) has run —
+   * requestfailed. `stop()` turns collection off and detaches every handler.
+   */
+  private async attachPageCollectors(
+    page: Page,
+    errors: PageError[],
+    warnings: string[],
+    betweenRegistrations: () => Promise<void>,
+  ): Promise<{ stop(): void }> {
     // Set to false once collection is done so spurious events fired during
     // page.close() (in-flight requests getting cancelled as ERR_ABORTED, etc.)
     // don't pollute the PageResult.
     let collecting = true;
-
-    this.events.onPageStart?.(url);
-    this.logger.logPageStart(url);
 
     // Set up error listeners. Each error records `page.url()` at fire time
     // so that errors triggered after a chaos-action navigation are attributed
@@ -1661,9 +1646,7 @@ export class ChaosCrawler {
           url: page.url(),
           timestamp: Date.now(),
         };
-        errors.push(error);
-        this.events.onError?.(error);
-        this.logger.logPageError(error);
+        this.emitPageError(errors, error);
       } else if (type === "warning") {
         warnings.push(text);
       }
@@ -1681,9 +1664,7 @@ export class ChaosCrawler {
         url: page.url(),
         timestamp: Date.now(),
       };
-      errors.push(error);
-      this.events.onError?.(error);
-      this.logger.logPageError(error);
+      this.emitPageError(errors, error);
     };
     page.on("pageerror", onPageError);
 
@@ -1704,65 +1685,7 @@ export class ChaosCrawler {
       : null;
     if (onResponse) page.on("response", onResponse);
 
-    // Capture unhandled promise rejections. The install claims them via
-    // `preventDefault` so they don't also fire as `pageerror` (which we'd
-    // misclassify as an exception). Shared with the exported
-    // `watchUnhandledRejections` rather than inlined twice — a harness written
-    // against this library needs exactly the same mechanism, and two copies is
-    // how one of them ends up without the `preventDefault`.
-    if (!this.initializedPages.has(page)) {
-      await watchUnhandledRejections(page);
-
-      // Capture SPA route changes that go through the History API
-      // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,
-      // Next.js client-side links, hand-rolled `useNavigate()` buttons —
-      // all of them mutate history without firing a real navigation, which
-      // means `extractLinks` (DOM-only) misses every URL they would route
-      // to. We monkey-patch the two methods on every page so each call
-      // appends the URL into a side channel that `drainSpaNavigations`
-      // reads later.
-      await page.addInitScript(() => {
-        // @ts-ignore - custom bag attached to window
-        window.__chaosNavigations = [];
-        const origPush = history.pushState;
-        const origReplace = history.replaceState;
-        history.pushState = function (...args: unknown[]) {
-          try {
-            const url = args[2];
-            if (typeof url === "string" && url.length > 0) {
-              // @ts-ignore
-              window.__chaosNavigations.push({
-                method: "pushState",
-                url,
-                timestamp: Date.now(),
-              });
-            }
-          } catch {
-            /* never let our hook break the host page */
-          }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return origPush.apply(this, args as any);
-        };
-        history.replaceState = function (...args: unknown[]) {
-          try {
-            const url = args[2];
-            if (typeof url === "string" && url.length > 0) {
-              // @ts-ignore
-              window.__chaosNavigations.push({
-                method: "replaceState",
-                url,
-                timestamp: Date.now(),
-              });
-            }
-          } catch {
-            /* never let our hook break the host page */
-          }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return origReplace.apply(this, args as any);
-        };
-      });
-      this.initializedPages.add(page);
-    }
+    await betweenRegistrations();
 
     const onRequestFailed = (request: Request) => {
       if (!collecting) return;
@@ -1796,11 +1719,52 @@ export class ChaosCrawler {
         url: page.url(),
         timestamp: Date.now(),
       };
-      errors.push(error);
-      this.events.onError?.(error);
-      this.logger.logPageError(error);
+      this.emitPageError(errors, error);
     };
     page.on("requestfailed", onRequestFailed);
+
+    return {
+      stop: () => {
+        collecting = false;
+        page.off("console", onConsole);
+        page.off("pageerror", onPageError);
+        if (onResponse) page.off("response", onResponse);
+        page.off("requestfailed", onRequestFailed);
+      },
+    };
+  }
+
+  /**
+   * Install this page's once-per-page init scripts: the unhandled-rejection
+   * watcher and the SPA History-API hook.
+   */
+  private async installPageInitScripts(page: Page): Promise<void> {
+    // Capture unhandled promise rejections. The install claims them via
+    // `preventDefault` so they don't also fire as `pageerror` (which we'd
+    // misclassify as an exception). Shared with the exported
+    // `watchUnhandledRejections` rather than inlined twice — a harness written
+    // against this library needs exactly the same mechanism, and two copies is
+    // how one of them ends up without the `preventDefault`.
+    if (this.initializedPages.has(page)) return;
+    await watchUnhandledRejections(page);
+    // Capture SPA route changes that go through the History API; see
+    // `installSpaNavigationHook` for why `extractLinks` alone misses them.
+    await installSpaNavigationHook(page);
+    this.initializedPages.add(page);
+  }
+
+  private async crawlPageWithExistingPage(page: Page, url: string): Promise<PageResult> {
+    const errors: PageError[] = [];
+    const warnings: string[] = [];
+    const blockedNavigations: string[] = [];
+    const startTime = Date.now();
+
+    this.events.onPageStart?.(url);
+    this.logger.logPageStart(url);
+
+    const collectors = await this.attachPageCollectors(page, errors, warnings, () =>
+      this.installPageInitScripts(page),
+    );
 
     // Track blocked external navigations
     const originalBlockedCount = this.blockedExternalCount;
@@ -1817,7 +1781,7 @@ export class ChaosCrawler {
     const requestTracking = this.settle.mode === "adaptive" ? trackPageRequests(page) : null;
     this.pageRequests = requestTracking?.tracker ?? null;
     this.pageSettleCapped = 0;
-    this.pendingPerfFaults = [];
+    this.perf.clearPending();
     // The previous page's last action is over: this page's load requests are
     // not its. `performWeightedActions` clears this too, but only after the
     // load, and the load span's server-fault join needs the load's trace ids.
@@ -1830,7 +1794,7 @@ export class ChaosCrawler {
 
       // The load span opens after the beforeNavigation faults, so it
       // measures the navigation under them rather than the faults' own
-      // setup, and closes after `collectMetrics` below.
+      // setup, and closes after `collectLoadMetrics` below.
       await this.beginLoadSpan(page, url);
 
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
@@ -1852,21 +1816,17 @@ export class ChaosCrawler {
       await this.runInvariants("afterLoad", page, url, errors);
 
       const loadTime = Date.now() - startTime;
-      const metrics = await this.collectMetrics(page);
-      // Strictly after `collectMetrics`: it reads the collector's store
+      const metrics = await collectLoadMetrics(page);
+      // Strictly after `collectLoadMetrics`: it reads the collector's store
       // without draining it, and closing a span drains the store. The other
       // order would take LCP and TBT's long tasks away before they are read.
-      await this.pagePerf?.endLoad({ settleCapped: loadCapped });
+      await this.perf.endLoad({ settleCapped: loadCapped });
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
       // History-API navigations that fired during page load (auto-routing
       // SPAs that redirect / on mount). Same de-dup happens at the queue
       // feeder, so duplicates between extractLinks and SPA drain are fine.
-      const loadSpaUrls = resolveSpaNavigationUrls(
-        await this.drainSpaNavigations(page),
-        page.url(),
-      );
-      for (const u of loadSpaUrls) links.push(u);
+      await this.appendSpaLinks(page, links);
 
       // beforeActions lifecycle faults — invariants have passed, the chaos
       // driver is about to start. Service Worker cache eviction lives here.
@@ -1885,11 +1845,7 @@ export class ChaosCrawler {
 
       // History-API navigations that fired DURING actions (every chaos
       // click on a React Router `<button onClick={navigate(...)}>`).
-      const actionSpaUrls = resolveSpaNavigationUrls(
-        await this.drainSpaNavigations(page),
-        page.url(),
-      );
-      for (const u of actionSpaUrls) links.push(u);
+      await this.appendSpaLinks(page, links);
 
       await this.runInvariants("afterActions", page, url, errors);
 
@@ -1922,7 +1878,7 @@ export class ChaosCrawler {
         ...errors,
         {
           type: "exception",
-          message: err instanceof Error ? err.message : String(err),
+          message: errorMessage(err),
           stack: err instanceof Error ? err.stack : undefined,
           url,
           timestamp: Date.now(),
@@ -1945,11 +1901,7 @@ export class ChaosCrawler {
     // same reason: stopping a timed-out load aborts its requests, and what
     // the measurement itself causes must not reach the error stream, which
     // is what a crawl with perf off would report.
-    collecting = false;
-    page.off("console", onConsole);
-    page.off("pageerror", onPageError);
-    if (onResponse) page.off("response", onResponse);
-    page.off("requestfailed", onRequestFailed);
+    collectors.stop();
     requestTracking?.detach();
     this.pageRequests = null;
     if (this.settle.mode === "adaptive") result.settleCapped = this.pageSettleCapped;
@@ -1970,32 +1922,15 @@ export class ChaosCrawler {
    * page is crawled unmeasured: measurement must never be why a page fails.
    */
   private async beginLoadSpan(page: Page, url: string): Promise<void> {
-    this.pagePerf = null;
-    if (!this.perfOptions) {
-      this.pendingPerfFaults = [];
-      return;
-    }
-    try {
+    await this.perf.beginPage(page, url, {
       // Decided per page, not per crawler: only a page in the context
       // `start()` created has the collector already. A caller's page on the
       // `testPage()` path belongs to a context the crawler never touched,
       // even when this same crawler ran `start()` before.
-      const perf = await PagePerf.open(page, url, this.perfOptions, {
-        pageIndex: this.perfPageIndex++,
-        runId: this.perfRunId,
-        installCollector: page.context() !== this.context,
-        // The runtime-fault script is on every page of the crawl.
-        pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
-      });
-      await perf.beginLoad();
-      for (const name of this.pendingPerfFaults) perf.noteFault(name, { persistent: true });
-      this.pagePerf = perf;
-    } catch (err) {
-      this.logger.warn("perf_session_failed", {
-        url,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    }
+      installCollector: page.context() !== this.context,
+      // The runtime-fault script is on every page of the crawl.
+      pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
+    });
   }
 
   /**
@@ -2004,8 +1939,7 @@ export class ChaosCrawler {
    * span and the `traceIds` the placeholder collects cover the same step.
    */
   private async beginActionSpan(): Promise<SpanHandle | null> {
-    if (!this.pagePerf || this.perfOptions?.actions !== true) return null;
-    return this.pagePerf.beginAction();
+    return this.perf.beginAction();
   }
 
   /**
@@ -2029,9 +1963,66 @@ export class ChaosCrawler {
       result !== null && this.settle.mode === "adaptive"
         ? await this.settleAdaptively(page, ACTION_SETTLE_CAP_MS, "action")
         : false;
-    if (span === null || !this.pagePerf) return;
-    if (result === null) this.pagePerf.cancelAction(span);
-    else await this.pagePerf.endAction(span, result, { settleCapped });
+    if (result === null) this.perf.cancelAction(span);
+    else await this.perf.endAction(span, result, { settleCapped });
+  }
+
+  /**
+   * Run one chosen action inside its perf span, with a placeholder standing in
+   * as `currentAction` while it runs.
+   *
+   * The placeholder exists so traceIds captured during execution land on an
+   * object before the real result exists; they are carried onto the (fresh)
+   * result afterwards. A null result is a skipped action: `currentAction` is
+   * left as the placeholder and the caller logs and moves on.
+   *
+   * Replay does not use this — it never had a placeholder or traceIds.
+   */
+  private async runMeasuredStep(
+    page: Page,
+    seed: { target: string; selector?: string },
+    perform: () => Promise<ActionResult | null>,
+  ): Promise<ActionResult | null> {
+    const placeholder: ActionResult = {
+      type: "click", // overwritten by the real result on success
+      target: seed.target,
+      ...(seed.selector !== undefined ? { selector: seed.selector } : {}),
+      success: false,
+      timestamp: Date.now(),
+    };
+    this.currentAction = placeholder;
+    const span = await this.beginActionSpan();
+    const result = await perform();
+    await this.endActionSpan(page, span, result);
+    if (result === null) return null;
+    if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
+    this.currentAction = result;
+    return result;
+  }
+
+  /** Record a performed action everywhere a performed action is reported. */
+  private recordAction(result: ActionResult, url: string, stamp: TraceStamp | undefined): void {
+    this.actions.push(result);
+    this.addToHistory(result); // Add to recovery history
+    if (this.isRecordingTrace()) this.trace.push(actionToTraceEntry(result, url, stamp));
+    this.events.onAction?.(result);
+    this.logger.logAction(result);
+  }
+
+  /**
+   * The tail of a chaos action step: attribute its coverage, re-apply the
+   * betweenActions lifecycle faults, then pause.
+   */
+  private async afterActionStep(page: Page, url: string, coverageSelector: string | null): Promise<void> {
+    // Attribute V8 coverage executed during this action to the selected
+    // target — feeds the novelty score that biases the next picks.
+    if (coverageSelector !== null) await this.attributeActionCoverage(url, coverageSelector);
+    // betweenActions lifecycle faults — re-applied after each chaos action
+    // so sustained-pressure faults (CPU throttle, repeated tamper) keep
+    // their pressure across the loop.
+    await this.applyLifecycleStage("betweenActions", page, url);
+    // Small delay between actions
+    await this.pauseBetweenActions(page);
   }
 
   /**
@@ -2111,35 +2102,20 @@ export class ChaosCrawler {
     url: string,
     { navigationFailed }: { navigationFailed: boolean },
   ): Promise<void> {
-    const perf = this.pagePerf;
-    if (!perf) return;
-    this.pagePerf = null;
-    let spans: PerfSpanReport[];
-    try {
-      spans = await perf.finish(result, { navigationFailed });
-    } catch (err) {
-      this.logger.warn("perf_finish_failed", {
-        url,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-    const load = perf.loadTraceIds();
-    if (load && load.traceIds.length > 0) this.perfLoadTraceIds.push(load);
-    if (perf.coverage) {
-      this.perfCoverage = mergeCoverageArtifacts(this.perfCoverage ?? {}, perf.coverage);
-    }
-    // Here rather than at each span's end: an action's key needs its result,
-    // and the spans only exist once lightbringer has built the page report.
+    const violations = await this.perf.finishPage(result, url, { navigationFailed });
     // The errors go onto the result itself because the page is over — its
     // `errors` array is the one the report, clusters and exit code read.
-    const violations = checkPerfBudgets(spans, this.options.perfBudgets, url);
     for (const error of violations) {
-      result.errors.push(error);
-      this.events.onError?.(error);
-      this.logger.logPageError(error);
+      this.emitPageError(result.errors, error);
     }
     if (violations.length > 0) result.hasErrors = true;
+  }
+
+  /** Record a page error and fan it out to the event hook and the logger. */
+  private emitPageError(errors: PageError[], error: PageError): void {
+    errors.push(error);
+    this.events.onError?.(error);
+    this.logger.logPageError(error);
   }
 
   /**
@@ -2155,73 +2131,7 @@ export class ChaosCrawler {
   ): void {
     const violations = checkPerformanceBudget(metrics, this.options.performanceBudget, url);
     for (const error of violations) {
-      errors.push(error);
-      this.events.onError?.(error);
-      this.logger.logPageError(error);
-    }
-  }
-
-  /**
-   * Read the page-load metrics once the load has settled.
-   *
-   * TTFB / FCP / DCL / load come from Navigation and Paint Timing, as they
-   * always have. LCP and TBT come from lightbringer's collector, which the
-   * crawler installs at context level in `start()`:
-   *
-   *   - `lcp` is web-vitals' latest LCP candidate. It exists only once the
-   *     browser has reported one, which is why this runs after the load
-   *     settles rather than at `domcontentloaded`.
-   *   - `tbt` is Σ max(0, duration − 50 ms) over long tasks that started at
-   *     or after FCP (from time 0 when there was no paint), up to now. Real
-   *     TBT stops at Time to Interactive; the crawler has no TTI, so this is
-   *     "FCP to the end of load" — an approximation, and documented as one.
-   *
-   * The collector is read without draining it: entries stay in the store for
-   * a perf session that drains them later. `flush()` first moves observer
-   * records the browser has queued but not yet delivered, so a long task at
-   * the very end of the load is not missed.
-   *
-   * A page without the collector — a caller-owned page on the `testPage()`
-   * path, or `setContent` — keeps today's four fields and leaves `lcp` and
-   * `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
-   * "measured, and fast".
-   */
-  private async collectMetrics(page: Page): Promise<PerformanceMetrics> {
-    try {
-      const metrics = await page.evaluate(() => {
-        const perf = performance;
-        const navigation = perf.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
-        const paint = perf.getEntriesByType("paint");
-
-        const fcp = paint.find((e) => e.name === "first-contentful-paint");
-
-        const out: PerformanceMetrics = {
-          ttfb: navigation?.responseStart - navigation?.requestStart,
-          domContentLoaded: navigation?.domContentLoadedEventEnd - navigation?.startTime,
-          load: navigation?.loadEventEnd - navigation?.startTime,
-          fcp: fcp?.startTime,
-        };
-
-        const store = (window as unknown as PerfWindow).__perf;
-        if (!store || store.__lb !== true) return out;
-        store.flush?.();
-        const lcp = store.vitals.LCP?.value;
-        if (typeof lcp === "number") out.lcp = lcp;
-        // Long-task starts and FCP are both native entry timestamps on this
-        // document's timeline, so a clock-skew fault cannot shift one
-        // against the other.
-        const from = fcp?.startTime ?? 0;
-        let tbt = 0;
-        for (const task of store.longTasks) {
-          if (task.start >= from) tbt += Math.max(0, task.duration - 50);
-        }
-        out.tbt = tbt;
-        return out;
-      });
-
-      return metrics;
-    } catch {
-      return {};
+      this.emitPageError(errors, error);
     }
   }
 
@@ -2302,21 +2212,11 @@ export class ChaosCrawler {
           this.rng,
         );
 
-      // Build a placeholder ActionResult ahead of the call so traceIds captured
-      // during execution land on the right object. We carry the captured ids
-      // onto the real result returned by performActionOnTarget below.
-      const placeholder: ActionResult = {
-        type: "click", // overwritten by performActionOnTarget on success
-        target: selectedTarget.name ?? selectedTarget.selector,
-        selector: selectedTarget.selector,
-        success: false,
-        timestamp: Date.now(),
-      };
-      this.currentAction = placeholder;
-
-      const span = await this.beginActionSpan();
-      const result = await this.performActionOnTarget(page, selectedTarget, url);
-      await this.endActionSpan(page, span, result);
+      const result = await this.runMeasuredStep(
+        page,
+        { target: selectedTarget.name ?? selectedTarget.selector, selector: selectedTarget.selector },
+        () => this.performActionOnTarget(page, selectedTarget, url),
+      );
 
       // Skip null results (element not visible)
       if (result === null) {
@@ -2324,32 +2224,12 @@ export class ChaosCrawler {
         continue;
       }
 
-      // Carry over any traceIds captured against the placeholder onto the
-      // real result. (performActionOnTarget returns a fresh ActionResult.)
-      if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
-      this.currentAction = result;
-
       actionsPerformed++;
-      this.actions.push(result);
-      this.addToHistory(result);  // Add to recovery history
+      // Consumed whether or not a trace is recorded, so a stale pick never
+      // outlives the step it was made for.
       const advisorStamp = this.consumeAdvisorStamp(selectedTarget.selector);
-      if (this.isRecordingTrace()) {
-        this.trace.push(actionToTraceEntry(result, url, advisorStamp));
-      }
-      this.events.onAction?.(result);
-      this.logger.logAction(result);
-
-      // Attribute V8 coverage executed during this action to the selected
-      // target — feeds the novelty score that biases the next picks.
-      await this.attributeActionCoverage(url, selectedTarget.selector);
-
-      // betweenActions lifecycle faults — re-applied after each chaos action
-      // so sustained-pressure faults (CPU throttle, repeated tamper) keep
-      // their pressure across the loop.
-      await this.applyLifecycleStage("betweenActions", page, url);
-
-      // Small delay between actions
-      await this.pauseBetweenActions(page);
+      this.recordAction(result, url, advisorStamp);
+      await this.afterActionStep(page, url, selectedTarget.selector);
     }
   }
 
@@ -2442,7 +2322,7 @@ export class ChaosCrawler {
       };
       // Set only when measured, so a driver can tell "unmeasured" from
       // "cost nothing" by the field's presence.
-      const lastActionPerf = this.pagePerf?.lastActionPerf();
+      const lastActionPerf = this.perf.lastActionPerf();
       if (lastActionPerf) step.lastActionPerf = lastActionPerf;
 
       let pick: DriverPick | null;
@@ -2451,7 +2331,7 @@ export class ChaosCrawler {
       } catch (err) {
         this.logger.warn("driver_threw", {
           driver: driver.name,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
         pick = null;
       }
@@ -2462,29 +2342,25 @@ export class ChaosCrawler {
       }
 
       let result: ActionResult | null;
-      let placeholder: ActionResult;
       let selectorForCoverage: string | null = null;
       if (pick.kind === "custom") {
-        placeholder = {
-          type: "click",
-          target: pick.source ?? driver.name,
-          success: false,
-          timestamp: Date.now(),
-        };
-        this.currentAction = placeholder;
-        const span = await this.beginActionSpan();
-        try {
-          result = await pick.perform(page);
-        } catch (err) {
-          result = {
-            type: "click",
-            target: pick.source ?? driver.name,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-            timestamp: Date.now(),
-          };
-        }
-        await this.endActionSpan(page, span, result);
+        const target = pick.source ?? driver.name;
+        result = await this.runMeasuredStep(page, { target }, async () => {
+          try {
+            return await pick.perform(page);
+          } catch (err) {
+            return {
+              type: "click",
+              target,
+              success: false,
+              error: errorMessage(err),
+              timestamp: Date.now(),
+            };
+          }
+        });
+        // A custom perform always yields a result (a throw becomes a failed
+        // click), so there is no skip to handle here.
+        if (result === null) continue;
       } else {
         const selectedTarget = targets[pick.index];
         if (!selectedTarget) {
@@ -2504,17 +2380,12 @@ export class ChaosCrawler {
           continue;
         }
         selectorForCoverage = selectedTarget.selector;
-        placeholder = {
-          type: "click",
-          target: selectedTarget.name ?? selectedTarget.selector,
-          selector: selectedTarget.selector,
-          success: false,
-          timestamp: Date.now(),
-        };
-        this.currentAction = placeholder;
-        const span = await this.beginActionSpan();
-        result = await this.performActionOnTarget(page, selectedTarget, url, pick.operation);
-        await this.endActionSpan(page, span, result);
+        const operation = pick.operation;
+        result = await this.runMeasuredStep(
+          page,
+          { target: selectedTarget.name ?? selectedTarget.selector, selector: selectedTarget.selector },
+          () => this.performActionOnTarget(page, selectedTarget, url, operation),
+        );
         if (result === null) {
           this.logger.debug("driver_action_skipped", {
             target: selectedTarget.name || selectedTarget.selector,
@@ -2524,33 +2395,15 @@ export class ChaosCrawler {
         }
       }
 
-      if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
-      this.currentAction = result;
       actionsPerformed++;
-      this.actions.push(result);
-      this.addToHistory(result);
-
-      if (this.isRecordingTrace()) {
-        const confidence = pick.kind === "select" ? pick.confidence : undefined;
-        const stamp = pick.reasoning
-          ? {
-              provider: pick.source ?? driver.name,
-              reason: "explicit_request" as const,
-              reasoning: pick.reasoning,
-              ...(confidence !== undefined ? { confidence } : {}),
-            }
-          : undefined;
-        this.trace.push(actionToTraceEntry(result, url, stamp));
-      }
-      this.events.onAction?.(result);
-      this.logger.logAction(result);
+      this.recordAction(result, url, driverTraceStamp(pick, driver.name));
 
       try {
         driver.onActionComplete?.(result, step);
       } catch (err) {
         this.logger.warn("driver_onActionComplete_threw", {
           driver: driver.name,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         });
       }
 
@@ -2567,11 +2420,7 @@ export class ChaosCrawler {
       // them.
       pendingViolations.length = 0;
 
-      if (selectorForCoverage !== null) {
-        await this.attributeActionCoverage(url, selectorForCoverage);
-      }
-      await this.applyLifecycleStage("betweenActions", page, url);
-      await this.pauseBetweenActions(page);
+      await this.afterActionStep(page, url, selectorForCoverage);
     }
 
     driver.onPageEnd?.(url);
@@ -2656,18 +2505,12 @@ export class ChaosCrawler {
           target: action.target,
           selector: action.selector,
           success: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
           timestamp,
         };
       }
       await this.endActionSpan(page, span, result);
-      this.actions.push(result);
-      this.addToHistory(result);
-      if (this.isRecordingTrace()) {
-        this.trace.push(actionToTraceEntry(result, url));
-      }
-      this.events.onAction?.(result);
-      this.logger.logAction(result);
+      this.recordAction(result, url, undefined);
       this.recordReplayOutcome(action, result);
       await this.pauseBetweenActions(page);
     }
@@ -2703,6 +2546,16 @@ export class ChaosCrawler {
     // works and another when it throws would split its baseline in two —
     // with the slow, faulted run being the one that loses its match.
     const attemptedType = attemptedActionType(target.type, operation);
+    // Success result for a plain element action. Results that carry an extra
+    // field (value, blockedExternal, shardSkipped) stay spelled out below:
+    // it sits before success/timestamp there, and report JSON keeps key order.
+    const ok = (type: ActionResult["type"]): ActionResult => ({
+      type,
+      target: target.name || target.selector,
+      selector: target.selector,
+      success: true,
+      timestamp,
+    });
 
     try {
       if (target.type === "scroll") {
@@ -2746,22 +2599,10 @@ export class ChaosCrawler {
           // `clear()` is `fill("")`, so it accepts exactly the controls
           // that made this target an `input` in the first place.
           await element.clear({ timeout: 1000 });
-          return {
-            type: "clear",
-            target: target.name || target.selector,
-            selector: target.selector,
-            success: true,
-            timestamp,
-          };
+          return ok("clear");
         }
         await element.fill(target.fillValue ?? DEFAULT_FILL_VALUE, { timeout: 1000 });
-        return {
-          type: "input",
-          target: target.name || target.selector,
-          selector: target.selector,
-          success: true,
-          timestamp,
-        };
+        return ok("input");
       }
 
       // For links, check if it's external before clicking
@@ -2824,13 +2665,7 @@ export class ChaosCrawler {
         await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
       }
 
-      return {
-        type: "click",
-        target: target.name || target.selector,
-        selector: target.selector,
-        success: true,
-        timestamp,
-      };
+      return ok("click");
     } catch (err) {
       // A scroll's "selector" is the placeholder `window`, which a successful
       // scroll never reports; leaving it off keeps both keyed as `scroll`.
@@ -2839,7 +2674,7 @@ export class ChaosCrawler {
         target: target.name || target.selector,
         ...(attemptedType === "scroll" ? {} : { selector: target.selector }),
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
         timestamp,
       };
     }
@@ -2877,7 +2712,7 @@ export class ChaosCrawler {
       // `server:<kind>` for the server faults its requests hit.
       tagServerFaults(
         [
-          ...this.perfLoadTraceIds,
+          ...this.perf.loadTraceIds,
           ...this.actions.flatMap((a) => (a.perf ? [{ span: a.perf, traceIds: a.traceIds }] : [])),
         ],
         drainedServerFaults,
@@ -2949,7 +2784,7 @@ export class ChaosCrawler {
       // Field is omitted when no faults observed (matches advisor / coverage convention).
       serverFaults: drainedServerFaults ?? undefined,
       perf: buildCrawlPerfSummary(this.results, this.actions, {
-        ...(this.perfCoverage ? { coverage: this.perfCoverage } : {}),
+        ...(this.perf.coverage ? { coverage: this.perf.coverage } : {}),
       }),
     };
   }

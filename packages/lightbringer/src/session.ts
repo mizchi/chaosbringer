@@ -1,5 +1,6 @@
 import type { CDPSession, Page } from "playwright";
-import { DEFAULT_EVALUATE_TIMEOUT_MS, webVitalsIife } from "./config";
+import { webVitalsIife } from "./config";
+import { DEFAULT_EVALUATE_TIMEOUT_MS, type NetProfile } from "./defaults";
 import { BoundedEvaluator } from "./evaluate";
 import {
   browserCollector,
@@ -36,11 +37,7 @@ export interface SessionOptions {
   /** CPU throttling multiplier (1 = off) */
   cpuRate?: number;
   /** network emulation profile (bytes/s, ms), or null for none */
-  netProfile?: {
-    latency: number;
-    downloadThroughput: number;
-    uploadThroughput: number;
-  } | null;
+  netProfile?: NetProfile | null;
   /** add per-selector SelectorStats to the trace (requires trace) */
   cssStats?: boolean;
   /** capture a Chrome trace, streamed to tracePath */

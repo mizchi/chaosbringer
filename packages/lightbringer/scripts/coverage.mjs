@@ -14,7 +14,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { formatCoverageUnion, unionCoverage } from "../dist/core.js";
+import { DEFAULT_COVERAGE_MIN_PCT, formatCoverageUnion, unionCoverage } from "../dist/core.js";
 
 // The union and its classification live in src/coverage-union.ts; this script
 // only reads the artifacts.
@@ -25,7 +25,7 @@ const flags = Object.fromEntries(
     .filter((a) => a.startsWith("--"))
     .map((a) => a.replace(/^--/, "").split("=")),
 );
-const minPct = Number(flags.min ?? "30");
+const minPct = flags.min != null ? Number(flags.min) : DEFAULT_COVERAGE_MIN_PCT;
 
 if (!fs.existsSync(DIR)) {
   console.error(`${DIR} not found. Run the suite with PERF_COV=1 first.`);

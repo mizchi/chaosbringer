@@ -15,6 +15,17 @@ import type {
 } from "./types.js";
 import { PERF_BUDGET_KEYS } from "./types.js";
 
+/** One perf-budget breach as an invariant violation named `perf-budget.<metric>`. */
+function perfBudgetError(metric: string, detail: string, url: string, now: number): PageError {
+  return {
+    type: "invariant-violation",
+    message: `[perf-budget.${metric}] ${detail}`,
+    invariantName: `perf-budget.${metric}`,
+    url,
+    timestamp: now,
+  };
+}
+
 /**
  * Compare measured metrics against a budget and return one invariant-violation
  * per breach. Returns an empty array when budget is undefined or empty,
@@ -33,14 +44,7 @@ export function checkPerformanceBudget(
     const measured = metrics[key];
     if (typeof limit !== "number" || typeof measured !== "number") continue;
     if (measured <= limit) continue;
-    const name = `perf-budget.${key}`;
-    errors.push({
-      type: "invariant-violation",
-      message: `[${name}] ${key}=${Math.round(measured)}ms > budget ${limit}ms`,
-      invariantName: name,
-      url,
-      timestamp: now,
-    });
+    errors.push(perfBudgetError(key, `${key}=${Math.round(measured)}ms > budget ${limit}ms`, url, now));
   }
   return errors;
 }
@@ -71,7 +75,6 @@ export function checkPerfBudgets(
         const get = BUDGET_METRIC[metric];
         const measured = get?.(span);
         if (typeof measured !== "number" || measured <= limit) continue;
-        const name = `perf-budget.${metric}`;
         // Whole numbers from 10 up, one decimal below, for reading. Clustering
         // does not depend on this: fingerprintError folds the measured value
         // of every perf-budget message, so 23 vs 24 is one cluster. Rounding
@@ -79,13 +82,9 @@ export function checkPerfBudgets(
         // for 10.4), so it falls back to the exact value when it would.
         let shown = measured >= 10 ? Math.round(measured) : Math.round(measured * 10) / 10;
         if (shown <= limit) shown = measured;
-        errors.push({
-          type: "invariant-violation",
-          message: `[${name}] ${span.key}: ${metric}=${shown} > budget ${limit} (rule "${rule.match}")`,
-          invariantName: name,
-          url,
-          timestamp: now,
-        });
+        errors.push(
+          perfBudgetError(metric, `${span.key}: ${metric}=${shown} > budget ${limit} (rule "${rule.match}")`, url, now),
+        );
       }
     }
   }

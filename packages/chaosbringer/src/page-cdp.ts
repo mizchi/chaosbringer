@@ -11,7 +11,7 @@
  * browser when its page closes, and the WeakMap entry goes with the page.
  */
 
-import type { BrowserContext, CDPSession, Page } from "playwright";
+import type { CDPSession, Page } from "playwright";
 
 /**
  * CDP domains more than one crawler layer enables on the same page. Tracing is
@@ -34,7 +34,7 @@ export interface PageCdp {
 const byPage = new WeakMap<Page, PageCdp>();
 
 /** The shared {@link PageCdp} for `page`, created on first call. */
-export function pageCdp(context: BrowserContext, page: Page): PageCdp {
+export function pageCdp(page: Page): PageCdp {
   const existing = byPage.get(page);
   if (existing) return existing;
 
@@ -44,7 +44,7 @@ export function pageCdp(context: BrowserContext, page: Page): PageCdp {
   const cdp: PageCdp = {
     session() {
       if (session === null) {
-        session = context.newCDPSession(page);
+        session = page.context().newCDPSession(page);
         // Forget a failed attach, so the next caller can try again instead of
         // inheriting a rejection for the rest of the page's life.
         session.catch(() => {
