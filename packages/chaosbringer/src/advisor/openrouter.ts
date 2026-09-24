@@ -13,6 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { formatLastActionPerf } from "../perf-key.js";
 import { parsePromptFile, renderUserPrompt, type ParsedPrompt } from "./prompts/loader.js";
 import type {
   ActionAdvisor,
@@ -88,6 +89,8 @@ export function openRouterAdvisor(opts: OpenRouterAdvisorOptions): ActionAdvisor
         reason: ctx.reason,
         candidates: formatCandidates(ctx.candidates),
         budgetRemaining: ctx.budgetRemaining,
+        // The key is left out: it embeds the selector.
+        ...(ctx.lastActionPerf ? { lastActionPerf: formatLastActionPerf(ctx.lastActionPerf) } : {}),
       });
 
       // A vision advisor, so it does pay the capture. `consultAdvisor`

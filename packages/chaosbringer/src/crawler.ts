@@ -7,7 +7,13 @@ import { chromium, devices } from "playwright";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { collectorInitScript, type PerfWindow, type SpanHandle } from "lightbringer/core";
+import {
+  collectorInitScript,
+  mergeCoverageArtifacts,
+  type CoverageArtifact,
+  type PerfWindow,
+  type SpanHandle,
+} from "lightbringer/core";
 import { cdpEndpointUrl, selectCdpPage } from "./cdp.js";
 import { resolveTerminalBrowserTarget } from "./terminal-browser.js";
 import type {
@@ -130,7 +136,17 @@ import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
 import { PagePerf } from "./perf.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
-import { resolvePerfOptions, type ResolvedPerfOptions } from "./perf-key.js";
+import { tagServerFaults } from "./perf-faults.js";
+import { attemptedActionType, resolvePerfOptions, type ResolvedPerfOptions } from "./perf-key.js";
+import {
+  ACTION_SETTLE_CAP_MS,
+  pageSettleEnv,
+  resolveSettle,
+  settleAdaptive,
+  trackPageRequests,
+  type RequestTracker,
+  type ResolvedSettle,
+} from "./settle.js";
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -323,6 +339,17 @@ export class ChaosCrawler {
    * of `crawlPageWithExistingPage`. Null with perf off, and between pages.
    */
   private pagePerf: PagePerf | null = null;
+  /** Resolved `settle` option: how each load and each action waits. */
+  private readonly settle: ResolvedSettle;
+  /**
+   * The current page's in-flight requests, for adaptive settle. Attached for
+   * the page's whole visit, not per step: a request started before a step's
+   * settle begins is what that settle has to wait for. Null under
+   * `networkidle`, and between pages.
+   */
+  private pageRequests: RequestTracker | null = null;
+  /** Settles of the current page that hit their cap (adaptive only). */
+  private pageSettleCapped = 0;
   /** Pages measured so far this run; numbers the per-page sidecar files. */
   private perfPageIndex = 0;
   /**
@@ -332,6 +359,24 @@ export class ChaosCrawler {
    * overwrite the previous test's report (or race it, across workers).
    */
   private perfRunId = randomBytes(4).toString("hex");
+  /**
+   * Lifecycle faults that fired on the current page before its perf session
+   * opened (`beforeNavigation` runs ahead of the load span). They are still
+   * in effect when the load runs, so the load span is tagged with them.
+   */
+  private pendingPerfFaults: string[] = [];
+  /**
+   * Each measured page's load span with the trace ids its requests carried,
+   * for the server-fault join in `generateReport` (actions carry theirs on
+   * `ActionResult.traceIds`).
+   */
+  private perfLoadTraceIds: Array<{ span: PerfSpanReport; traceIds: string[] }> = [];
+  /**
+   * The crawl's JS/CSS coverage, every measured page's artifact folded in as
+   * the page finishes (`perf.coverage` only). One merged artifact rather
+   * than one per page: its size is bounded by the site's resources.
+   */
+  private perfCoverage: CoverageArtifact | null = null;
   /**
    * Buffer of invariant violations observed since the driver's previous
    * step. Drained at the top of every driver-loop iteration. Empty when
@@ -368,6 +413,7 @@ export class ChaosCrawler {
     }
 
     this.driver = isDriver(options.driver) ? options.driver : null;
+    this.settle = resolveSettle(options.settle);
     // `perfBudgets` needs spans to check, so rules without `perf` turn it on
     // at light level (validateOptions refuses rules with `perf: false`).
     this.perfOptions = resolvePerfOptions(
@@ -575,6 +621,8 @@ export class ChaosCrawler {
     this.targetNovelty = new Map();
     this.perfPageIndex = 0;
     this.perfRunId = randomBytes(4).toString("hex");
+    this.perfLoadTraceIds = [];
+    this.perfCoverage = null;
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
@@ -1172,10 +1220,15 @@ export class ChaosCrawler {
   /**
    * Append a trace-id to the currently-executing action, if any. Called
    * from the per-request traceparent injection in `setupNavigationBlocking`.
-   * No-op when no action is in flight (e.g. during initial page load).
+   * During the page load (no action in flight) it goes to the load span.
    */
   private recordTraceId(traceId: string): void {
-    if (!this.currentAction) return;
+    if (!this.currentAction) {
+      // A request of the page load: the load span keeps it for the
+      // server-fault join (no-op unless the load span is open).
+      this.pagePerf?.noteLoadTraceId(traceId);
+      return;
+    }
     if (!this.currentAction.traceIds) this.currentAction.traceIds = [];
     this.currentAction.traceIds.push(traceId);
   }
@@ -1196,6 +1249,7 @@ export class ChaosCrawler {
       ...toCandidateGeometry(t),
     }));
 
+    const lastActionPerf = this.pagePerf?.lastActionPerf();
     const result = await consultAdvisor({
       state: {
         callsThisCrawl: runtime.budget.callsThisCrawl(),
@@ -1210,6 +1264,7 @@ export class ChaosCrawler {
       candidates,
       screenshotSupplier: () => page.screenshot({ fullPage: runtime.screenshotFullPage }),
       timeoutMs: runtime.timeoutMs,
+      ...(lastActionPerf ? { lastActionPerf } : {}),
     });
 
     if (result.outcome === "skipped") return null;
@@ -1327,6 +1382,9 @@ export class ChaosCrawler {
       try {
         await executeLifecycleAction(c.fault.action, executor);
         c.fired++;
+        // Persistent: a throttle or wiped storage lasts the rest of the visit.
+        if (this.pagePerf) this.pagePerf.noteFault(c.name, { persistent: true });
+        else if (this.perfOptions) this.pendingPerfFaults.push(c.name);
       } catch (err) {
         c.errored++;
         this.logger.warn("lifecycle_fault_failed", {
@@ -1419,6 +1477,10 @@ export class ChaosCrawler {
       // this file has produced more than any other.
       const winner = pickFaultRule(rules, url, method, this.rng);
       if (winner) {
+        // Before the fault runs: a delay's span is the one open when the
+        // request was made, not the one open when the delay ends. The label
+        // is `faultInjections[].rule`'s, so the two join by name.
+        this.pagePerf?.noteFault(winner.rule.name ?? winner.pattern.toString());
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
@@ -1536,10 +1598,7 @@ export class ChaosCrawler {
         // Try to recover by going back to last successful URL
         if (this.lastSuccessfulUrl && this.lastSuccessfulUrl !== url) {
           try {
-            await page.goto(this.lastSuccessfulUrl, {
-              timeout: this.options.timeout,
-              waitUntil: "networkidle",
-            });
+            await this.gotoAndSettle(page, this.lastSuccessfulUrl);
             this.logger.info("recovery_success", { recoveredTo: this.lastSuccessfulUrl });
           } catch {
             // Recovery navigation failed, just continue
@@ -1753,6 +1812,17 @@ export class ChaosCrawler {
     // live document.
     let navigated = false;
 
+    // Adaptive settle counts this page's requests from before its `goto`, so
+    // the load's own requests are in flight when the load settle begins.
+    const requestTracking = this.settle.mode === "adaptive" ? trackPageRequests(page) : null;
+    this.pageRequests = requestTracking?.tracker ?? null;
+    this.pageSettleCapped = 0;
+    this.pendingPerfFaults = [];
+    // The previous page's last action is over: this page's load requests are
+    // not its. `performWeightedActions` clears this too, but only after the
+    // load, and the load span's server-fault join needs the load's trace ids.
+    this.currentAction = null;
+
     try {
       // beforeNavigation lifecycle faults — applied before the load itself,
       // so e.g. CDP CPU throttling slows the navigation request.
@@ -1763,10 +1833,7 @@ export class ChaosCrawler {
       // setup, and closes after `collectMetrics` below.
       await this.beginLoadSpan(page, url);
 
-      const response = await page.goto(url, {
-        timeout: this.options.timeout,
-        waitUntil: "networkidle",
-      });
+      const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
       navigated = true;
 
       // Drain any unhandled rejections captured during load.
@@ -1789,7 +1856,7 @@ export class ChaosCrawler {
       // Strictly after `collectMetrics`: it reads the collector's store
       // without draining it, and closing a span drains the store. The other
       // order would take LCP and TBT's long tasks away before they are read.
-      await this.pagePerf?.endLoad();
+      await this.pagePerf?.endLoad({ settleCapped: loadCapped });
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
       // History-API navigations that fired during page load (auto-routing
@@ -1883,6 +1950,9 @@ export class ChaosCrawler {
     page.off("pageerror", onPageError);
     if (onResponse) page.off("response", onResponse);
     page.off("requestfailed", onRequestFailed);
+    requestTracking?.detach();
+    this.pageRequests = null;
+    if (this.settle.mode === "adaptive") result.settleCapped = this.pageSettleCapped;
 
     // Both paths, before the caller navigates for recovery or closes the
     // page: a `goto` that timed out still yields a load span that says what
@@ -1901,7 +1971,10 @@ export class ChaosCrawler {
    */
   private async beginLoadSpan(page: Page, url: string): Promise<void> {
     this.pagePerf = null;
-    if (!this.perfOptions) return;
+    if (!this.perfOptions) {
+      this.pendingPerfFaults = [];
+      return;
+    }
     try {
       // Decided per page, not per crawler: only a page in the context
       // `start()` created has the collector already. A caller's page on the
@@ -1911,8 +1984,11 @@ export class ChaosCrawler {
         pageIndex: this.perfPageIndex++,
         runId: this.perfRunId,
         installCollector: page.context() !== this.context,
+        // The runtime-fault script is on every page of the crawl.
+        pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
       });
       await perf.beginLoad();
+      for (const name of this.pendingPerfFaults) perf.noteFault(name, { persistent: true });
       this.pagePerf = perf;
     } catch (err) {
       this.logger.warn("perf_session_failed", {
@@ -1933,15 +2009,100 @@ export class ChaosCrawler {
   }
 
   /**
-   * Close the span `beginActionSpan` opened. `settle: false` because the
-   * action already did its own settling (`networkidle` after a click); a
-   * null result is a skipped action, and a skipped action is not a step, so
-   * its span is dropped rather than recorded as an empty one.
+   * Settle after an action, then close the span `beginActionSpan` opened.
+   *
+   * Under `networkidle` the settle is the post-click `waitForLoadState` inside
+   * `performActionOnTarget`, exactly as before, and nothing happens here.
+   * Under adaptive settle every action that ran settles here, inside its span,
+   * so the span covers what the step caused. A null result is a skipped
+   * action: not a step, so it neither settles nor records a span.
+   *
+   * `settle: false` on the span because the crawler did the settling; the
+   * span ends now, and carries `capped` when the crawler's settle capped.
    */
-  private async endActionSpan(span: SpanHandle | null, result: ActionResult | null): Promise<void> {
+  private async endActionSpan(
+    page: Page,
+    span: SpanHandle | null,
+    result: ActionResult | null,
+  ): Promise<void> {
+    const settleCapped =
+      result !== null && this.settle.mode === "adaptive"
+        ? await this.settleAdaptively(page, ACTION_SETTLE_CAP_MS, "action")
+        : false;
     if (span === null || !this.pagePerf) return;
     if (result === null) this.pagePerf.cancelAction(span);
-    else await this.pagePerf.endAction(span, result);
+    else await this.pagePerf.endAction(span, result, { settleCapped });
+  }
+
+  /**
+   * `page.goto` and the load's settle.
+   *
+   * `networkidle` is the historic call, unchanged. Adaptive waits for `load`
+   * — not `domcontentloaded`, so images and load-time scripts are in, the
+   * same point `networkidle` starts its idle window from — then settles
+   * adaptively for what is left of the same `timeout`. A load settle that
+   * caps does not fail the page: the page loaded, and a load that never goes
+   * quiet is reported as `capped` instead of as a navigation timeout.
+   */
+  private async gotoAndSettle(
+    page: Page,
+    url: string,
+  ): Promise<{ response: Response | null; capped: boolean }> {
+    if (this.settle.mode === "networkidle") {
+      const response = await page.goto(url, {
+        timeout: this.options.timeout,
+        waitUntil: "networkidle",
+      });
+      return { response, capped: false };
+    }
+    // The recovery navigation runs after the page's own tracker is detached;
+    // it gets one of its own for the length of the navigation.
+    const temporary = this.pageRequests === null ? trackPageRequests(page) : null;
+    const tracker = this.pageRequests ?? temporary!.tracker;
+    try {
+      const started = performance.now();
+      const response = await page.goto(url, { timeout: this.options.timeout, waitUntil: "load" });
+      const left = Math.max(0, this.options.timeout - (performance.now() - started));
+      const capped = await this.settleAdaptively(page, left, "load", tracker);
+      return { response, capped };
+    } finally {
+      temporary?.detach();
+    }
+  }
+
+  /**
+   * One adaptive settle, capped at `capMs`. Returns whether it capped, and
+   * counts a capped one against the current page.
+   */
+  private async settleAdaptively(
+    page: Page,
+    capMs: number,
+    stage: "load" | "action",
+    tracker: RequestTracker | null = this.pageRequests,
+  ): Promise<boolean> {
+    if (this.settle.mode !== "adaptive" || tracker === null) return false;
+    const outcome = await settleAdaptive(tracker, pageSettleEnv(page, tracker), {
+      quietMs: this.settle.quietMs,
+      capMs,
+    });
+    if (!outcome.capped) return false;
+    this.pageSettleCapped++;
+    this.logger.debug("settle_capped", {
+      stage,
+      url: page.url(),
+      capMs,
+      reason: outcome.reason,
+    });
+    return true;
+  }
+
+  /**
+   * The pause between two actions: a fixed 100 ms under `networkidle`, as
+   * before. Adaptive settle has already waited for the page inside the
+   * action's span, so it adds nothing here.
+   */
+  private async pauseBetweenActions(page: Page): Promise<void> {
+    if (this.settle.mode === "networkidle") await page.waitForTimeout(100);
   }
 
   /** Build the page's perf report and attach it to `result` and its actions. */
@@ -1962,6 +2123,11 @@ export class ChaosCrawler {
         reason: err instanceof Error ? err.message : String(err),
       });
       return;
+    }
+    const load = perf.loadTraceIds();
+    if (load && load.traceIds.length > 0) this.perfLoadTraceIds.push(load);
+    if (perf.coverage) {
+      this.perfCoverage = mergeCoverageArtifacts(this.perfCoverage ?? {}, perf.coverage);
     }
     // Here rather than at each span's end: an action's key needs its result,
     // and the spans only exist once lightbringer has built the page report.
@@ -2150,7 +2316,7 @@ export class ChaosCrawler {
 
       const span = await this.beginActionSpan();
       const result = await this.performActionOnTarget(page, selectedTarget, url);
-      await this.endActionSpan(span, result);
+      await this.endActionSpan(page, span, result);
 
       // Skip null results (element not visible)
       if (result === null) {
@@ -2183,7 +2349,7 @@ export class ChaosCrawler {
       await this.applyLifecycleStage("betweenActions", page, url);
 
       // Small delay between actions
-      await page.waitForTimeout(100);
+      await this.pauseBetweenActions(page);
     }
   }
 
@@ -2274,6 +2440,10 @@ export class ChaosCrawler {
         screenshot: screenshotFn,
         invariantViolations: pendingViolations,
       };
+      // Set only when measured, so a driver can tell "unmeasured" from
+      // "cost nothing" by the field's presence.
+      const lastActionPerf = this.pagePerf?.lastActionPerf();
+      if (lastActionPerf) step.lastActionPerf = lastActionPerf;
 
       let pick: DriverPick | null;
       try {
@@ -2314,7 +2484,7 @@ export class ChaosCrawler {
             timestamp: Date.now(),
           };
         }
-        await this.endActionSpan(span, result);
+        await this.endActionSpan(page, span, result);
       } else {
         const selectedTarget = targets[pick.index];
         if (!selectedTarget) {
@@ -2344,7 +2514,7 @@ export class ChaosCrawler {
         this.currentAction = placeholder;
         const span = await this.beginActionSpan();
         result = await this.performActionOnTarget(page, selectedTarget, url, pick.operation);
-        await this.endActionSpan(span, result);
+        await this.endActionSpan(page, span, result);
         if (result === null) {
           this.logger.debug("driver_action_skipped", {
             target: selectedTarget.name || selectedTarget.selector,
@@ -2401,7 +2571,7 @@ export class ChaosCrawler {
         await this.attributeActionCoverage(url, selectorForCoverage);
       }
       await this.applyLifecycleStage("betweenActions", page, url);
-      await page.waitForTimeout(100);
+      await this.pauseBetweenActions(page);
     }
 
     driver.onPageEnd?.(url);
@@ -2490,7 +2660,7 @@ export class ChaosCrawler {
           timestamp,
         };
       }
-      await this.endActionSpan(span, result);
+      await this.endActionSpan(page, span, result);
       this.actions.push(result);
       this.addToHistory(result);
       if (this.isRecordingTrace()) {
@@ -2499,7 +2669,7 @@ export class ChaosCrawler {
       this.events.onAction?.(result);
       this.logger.logAction(result);
       this.recordReplayOutcome(action, result);
-      await page.waitForTimeout(100);
+      await this.pauseBetweenActions(page);
     }
   }
 
@@ -2532,16 +2702,7 @@ export class ChaosCrawler {
     // built from the result's type, and a step that is keyed one way when it
     // works and another when it throws would split its baseline in two —
     // with the slow, faulted run being the one that loses its match.
-    const attemptedType: ActionResult["type"] =
-      target.type === "scroll"
-        ? "scroll"
-        : target.type === "select"
-          ? "select"
-          : target.type === "input"
-            ? operation === "clear"
-              ? "clear"
-              : "input"
-            : "click";
+    const attemptedType = attemptedActionType(target.type, operation);
 
     try {
       if (target.type === "scroll") {
@@ -2653,8 +2814,15 @@ export class ChaosCrawler {
 
       await element.click({ timeout: 1000 });
 
-      // Wait for any navigation to settle
-      await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
+      // Wait for any navigation to settle. Note what this does not do: when
+      // the current document already reached networkidle — it has, the load
+      // waited for it — this resolves at once, so a click that only fires an
+      // XHR is not waited for. Adaptive settle (`endActionSpan`) waits for
+      // the page's requests instead; this call stays as it was under the
+      // default `networkidle`.
+      if (this.settle.mode === "networkidle") {
+        await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {});
+      }
 
       return {
         type: "click",
@@ -2705,6 +2873,15 @@ export class ChaosCrawler {
         const events = drainedServerFaults.filter((e) => e.traceId !== undefined && set.has(e.traceId));
         if (events.length > 0) a.serverFaultEvents = events;
       }
+      // The same join by trace id, onto the perf spans: each span is tagged
+      // `server:<kind>` for the server faults its requests hit.
+      tagServerFaults(
+        [
+          ...this.perfLoadTraceIds,
+          ...this.actions.flatMap((a) => (a.perf ? [{ span: a.perf, traceIds: a.traceIds }] : [])),
+        ],
+        drainedServerFaults,
+      );
     }
 
     return {
@@ -2771,7 +2948,9 @@ export class ChaosCrawler {
       har: this.options.har,
       // Field is omitted when no faults observed (matches advisor / coverage convention).
       serverFaults: drainedServerFaults ?? undefined,
-      perf: buildCrawlPerfSummary(this.results, this.actions),
+      perf: buildCrawlPerfSummary(this.results, this.actions, {
+        ...(this.perfCoverage ? { coverage: this.perfCoverage } : {}),
+      }),
     };
   }
 

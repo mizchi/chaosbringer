@@ -35,6 +35,28 @@ export interface StepSloThresholds {
   meanMs?: number;
   /** Max acceptable error rate (failures / invocations). 0–1. */
   errorRate?: number;
+  /**
+   * Upper bounds on the step's browser-side cost (`StepReport.perf`, needs
+   * `perf` on the run). A step with no `perf` — perf off, or no sampled worker
+   * reached it — is a violation, as a missing target is: a browser SLO that
+   * nothing measured has not passed.
+   */
+  perf?: StepPerfSloThresholds;
+}
+
+/** Max acceptable browser-side quantiles for a step, in ms. */
+export interface StepPerfSloThresholds {
+  durationMsP50?: number;
+  durationMsP95?: number;
+  blockingMsP50?: number;
+  blockingMsP95?: number;
+  /**
+   * A step whose spans had no interaction at all breaches these (actual
+   * `null`): a navigation-only step cannot meet an interaction SLO by having
+   * none.
+   */
+  interactionMsP50?: number;
+  interactionMsP95?: number;
 }
 
 export interface ScenarioSloThresholds {
@@ -113,6 +135,7 @@ export function evaluateSlo(report: LoadReport, slo: SloDefinition): SloResult {
       compareMax(violations, "step", target, "p99Ms", thresholds.p99Ms, step.latency.p99Ms);
       compareMax(violations, "step", target, "meanMs", thresholds.meanMs, step.latency.meanMs);
       compareMax(violations, "step", target, "errorRate", thresholds.errorRate, step.errorRate);
+      if (thresholds.perf) comparePerf(violations, target, thresholds.perf, step);
     }
   }
 
@@ -234,6 +257,42 @@ function compareMax(
     actual,
     message: `[${scope}] ${target} ${metric}=${format(actual)} exceeds ${format(threshold)}`,
   });
+}
+
+function comparePerf(
+  out: SloViolation[],
+  target: string,
+  t: StepPerfSloThresholds,
+  step: StepReport,
+): void {
+  const p = step.perf;
+  const checks: Array<[keyof StepPerfSloThresholds, number | undefined]> = [
+    ["durationMsP50", p?.durationMs.p50],
+    ["durationMsP95", p?.durationMs.p95],
+    ["blockingMsP50", p?.blockingMs.p50],
+    ["blockingMsP95", p?.blockingMs.p95],
+    ["interactionMsP50", p?.interactionMs?.p50],
+    ["interactionMsP95", p?.interactionMs?.p95],
+  ];
+  for (const [name, actual] of checks) {
+    const threshold = t[name];
+    if (threshold === undefined) continue;
+    const metric = `perf.${name}`;
+    if (actual === undefined) {
+      out.push({
+        scope: "step",
+        target,
+        metric,
+        threshold,
+        actual: null,
+        message: p
+          ? `[step] ${target} ${metric} not measured (no span of the step had an interaction)`
+          : `[step] ${target} ${metric} not measured (perf off, or no sampled worker ran the step)`,
+      });
+      continue;
+    }
+    compareMax(out, "step", target, metric, threshold, actual);
+  }
 }
 
 function compareMin(

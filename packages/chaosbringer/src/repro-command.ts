@@ -10,6 +10,7 @@
  * short enough to paste.
  */
 import { DEFAULT_OPTIONS } from "./defaults.js";
+import { settleReproArg } from "./settle.js";
 import { PERF_BUDGET_KEYS } from "./types.js";
 import type { CrawlerOptions } from "./types.js";
 
@@ -69,6 +70,9 @@ seed: number,
   if (options.shardCount !== undefined && options.shardCount > 1) {
     parts.push("--shard", `${options.shardIndex ?? 0}/${options.shardCount}`);
   }
+  // A settle mode changes what every step waits for, so what the repro sees.
+  const settle = settleReproArg(options.settle);
+  if (settle !== null) parts.push("--settle", settle);
   parts.push(...perfReproFlags(options));
   return parts.join(" ");
 }

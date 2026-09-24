@@ -15,6 +15,12 @@ export interface UserPromptVars {
   reason: string;
   candidates: string;
   budgetRemaining?: number | string;
+  /**
+   * One line about the previous action's cost (`formatLastActionPerf`),
+   * appended after the rendered template. Omitted, the prompt renders
+   * exactly as it did before perf facts existed.
+   */
+  lastActionPerf?: string;
 }
 
 const SYSTEM_DELIM = "---SYSTEM---";
@@ -39,9 +45,10 @@ export function parsePromptFile(content: string): ParsedPrompt {
 }
 
 export function renderUserPrompt(template: string, vars: UserPromptVars): string {
-  return template
+  const rendered = template
     .replace(/\{\{url\}\}/g, vars.url)
     .replace(/\{\{reason\}\}/g, vars.reason)
     .replace(/\{\{candidates\}\}/g, vars.candidates)
     .replace(/\{\{budgetRemaining\}\}/g, String(vars.budgetRemaining ?? ""));
+  return vars.lastActionPerf ? `${rendered}\n\n${vars.lastActionPerf}` : rendered;
 }

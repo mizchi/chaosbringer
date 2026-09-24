@@ -10,6 +10,7 @@
 
 import { AdvisorBudget } from "./budget.js";
 import { decideTrigger, type TriggerDecision, type TriggerPolicy, type TriggerState } from "./trigger.js";
+import type { LastActionPerf } from "../types.js";
 import type { ActionAdvisor, AdvisorCandidate, AdvisorSuggestion } from "./types.js";
 
 export interface ConsultDeps {
@@ -21,6 +22,8 @@ export interface ConsultDeps {
   candidates: AdvisorCandidate[];
   screenshotSupplier: () => Promise<Buffer>;
   timeoutMs: number;
+  /** Forwarded as `AdvisorContext.lastActionPerf`; omitted when absent. */
+  lastActionPerf?: LastActionPerf;
 }
 
 export type ConsultOutcome =
@@ -66,6 +69,7 @@ export async function consultAdvisor(deps: ConsultDeps): Promise<ConsultResult> 
         candidates: deps.candidates,
         reason: decision.reason,
         budgetRemaining: remaining,
+        ...(deps.lastActionPerf ? { lastActionPerf: deps.lastActionPerf } : {}),
       }),
       new Promise<typeof TIMEOUT_SENTINEL>((resolve) =>
         setTimeout(() => resolve(TIMEOUT_SENTINEL), deps.timeoutMs),

@@ -175,3 +175,38 @@ describe("openRouterAdvisor", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("openRouterAdvisor lastActionPerf", () => {
+  const userText = async (ctx: AdvisorContext): Promise<string> => {
+    const fetchMock = vi.fn(async () => okResponse(okBody()));
+    await openRouterAdvisor({ apiKey: "k", fetch: fetchMock }).suggest(ctx);
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    const userMsg = body.messages.find((m: { role: string }) => m.role === "user");
+    return userMsg.content.find((c: { type: string }) => c.type === "text").text;
+  };
+
+  it("adds a one-line cost summary, never the key (it holds the selector)", async () => {
+    const text = await userText(sampleContext({ lastActionPerf: {
+  key: "/app :: click #save",
+  durationMs: 412,
+  cpu: { blockingMs: 180, longTaskCount: 2 },
+  interaction: {
+    count: 1,
+    maxDurationMs: 96,
+    type: "click",
+    inputDelayMs: 10,
+    processingMs: 80,
+    presentationMs: 6,
+  },
+  network: { requestCount: 3, encodedKB: 12.4 },
+} }));
+    expect(text).toContain("Previous action cost: 412ms, 180ms main-thread blocking over 2 long tasks");
+    expect(text).not.toContain("#save");
+  });
+
+  it("sends the same prompt as before when absent", async () => {
+    const text = await userText(sampleContext());
+    expect(text).not.toContain("Previous action cost");
+    expect(text.endsWith("2. input C")).toBe(true);
+  });
+});

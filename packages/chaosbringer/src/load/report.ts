@@ -9,6 +9,7 @@
  * report families read similarly.
  */
 import { emptyLatencyStats, latencyStats } from "./histogram.js";
+import { perfQuantiles, stepPerfStats, type WorkerPerfSample } from "./perf-stats.js";
 import type { NetworkSample } from "./sampler.js";
 import type { WorkerSamples } from "./worker.js";
 import type {
@@ -31,7 +32,8 @@ export interface BuildLoadReportInput {
   durationMs: number;
   plannedDurationMs: number;
   rampUpMs: number;
-  planned: ReadonlyArray<{ workerIndex: number; spec: ScenarioSpec }>;
+  /** `startOffsetMs` (ramp-up) feeds `TimelinePerf.startedWorkers`; 0 when absent. */
+  planned: ReadonlyArray<{ workerIndex: number; spec: ScenarioSpec; startOffsetMs?: number }>;
   samples: ReadonlyArray<WorkerSamples>;
   /** Default 1000ms. Values <= 0 disable the timeline (returned empty). */
   timelineBucketMs?: number;
@@ -41,6 +43,12 @@ export interface BuildLoadReportInput {
    * rule didn't fire) so consumers can read row × column.
    */
   faultFirings?: Record<string, ReadonlyArray<number>>;
+  /**
+   * Set when `perf` was on. Turns on the per-bucket `perf` block even when no
+   * sampled worker recorded a span, so the report says "measured, nothing
+   * seen" rather than looking unmeasured.
+   */
+  perf?: { level: "light"; sampledWorkers: number };
 }
 
 export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
@@ -53,15 +61,17 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     workerCount: number;
     iterations: WorkerSamples["iterations"];
     steps: WorkerSamples["steps"];
+    perf: WorkerPerfSample[];
   }>();
   for (let i = 0; i < input.planned.length; i++) {
     const plan = input.planned[i]!;
     const samples = input.samples[i]!;
     const name = plan.spec.scenario.name;
-    const entry = byScenario.get(name) ?? { workerCount: 0, iterations: [], steps: [] };
+    const entry = byScenario.get(name) ?? { workerCount: 0, iterations: [], steps: [], perf: [] };
     entry.workerCount += 1;
     entry.iterations.push(...samples.iterations);
     entry.steps.push(...samples.steps);
+    if (samples.perf) entry.perf.push(...samples.perf);
     byScenario.set(name, entry);
     seenScenarioNames.add(name);
   }
@@ -74,14 +84,22 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
       if (!s.success) e.failures += 1;
       stepsByName.set(s.stepName, e);
     }
+    const perfByStep = new Map<string, WorkerPerfSample[]>();
+    for (const p of group.perf) {
+      const list = perfByStep.get(p.stepName) ?? [];
+      list.push(p);
+      perfByStep.set(p.stepName, list);
+    }
     const stepReports: StepReport[] = [];
     for (const [stepName, e] of stepsByName) {
+      const perf = stepPerfStats(perfByStep.get(stepName) ?? []);
       stepReports.push({
         name: stepName,
         invocations: e.latencies.length,
         failures: e.failures,
         errorRate: e.latencies.length > 0 ? e.failures / e.latencies.length : 0,
         latency: latencyStats(e.latencies),
+        ...(perf ? { perf } : {}),
       });
     }
     const iterationFailures = group.iterations.filter((i) => !i.success).length;
@@ -180,6 +198,9 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     bucketMs: input.timelineBucketMs ?? DEFAULT_TIMELINE_BUCKET_MS,
     samples: input.samples,
     faultFirings: input.faultFirings,
+    perfStartOffsetsMs: input.perf
+      ? input.planned.map((p) => p.startOffsetMs ?? 0)
+      : undefined,
   });
 
   return {
@@ -191,6 +212,7 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
       workers: input.planned.length,
       rampUpMs: input.rampUpMs,
       durationMs: input.plannedDurationMs,
+      ...(input.perf ? { perf: input.perf } : {}),
     },
     totals,
     scenarios,
@@ -207,6 +229,8 @@ interface BuildTimelineInput {
   bucketMs: number;
   samples: ReadonlyArray<WorkerSamples>;
   faultFirings?: Record<string, ReadonlyArray<number>>;
+  /** Every planned worker's ramp-up start offset; set only when perf is on. */
+  perfStartOffsetsMs?: ReadonlyArray<number>;
 }
 
 /**
@@ -258,6 +282,28 @@ function buildTimeline(input: BuildTimelineInput): TimelineBucket[] {
       if (isNetworkError(n)) buckets[idx]!.networkErrors += 1;
     }
   }
+  if (input.perfStartOffsetsMs) {
+    const offsets = input.perfStartOffsetsMs;
+    const blockingByBucket: number[][] = buckets.map(() => []);
+    for (const s of input.samples) {
+      for (const p of s.perf ?? []) {
+        const idx = indexFor(p.timestamp);
+        if (idx !== null) blockingByBucket[idx]!.push(p.blockingMs);
+      }
+    }
+    buckets.forEach((b, i) => {
+      const bucketEnd = b.tMs + input.bucketMs;
+      const blocking = perfQuantiles(blockingByBucket[i]!);
+      b.perf = {
+        // A worker whose offset is past the run never started (the runner
+        // returns it empty), so it can never count here.
+        startedWorkers: offsets.filter((o) => o < bucketEnd && o < input.durationMs).length,
+        spans: blockingByBucket[i]!.length,
+        blockingMsP50: blocking.p50,
+        blockingMsP95: blocking.p95,
+      };
+    });
+  }
   if (input.faultFirings) {
     for (const [name, firings] of Object.entries(input.faultFirings)) {
       for (const t of firings) {
@@ -297,6 +343,7 @@ export function formatLoadReport(report: LoadReport): string {
       lines.push(
         `  ${st.name.padEnd(24)}  n=${pad(st.invocations, 5)}  err=${pad(st.failures, 4)}  p50=${ms(l.p50Ms)}  p95=${ms(l.p95Ms)}  p99=${ms(l.p99Ms)}`,
       );
+      if (st.perf) lines.push(formatStepPerf(st.perf));
     }
     lines.push("");
   }
@@ -320,6 +367,12 @@ export function formatLoadReport(report: LoadReport): string {
       if (series.every((v) => v === 0)) continue;
       lines.push(`  ${("fault:" + rule).padEnd(16)}${sparkline(series)}`);
     }
+    if (report.timeline.some((b) => b.perf)) {
+      // Read against each other: blocking climbing with the worker count is
+      // the browser-side cost of concurrency.
+      lines.push(`  ${"workers".padEnd(16)}${sparkline(report.timeline.map((b) => b.perf?.startedWorkers ?? 0))}`);
+      lines.push(`  ${"blocking p95".padEnd(16)}${sparkline(report.timeline.map((b) => b.perf?.blockingMsP95 ?? 0))}`);
+    }
     const maxIter = Math.max(...report.timeline.map((b) => b.iterations));
     lines.push(`  peak: ${maxIter}/bucket`);
   }
@@ -334,6 +387,18 @@ export function formatLoadReport(report: LoadReport): string {
     }
   }
   return lines.join("\n");
+}
+
+function formatStepPerf(p: NonNullable<StepReport["perf"]>): string {
+  const parts = [
+    `browser n=${p.n}`,
+    `dur p50=${ms(p.durationMs.p50)} p95=${ms(p.durationMs.p95)}`,
+    `blocking p50=${ms(p.blockingMs.p50)} p95=${ms(p.blockingMs.p95)}`,
+  ];
+  if (p.interactionMs) {
+    parts.push(`inp p50=${ms(p.interactionMs.p50)} p95=${ms(p.interactionMs.p95)} (n=${p.interactionMs.n})`);
+  }
+  return `  ${"".padEnd(24)}  ${parts.join("  ")}`;
 }
 
 function ms(n: number): string {

@@ -5,7 +5,7 @@
  * (OpenRouter google/gemini-2.5-flash) lands in a follow-up PR per
  * `docs/superpowers/specs/2026-05-01-vlm-action-advisor-design.md` §10.
  */
-import type { ActionTarget } from "../types.js";
+import type { ActionTarget, LastActionPerf } from "../types.js";
 
 export interface AdvisorCandidate {
   /** Stable index inside the candidate batch. The advisor returns this. */
@@ -57,6 +57,13 @@ export interface AdvisorContext {
   reason: AdvisorConsultReason;
   /** How many advisor calls remain in this crawl, after this one. */
   budgetRemaining: number;
+  /**
+   * What the previous action on this page cost; the same fact, under the
+   * same rules, as `DriverStep.lastActionPerf` — absent unless perf is on
+   * and an action on this page was measured. `key` embeds the action's
+   * selector, which, like `AdvisorCandidate.selector`, is not for the model.
+   */
+  lastActionPerf?: LastActionPerf;
 }
 
 export interface AdvisorSuggestion {

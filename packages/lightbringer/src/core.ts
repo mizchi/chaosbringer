@@ -144,8 +144,18 @@ export type {
 } from "./drilldown";
 export {
   unionCoverage,
+  mergeCoverageArtifacts,
   formatCoverageUnion,
   COVERAGE_MIN_FLAG_BYTES,
   DEFAULT_COVERAGE_MIN_PCT,
 } from "./coverage-union";
-export type { CoverageUnion, CoverageUnionKind, CoverageUnionRow } from "./coverage-union";
+export type {
+  CoverageArtifact,
+  CoverageUnion,
+  CoverageUnionKind,
+  CoverageUnionRow,
+} from "./coverage-union";
+// Leak detection over repeated steps. A crawl repeats the same step (the same
+// nav click on every page) without a measureRepeat, so it names its spans
+// `<key>#<i>` and reuses the same climb detection.
+export { buildTrends } from "./analyze/memory";

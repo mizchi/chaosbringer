@@ -11,7 +11,10 @@
  * memory bounded at ~10× lower than per-worker-browser.
  */
 import type { Browser, BrowserContext, Page } from "playwright";
+import type { SpanHandle } from "lightbringer/core";
+import type { WorkerPerfSample } from "./perf-stats.js";
 import { NetworkSampler, type NetworkSample } from "./sampler.js";
+import { StepPerf } from "./step-perf.js";
 import { pickThinkTimeMs } from "./scenario.js";
 import type { Scenario, ScenarioContext, ThinkTime } from "./types.js";
 import type { Invariant } from "../types.js";
@@ -55,6 +58,8 @@ export interface WorkerSamples {
    * Empty when runtime faults weren't configured for this worker.
    */
   runtimeFaultStats: Record<string, { matched: number; fired: number }>;
+  /** One sample per measured step; absent unless this worker was sampled. */
+  perf?: WorkerPerfSample[];
 }
 
 export interface WorkerOptions {
@@ -74,6 +79,12 @@ export interface WorkerOptions {
    * once per worker on context create.
    */
   onContextCreated?: (context: BrowserContext) => Promise<void>;
+  /**
+   * Measure every step as a lightbringer span. The runner sets it on the
+   * sampled workers only, and has already installed the collector on the
+   * context this worker's hook receives.
+   */
+  perf?: boolean;
 }
 
 export class ScenarioWorker {
@@ -88,6 +99,7 @@ export class ScenarioWorker {
     runtimeFaultStats: {},
   };
   private iteration = 0;
+  private stepPerf: StepPerf | null = null;
 
   constructor(private readonly opts: WorkerOptions) {}
 
@@ -105,6 +117,11 @@ export class ScenarioWorker {
     }
     this.page = await this.context.newPage();
     this.sampler.attach(this.page);
+    if (this.opts.perf) {
+      // A worker whose session cannot open still generates its share of the
+      // load; it just reports no browser-side cost.
+      this.stepPerf = await StepPerf.open(this.page).catch(() => null);
+    }
 
     try {
       while (!this.opts.shouldStop()) {
@@ -136,6 +153,10 @@ export class ScenarioWorker {
         } catch {
           // ignored — diagnostics, not load-bearing
         }
+      }
+      if (this.stepPerf) {
+        this.samples.perf = await this.stepPerf.finish();
+        this.stepPerf = null;
       }
       await this.context.close().catch(() => {});
       this.context = null;
@@ -169,6 +190,12 @@ export class ScenarioWorker {
     if (!iterationFailed) {
       for (const step of scenario.steps) {
         if (this.opts.shouldStop()) break;
+        // The span opens before the wall-clock start and closes after the
+        // wall-clock end, so lightbringer's own CDP round-trips never count
+        // toward the step latency the SLOs read.
+        const span: SpanHandle | null = this.stepPerf
+          ? await this.stepPerf.begin(step.name).catch(() => null)
+          : null;
         const stepStart = performance.now();
         let stepFailed = false;
         try {
@@ -183,14 +210,22 @@ export class ScenarioWorker {
           stepFailed = true;
         }
         const stepEnd = performance.now();
+        const timestamp = Date.now();
         this.samples.steps.push({
           scenarioName: scenario.name,
           stepName: step.name,
           durationMs: stepEnd - stepStart,
           success: !stepFailed,
           iteration: this.iteration,
-          timestamp: Date.now(),
+          timestamp,
         });
+        if (span && this.stepPerf) {
+          // A failed step is measured too: what it cost the browser before it
+          // failed is part of the load the page saw.
+          await this.stepPerf
+            .end(span, { scenarioName: scenario.name, stepName: step.name, timestamp })
+            .catch(() => {});
+        }
         if (stepFailed && !step.optional) {
           iterationFailed = true;
           break;

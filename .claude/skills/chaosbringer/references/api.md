@@ -77,7 +77,9 @@ span — network, main-thread blocking, render, memory, interaction latency — 
 `/items/:id :: click #buy`. It is measurement, not a fault: pair it with fault
 rules to see what a fault *costs* the user. Off by default and free when off;
 `docs/recipes/perf.md` has the levels and artefacts. Note `cpu.blockingMs` is
-total long-task time, not TBT.
+total long-task time, not TBT. With perf on, `driver: perfSeekingDriver()`
+steers the crawl toward the steps that blocked the main thread longest
+(each `DriverStep.lastActionPerf` is what the previous action cost).
 
 ### Reading whether a fault fired
 

@@ -3,6 +3,7 @@
  * as a separate `.md` file so it diffs cleanly and can be tweaked
  * without touching code.
  */
+import { formatLastActionPerf } from "../../perf-key.js";
 import type { DriverHistoryEntry, DriverInvariantViolation, DriverProviderInput } from "../types.js";
 
 export interface ParsedPrompt {
@@ -45,11 +46,16 @@ export function formatCandidates(candidates: ReadonlyArray<{ index: number; desc
 
 export function renderUserPrompt(template: string, input: DriverProviderInput): string {
   const goalLine = input.goal ? `Goal: ${input.goal}\n` : "";
+  // Appended under the history it describes rather than given a template
+  // slot, so a prompt without perf renders byte-for-byte as it always did.
+  const historyBlock = input.lastActionPerf
+    ? `${formatHistory(input.history)}\n${formatLastActionPerf(input.lastActionPerf)}`
+    : formatHistory(input.history);
   return template
     .replace(/\{\{url\}\}/g, input.url)
     .replace(/\{\{stepIndex\}\}/g, String(input.stepIndex))
     .replace(/\{\{goalLine\}\}/g, goalLine)
-    .replace(/\{\{history\}\}/g, formatHistory(input.history))
+    .replace(/\{\{history\}\}/g, historyBlock)
     .replace(/\{\{violations\}\}/g, formatViolations(input.invariantViolations))
     .replace(/\{\{candidates\}\}/g, formatCandidates(input.candidates));
 }

@@ -200,6 +200,67 @@ Timeline (bucket=500ms):
 
 The fault row lines up with the `errors` row by construction — that's the cause-and-effect you came here to see.
 
+## Recipe: browser cost under load (`perf`)
+
+Step latency says how long a step took; it does not say whether the browser
+was the bottleneck. With `perf` on, a few sampled workers measure every step
+as a [lightbringer](../../packages/lightbringer) span, the same measurement
+the crawler's `--perf` makes (see [perf.md](./perf.md)):
+
+```ts
+const { report } = await scenarioLoad({
+  baseUrl: "http://localhost:3000",
+  scenarios: [{ scenario: shop, workers: 10 }],
+  duration: "2m",
+  rampUp: "60s",
+  perf: true, // ≡ { level: "light", sampleWorkers: 1 }
+});
+```
+
+| Option (`perf: { … }`) | Default | What |
+|---|---|---|
+| `level: "light"` | `"light"` | The only level. `"trace"` throws: a Chrome trace per worker streams to disk and loads the renderer every worker shares, so it would distort the concurrency it is there to observe. |
+| `sampleWorkers` | `1` | How many workers **of each scenario spec** measure (its first N, capped at `workers`). The rest run unmeasured. |
+
+What it adds to the `LoadReport`:
+
+| Field | What |
+|---|---|
+| `config.perf` | `{ level, sampledWorkers }` — total measured workers. |
+| `scenarios[].steps[].perf` | `{ n, durationMs, blockingMs, interactionMs? }` over the sampled workers' executions of the step, each `{ p50, p95 }` in ms. `blockingMs` is total long-task time in the span; `interactionMs` is the span's worst interaction (input → next paint) over the `n` spans that had one, absent when none did. Absent when no sampled worker ran the step. |
+| `timeline[].perf` | `{ startedWorkers, spans, blockingMsP50, blockingMsP95 }` per bucket: spans that ended in the bucket, and how many workers the ramp-up had started by its end. |
+
+`formatLoadReport` adds a `browser …` line under each measured step and two
+timeline rows, so blocking can be read against concurrency:
+
+```
+  click                     n=   27  err=   0  p50=182ms  p95=192ms  p99=223ms
+                            browser n=12  dur p50=184ms p95=196ms  blocking p50=121ms p95=122ms  inp p50=120ms p95=128ms (n=12)
+  …
+  workers         ▂▄▆███
+  blocking p95    ▁▂▃▅▇█
+```
+
+Gate on it with `StepSloThresholds.perf` (below). How it works and what it costs:
+
+- Each sampled step is one span: it opens before the step's wall-clock start
+  and closes after its end, with no settle, so the step's `latency` does not
+  include the measurement. The iteration does: opening and closing the span
+  (a few CDP calls and in-page reads per step) happens inside it, so the
+  sampled worker's iteration durations are longer and its throughput lower
+  (on the e2e fixture, about 20 %). It adds a little less load than an
+  unmeasured worker, and turning `perf` on can move a scenario-level
+  `minThroughputPerSec` or anything read from iteration durations — set
+  those against a run with the same `perf` setting.
+- A failed step is measured too — its cost is part of what the page saw.
+- The in-page collector goes onto the sampled worker's context ahead of the
+  `runtimeFaults` script, so a `clock-skew` fault does not skew the spans.
+  Unsampled workers get no collector at all.
+- `interactionMs` is read at the end of the run (lightbringer's final drain),
+  so an interaction whose paint landed after its step ended is still counted.
+  Measurement never fails the run: a worker whose session cannot open runs
+  unmeasured, and a final read that hangs falls back to what was gathered.
+
 ## Recipe: SLO gating in CI
 
 `assertSlo()` throws an error listing every breached threshold so the
@@ -214,6 +275,8 @@ const slo: SloDefinition = {
   // Step key format: "scenarioName/stepName"
   steps: {
     "shop/checkout": { p95Ms: 800, errorRate: 0.05 },
+    // Browser-side, from `perf` (ms): durationMs / blockingMs / interactionMs × P50 / P95.
+    "shop/add-to-cart": { perf: { blockingMsP95: 100, interactionMsP95: 200 } },
   },
   scenarios: {
     shop: { minThroughputPerSec: 3 },
@@ -234,6 +297,11 @@ Comparisons are inclusive: `p95Ms: 800` passes if actual ≤ 800.
 else is a max). Missing targets (e.g. a step the report didn't see)
 are themselves violations — the point of an SLO is to express
 expectations, so a silently-skipped check defeats the purpose.
+
+A `perf` threshold on a step that has no `perf` (perf off, or no sampled
+worker ran the step) is a violation with `actual: null`, and so is an
+`interactionMs*` threshold on a step none of whose spans had an interaction:
+a browser SLO nothing measured has not passed.
 
 If you want non-throwing handling, use `evaluateSlo(report, slo)` which
 returns `{ ok, violations[] }`.

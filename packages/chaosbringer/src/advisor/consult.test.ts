@@ -209,3 +209,30 @@ describe("consultAdvisor", () => {
     expect(seen).toEqual([20 - 2 - 1]);
   });
 });
+
+describe("consultAdvisor lastActionPerf", () => {
+  it("forwards it to the advisor when given, and leaves it off otherwise", async () => {
+    const seen: unknown[] = [];
+    const provider = makeProvider(async (ctx) => {
+      seen.push("lastActionPerf" in ctx ? ctx.lastActionPerf : "absent");
+      return { chosenIndex: 0, reasoning: "ok" };
+    });
+    const perf = {
+  key: "/app :: click #save",
+  durationMs: 412,
+  cpu: { blockingMs: 180, longTaskCount: 2 },
+  interaction: {
+    count: 1,
+    maxDurationMs: 96,
+    type: "click",
+    inputDelayMs: 10,
+    processingMs: 80,
+    presentationMs: 6,
+  },
+  network: { requestCount: 3, encodedKB: 12.4 },
+};
+    await consultAdvisor(baseDeps({ provider, lastActionPerf: perf }));
+    await consultAdvisor(baseDeps({ provider }));
+    expect(seen).toEqual([perf, "absent"]);
+  });
+});

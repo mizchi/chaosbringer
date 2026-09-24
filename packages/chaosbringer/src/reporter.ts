@@ -5,7 +5,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { slowestActions } from "./perf-summary.js";
-import type { CrawlReport, PageResult } from "./types.js";
+import type { CrawlReport, PageResult, PerfDegradationEntry } from "./types.js";
 
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
@@ -386,6 +386,50 @@ function formatCrawlPerfSummary(report: CrawlReport): string[] {
         .slice(0, 3)
         .map((d) => `${d.domain} (${d.requestCount} req, ${d.encodedKB}KB)`)
         .join(", ")}`,
+    );
+  }
+  if (perf.coverage) {
+    for (const kind of ["js", "css"] as const) {
+      const c = perf.coverage[kind];
+      if (c.totalBytes === 0) continue;
+      const worst = c.lowUsage[0];
+      out.push(
+        `  ${kind.toUpperCase()} coverage (union over the crawl): ${c.usedPct}% used` +
+          (worst ? `, least used ${truncate(worst.url, 60)} (${worst.usedPct}%)` : ""),
+      );
+    }
+  }
+  out.push(...formatDegradation(perf.degradation ?? []));
+  if (perf.trends && perf.trends.length > 0) {
+    out.push("", "Memory climbing across repeats of a step (likely leak):");
+    for (const t of perf.trends.slice(0, 5)) {
+      out.push(
+        `  ${t.metric} +${t.growth} over ${t.count} repeats (${t.values[0]} -> ${t.values[t.values.length - 1]})  ${truncate(t.name, 70)}`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * The top five `(perfKey, fault)` pairs of `perf.degradation`, one line
+ * each: the median step with the fault against without it. The JSON keeps
+ * all ten and the blocking / request / interaction sides.
+ */
+function formatDegradation(rows: readonly PerfDegradationEntry[]): string[] {
+  if (rows.length === 0) return [];
+  const signed = (n: number, unit = "") => `${n >= 0 ? "+" : ""}${Math.round(n)}${unit}`;
+  const out = ["", "Degradation under faults (median with vs without):"];
+  for (const r of rows.slice(0, 5)) {
+    const extra = [
+      r.delta.blockingMs !== 0 ? `blocking ${signed(r.delta.blockingMs, "ms")}` : "",
+      r.delta.requestCount !== 0 ? `${signed(r.delta.requestCount)} req` : "",
+      r.delta.interactionMs !== undefined ? `interaction ${signed(r.delta.interactionMs, "ms")}` : "",
+    ].filter(Boolean);
+    out.push(
+      `  ${signed(r.delta.durationMs, "ms").padStart(8)}  ${truncate(r.key, 60)}  under ${truncate(r.fault, 40)}` +
+        `  (${Math.round(r.faulted.durationMs)}ms n=${r.faulted.n} vs ${Math.round(r.clean.durationMs)}ms n=${r.clean.n})` +
+        (extra.length > 0 ? `  ${extra.join("  ")}` : ""),
     );
   }
   return out;

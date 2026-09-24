@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PerfAccumulator, accumulateSnapshot } from "./accumulator";
 import type { DrainPayload } from "./browser";
-import { buildReport } from "./report";
+import { buildReport, buildSpanReport, firstPartyDomainOf } from "./report";
 import type { RawSpan } from "./controller";
 
 const payload = (over: Partial<DrainPayload> = {}): DrainPayload => ({
@@ -167,5 +167,27 @@ describe("buildReport from accumulated entries", () => {
     ]);
     expect(legacy.appSpans[0].attributes).toEqual({ k: 1 });
     expect(legacy.spans[0].cpu.blockingMs).toBe(80);
+  });
+});
+
+describe("buildSpanReport", () => {
+  it("is what buildReport reports for the same span, so a mid-run peek agrees with the report", () => {
+    const acc = new PerfAccumulator();
+    acc.add(
+      payload({
+        longTasks: [{ start: 100, duration: 120 }],
+        events: [{ start: 110, duration: 90, type: "click", processingStart: 115, processingEnd: 190 }],
+      }),
+    );
+    const reqs = [
+      { url: "http://x.test/api", type: "Fetch", startMono: 0, startEpochMs: 1_000_120, endEpochMs: 1_000_180, encoded: 2048 },
+    ];
+    const spans = [span("a", 1_000_050, 1_000_300)];
+    const report = buildReport("t", "http://x.test/a", acc, spans, reqs);
+    const peek = buildSpanReport(spans[0], acc, reqs, firstPartyDomainOf("http://x.test/a"));
+    expect(peek).toEqual(report.spans[0]);
+    expect(peek.cpu.blockingMs).toBe(120);
+    expect(peek.network.requestCount).toBe(1);
+    expect(peek.interaction?.maxDurationMs).toBe(90);
   });
 });

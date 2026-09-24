@@ -14,7 +14,7 @@
  */
 import type { Page } from "playwright";
 import type { Rng } from "../random.js";
-import type { ActionResult, ActionTarget } from "../types.js";
+import type { ActionResult, ActionTarget, LastActionPerf } from "../types.js";
 
 export interface DriverCandidate {
   /** Stable index into the candidates array — what `select` returns. */
@@ -146,6 +146,15 @@ export interface DriverStep {
   screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
   /** Invariant violations observed since the previous step. */
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
+  /**
+   * What the previous action on this page cost — the last `history` entry's
+   * span. Present only with `perf` on (and `perf.actions` not false) and
+   * only once an action on this page was measured; absent, never zeroed,
+   * otherwise. `key` is that action's perfKey (`candidatePerfKey` gives the
+   * same key for a candidate, so a driver can join the two). See
+   * `LastActionPerf`.
+   */
+  lastActionPerf?: LastActionPerf;
 }
 
 /**
@@ -276,6 +285,12 @@ export interface DriverProviderInput {
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
   /** Free-form goal hint forwarded by the driver — e.g. "find bugs". */
   goal?: string;
+  /**
+   * `DriverStep.lastActionPerf` without its `key`: the key embeds the
+   * action's selector, and a selector never crosses this seam. Absent
+   * under the same conditions.
+   */
+  lastActionPerf?: Omit<LastActionPerf, "key">;
   /** Step index in the current page (0-based). */
   stepIndex: number;
 }

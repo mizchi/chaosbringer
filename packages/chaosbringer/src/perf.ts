@@ -17,20 +17,43 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CDPSession, Page } from "playwright";
-import { startSession, type PerfReport, type PerfSession, type SpanHandle } from "lightbringer/core";
+import {
+  startSession,
+  type CoverageArtifact,
+  type PerfReport,
+  type PerfSession,
+  type SpanHandle,
+} from "lightbringer/core";
 import { pageCdp } from "./page-cdp.js";
+import { SpanFaultTags } from "./perf-faults.js";
 import {
   actionKind,
   loadSpanName,
   perfKey,
   perfSlug,
+  toLastActionPerf,
   toPerfSpanReport,
   type ResolvedPerfOptions,
 } from "./perf-key.js";
-import type { ActionResult, PagePerfSummary, PageResult, PerfSpanReport } from "./types.js";
+import type {
+  ActionResult,
+  LastActionPerf,
+  PagePerfSummary,
+  PageResult,
+  PerfSpanReport,
+} from "./types.js";
 
-/** Who a recorded span belongs to, in the order the spans were recorded. */
-type SpanOwner = { kind: "load" } | { kind: "action"; action: ActionResult };
+/**
+ * Who a recorded span belongs to, in the order the spans were recorded.
+ * `settleCapped`: the crawler's own settle for this step hit its cap (adaptive
+ * settle only). lightbringer's `capped` means *its* settle capped, which never
+ * happens here (spans end with `settle: false`), so the crawler's verdict is
+ * what the span reports.
+ */
+type SpanOwner = (
+  | { kind: "load"; settleCapped: boolean }
+  | { kind: "action"; action: ActionResult; settleCapped: boolean }
+) & { faults?: string[] };
 
 /**
  * How long `finish()` may take before the page is given up on. lightbringer
@@ -47,6 +70,25 @@ export class PagePerf {
   private loadHandle: SpanHandle | null = null;
   private readonly openActions = new Set<SpanHandle>();
   private readonly owners: SpanOwner[] = [];
+  private readonly faultTags: SpanFaultTags<SpanHandle>;
+  /**
+   * Trace ids of the requests made while the load span was open. An action's
+   * requests go onto its `ActionResult.traceIds`; a load has no such field,
+   * so its ids are kept here for the server-fault join.
+   */
+  private readonly loadIds: string[] = [];
+  /** The load span's report after `finish()`, for `loadTraceIds`. */
+  private loadReport: PerfSpanReport | null = null;
+  /**
+   * The most recent action that ran on this page: its span's index in the
+   * controller, or null when its span was not recorded — so a stale span
+   * from an earlier action is never reported as the last one's.
+   */
+  private lastAction: { spanIndex: number; action: ActionResult } | null = null;
+  /** `lastActionPerf()`'s answer for `lastAction`, once it was asked for. */
+  private lastActionFacts: LastActionPerf | undefined;
+  /** The page's coverage artifact after `finish()` (`perf.coverage` only). */
+  coverage: CoverageArtifact | undefined;
 
   private constructor(
     private readonly session: PerfSession,
@@ -54,7 +96,10 @@ export class PagePerf {
     private readonly url: string,
     private readonly opts: ResolvedPerfOptions,
     private readonly slug: string,
-  ) {}
+    pageFaults: readonly string[],
+  ) {
+    this.faultTags = new SpanFaultTags(pageFaults);
+  }
 
   /**
    * Open a lightbringer session on `page`. `installCollector` is false when
@@ -66,6 +111,9 @@ export class PagePerf {
    * CPU and network throttling are never passed: the crawler owns both
    * (`faults.cpu()`, `network`), and lightbringer applying its own would
    * overwrite them on the same CDP session.
+   *
+   * `pageFaults` are faults in effect for the whole visit (the crawl's
+   * runtime faults); every span of the page is tagged with them.
    */
   static async open(
     page: Page,
@@ -75,7 +123,13 @@ export class PagePerf {
       pageIndex,
       runId,
       installCollector,
-    }: { pageIndex: number; runId: string; installCollector: boolean },
+      pageFaults = [],
+    }: {
+      pageIndex: number;
+      runId: string;
+      installCollector: boolean;
+      pageFaults?: readonly string[];
+    },
   ): Promise<PagePerf> {
     const slug = perfSlug(url, pageIndex, runId);
     let tracePath: string | undefined;
@@ -92,42 +146,90 @@ export class PagePerf {
       coverage: opts.coverage,
       cssStats: opts.cssSelectorStats,
     });
-    return new PagePerf(session, client, url, opts, slug);
+    return new PagePerf(session, client, url, opts, slug, pageFaults);
   }
 
   /** Open the page-load span. Call right before `page.goto`. */
   async beginLoad(): Promise<void> {
     if (this.loadHandle) return;
     this.loadHandle = await this.session.controller.begin(loadSpanName(this.url));
+    this.faultTags.begin(this.loadHandle);
+  }
+
+  /**
+   * A fault took effect now: tag every open span with it. `persistent` for a
+   * fault whose effect outlasts the moment it fired (a lifecycle fault), so
+   * spans opened later in the visit are tagged too.
+   */
+  noteFault(name: string, opts: { persistent?: boolean } = {}): void {
+    this.faultTags.note(name, opts);
+  }
+
+  /** A request made during the load carried this trace id. */
+  noteLoadTraceId(traceId: string): void {
+    if (this.loadHandle) this.loadIds.push(traceId);
+  }
+
+  /**
+   * The load span's report and its requests' trace ids, after `finish()`;
+   * null when the page recorded no load span.
+   */
+  loadTraceIds(): { span: PerfSpanReport; traceIds: string[] } | null {
+    return this.loadReport ? { span: this.loadReport, traceIds: [...this.loadIds] } : null;
   }
 
   /**
    * Close the page-load span. `settle: false` because the crawler has already
-   * waited for `networkidle` and run its `afterLoad` work; the span ends now.
+   * settled the load and run its `afterLoad` work; the span ends now.
    */
-  async endLoad(): Promise<void> {
+  async endLoad({ settleCapped = false }: { settleCapped?: boolean } = {}): Promise<void> {
     const handle = this.loadHandle;
     if (!handle) return;
     this.loadHandle = null;
-    await this.record(handle, { kind: "load" });
+    await this.record(handle, { kind: "load", settleCapped });
   }
 
   /** Open an action span. The name is provisional; `finish()` names it from the result. */
   async beginAction(): Promise<SpanHandle> {
     const handle = await this.session.controller.begin("action");
     this.openActions.add(handle);
+    this.faultTags.begin(handle);
     return handle;
   }
 
   /** Close an action span and tie it to the result the action produced. */
-  async endAction(handle: SpanHandle, action: ActionResult): Promise<void> {
+  async endAction(
+    handle: SpanHandle,
+    action: ActionResult,
+    { settleCapped = false }: { settleCapped?: boolean } = {},
+  ): Promise<void> {
     if (!this.openActions.delete(handle)) return;
-    await this.record(handle, { kind: "action", action });
+    const spanIndex = await this.record(handle, { kind: "action", action, settleCapped });
+    this.lastAction = spanIndex === null ? null : { spanIndex, action };
+    this.lastActionFacts = undefined;
+  }
+
+  /**
+   * What the most recent action on this page cost, for the next step's driver
+   * or advisor; undefined when no action ran yet or its span was not
+   * recorded. Built on first ask from what lightbringer has gathered so far
+   * (`peekSpan`: node-side filtering, no page call) and kept, so a step that
+   * asks twice — or a crawl that never asks — pays once or not at all.
+   */
+  lastActionPerf(): LastActionPerf | undefined {
+    const last = this.lastAction;
+    if (!last) return undefined;
+    if (this.lastActionFacts) return this.lastActionFacts;
+    const span = this.session.peekSpan(last.spanIndex);
+    if (!span) return undefined;
+    this.lastActionFacts = toLastActionPerf(span, perfKey(this.url, actionKind(last.action)));
+    return this.lastActionFacts;
   }
 
   /** Drop an action span without recording it — the action was skipped. */
   cancelAction(handle: SpanHandle): void {
     if (!this.openActions.delete(handle)) return;
+    this.faultTags.end(handle);
     this.session.controller.cancel(handle);
   }
 
@@ -181,10 +283,14 @@ export class PagePerf {
 
   private async build(result: PageResult): Promise<PerfSpanReport[]> {
     if (this.loadHandle) await this.endLoad();
-    for (const handle of this.openActions) this.session.controller.cancel(handle);
+    for (const handle of this.openActions) {
+      this.faultTags.end(handle);
+      this.session.controller.cancel(handle);
+    }
     this.openActions.clear();
 
     const { report, covArtifact } = await this.session.finish(loadSpanName(this.url));
+    this.coverage = covArtifact;
 
     // `report.spans` is in the order the spans were recorded, which is the
     // order `record()` pushed their owners.
@@ -196,14 +302,23 @@ export class PagePerf {
       const name = owner.kind === "load" ? loadSpanName(this.url) : kind;
       const key = perfKey(this.url, kind);
       const trimmed = toPerfSpanReport(span, key, name);
+      if (owner.settleCapped) trimmed.capped = true;
+      if (owner.faults) trimmed.faults = owner.faults;
       if (owner.kind === "load") {
+        this.loadReport = trimmed;
         result.perf = trimmed;
         attached.unshift(trimmed);
       } else {
         owner.action.perf = trimmed;
         attached.push(trimmed);
       }
-      return { ...span, name, key };
+      return {
+        ...span,
+        name,
+        key,
+        ...(owner.settleCapped ? { capped: true } : {}),
+        ...(owner.faults ? { faults: owner.faults } : {}),
+      };
     });
 
     const summary = pageSummary(report);
@@ -230,12 +345,18 @@ export class PagePerf {
    * End a span and remember its owner — but only if lightbringer really
    * recorded it. `end()` of a handle it no longer knows is a no-op, and an
    * owner pushed for a span that was never recorded would shift every later
-   * span onto the wrong result.
+   * span onto the wrong result. Returns the recorded span's controller index,
+   * or null when nothing was recorded.
    */
-  private async record(handle: SpanHandle, owner: SpanOwner): Promise<void> {
+  private async record(handle: SpanHandle, owner: SpanOwner): Promise<number | null> {
     const before = this.session.controller.spans.length;
+    // Read the tags before `end()` awaits: a fault that fires while lightbringer
+    // is still reading the span's metrics happened after the span closed.
+    const faults = this.faultTags.end(handle);
     await this.session.controller.end(handle, { settle: false });
-    if (this.session.controller.spans.length > before) this.owners.push(owner);
+    if (this.session.controller.spans.length <= before) return null;
+    this.owners.push(faults ? { ...owner, faults } : owner);
+    return this.session.controller.spans.length - 1;
   }
 }
 

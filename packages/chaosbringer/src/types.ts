@@ -2,7 +2,13 @@
  * Core types for Chaos Crawler
  */
 
-import type { BudgetMetric, DocumentReport, SpanReport, VitalSample } from "lightbringer/core";
+import type {
+  BudgetMetric,
+  DocumentReport,
+  MemoryTrend,
+  SpanReport,
+  VitalSample,
+} from "lightbringer/core";
 import type { AdvisorConfig } from "./advisor/types.js";
 import type { ServerFaultEventAttrs } from "./server-fault-events.js";
 
@@ -280,6 +286,24 @@ export interface CrawlerOptions {
    * from, so `reproCommand` can point back at it.
    */
   perfBudgetsFile?: string;
+  /**
+   * How the crawler waits for the page to settle after `page.goto` and after
+   * each chaos action. Default `"networkidle"`: exactly the waits the crawler
+   * has always made (a `networkidle` navigation, `waitForLoadState
+   * ("networkidle", 2000 ms)` after a click, a fixed 100 ms between actions).
+   *
+   * `"adaptive"` waits until the page is quiet instead: no request of the
+   * page in flight and no long task for a quiet window (100 ms), and at least
+   * two animation frames since the step, capped at the old timeouts (the
+   * navigation `timeout` after a load, 2000 ms after an action). A number is
+   * `"adaptive"` with that quiet window in ms — e.g. a `quiescenceMs` solved
+   * from a calibrated `TimingProfile`. A settle that hits its cap sets
+   * `capped` on the step's perf span and counts in `PageResult.settleCapped`.
+   *
+   * Opt-in, and staying that way: switching the default would change the
+   * timing of existing crawls, recorded traces and calibrated profiles.
+   */
+  settle?: SettleMode;
   /** @internal Set by `chaos({ server })`. */
   server?: ChaosRemoteServer;
 }
@@ -337,7 +361,53 @@ export interface PerfSpanReport extends Omit<SpanReport, "budget"> {
    * `<type> <selector ?? target>` for an action (`scroll` for a scroll).
    */
   key: string;
+  /**
+   * Names of the faults active during this span, sorted and deduplicated;
+   * absent when none was. A fault counts when it took effect inside the
+   * span's window:
+   * - a network `faultInjection` rule that fired on a request made while the span
+   *   was open (its `name`, or its pattern when unnamed — the same label as
+   *   `faultInjections[].rule`);
+   * - a lifecycle fault that fired before or during the span on the same page
+   *   visit — its effect (a CPU throttle, wiped storage) lasts for the rest
+   *   of the visit, so every later span of that page carries it too;
+   * - every runtime fault the crawl installs (`clock-skew`, `flaky-fetch`, …):
+   *   the fault script is on every page, so every span is tagged;
+   * - `server:<kind>` for each server-side fault event whose trace id one of
+   *   the span's requests carried (needs `traceparent`).
+   *
+   * `CrawlPerfSummary.degradation` compares spans of one key with and
+   * without each fault.
+   */
+  faults?: string[];
 }
+
+/**
+ * What the previous action on this page cost — the slice of its span a driver
+ * or advisor can weigh the next step by (`DriverStep.lastActionPerf`,
+ * `AdvisorContext.lastActionPerf`).
+ *
+ * Picked from `PerfSpanReport` rather than listed again, so a field keeps its
+ * meaning and its unit in one place. Read as of the step, not at page end:
+ * a request the action started that is still in flight counts toward
+ * `requestCount` without its bytes, so `encodedKB` can be lower than the
+ * report's figure for the same span.
+ *
+ * Absent — never zeroed — when there is nothing measured to report: perf is
+ * off or `perf.actions` is false, this is the page's first step, or the
+ * previous action's span was not recorded. `interaction` is absent when the
+ * action caused none, exactly as on the span — and often when it did: the
+ * browser reports an interaction only after the paint that ends it, which
+ * under the default `networkidle` settle usually lands after the span closed.
+ * The report's copy of the span, read at page end, has it.
+ *
+ * `key` is the action's perfKey, which contains its selector: the providers
+ * shipped here never put it into a prompt (see `DriverProviderInput`).
+ */
+export type LastActionPerf = Pick<PerfSpanReport, "key" | "durationMs" | "interaction"> & {
+  cpu: Pick<PerfSpanReport["cpu"], "blockingMs" | "longTaskCount">;
+  network: Pick<PerfSpanReport["network"], "requestCount" | "encodedKB">;
+};
 
 /**
  * One `CrawlerOptions.perfBudgets` rule.
@@ -391,6 +461,67 @@ export interface CrawlPerfSummary {
   /** Third-party traffic per registrable domain across every span, heaviest first (top 10). */
   thirdParty: Array<{ domain: string; requestCount: number; encodedKB: number; busyMs: number }>;
   totals: { spans: number; pages: number };
+  /**
+   * What each fault cost the steps it hit: the 10 `(perfKey, fault)` pairs
+   * whose median span got longest under the fault, longest first. Present
+   * only when some key has spans both with and without the same fault.
+   */
+  degradation?: PerfDegradationEntry[];
+  /**
+   * Memory that climbs across the repeats of one step — the same `perfKey`
+   * seen at least three times in the crawl, in crawl order (the same nav
+   * click on every page, a button clicked again and again). lightbringer's
+   * `buildTrends` over those repeats: only sustained, distributed growth past
+   * the metric's floor is reported, each with `leak: true`. `name` is the
+   * perfKey. Spans that created a document (loads, clicks that navigate)
+   * are left out: the gauges still count the documents left behind, so a
+   * run of navigations climbs on garbage. Present only when some key climbs.
+   */
+  trends?: MemoryTrend[];
+  /**
+   * JS / CSS coverage unioned over every measured page of the crawl: a byte
+   * counts as used if any page's visit executed it. Present only with
+   * `perf.coverage` on. The crawl reaches pages and actions that no
+   * hand-written scenario covers, so what stays unused here is a stronger
+   * dead-code / over-shipping signal than a union over scenarios. Absent
+   * from a report merged from shards: shard reports keep only the totals,
+   * and byte ranges cannot be unioned from totals.
+   */
+  coverage?: { js: CrawlCoverageKind; css: CrawlCoverageKind };
+}
+
+/** One side of a degradation comparison: medians over `n` spans. */
+export interface PerfDegradationSide {
+  n: number;
+  durationMs: number;
+  blockingMs: number;
+  requestCount: number;
+  /** Median over the spans that had an interaction; absent when none did. */
+  interactionMs?: number;
+}
+
+/**
+ * One `(perfKey, fault)` pair of `CrawlPerfSummary.degradation`. `faulted` is
+ * the spans of `key` tagged with `fault`, `clean` the spans of `key` without
+ * it (they may carry other faults). `delta` is faulted minus clean, median
+ * against median; `interactionMs` only when both sides measured one.
+ */
+export interface PerfDegradationEntry {
+  key: string;
+  fault: string;
+  faulted: PerfDegradationSide;
+  clean: PerfDegradationSide;
+  delta: Omit<PerfDegradationSide, "n">;
+}
+
+/** One kind (JS or CSS) of `CrawlPerfSummary.coverage`. */
+export interface CrawlCoverageKind {
+  totalBytes: number;
+  usedBytes: number;
+  /** usedBytes / totalBytes as a percentage, one decimal. */
+  usedPct: number;
+  /** The 10 resources with the most unused bytes, most unused first. */
+  lowUsage: Array<{ url: string; totalBytes: number; usedBytes: number; usedPct: number }>;
 }
 
 /**
@@ -674,6 +805,13 @@ export interface PerformanceBudget {
 /** Supported network throttling presets applied via CDP. */
 export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
 
+/**
+ * `CrawlerOptions.settle`: `"networkidle"` (default, the crawler's historic
+ * waits), `"adaptive"`, or a number — adaptive with that quiet window in ms.
+ * See `settle.ts`.
+ */
+export type SettleMode = "networkidle" | "adaptive" | number;
+
 export const NETWORK_PROFILES = ["slow-3g", "fast-3g", "offline"] as const satisfies ReadonlyArray<NetworkProfile>;
 
 /** Keys of PerformanceMetrics that a budget can target. */
@@ -733,6 +871,12 @@ export interface PageResult {
   perf?: PerfSpanReport;
   /** Page-level perf extras (vitals, network totals). Present only with `perf` on. */
   perfPage?: PagePerfSummary;
+  /**
+   * How many of this page's settles (its load and each action) hit their cap
+   * instead of going quiet. Present only with `settle` adaptive, where 0 is a
+   * measurement; under `networkidle` there is nothing to count.
+   */
+  settleCapped?: number;
 }
 
 export interface RecoveryInfo {
@@ -885,7 +1029,8 @@ export interface ActionResult {
   serverFaultEvents?: ServerFaultEvent[];
   /**
    * This action's span: from just before the action ran to just after it
-   * returned, including the crawler's own post-click settle. It covers the
+   * returned, including the crawler's own settle (the post-click
+   * `networkidle` wait, or the adaptive settle after every action). It covers the
    * same interval that collects `traceIds`. Present only with `perf` on and
    * `perf.actions` not false; a skipped action records no span.
    */
@@ -1201,4 +1346,6 @@ export interface ChaosTestOptions {
   actionWeights?: ActionWeights;
   /** Per-step performance measurement; see `CrawlerOptions.perf`. */
   perf?: boolean | PerfOptions;
+  /** How each step settles; see `CrawlerOptions.settle`. */
+  settle?: SettleMode;
 }

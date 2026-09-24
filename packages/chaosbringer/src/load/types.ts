@@ -117,6 +117,30 @@ export interface ScenarioLoadOptions {
    * Smaller buckets are finer-grained but blow up the report size linearly.
    */
   timelineBucketMs?: number;
+
+  /**
+   * Measure each scenario step as a lightbringer span on a few sampled
+   * workers, so the report shows what the browser paid for a step (main-thread
+   * blocking, interaction latency) next to its wall-clock latency, and how that
+   * cost moves as concurrency rises. `true` is `{ level: "light" }`.
+   *
+   * Only `"light"` is accepted. A trace per worker (`"trace"` in the crawler)
+   * streams megabytes a second to disk and taxes the very renderer the load
+   * shares with every other worker, so it would distort the concurrency it is
+   * meant to observe; `scenarioLoad` throws on it.
+   */
+  perf?: boolean | ScenarioLoadPerfOptions;
+}
+
+export interface ScenarioLoadPerfOptions {
+  level?: "light";
+  /**
+   * How many workers of each scenario spec measure (its first N). Default 1.
+   * The rest run unmeasured: one measured worker is enough to see browser
+   * cost under the load the others create, and each measured one adds a CDP
+   * session and an in-page read per step. Capped at the spec's `workers`.
+   */
+  sampleWorkers?: number;
 }
 
 // -------- Report shape --------
@@ -138,6 +162,32 @@ export interface StepReport {
   failures: number;
   errorRate: number;
   latency: LatencyStats;
+  /**
+   * Browser-side cost of this step over the sampled workers' spans. Absent
+   * when `perf` is off or no sampled worker recorded a span of this step.
+   */
+  perf?: StepPerfStats;
+}
+
+export interface PerfQuantiles {
+  p50: number;
+  p95: number;
+}
+
+/** Browser-side stats for one step, from lightbringer spans (all in ms). */
+export interface StepPerfStats {
+  /** Spans the stats are over (sampled workers' executions of the step). */
+  n: number;
+  /** Span duration: from just before `run` to just after it returned. */
+  durationMs: PerfQuantiles;
+  /** Main-thread blocking: total long-task time inside the span (lightbringer's `cpu.blockingMs`). */
+  blockingMs: PerfQuantiles;
+  /**
+   * Worst interaction latency (input → next paint) per span, over the spans
+   * that had one (`n` of them). Absent when no span of the step had one — a
+   * step that only navigates never does.
+   */
+  interactionMs?: PerfQuantiles & { n: number };
 }
 
 export interface ScenarioReport {
@@ -187,6 +237,21 @@ export interface TimelineBucket {
    * cause-and-effect on the same axis as `iterations` / `errors`.
    */
   faults: Record<string, number>;
+  /**
+   * Browser cost of the spans that ended inside this bucket; present on every
+   * bucket when `perf` is on, absent otherwise. `startedWorkers` is how many
+   * workers the ramp-up had started by the bucket's end, so blocking can be
+   * read against concurrency on one axis.
+   */
+  perf?: TimelinePerf;
+}
+
+export interface TimelinePerf {
+  startedWorkers: number;
+  /** Spans that ended in this bucket (0: the blocking figures are 0 too). */
+  spans: number;
+  blockingMsP50: number;
+  blockingMsP95: number;
 }
 
 export interface LoadReport {
@@ -198,6 +263,8 @@ export interface LoadReport {
     workers: number;
     rampUpMs: number;
     durationMs: number;
+    /** Present when `perf` was on: how many workers measured, in total. */
+    perf?: { level: "light"; sampledWorkers: number };
   };
   totals: {
     iterations: number;

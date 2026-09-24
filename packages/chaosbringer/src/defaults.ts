@@ -65,6 +65,7 @@ export const DEFAULT_OPTIONS: Required<
   runtimeFaults: [],
   iframeFaults: [],
   initScripts: [],
+  settle: "networkidle",
 };
 
 export const DEFAULT_ACTION_WEIGHTS: Required<ActionWeights> = {

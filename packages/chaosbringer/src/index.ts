@@ -174,8 +174,10 @@ export {
   perfBudgetRulesFromJson,
   type PerfBudgetsFile,
 } from "./budget.js";
-export { buildCrawlPerfSummary } from "./perf-summary.js";
-export { compilePerfKeyGlob } from "./perf-key.js";
+export { buildCrawlPerfSummary, buildCoverageSummary, buildPerfTrends } from "./perf-summary.js";
+export { buildDegradation, serverFaultName } from "./perf-faults.js";
+export { candidatePerfKey, compilePerfKeyGlob } from "./perf-key.js";
+export { DEFAULT_SETTLE_QUIET_MS, ACTION_SETTLE_CAP_MS } from "./settle.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
   stateMachineCurrent,
@@ -234,6 +236,10 @@ export {
   TEMPLATE_INJECTION_PAYLOADS,
   UNICODE_PAYLOADS,
   weightedRandomDriver,
+  perfSeekingCost,
+  perfSeekingDriver,
+  PERF_SEEKING_COST_FLOOR_MS,
+  PERF_SEEKING_DEFAULT_EPSILON,
   isObstructed,
   WEAK_PASSWORDS,
   XSS_AUTH_MARKER,
@@ -268,6 +274,7 @@ export {
   type SamplingDriverOptions,
   type ScreenshotMode,
   type WeightedRandomDriverOptions,
+  type PerfSeekingDriverOptions,
   type AuthAttackDriver,
   type AuthAttackName,
   type AuthAttackOptions,
@@ -400,6 +407,7 @@ export {
   type SloResult,
   type SloScope,
   type SloViolation,
+  type StepPerfSloThresholds,
   type StepSloThresholds,
   type TotalsSloThresholds,
   type EndpointReport,
@@ -409,13 +417,16 @@ export {
   type Scenario,
   type ScenarioContext,
   type ScenarioLoadOptions,
+  type ScenarioLoadPerfOptions,
   type ScenarioLoadResult,
   type ScenarioReport,
   type ScenarioSpec,
   type ScenarioStep,
+  type StepPerfStats,
   type StepReport,
   type ThinkTime,
   type TimelineBucket,
+  type TimelinePerf,
   type WorkerSummary,
 } from "./load/index.js";
 export {
@@ -558,14 +569,19 @@ export type {
   HarConfig,
   HarMode,
   NetworkProfile,
+  SettleMode,
   PerformanceBudget,
   PerfBudgetKey,
   PerfOptions,
   PerfSpanReport,
+  LastActionPerf,
   PagePerfSummary,
   PerfBudgetRule,
   CrawlPerfSummary,
   CrawlVitalSummary,
+  CrawlCoverageKind,
+  PerfDegradationEntry,
+  PerfDegradationSide,
   ReportDiff,
   ClusterDiffEntry,
   PageDiffEntry,
