@@ -9,6 +9,7 @@ import { devices } from "playwright";
 import { validateFaultSchedule } from "./schedule.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 import type { CrawlerOptions, UrlMatcher } from "./types.js";
+import { cdpEndpointUrl } from "./cdp.js";
 
 /**
  * Validate user-supplied options up front so downstream code can assume
@@ -39,7 +40,7 @@ export const KNOWN_OPTION_NAMES = [
   "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
-  "initScripts", "perf",
+  "initScripts", "perf", "cdpEndpoint", "cdpTargetId", "terminalBrowser",
 ] as const;
 
 /**
@@ -107,6 +108,29 @@ function rejectNearMissOptions(options: object): void {
 
 export function validateOptions(options: CrawlerOptions): void {
   rejectNearMissOptions(options);
+  if (options.terminalBrowser && options.cdpEndpoint !== undefined) {
+    throw new Error('chaosbringer: "terminalBrowser" cannot be used with "cdpEndpoint"');
+  }
+  if (options.terminalBrowser && options.cdpTargetId !== undefined) {
+    throw new Error('chaosbringer: "terminalBrowser" cannot be used with "cdpTargetId"');
+  }
+  if (options.cdpTargetId && !options.cdpEndpoint) {
+    throw new Error('chaosbringer: "cdpTargetId" requires "cdpEndpoint"');
+  }
+  if (options.cdpTargetId !== undefined && !options.cdpTargetId.trim()) {
+    throw new Error('chaosbringer: "cdpTargetId" must not be empty');
+  }
+  if (options.cdpEndpoint !== undefined || options.terminalBrowser) {
+    if (options.cdpEndpoint !== undefined) cdpEndpointUrl(options.cdpEndpoint);
+    for (const key of ["launchOptions", "device", "viewport", "userAgent", "storageState"] as const) {
+      if (options[key] !== undefined) {
+        throw new Error(`chaosbringer: "${key}" cannot be used with an attached browser`);
+      }
+    }
+    if (options.har) {
+      throw new Error('chaosbringer: HAR cannot be used with an attached browser');
+    }
+  }
   // baseUrl — parse and surface a named error.
   try {
     // eslint-disable-next-line no-new

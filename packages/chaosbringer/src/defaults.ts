@@ -15,6 +15,9 @@ export const DEFAULT_OPTIONS: Required<
     CrawlerOptions,
     | "baseUrl"
     | "launchOptions"
+    | "cdpEndpoint"
+    | "cdpTargetId"
+    | "terminalBrowser"
     | "har"
     | "storageState"
     | "performanceBudget"

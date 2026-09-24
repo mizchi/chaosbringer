@@ -2,12 +2,14 @@
  * ChaosCrawler - Playwright-based chaos testing crawler
  */
 
-import type { Browser, BrowserContext, Page, Route } from "playwright";
+import type { Browser, BrowserContext, ConsoleMessage, Page, Request, Response, Route } from "playwright";
 import { chromium, devices } from "playwright";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { collectorInitScript, type PerfWindow, type SpanHandle } from "lightbringer/core";
+import { cdpEndpointUrl, selectCdpPage } from "./cdp.js";
+import { resolveTerminalBrowserTarget } from "./terminal-browser.js";
 import type {
   CrawlerOptions,
   CrawlerEvents,
@@ -192,6 +194,9 @@ export class ChaosCrawler {
   private logger: Logger;
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
+  private cdpPage: Page | null = null;
+  private readonly initializedPages = new WeakSet<Page>();
+  private readonly routeHandlers = new Map<Page, (route: Route) => Promise<void>>();
   private visited: Set<string> = new Set();
   private queue: QueueEntry[] = [];
   private results: PageResult[] = [];
@@ -630,93 +635,99 @@ export class ChaosCrawler {
       mkdirSync(this.options.screenshotDir, { recursive: true });
     }
 
-    this.browser = await chromium.launch({
-      ...this.options.launchOptions,
-      // Last, so the explicit option (and the CLI flag behind it) wins over
-      // anything `launchOptions` happens to carry.
-      headless: this.options.headless,
-    });
-    // Device descriptor overrides viewport / userAgent / device pixel ratio;
-    // explicit options in CrawlerOptions still win because they come later.
-    const deviceDesc =
-      this.options.device && devices[this.options.device]
-        ? devices[this.options.device]
-        : undefined;
-    this.context = await this.browser.newContext({
-      ...deviceDesc,
-      // Device descriptor's viewport wins when set — device emulation is
-      // only meaningful if the viewport matches. Otherwise fall back to
-      // the configured default.
-      viewport: deviceDesc?.viewport ?? this.options.viewport,
-      userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
-      // Record mode: ask Playwright to capture all network into the HAR.
-      recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
-      // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
-      // and validates the file; we don't touch it.
-      storageState: this.options.storageState || undefined,
-    });
-
-    // lightbringer's in-page collector (web-vitals + long-task observers),
-    // which is what `collectMetrics` reads LCP and TBT from. It is installed
-    // first, before every other init script, and the order is load-bearing:
-    // init scripts run in registration order, and the collector captures the
-    // native `performance.now` / `timeOrigin` when it runs. Installed after
-    // the runtime-fault script, a `clock-skew` fault would already have
-    // replaced the clock it captures.
-    //
-    // It runs on every crawl, not only under perf measurement. Without perf
-    // it starts without the rAF frame probe: a per-frame callback on every
-    // page nobody measures is the one steady cost the collector would
-    // otherwise add. With perf the probe runs from each document's first
-    // frame. Starting it lazily when a span opens is not enough here: the
-    // load span opens on the document before `page.goto`, and a click that
-    // navigates opens its span on the document it leaves, so the document
-    // the span is really about would never start its probe and those spans
-    // would carry no frames.
-    await this.context.addInitScript({
-      content: collectorInitScript({ frames: this.perfOptions !== null }),
-    });
-
-    // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
-    // …) on every navigation. Installed at the context level so every page
-    // (including ones opened via window.open later) inherits the patches.
-    if (this.compiledRuntimeFaults.length > 0) {
-      const script = buildRuntimeFaultsScript(
-        this.compiledRuntimeFaults.map((c) => c.fault),
-        this.rng.seed,
-      );
-      await this.context.addInitScript({ content: script });
-    }
-
-    // Caller-supplied init scripts, after the fault layers so a script can
-    // observe the patched APIs. Installed even when empty-checked away, so a
-    // caller that passes `[]` costs nothing.
-    for (const script of this.options.initScripts ?? []) {
-      await this.context.addInitScript({ content: script });
-    }
-
-    // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
-    // (and setAttribute("src", …)) so faults fire when the host page assigns
-    // an iframe's URL. Independent of runtimeFaults so a page can configure
-    // either layer on its own.
-    if (this.compiledIframeFaults.length > 0) {
-      const script = buildIframeFaultsScript(
-        this.compiledIframeFaults.map((c) => c.fault),
-        this.rng.seed,
-      );
-      await this.context.addInitScript({ content: script });
-    }
-
-    // Replay mode: serve every matching request from the HAR before it hits
-    // the network. Fault injection (installed per-page) still wins because
-    // page.route runs before context.route in Playwright.
-    if (this.options.har?.mode === "replay") {
-      await this.context.routeFromHAR(this.options.har.path, {
-        notFound: this.options.har.notFound ?? "fallback",
-      });
-    }
-
     try {
+      if (this.options.cdpEndpoint || this.options.terminalBrowser) {
+        const connection = this.options.terminalBrowser
+          ? await resolveTerminalBrowserTarget(this.options.baseUrl)
+          : { cdpEndpoint: this.options.cdpEndpoint, cdpTargetId: this.options.cdpTargetId };
+        this.browser = await chromium.connectOverCDP(cdpEndpointUrl(connection.cdpEndpoint));
+        this.cdpPage = await selectCdpPage(this.browser, this.options.baseUrl, connection.cdpTargetId);
+        this.context = this.cdpPage.context();
+      } else {
+        this.browser = await chromium.launch({
+          ...this.options.launchOptions,
+          headless: this.options.headless,
+        });
+        // Device descriptor overrides viewport / userAgent / device pixel ratio;
+        // explicit options in CrawlerOptions still win because they come later.
+        const deviceDesc =
+          this.options.device && devices[this.options.device]
+            ? devices[this.options.device]
+            : undefined;
+        this.context = await this.browser.newContext({
+          ...deviceDesc,
+          // Device descriptor's viewport wins when set — device emulation is
+          // only meaningful if the viewport matches. Otherwise fall back to
+          // the configured default.
+          viewport: deviceDesc?.viewport ?? this.options.viewport,
+          userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
+          // Record mode: ask Playwright to capture all network into the HAR.
+          recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
+          // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
+          // and validates the file; we don't touch it.
+          storageState: this.options.storageState || undefined,
+        });
+      }
+
+      // lightbringer's in-page collector (web-vitals + long-task observers),
+      // which is what `collectMetrics` reads LCP and TBT from. It is installed
+      // first, before every other init script, and the order is load-bearing:
+      // init scripts run in registration order, and the collector captures the
+      // native `performance.now` / `timeOrigin` when it runs. Installed after
+      // the runtime-fault script, a `clock-skew` fault would already have
+      // replaced the clock it captures.
+      //
+      // It runs on every crawl, not only under perf measurement. Without perf
+      // it starts without the rAF frame probe: a per-frame callback on every
+      // page nobody measures is the one steady cost the collector would
+      // otherwise add. With perf the probe runs from each document's first
+      // frame. Starting it lazily when a span opens is not enough here: the
+      // load span opens on the document before `page.goto`, and a click that
+      // navigates opens its span on the document it leaves, so the document
+      // the span is really about would never start its probe and those spans
+      // would carry no frames.
+      await (this.cdpPage ?? this.context).addInitScript({
+        content: collectorInitScript({ frames: this.perfOptions !== null }),
+      });
+
+      // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
+      // …) on every navigation. CDP runs scope it to the selected page.
+      if (this.compiledRuntimeFaults.length > 0) {
+        const script = buildRuntimeFaultsScript(
+          this.compiledRuntimeFaults.map((c) => c.fault),
+          this.rng.seed,
+        );
+        await (this.cdpPage ?? this.context).addInitScript({ content: script });
+      }
+
+      // Caller-supplied init scripts, after the fault layers so a script can
+      // observe the patched APIs. Installed even when empty-checked away, so a
+      // caller that passes `[]` costs nothing.
+      for (const script of this.options.initScripts ?? []) {
+        await (this.cdpPage ?? this.context).addInitScript({ content: script });
+      }
+
+      // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
+      // (and setAttribute("src", …)) so faults fire when the host page assigns
+      // an iframe's URL. Independent of runtimeFaults so a page can configure
+      // either layer on its own.
+      if (this.compiledIframeFaults.length > 0) {
+        const script = buildIframeFaultsScript(
+          this.compiledIframeFaults.map((c) => c.fault),
+          this.rng.seed,
+        );
+        await (this.cdpPage ?? this.context).addInitScript({ content: script });
+      }
+
+      // Replay mode: serve every matching request from the HAR before it hits
+      // the network. Fault injection (installed per-page) still wins because
+      // page.route runs before context.route in Playwright.
+      if (this.options.har?.mode === "replay") {
+        await this.context.routeFromHAR(this.options.har.path, {
+          notFound: this.options.har.notFound ?? "fallback",
+        });
+      }
+
       if (this.options.traceReplay) {
         // Replay: iterate every recorded (visit, actions) group. The trace
         // itself defines the scope — applying maxPages here would silently
@@ -781,10 +792,17 @@ export class ChaosCrawler {
         }
       }
     } finally {
-      // Close the context explicitly so the HAR file (record mode) is flushed
-      // before `browser.close()` tears everything down.
-      await this.context?.close();
-      await this.browser.close();
+      if (this.cdpPage) {
+        const handler = this.routeHandlers.get(this.cdpPage);
+        if (handler && !this.cdpPage.isClosed()) {
+          await this.cdpPage.unroute("**/*", handler).catch(() => {});
+        }
+        this.routeHandlers.delete(this.cdpPage);
+        this.cdpPage = null;
+      } else {
+        await this.context?.close();
+      }
+      await this.browser?.close();
       if (this.options.traceOut && this.trace.length > 0) {
         writeTrace(this.options.traceOut, this.trace);
       }
@@ -1335,6 +1353,7 @@ export class ChaosCrawler {
   }
 
   private async setupNavigationBlocking(page: Page): Promise<void> {
+    if (this.routeHandlers.has(page)) return;
     const blockExternal = this.options.blockExternalNavigation;
     const rules = this.compiledFaultRules;
     const traceparentEnabled = this.options.traceparent !== undefined && this.options.traceparent !== false;
@@ -1343,7 +1362,7 @@ export class ChaosCrawler {
 
     // Install a single route handler that first considers fault injection,
     // then falls back to external-navigation blocking, then continues.
-    await page.route("**/*", async (route: Route) => {
+    const handler = async (route: Route) => {
       const request = route.request();
       const url = request.url();
       const method = request.method().toUpperCase();
@@ -1419,11 +1438,13 @@ export class ChaosCrawler {
       } else {
         await route.fallback();
       }
-    });
+    };
+    await page.route("**/*", handler);
+    if (page === this.cdpPage) this.routeHandlers.set(page, handler);
   }
 
   private async crawlPage(entry: QueueEntry): Promise<PageResult> {
-    const page = await this.context!.newPage();
+    const page = this.cdpPage ?? await this.context!.newPage();
     const { url, sourceUrl, method, sourceElement } = entry;
 
     // Scope recovery diagnostics to this page only.
@@ -1543,7 +1564,7 @@ export class ChaosCrawler {
       // Release hung requests before the page goes away, so `page.close()`
       // isn't racing a route handler that never responded.
       await this.drainHeldRoutes();
-      await page.close();
+      if (page !== this.cdpPage) await page.close();
     }
   }
 
@@ -1563,7 +1584,7 @@ export class ChaosCrawler {
     // Set up error listeners. Each error records `page.url()` at fire time
     // so that errors triggered after a chaos-action navigation are attributed
     // to the URL actually in the address bar, not the original crawlPage URL.
-    page.on("console", (msg) => {
+    const onConsole = (msg: ConsoleMessage) => {
       if (!collecting) return;
       const type = msg.type();
       const text = msg.text();
@@ -1581,10 +1602,11 @@ export class ChaosCrawler {
       } else if (type === "warning") {
         warnings.push(text);
       }
-    });
+    };
+    page.on("console", onConsole);
 
     // Capture unhandled exceptions
-    page.on("pageerror", (err) => {
+    const onPageError = (err: Error) => {
       if (!collecting) return;
       if (this.shouldIgnoreError(err.message)) return;
       const error: PageError = {
@@ -1597,23 +1619,25 @@ export class ChaosCrawler {
       errors.push(error);
       this.events.onError?.(error);
       this.logger.logPageError(error);
-    });
+    };
+    page.on("pageerror", onPageError);
 
     // Server-fault collector: when chaos() runs in remote-server mode, every
     // response carries `x-chaos-fault-*` headers describing any fault the
     // server-side middleware injected. Forward each response's headers to
     // the collector so `generateReport` (Task 13) can drain them.
-    if (this.serverFaultCollector) {
-      const collector = this.serverFaultCollector;
-      page.on("response", (response) => {
-        if (!collecting) return;
-        // Playwright's APIResponse / Response gives a plain object via headers().
-        // Wrap in Headers so the collector's parser sees a Web-Standard surface.
-        const h = new Headers();
-        for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
-        collector.observe({ headers: h, pageUrl: page.url() });
-      });
-    }
+    const collector = this.serverFaultCollector;
+    const onResponse = collector
+      ? (response: Response) => {
+          if (!collecting) return;
+          // Playwright's APIResponse / Response gives a plain object via headers().
+          // Wrap in Headers so the collector's parser sees a Web-Standard surface.
+          const h = new Headers();
+          for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
+          collector.observe({ headers: h, pageUrl: page.url() });
+        }
+      : null;
+    if (onResponse) page.on("response", onResponse);
 
     // Capture unhandled promise rejections. The install claims them via
     // `preventDefault` so they don't also fire as `pageerror` (which we'd
@@ -1621,58 +1645,61 @@ export class ChaosCrawler {
     // `watchUnhandledRejections` rather than inlined twice — a harness written
     // against this library needs exactly the same mechanism, and two copies is
     // how one of them ends up without the `preventDefault`.
-    await watchUnhandledRejections(page);
+    if (!this.initializedPages.has(page)) {
+      await watchUnhandledRejections(page);
 
-    // Capture SPA route changes that go through the History API
-    // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,
-    // Next.js client-side links, hand-rolled `useNavigate()` buttons —
-    // all of them mutate history without firing a real navigation, which
-    // means `extractLinks` (DOM-only) misses every URL they would route
-    // to. We monkey-patch the two methods on every page so each call
-    // appends the URL into a side channel that `drainSpaNavigations`
-    // reads later.
-    await page.addInitScript(() => {
-      // @ts-ignore - custom bag attached to window
-      window.__chaosNavigations = [];
-      const origPush = history.pushState;
-      const origReplace = history.replaceState;
-      history.pushState = function (...args: unknown[]) {
-        try {
-          const url = args[2];
-          if (typeof url === "string" && url.length > 0) {
-            // @ts-ignore
-            window.__chaosNavigations.push({
-              method: "pushState",
-              url,
-              timestamp: Date.now(),
-            });
+      // Capture SPA route changes that go through the History API
+      // (`pushState` / `replaceState`). React Router, Vue Router, SvelteKit,
+      // Next.js client-side links, hand-rolled `useNavigate()` buttons —
+      // all of them mutate history without firing a real navigation, which
+      // means `extractLinks` (DOM-only) misses every URL they would route
+      // to. We monkey-patch the two methods on every page so each call
+      // appends the URL into a side channel that `drainSpaNavigations`
+      // reads later.
+      await page.addInitScript(() => {
+        // @ts-ignore - custom bag attached to window
+        window.__chaosNavigations = [];
+        const origPush = history.pushState;
+        const origReplace = history.replaceState;
+        history.pushState = function (...args: unknown[]) {
+          try {
+            const url = args[2];
+            if (typeof url === "string" && url.length > 0) {
+              // @ts-ignore
+              window.__chaosNavigations.push({
+                method: "pushState",
+                url,
+                timestamp: Date.now(),
+              });
+            }
+          } catch {
+            /* never let our hook break the host page */
           }
-        } catch {
-          /* never let our hook break the host page */
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return origPush.apply(this, args as any);
-      };
-      history.replaceState = function (...args: unknown[]) {
-        try {
-          const url = args[2];
-          if (typeof url === "string" && url.length > 0) {
-            // @ts-ignore
-            window.__chaosNavigations.push({
-              method: "replaceState",
-              url,
-              timestamp: Date.now(),
-            });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return origPush.apply(this, args as any);
+        };
+        history.replaceState = function (...args: unknown[]) {
+          try {
+            const url = args[2];
+            if (typeof url === "string" && url.length > 0) {
+              // @ts-ignore
+              window.__chaosNavigations.push({
+                method: "replaceState",
+                url,
+                timestamp: Date.now(),
+              });
+            }
+          } catch {
+            /* never let our hook break the host page */
           }
-        } catch {
-          /* never let our hook break the host page */
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return origReplace.apply(this, args as any);
-      };
-    });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return origReplace.apply(this, args as any);
+        };
+      });
+      this.initializedPages.add(page);
+    }
 
-    page.on("requestfailed", (request) => {
+    const onRequestFailed = (request: Request) => {
       if (!collecting) return;
       const requestUrl = request.url();
       // Test the pattern against the *message* — `"<url> - <errorText>"` — not
@@ -1707,7 +1734,8 @@ export class ChaosCrawler {
       errors.push(error);
       this.events.onError?.(error);
       this.logger.logPageError(error);
-    });
+    };
+    page.on("requestfailed", onRequestFailed);
 
     // Track blocked external navigations
     const originalBlockedCount = this.blockedExternalCount;
@@ -1845,6 +1873,10 @@ export class ChaosCrawler {
     // the measurement itself causes must not reach the error stream, which
     // is what a crawl with perf off would report.
     collecting = false;
+    page.off("console", onConsole);
+    page.off("pageerror", onPageError);
+    if (onResponse) page.off("response", onResponse);
+    page.off("requestfailed", onRequestFailed);
 
     // Both paths, before the caller navigates for recovery or closes the
     // page: a `goto` that timed out still yields a load span that says what

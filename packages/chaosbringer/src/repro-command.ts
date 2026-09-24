@@ -26,6 +26,9 @@ seed: number,
 ): string {
   const parts: string[] = ["chaosbringer", "--url", shellQuote(options.baseUrl)];
   parts.push("--seed", String(seed));
+  if (options.cdpEndpoint) parts.push("--cdp", shellQuote(options.cdpEndpoint));
+  if (options.cdpTargetId) parts.push("--cdp-target", shellQuote(options.cdpTargetId));
+  if (options.terminalBrowser) parts.push("--terminal-browser");
   if (options.maxPages !== DEFAULT_OPTIONS.maxPages) {
     parts.push("--max-pages", String(options.maxPages));
   }
