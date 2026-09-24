@@ -1,5 +1,6 @@
 import type { CDPSession, Page } from "playwright";
-import { DEFAULT_SETTLE_TIMEOUT_MS } from "./config";
+import { DEFAULT_EVALUATE_TIMEOUT_MS, DEFAULT_SETTLE_TIMEOUT_MS } from "./config";
+import { BoundedEvaluator } from "./evaluate";
 import { diffMetrics, type SpanRender } from "./analyze/render";
 import { diffMemory, type SpanMemory } from "./analyze/memory";
 import { PerfAccumulator } from "./accumulator";
@@ -52,6 +53,16 @@ export interface PerfControllerOptions {
   settleTimeoutMs?: number;
   /** where drained in-page entries go (startSession shares one with the report) */
   accumulator?: PerfAccumulator;
+  /**
+   * max time one in-page read at a span boundary may take before its fallback
+   * is used (default 5000). Bounds begin/end/drain on a page that cannot answer.
+   */
+  evaluateTimeoutMs?: number;
+  /**
+   * @internal the bounded evaluator to share (startSession passes the one its
+   * finish() uses, so a stall seen by either short-circuits both).
+   */
+  evaluator?: BoundedEvaluator;
 }
 
 interface OpenSpan extends SpanHandle {
@@ -69,6 +80,7 @@ export class PerfController {
   private settle: Settle;
   private memGc: boolean;
   private settleTimeoutMs: number;
+  private evaluator: BoundedEvaluator;
   private open = new Map<number, OpenSpan>();
   private nextId = 1;
   private lastClosed?: { start: number; end: number };
@@ -89,6 +101,9 @@ export class PerfController {
     this.memGc = opts.memGc ?? memGc ?? false;
     this.settleTimeoutMs = opts.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS;
     this.accumulator = opts.accumulator ?? new PerfAccumulator();
+    this.evaluator =
+      opts.evaluator ??
+      new BoundedEvaluator(page, opts.evaluateTimeoutMs ?? DEFAULT_EVALUATE_TIMEOUT_MS);
     this.accumulator.setKeepFramesFrom(() => this.keepFramesFrom());
   }
 
@@ -275,21 +290,22 @@ export class PerfController {
   }
 
   /**
-   * page.evaluate that tolerates navigation and closure: on failure (typically
-   * "Execution context was destroyed") retry once after domcontentloaded, then
-   * give up with the fallback. Never throws.
+   * page.evaluate that tolerates navigation, closure and a page that cannot
+   * answer: on failure (typically "Execution context was destroyed") retry once
+   * after domcontentloaded; on timeout (evaluateTimeoutMs) give up at once — a
+   * retry would only wait for the same missing context again. Falls back
+   * otherwise. Never throws.
    */
   private async evalSafe<R>(fn: () => R, fallback: () => R): Promise<R> {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (this.page.isClosed()) break;
-      try {
-        return (await this.page.evaluate(fn)) as R;
-      } catch {
-        if (this.page.isClosed() || attempt > 0) break;
-        await this.page
-          .waitForLoadState("domcontentloaded", { timeout: NAV_TIMEOUT_MS })
-          .catch(() => {});
-      }
+      const r = await this.evaluator.attempt(fn);
+      if (r.kind === "ok") return r.value;
+      if (r.kind === "timeout") break;
+      if (this.page.isClosed() || attempt > 0) break;
+      await this.page
+        .waitForLoadState("domcontentloaded", { timeout: NAV_TIMEOUT_MS })
+        .catch(() => {});
     }
     return fallback();
   }

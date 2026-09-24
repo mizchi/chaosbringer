@@ -59,6 +59,14 @@ export function netProfileByName(name: string | undefined): NetProfile | null {
 /** Default max time to wait for settle before marking a span capped (ms). */
 export const DEFAULT_SETTLE_TIMEOUT_MS = 5000;
 
+/**
+ * Default max time one in-page read (page.evaluate) at a span boundary or in
+ * finish() may take before its fallback is used (ms). The reads themselves take
+ * milliseconds; only a page that cannot answer (a navigation whose document
+ * request never completes, a main thread that never yields) reaches this.
+ */
+export const DEFAULT_EVALUATE_TIMEOUT_MS = 5000;
+
 /** What sessionOptionsFromEnv resolves: SessionOptions plus the edge-only knobs. */
 export type EnvSessionOptions = SessionOptions & {
   /** PERF_OUT_DIR (default ./perf-results), resolved against cwd */

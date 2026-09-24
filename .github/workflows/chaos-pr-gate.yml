@@ -12,7 +12,8 @@ permissions:
 jobs:
   chaos-crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 20, not 15: the three `--perf` crawls below add ~2 minutes.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/chaosbringer
@@ -66,8 +67,22 @@ jobs:
           else
             echo "no baseline available; running without --baseline"
           fi
+          # Perf baseline: same run, its own artifact. Missing on the first
+          # baseline run after the perf steps landed (and whenever the last
+          # successful baseline predates them), so like the chaos baseline it
+          # is best-effort; the regress step reports and skips instead.
+          mkdir -p perf-baseline
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --name chaos-perf-baseline -D ./perf-baseline -R ${{ github.repository }} || true
+          fi
+          if ls perf-baseline/*.json > /dev/null 2>&1; then
+            echo "PERF_BASELINE=$(pwd)/perf-baseline" >> "$GITHUB_ENV"
+          else
+            echo "no perf baseline available; perf regress will be skipped"
+          fi
 
       - name: Start fixture server
+        id: fixture
         run: |
           PORT=4455 pnpm fixture:serve &
           echo $! > .fixture.pid
@@ -93,6 +108,58 @@ jobs:
             ${BASELINE:+--baseline "$BASELINE"} \
             ${BASELINE:+--baseline-strict}
 
+      # Same URL / seed / limits as `chaos-baseline`'s perf crawls, so the
+      # perfKeys line up. Runs even when the chaos gate above failed, so a PR
+      # sees both verdicts at once. The crawl's own exit code is not this
+      # gate (chaos findings are the step above's); a missing report is.
+      - name: Perf crawls (PR, N=3)
+        id: perf_crawls
+        if: ${{ !cancelled() && steps.fixture.outcome == 'success' }}
+        env:
+          PERF_RUNS: "3"
+        run: |
+          mkdir -p perf-current
+          for i in $(seq 1 "$PERF_RUNS"); do
+            node dist/cli.js \
+              --url http://127.0.0.1:4455 \
+              --max-pages 30 \
+              --max-actions-per-page 5 \
+              --seed 1 \
+              --perf \
+              --output "perf-current/run$i.json" \
+              > "perf-current/run$i.log" 2>&1 || true
+            if [ ! -f "perf-current/run$i.json" ]; then
+              echo "::error::perf crawl $i wrote no report"
+              cat "perf-current/run$i.log"
+              exit 1
+            fi
+          done
+
+      # Baseline-relative medians per perfKey (threshold 15% AND a per-metric
+      # absolute floor; noisy medians only warn). Not `perf gate`: that needs
+      # hand-maintained budgets, this needs none. The baseline was measured
+      # on a different runner than this job, so a PR that touches nothing
+      # can still see runner-to-runner drift; the floors and the 15% are what
+      # absorb it. If it flakes, add runs (PERF_RUNS) before loosening them.
+      - name: Perf regress vs baseline
+        if: ${{ !cancelled() && steps.perf_crawls.outcome == 'success' }}
+        shell: bash
+        run: |
+          if [ -z "${PERF_BASELINE:-}" ]; then
+            echo "::notice::no chaos-perf-baseline artifact on main yet; skipping perf regress (the next chaos-baseline run creates it)"
+            exit 0
+          fi
+          { echo '## perf regress vs main'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # `shell: bash` runs with -eo pipefail: without the set +e a
+          # regression (exit 1) would end the step here, before the closing
+          # fence, and every summary section after it would render as code.
+          set +e
+          node dist/cli.js perf regress "$PERF_BASELINE" --current perf-current 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"
+
       - name: Stop fixture server
         if: always()
         run: kill "$(cat .fixture.pid)" 2>/dev/null || true
@@ -104,6 +171,14 @@ jobs:
           name: chaos-report-pr-${{ github.event.pull_request.number }}
           path: packages/chaosbringer/chaos-report.json
           if-no-files-found: warn
+
+      - name: Upload perf reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-perf-pr-${{ github.event.pull_request.number }}
+          path: packages/chaosbringer/perf-current/
+          if-no-files-found: ignore
 
       - name: Upload failure bundles
         if: failure()

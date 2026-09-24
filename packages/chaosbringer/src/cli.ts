@@ -34,8 +34,9 @@ import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { perfBudgetRulesFromJson } from "./budget.js";
 import { perfOptionsFromCliFlags } from "./perf-key.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
@@ -63,6 +64,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
   parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
   journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
   model: () => import("./model/cli.js").then((m) => m.runModelCli),
+  perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
 };
 
 const rawSub = process.argv[2];
@@ -137,6 +139,7 @@ const { values, positionals } = parseArgs({
     "perf-mem": { type: "boolean", default: false },
     "perf-cov": { type: "boolean", default: false },
     "perf-out": { type: "string" },
+    "perf-budgets": { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -208,6 +211,8 @@ OPTIONS:
   --perf-mem            Force GC at span boundaries for retained-only memory deltas (slow; implies --perf)
   --perf-cov            Record JS/CSS byte coverage per page (implies --perf)
   --perf-out <dir>      Write each page's full perf report (+ trace/coverage) to <dir> (implies --perf)
+  --perf-budgets <file> Per-span budgets by perfKey glob: a perfBudgets JSON array or a
+                        \`perf emit-budgets\` file; a breach is a perf-budget.<metric> violation (implies --perf)
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -215,6 +220,13 @@ OPTIONS:
   --strict              Exit with error on any console errors
   --quiet               Minimal output
   --help                Show this help
+
+PERF SUBCOMMANDS (read crawl reports written with --perf):
+  chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]
+  chaosbringer perf gate <report.json...> --budgets <file> [--json]
+  chaosbringer perf regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15]
+  chaosbringer perf drilldown <report.json> <perfKey> [--top N]
+  (chaosbringer perf --help for details)
 
 EXAMPLES:
   # Basic crawl
@@ -334,6 +346,23 @@ if (values.budget && values.budget.length > 0) {
   }
 }
 
+// Read here, not by the crawler, so a bad file fails before a browser starts
+// and the error names the flag. The rules' contents are validated by the
+// crawler (validatePerfBudgets), the same as for the programmatic option.
+let perfBudgets: CrawlerOptions["perfBudgets"];
+const perfBudgetsFile = values["perf-budgets"];
+if (perfBudgetsFile !== undefined) {
+  try {
+    perfBudgets = perfBudgetRulesFromJson(
+      JSON.parse(readFileSync(perfBudgetsFile, "utf-8")),
+      `--perf-budgets ${perfBudgetsFile}`,
+    );
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+}
+
 let shardIndex: number | undefined;
 let shardCount: number | undefined;
 if (values.shard) {
@@ -450,6 +479,8 @@ const options: CrawlerOptions = {
     : undefined,
   invariants: buildInvariants(),
   perf: perfOptionsFromCliFlags(values),
+  perfBudgets,
+  perfBudgetsFile,
 };
 
 const outputPath = values.output || "chaos-report.json";

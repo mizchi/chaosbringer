@@ -476,7 +476,7 @@ regression, so it drops straight into CI alongside the budget gate.
 
 ## CI
 
-[`.github/workflows/perf.yml`](.github/workflows/perf.yml) is a working perf gate —
+[`.github/workflows/lightbringer-perf.yml`](https://github.com/mizchi/chaosbringer/blob/main/.github/workflows/lightbringer-perf.yml) is a working perf gate —
 lightbringer measuring its own fixtures — that doubles as the copy-this template:
 
 ```yaml
@@ -524,7 +524,7 @@ tutorial; this is the lookup.
 | --- | --- |
 | `import { test, expect } from "lightbringer"` | extended Playwright fixture exposing **`perf`** (below) — you mark spans with `perf.measure`. Also re-exports everything in `lightbringer/core`. |
 | `import { test, expect } from "lightbringer/fixture"` | the same fixture on its own subpath. |
-| `import { … } from "lightbringer/core"` | the runner-agnostic core — `startSession`, `PerfController`, `buildReport`, `logSummary`, `checkBudgets`, `collectorInitScript`, `sessionOptionsFromEnv`, `withSpan` / `startSpan`, `toOtelSpans`, the report types — with **no `@playwright/test` import** (a plain `playwright` `Page` + `CDPSession` is enough; see [Core](#lightbringercore-no-test-runner)). |
+| `import { … } from "lightbringer/core"` | the runner-agnostic core — `startSession`, `PerfController`, `buildReport`, `logSummary`, `checkBudgets`, `collectorInitScript`, `sessionOptionsFromEnv`, `withSpan` / `startSpan`, `toOtelSpans`, the median / gate / regress / drilldown functions, the report types — with **no `@playwright/test` import** (a plain `playwright` `Page` + `CDPSession` is enough; see [Core](#lightbringercore-no-test-runner)). |
 | `import { test, expect } from "lightbringer/auto"` | same `test`, but every `page.goto` / Locator action becomes a span automatically — no `perf.measure` calls (see [Auto-span](#auto-span-measure-an-existing-spec-1-line-change)). |
 | `import { … } from "lightbringer/analyze"` | the pure CDP-event analysis layer — builder functions + fragment types, **no Playwright / fs dependency** (below). |
 | `npx lightbringer run <scenario.json \| spec.ts \| dir>` | the zero-install CLI (see [CLI](#cli-no-install-no-spec)). |
@@ -559,9 +559,26 @@ logSummary(report);
 ```
 
 `SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
-`coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`. The fixture
-and CLI map the `PERF_*` env vars onto these with `sessionOptionsFromEnv(env)` —
-the only place the environment is read.
+`coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`,
+`evaluateTimeoutMs`. The fixture and CLI map the `PERF_*` env vars onto these
+with `sessionOptionsFromEnv(env)` — the only place the environment is read.
+
+**Hung pages.** Every in-page read at a span boundary (`begin` / `end` / `drain`)
+and in `finish()` is bounded by `evaluateTimeoutMs` (default 5000 ms) and falls
+back (no frames, node clock, no page extras) when the page cannot answer —
+typically a navigation whose document request is never answered, which makes
+Playwright hold every `page.evaluate` for minutes. After one read times out, the
+rest return at once until that read settles, so a hung page costs one bounded
+wait, not one per read.
+
+**Statistics, gates and drilldown.** The logic behind `scripts/*.mjs` and
+`lightbringer run --emit-budgets/--gate` is exported as pure functions, for a
+driver that has its own run reports: `stat` / `median` / `percentile`
+(median + p25..p75 band, `noisy` when the IQR exceeds 25% of a median above 5),
+`aggregateRuns` (→ the `<slug>.median.json` shape), `checkMedianBudgets`, `gate`,
+`spanMedians` + `emitBudgets` (ceil(median × 1.25)), `regress` + `formatRegress`
+(threshold 0.15 plus per-metric absolute floors), `analyseDrilldown` +
+`formatDrilldown`, and `unionCoverage` + `formatCoverageUnion`.
 
 **Init-script order / clock skew.** The collector captures the native
 `performance.now` / `timeOrigin` when it is installed, so spans stay correct even

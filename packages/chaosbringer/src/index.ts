@@ -168,7 +168,14 @@ export {
   type RunParityOptions,
   type SideResult,
 } from "./parity.js";
-export { checkPerformanceBudget } from "./budget.js";
+export {
+  checkPerformanceBudget,
+  checkPerfBudgets,
+  perfBudgetRulesFromJson,
+  type PerfBudgetsFile,
+} from "./budget.js";
+export { buildCrawlPerfSummary } from "./perf-summary.js";
+export { compilePerfKeyGlob } from "./perf-key.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
   stateMachineCurrent,
@@ -556,6 +563,9 @@ export type {
   PerfOptions,
   PerfSpanReport,
   PagePerfSummary,
+  PerfBudgetRule,
+  CrawlPerfSummary,
+  CrawlVitalSummary,
   ReportDiff,
   ClusterDiffEntry,
   PageDiffEntry,

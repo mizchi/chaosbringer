@@ -12,7 +12,16 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page, type BrowserContextOptions } from "playwright";
-import { startSession, logSummary, type PerfReport, type SpanReport } from "./core";
+import {
+  startSession,
+  logSummary,
+  emitBudgets,
+  formatGateViolation,
+  gate,
+  spanMedians,
+  type PerfReport,
+  type SpanMedians,
+} from "./core";
 import { netProfileByName, sessionOptionsFromEnv } from "./config";
 
 interface Step {
@@ -67,8 +76,8 @@ const cov = flags.has("--cov");
 const mem = flags.has("--mem");
 const css = flags.has("--css");
 const trace = flags.has("--trace") || css;
-const emitBudgets = flags.has("--emit-budgets");
-const gate = flags.has("--gate");
+const emitBudgetsFlag = flags.has("--emit-budgets");
+const gateFlag = flags.has("--gate");
 
 const netProfile = netProfileByName(netName);
 // Flags drive the CLI; PERF_* env vars still supply what has no flag
@@ -156,38 +165,11 @@ async function runOnce(index: number): Promise<PerfReport> {
 }
 
 // ── median + budgets ──────────────────────────────────────────────────────
-const METRICS: Record<string, (s: SpanReport) => number | undefined> = {
-  durationMs: (s) => s.durationMs,
-  scriptMs: (s) => s.render.scriptMs,
-  blockingMs: (s) => s.cpu.blockingMs,
-  layoutCount: (s) => s.render.layoutCount,
-  recalcStyleMs: (s) => s.render.recalcStyleMs,
-  encodedKB: (s) => s.network.encodedKB,
-  requestCount: (s) => s.network.requestCount,
-  interactionMs: (s) => s.interaction?.maxDurationMs,
-};
-const median = (xs: number[]) => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
-};
+// Medians, ×1.25 budgets and the gate come from src/stats.ts, the same
+// functions scripts/median.mjs and chaosbringer's `perf` subcommands use.
 
-/** spanName -> metric -> median across runs */
-function medians(runs: PerfReport[]): Record<string, Record<string, number>> {
-  const out: Record<string, Record<string, number>> = {};
-  const names = [...new Set(runs.flatMap((r) => r.spans.map((s) => s.name)))];
-  for (const name of names) {
-    const spans = runs.flatMap((r) => r.spans.filter((s) => s.name === name));
-    out[name] = {};
-    for (const [k, get] of Object.entries(METRICS)) {
-      const vals = spans.map(get).filter((v): v is number => typeof v === "number");
-      if (vals.length) out[name]![k] = Math.round(median(vals) * 10) / 10;
-    }
-  }
-  return out;
-}
-
-type SlugBudgets = Record<string, Record<string, Record<string, number>>>;
+/** slug → span → metric → budget (lightbringer.budgets.json) */
+type SlugBudgets = Record<string, SpanMedians>;
 
 /** Read the per-run report files written by the run (scenario or spec). */
 function loadRunsBySlug(): Map<string, PerfReport[]> {
@@ -205,19 +187,13 @@ function loadRunsBySlug(): Map<string, PerfReport[]> {
 /** Emit budgets from medians (×1.25) and/or gate against them. Keyed slug→span→metric. */
 function emitOrGate(bySlug: Map<string, PerfReport[]>) {
   const budgetsPath = path.join(outDir, "lightbringer.budgets.json");
-  if (emitBudgets) {
+  if (emitBudgetsFlag) {
     const budgets: SlugBudgets = {};
-    for (const [s, runs] of bySlug) {
-      budgets[s] = {};
-      for (const [span, metrics] of Object.entries(medians(runs))) {
-        budgets[s]![span] = {};
-        for (const [k, v] of Object.entries(metrics)) budgets[s]![span]![k] = Math.ceil(v * 1.25);
-      }
-    }
+    for (const [s, runs] of bySlug) budgets[s] = emitBudgets(spanMedians(runs));
     fs.writeFileSync(budgetsPath, JSON.stringify(budgets, null, 2));
     console.log(`\n[lightbringer] wrote budgets → ${path.relative(process.cwd(), budgetsPath)} (median ×1.25)`);
   }
-  if (gate) {
+  if (gateFlag) {
     if (!fs.existsSync(budgetsPath)) {
       console.error(`[lightbringer] --gate: no budgets at ${budgetsPath} (run --emit-budgets first)`);
       process.exit(1);
@@ -225,14 +201,9 @@ function emitOrGate(bySlug: Map<string, PerfReport[]>) {
     const budgets = JSON.parse(fs.readFileSync(budgetsPath, "utf8")) as SlugBudgets;
     const violations: string[] = [];
     for (const [s, runs] of bySlug) {
-      const med = medians(runs);
-      for (const [span, metrics] of Object.entries(budgets[s] ?? {})) {
-        for (const [k, limit] of Object.entries(metrics)) {
-          const actual = med[span]?.[k];
-          if (actual != null && actual > limit)
-            violations.push(`${s} / ${span}.${k} median=${actual} > budget ${limit}`);
-        }
-      }
+      // Bare medians (no IQR band), so this gate has hard violations only.
+      const r = gate(spanMedians(runs), budgets[s] ?? {});
+      violations.push(...r.violations.map((f) => formatGateViolation(s, f)));
     }
     if (violations.length) {
       console.error(`\n[lightbringer] GATE FAILED (${violations.length}):`);
@@ -274,7 +245,7 @@ function runSpecMode() {
 async function main() {
   if (isSpec) {
     runSpecMode(); // auto fixture logs each test + writes perf-results/*.json
-    if (emitBudgets || gate) emitOrGate(loadRunsBySlug());
+    if (emitBudgetsFlag || gateFlag) emitOrGate(loadRunsBySlug());
     return;
   }
   const runs: PerfReport[] = [];
@@ -283,7 +254,7 @@ async function main() {
     runs.push(await runOnce(i));
   }
   logSummary(runs[runs.length - 1]!, mem);
-  if (emitBudgets || gate) emitOrGate(new Map([[slug, runs]]));
+  if (emitBudgetsFlag || gateFlag) emitOrGate(new Map([[slug, runs]]));
 }
 
 main().catch((e) => {

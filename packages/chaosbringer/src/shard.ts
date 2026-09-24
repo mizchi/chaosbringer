@@ -15,6 +15,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
 import { printReport, getExitCode } from "./reporter.js";
@@ -157,6 +158,9 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
     errorClusters,
     har: first.har,
     diff: undefined,
+    // Rebuilt from the merged pages, like the clusters: a per-shard summary
+    // cannot be added up (percentiles do not sum).
+    perf: buildCrawlPerfSummary(mergedPages, actions),
   };
 }
 

@@ -5,6 +5,7 @@
  *
  * Every message starts with `chaosbringer:` and names the field it is about.
  */
+import { BUDGET_METRIC } from "lightbringer/core";
 import { devices } from "playwright";
 import { validateFaultSchedule } from "./schedule.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
@@ -40,7 +41,8 @@ export const KNOWN_OPTION_NAMES = [
   "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
-  "initScripts", "perf", "cdpEndpoint", "cdpTargetId", "terminalBrowser",
+  "initScripts", "perf", "perfBudgets", "perfBudgetsFile", "cdpEndpoint", "cdpTargetId",
+  "terminalBrowser",
 ] as const;
 
 /**
@@ -533,6 +535,16 @@ export function validateOptions(options: CrawlerOptions): void {
   }
 
   if (options.perf !== undefined) validatePerf(options.perf);
+  if (options.perfBudgets !== undefined) {
+    validatePerfBudgets(options.perfBudgets);
+    if (options.perf === false && options.perfBudgets.length > 0) {
+      // Every rule would pass without a span to check, which reads as "within
+      // budget" rather than "not measured".
+      throw new Error(
+        `chaosbringer: "perfBudgets" needs per-step measurement, but "perf" is false (drop "perf: false", or the rules)`
+      );
+    }
+  }
 
   if (options.performanceBudget !== undefined) {
     const budget = options.performanceBudget;
@@ -607,4 +619,57 @@ function validatePerf(perf: unknown): void {
   if (p.outDir !== undefined && (typeof p.outDir !== "string" || p.outDir.length === 0)) {
     throw new Error(`chaosbringer: "perf.outDir" must be a non-empty string`);
   }
+}
+
+const PERF_BUDGET_RULE_KEYS = new Set(["match", "budget", "exact"]);
+
+/**
+ * `perfBudgets` is an array of `{ match, budget }`. The metric names are
+ * lightbringer's `BUDGET_METRIC` keys — read from there, not copied, so a
+ * metric lightbringer adds is accepted here the day it lands. Unknown keys
+ * are refused outright: a misspelt `blockingMS` would otherwise be a budget
+ * that never fires. A limit of 0 is allowed (`perf emit-budgets` writes 0
+ * for a metric whose median was 0, e.g. no requests on a click).
+ */
+export function validatePerfBudgets(rules: unknown): void {
+  if (!Array.isArray(rules)) {
+    throw new Error(
+      `chaosbringer: "perfBudgets" must be an array of { match, budget } (got ${JSON.stringify(rules)})`
+    );
+  }
+  const metrics = Object.keys(BUDGET_METRIC);
+  rules.forEach((rule: unknown, i) => {
+    const at = `perfBudgets[${i}]`;
+    if (rule === null || typeof rule !== "object" || Array.isArray(rule)) {
+      throw new Error(`chaosbringer: "${at}" must be an object like { match, budget }`);
+    }
+    const r = rule as Record<string, unknown>;
+    for (const key of Object.keys(r)) {
+      if (!PERF_BUDGET_RULE_KEYS.has(key)) {
+        throw new Error(`chaosbringer: "${at}.${key}" is not a rule field (allowed: match, budget, exact)`);
+      }
+    }
+    if (r.exact !== undefined && typeof r.exact !== "boolean") {
+      throw new Error(`chaosbringer: "${at}.exact" must be a boolean (got ${JSON.stringify(r.exact)})`);
+    }
+    if (typeof r.match !== "string" || r.match.length === 0) {
+      throw new Error(`chaosbringer: "${at}.match" must be a non-empty glob over perfKey (got ${JSON.stringify(r.match)})`);
+    }
+    const budget = r.budget;
+    if (budget === null || typeof budget !== "object" || Array.isArray(budget)) {
+      throw new Error(`chaosbringer: "${at}.budget" must be an object of metric → limit`);
+    }
+    for (const [metric, limit] of Object.entries(budget as Record<string, unknown>)) {
+      if (!metrics.includes(metric)) {
+        throw new Error(
+          `chaosbringer: "${at}.budget.${metric}" is not a budget metric (allowed: ${metrics.join(", ")})`
+        );
+      }
+      if (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0) {
+        throw new Error(
+          `chaosbringer: "${at}.budget.${metric}" must be a non-negative number (got ${JSON.stringify(limit)})`
+        );
+      }
+    }
+  });
 }

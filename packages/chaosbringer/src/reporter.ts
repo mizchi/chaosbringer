@@ -4,7 +4,8 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ActionResult, CrawlReport, PageResult } from "./types.js";
+import { slowestActions } from "./perf-summary.js";
+import type { CrawlReport, PageResult } from "./types.js";
 
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
@@ -316,30 +317,6 @@ export function printReport(report: CrawlReport, compact = false, strict: boolea
   console.log(compact ? formatCompactReport(report, strict) : formatReport(report));
 }
 
-/** One row of the "slowest actions" block. */
-export interface SlowActionRow {
-  key: string;
-  durationMs: number;
-  blockingMs: number;
-  /** Absent when the span contained no interaction. */
-  interactionMs?: number;
-}
-
-/** The `n` measured actions with the longest spans, slowest first. */
-export function slowestActions(actions: readonly ActionResult[], n = 5): SlowActionRow[] {
-  const rows: SlowActionRow[] = [];
-  for (const a of actions) {
-    if (!a.perf) continue;
-    rows.push({
-      key: a.perf.key,
-      durationMs: a.perf.durationMs,
-      blockingMs: a.perf.cpu.blockingMs,
-      ...(a.perf.interaction ? { interactionMs: a.perf.interaction.maxDurationMs } : {}),
-    });
-  }
-  return rows.sort((a, b) => b.durationMs - a.durationMs).slice(0, n);
-}
-
 /**
  * The per-step performance block: a line per measured page, then the
  * slowest actions. Empty — not even a header — when nothing was measured,
@@ -375,6 +352,41 @@ function formatPerfSection(report: CrawlReport): string[] {
         `  ${ms(row.durationMs).padStart(7)}  blocking ${ms(row.blockingMs)}${inp}  ${truncate(row.key, 80)}`,
       );
     }
+  }
+  out.push(...formatCrawlPerfSummary(report));
+  return out;
+}
+
+/**
+ * The crawl-wide lines from `report.perf`: vitals across pages, then the
+ * top three initiators and third-party domains. Compact on purpose — the
+ * full lists are in the JSON — and nothing at all without a summary.
+ */
+function formatCrawlPerfSummary(report: CrawlReport): string[] {
+  const perf = report.perf;
+  if (!perf) return [];
+  const out: string[] = ["", `Across the crawl (${perf.totals.pages} pages, ${perf.totals.spans} spans):`];
+  for (const [name, v] of Object.entries(perf.vitals)) {
+    const unit = name === "CLS" ? "" : "ms";
+    out.push(
+      `  ${name.padEnd(4)} p50 ${v.p50}${unit}  p75 ${v.p75}${unit}  worst ${v.worst.value}${unit} ${truncate(v.worst.url, 60)}`,
+    );
+  }
+  if (perf.hotInitiators.length > 0) {
+    out.push(
+      `  top initiators: ${perf.hotInitiators
+        .slice(0, 3)
+        .map((i) => `${truncate(i.frame, 50)} (${i.requestCount} req, ${i.encodedKB}KB)`)
+        .join(", ")}`,
+    );
+  }
+  if (perf.thirdParty.length > 0) {
+    out.push(
+      `  third party: ${perf.thirdParty
+        .slice(0, 3)
+        .map((d) => `${d.domain} (${d.requestCount} req, ${d.encodedKB}KB)`)
+        .join(", ")}`,
+    );
   }
   return out;
 }

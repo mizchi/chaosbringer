@@ -150,6 +150,27 @@ function loadChaosConfig(): ServerFaultConfig {
   return cfg;
 }
 
+// ─── Opt-in perf regression ───────────────────────────────────────────────
+// Not a seeded bug: BUG_LEDGER and the `loop` mismatch count must not move,
+// so this is OFF unless PLAYGROUND_PERF_REGRESSION=1 and applies to both
+// variants alike (parity / chaos:diff see identical pages either way). It
+// exists to prove the `chaosbringer perf gate` / `perf regress` path end to
+// end: turn it on, crawl, and the `/users :: load` span must fail.
+//
+// A synchronous busy loop on `performance.now()` rather than a timer: the
+// gates hold main-thread cost (scriptMs / blockingMs), and a setTimeout
+// would only move wall-clock time, which is the noisiest metric there is.
+// A fixed duration, not an iteration count, so the cost is the same ~150 ms
+// on a fast laptop and a slow CI runner.
+const PERF_REGRESSION_MS =
+  process.env.PLAYGROUND_PERF_REGRESSION === "1"
+    ? Number.parseInt(process.env.PLAYGROUND_PERF_REGRESSION_MS ?? "150", 10)
+    : 0;
+function perfRegressionScript(): string {
+  if (!(PERF_REGRESSION_MS > 0)) return "";
+  return `<script>(function(){var end=performance.now()+${PERF_REGRESSION_MS};while(performance.now()<end){}})();</script>`;
+}
+
 // ─── App data ─────────────────────────────────────────────────────────────
 interface User {
   id: number;
@@ -194,7 +215,7 @@ app.get("/users", (c) => {
     (u) => `<li><a href="/users/${u.id}">${u.name}</a></li>`,
   ).join("");
   return c.html(`<!doctype html>
-<html><body><h1>Users</h1><ul>${items}</ul></body></html>`);
+<html><body><h1>Users</h1><ul>${items}</ul>${perfRegressionScript()}</body></html>`);
 });
 
 app.get("/users/:id", (c) => {
@@ -356,5 +377,8 @@ serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(
     `[${VARIANT}] listening on http://127.0.0.1:${info.port} — chaos config:`,
     Object.keys(loadChaosConfig()).join(", "),
+    ...(PERF_REGRESSION_MS > 0
+      ? [`— perf regression: ${PERF_REGRESSION_MS}ms busy loop on /users load`]
+      : []),
   );
 });

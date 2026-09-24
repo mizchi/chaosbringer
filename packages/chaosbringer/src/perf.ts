@@ -27,17 +27,21 @@ import {
   toPerfSpanReport,
   type ResolvedPerfOptions,
 } from "./perf-key.js";
-import type { ActionResult, PagePerfSummary, PageResult } from "./types.js";
+import type { ActionResult, PagePerfSummary, PageResult, PerfSpanReport } from "./types.js";
 
 /** Who a recorded span belongs to, in the order the spans were recorded. */
 type SpanOwner = { kind: "load" } | { kind: "action"; action: ActionResult };
 
 /**
- * How long `finish()` may take before the page is given up on. It reads the
- * page a handful of times; on a page whose main thread never yields, each of
- * those reads would wait forever, and a crawl must not hang on measurement.
+ * How long `finish()` may take before the page is given up on. lightbringer
+ * bounds its in-page reads (`evaluateTimeoutMs`), but not every call
+ * `finish()` makes goes through that bound: stopping JS/CSS coverage
+ * (`--perf-cov`) and a forced GC (`--perf-mem`, when the load span is closed
+ * here) are CDP calls that need the renderer's main thread, and on a page
+ * whose main thread never yields they never answer. A crawl must not hang
+ * on measurement, so the whole of `finish()` is raced against this.
  */
-const FINISH_TIMEOUT_MS = 15_000;
+export const FINISH_TIMEOUT_MS = 15_000;
 
 export class PagePerf {
   private loadHandle: SpanHandle | null = null;
@@ -131,36 +135,51 @@ export class PagePerf {
    * Build the page's report and attach it: the load span to `result.perf`,
    * page extras to `result.perfPage`, and each action span to the
    * `ActionResult` it measured — the same objects the crawler already pushed
-   * into its report, mutated in place.
+   * into its report, mutated in place. Returns the attached spans, load
+   * first, for the crawler's `perfBudgets` check.
    *
    * A load span still open (the `goto` threw) is closed first, so a timed-out
    * navigation still reports what it cost. Action spans still open belong to
    * actions that never produced a result; they are dropped.
    *
-   * `navigationFailed` stops the page's pending load first, and the crawler
-   * passes it only when the `goto` itself did not return: stopping the load
-   * of a page that did load would abort its in-flight fetches, which only a
-   * perf run would do. After a `goto`
-   * that timed out on a document request nobody answers, the navigation is
-   * still in flight, and Playwright holds every `page.evaluate` until the new
-   * document's context exists — which is never. Measured: each of the
-   * handful of reads `finish()` makes then waits until Chromium gives up on
-   * the request, two minutes per page. `Page.stopLoading` is the browser's
-   * stop button; the old document's context answers at once.
+   * Every in-page read lightbringer makes is bounded by its
+   * `evaluateTimeoutMs`, and after one read times out the rest return at
+   * once. The CDP calls that are not reads (coverage stop, forced GC) have no
+   * such bound, so the whole call is also raced against `timeoutMs`
+   * (FINISH_TIMEOUT_MS); past it, it throws and the page goes unmeasured.
+   *
+   * `navigationFailed` still stops the page's pending load first — not to
+   * avoid a hang any more, but for the data: after a `goto` that timed out on
+   * a document request nobody answers, the navigation is still in flight and
+   * Playwright holds every `page.evaluate` for the new document's context,
+   * so without the stop each read would time out into its fallback and the
+   * load span would lose the in-page part (long tasks, frames) of what the
+   * attempt cost. `Page.stopLoading` is the browser's stop button; the old
+   * document's context answers at once. The crawler passes it only when the
+   * `goto` itself did not return: stopping the load of a page that did load
+   * would abort its in-flight fetches, which only a perf run would do.
    */
-  async finish(result: PageResult, { navigationFailed = false } = {}): Promise<void> {
+  async finish(
+    result: PageResult,
+    {
+      navigationFailed = false,
+      timeoutMs = FINISH_TIMEOUT_MS,
+    }: { navigationFailed?: boolean; timeoutMs?: number } = {},
+  ): Promise<PerfSpanReport[]> {
     if (navigationFailed) await this.client.send("Page.stopLoading").catch(() => {});
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), FINISH_TIMEOUT_MS);
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
     });
     const outcome = await Promise.race([this.build(result), timeout]).finally(() =>
       clearTimeout(timer),
     );
-    if (outcome === "timeout") throw new Error(`perf finish timed out after ${FINISH_TIMEOUT_MS}ms`);
+    // The crawler logs this as `perf_finish_failed` and keeps crawling.
+    if (outcome === "timeout") throw new Error(`perf finish timed out after ${timeoutMs}ms`);
+    return outcome;
   }
 
-  private async build(result: PageResult): Promise<void> {
+  private async build(result: PageResult): Promise<PerfSpanReport[]> {
     if (this.loadHandle) await this.endLoad();
     for (const handle of this.openActions) this.session.controller.cancel(handle);
     this.openActions.clear();
@@ -169,6 +188,7 @@ export class PagePerf {
 
     // `report.spans` is in the order the spans were recorded, which is the
     // order `record()` pushed their owners.
+    const attached: PerfSpanReport[] = [];
     const sidecarSpans = report.spans.map((span, i) => {
       const owner = this.owners[i];
       if (!owner) return span;
@@ -176,8 +196,13 @@ export class PagePerf {
       const name = owner.kind === "load" ? loadSpanName(this.url) : kind;
       const key = perfKey(this.url, kind);
       const trimmed = toPerfSpanReport(span, key, name);
-      if (owner.kind === "load") result.perf = trimmed;
-      else owner.action.perf = trimmed;
+      if (owner.kind === "load") {
+        result.perf = trimmed;
+        attached.unshift(trimmed);
+      } else {
+        owner.action.perf = trimmed;
+        attached.push(trimmed);
+      }
       return { ...span, name, key };
     });
 
@@ -198,6 +223,7 @@ export class PagePerf {
       summary.reportPath = reportPath;
     }
     result.perfPage = summary;
+    return attached;
   }
 
   /**

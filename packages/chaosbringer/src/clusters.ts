@@ -28,6 +28,14 @@ export interface ErrorCluster {
 /** Normalise an error message to its fingerprint. */
 export function fingerprintError(err: PageError): string {
   let msg = err.message ?? "";
+  // A perf-budget breach is one failure however much it went over by: the
+  // measured value ("requestCount=23 > budget 20") changes run to run, and
+  // the generic 3+-digit fold below leaves 10–99 and decimals literal, so
+  // each run would open a new cluster and trip --baseline-strict. The limit
+  // and the key stay in the fingerprint.
+  if (err.invariantName?.startsWith("perf-budget.")) {
+    msg = msg.replace(/=\d+(?:\.\d+)?(ms)?(?= > budget )/g, "=<n>$1");
+  }
   msg = msg
     // URLs in message bodies vary per run — collapse them.
     .replace(/https?:\/\/[^\s"'()<>]+/g, "<url>")

@@ -35,6 +35,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
         working-directory: .
+      # scripts/median.mjs and scripts/coverage.mjs import ../dist/core.js
+      # (the published statistics, so the gate and `lightbringer run
+      # --gate` cannot drift), and a monorepo checkout has no dist/ until
+      # it is built. Without this step the gate dies on a missing module.
+      - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - name: measure (median of 5 runs)
         env:
@@ -48,8 +53,12 @@ jobs:
         shell: bash
         run: |
           { echo '## perf budget'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # `shell: bash` is -eo pipefail: without set +e a failing gate would
+          # end the step before the closing fence is written.
+          set +e
           node scripts/median.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
           code=${PIPESTATUS[0]}
+          set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$code"
 
@@ -66,6 +75,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
         working-directory: .
+      # scripts/median.mjs and scripts/coverage.mjs import ../dist/core.js
+      # (the published statistics, so the gate and `lightbringer run
+      # --gate` cannot drift), and a monorepo checkout has no dist/ until
+      # it is built. Without this step the gate dies on a missing module.
+      - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - name: measure production build with coverage
         env:
