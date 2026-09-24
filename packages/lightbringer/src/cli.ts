@@ -12,7 +12,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page, type BrowserContextOptions } from "playwright";
-import { startSession, logSummary, type PerfReport, type SpanReport } from "./collector";
+import { startSession, logSummary, type PerfReport, type SpanReport } from "./core";
+import { netProfileByName, sessionOptionsFromEnv } from "./config";
 
 interface Step {
   name: string;
@@ -69,12 +70,10 @@ const trace = flags.has("--trace") || css;
 const emitBudgets = flags.has("--emit-budgets");
 const gate = flags.has("--gate");
 
-const NET_PROFILES: Record<string, { latency: number; downloadThroughput: number; uploadThroughput: number }> = {
-  "slow-3g": { latency: 400, downloadThroughput: 51_200, uploadThroughput: 51_200 },
-  "fast-3g": { latency: 150, downloadThroughput: 196_608, uploadThroughput: 98_304 },
-  "4g": { latency: 40, downloadThroughput: 1_179_648, uploadThroughput: 589_824 },
-};
-const netProfile = netName ? NET_PROFILES[netName] ?? null : null;
+const netProfile = netProfileByName(netName);
+// Flags drive the CLI; PERF_* env vars still supply what has no flag
+// (PERF_SETTLE_TIMEOUT), exactly as before.
+const envOpts = sessionOptionsFromEnv();
 
 // A .json argument is a declarative scenario; anything else (a .ts/.js test file
 // or glob) is an existing Playwright spec, run via `playwright test` with the auto
@@ -138,6 +137,7 @@ async function runOnce(index: number): Promise<PerfReport> {
       cssStats: css,
       trace,
       tracePath,
+      settleTimeoutMs: envOpts.settleTimeoutMs,
     });
     for (const step of scenario.steps) {
       await session.controller.measure(step.name, () => applyStep(page, step), {

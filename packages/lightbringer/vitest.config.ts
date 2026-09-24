@@ -1,12 +1,11 @@
 import { defineConfig } from "vitest/config";
 
-// In-source tests live in src/**/*.ts behind `if (import.meta.vitest)`.
+// Unit tests live next to their module as src/**/*.test.ts. The analyze layer
+// is pure; collector.ts pulls in Playwright/web-vitals at module load, so it
+// has no unit test file.
 export default defineConfig({
-  // Only files that carry `if (import.meta.vitest)` blocks. The analyze layer is
-  // pure; collector.ts pulls in Playwright/web-vitals at module load, so it is
-  // kept out of the vitest runner.
   test: {
-    includeSource: ["src/otel.ts", "src/trace.ts", "src/color.ts", "src/analyze/*.ts"],
+    include: ["src/**/*.test.ts"],
     // examples/*.spec.ts are Playwright tests; keep the vitest runner out of them.
     // .direnv holds a Nix-materialized copy of the repo (incl. examples) — exclude it too.
     exclude: ["**/node_modules/**", "**/dist/**", "**/.direnv/**", "examples/**"],

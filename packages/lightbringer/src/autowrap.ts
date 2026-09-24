@@ -10,21 +10,8 @@
 // `src/auto.ts` is the thin `lightbringer/auto` entry that DOES value-import
 // @playwright/test (safe there: a direct import resolves to the consumer's single
 // install) and builds `test = autoWrap(base)`.
-import fs from "node:fs";
-import path from "node:path";
 import type { Page, TestInfo } from "@playwright/test";
-import {
-  startSession,
-  logSummary,
-  checkBudgets,
-  PERF_OUT_DIR,
-  CPU_RATE,
-  NET_PROFILE,
-  CSS_STATS,
-  TRACE_ENABLED,
-  COV_ENABLED,
-  MEM_GC,
-} from "./collector";
+import { runTestSession } from "./test-edge";
 
 // Locator/Page action methods worth a span (navigations + interactions).
 const ACTION_METHODS = [
@@ -63,27 +50,7 @@ function locatorLabel(loc: unknown): string {
 // `lightbringer/auto` test (src/auto.ts) and autoWrap() (used by the CLI's loader
 // to wrap an existing repo's @playwright/test without editing specs).
 const autoPageFixture: PageFixture = async ({ page }, use, testInfo) => {
-    const slug = testInfo.titlePath
-      .filter(Boolean)
-      .join("_")
-      .replace(/[^\p{L}\p{N}_]+/gu, "_");
-    const runTag = `run${testInfo.repeatEachIndex}`;
-    const tracePath = path.join(PERF_OUT_DIR, `${slug}.${runTag}.trace.json`);
-    if (TRACE_ENABLED) fs.mkdirSync(PERF_OUT_DIR, { recursive: true });
-
-    const client = await page.context().newCDPSession(page);
-    const session = await startSession(page, client, {
-      cpuRate: CPU_RATE,
-      netProfile: NET_PROFILE,
-      cssStats: CSS_STATS,
-      trace: TRACE_ENABLED,
-      tracePath,
-      coverage: COV_ENABLED,
-      memGc: MEM_GC,
-    });
-    if (CPU_RATE > 1 && testInfo.timeout > 0) {
-      testInfo.setTimeout(testInfo.timeout * CPU_RATE);
-    }
+  await runTestSession(page, testInfo, async (session) => {
     const controller = session.controller;
 
     // Reentrancy guard: page.click(sel) internally drives a Locator action (also
@@ -134,31 +101,7 @@ const autoPageFixture: PageFixture = async ({ page }, use, testInfo) => {
     } finally {
       for (const r of restore) r();
     }
-
-    const { report, covArtifact } = await session.finish(testInfo.title);
-
-    fs.mkdirSync(PERF_OUT_DIR, { recursive: true });
-    const jsonPath = path.join(PERF_OUT_DIR, `${slug}.${runTag}.json`);
-    fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2));
-    if (covArtifact) {
-      fs.writeFileSync(
-        path.join(PERF_OUT_DIR, `${slug}.${runTag}.coverage.json`),
-        JSON.stringify(covArtifact),
-      );
-    }
-    await testInfo.attach("perf-report", {
-      path: jsonPath,
-      contentType: "application/json",
-    });
-
-    logSummary(report, MEM_GC);
-
-    if (process.env.PERF_ASSERT === "1") {
-      const violations = checkBudgets(report);
-      if (violations.length > 0) {
-        throw new Error(`perf budget exceeded:\n  ${violations.join("\n  ")}`);
-      }
-    }
+  });
 };
 
 /**

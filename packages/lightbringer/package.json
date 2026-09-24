@@ -32,6 +32,14 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    },
+    "./fixture": {
+      "types": "./dist/fixture.d.ts",
+      "default": "./dist/fixture.js"
+    },
     "./auto": {
       "types": "./dist/auto.d.ts",
       "default": "./dist/auto.js"
@@ -53,7 +61,7 @@
     "lightbringer-coverage": "scripts/coverage.mjs"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts src/auto.ts src/autowrap.ts src/analyze/index.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/core.ts src/fixture.ts src/cli.ts src/auto.ts src/autowrap.ts src/analyze/index.ts --format esm --dts --clean",
     "test": "playwright test",
     "test:unit": "vitest run",
     "test:bundle": "playwright test -c playwright.bundle.config.ts",
@@ -75,6 +83,7 @@
     "@playwright/test": ">=1.50.0"
   },
   "devDependencies": {
+    "@mizchi/playwright-faults": "workspace:*",
     "@playwright/test": "^1.59.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

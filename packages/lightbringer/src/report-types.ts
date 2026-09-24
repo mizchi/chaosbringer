@@ -123,9 +123,28 @@ export interface PerfReport {
   pageErrors?: string[];
   /** true if the in-page collector never ran (e.g. page.setContent without a goto) */
   collectorMissing?: boolean;
+  /**
+   * true if performance.now was already patched by page JS (e.g. a clock-skew
+   * fault) when the collector installed, so span epochs may be skewed. Install
+   * collectorInitScript() at context level before the fault's init script.
+   */
+  clockPatched?: boolean;
+  /**
+   * Per-document web-vitals, in navigation order — present only when more than
+   * one document was observed (the top-level `vitals` are the last one's).
+   */
+  documents?: DocumentReport[];
   /** memory growth across repeated steps (from measureRepeat); leak signal */
   trends?: MemoryTrend[];
   tracePath?: string;
+}
+
+/** One observed document (a navigation) and its final web-vitals. */
+export interface DocumentReport {
+  url: string;
+  /** the document's performance.timeOrigin (epoch ms) */
+  timeOrigin: number;
+  vitals: Record<string, VitalSample>;
 }
 
 /**

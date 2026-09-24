@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import type { CDPSession } from "playwright";
-import { CSS_STATS } from "./config";
 import {
   summarizeInitiator,
   type NetReq,
@@ -89,7 +88,7 @@ export async function startNetworkCapture(
 export async function startTrace(
   client: CDPSession,
   tracePath: string,
-  cssStats: boolean = CSS_STATS,
+  cssStats: boolean = false,
 ): Promise<() => Promise<{ renderEvents: TraceEvent[] }>> {
   // A heavy page emits tens-to-hundreds of MB of trace events. Holding them all
   // in a JS array and JSON.stringify-ing at the end peaks at 2x that in heap and

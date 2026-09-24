@@ -1,7 +1,8 @@
 import type { CDPSession, Page } from "playwright";
-import { CSS_STATS, MEM_GC, WEB_VITALS_IIFE } from "./config";
-import { browserCollector, type PerfWindow } from "./browser";
+import { webVitalsIife } from "./config";
+import { browserCollector, type DrainPayload } from "./browser";
 import { PerfController } from "./controller";
+import { PerfAccumulator } from "./accumulator";
 import { startNetworkCapture, startTrace } from "./capture";
 import { buildReport } from "./report";
 import {
@@ -16,6 +17,7 @@ import type {
   MediaReport,
   PerfReport,
   RenderBlocking,
+  Settle,
 } from "./report-types";
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,36 @@ export interface SessionOptions {
   coverage?: boolean;
   /** force a GC at span boundaries (retained-only memory deltas) */
   memGc?: boolean;
+  /** max time to wait for settle before marking a span capped (ms, default 5000) */
+  settleTimeoutMs?: number;
+  /** default settle for measure()/end() (default: two animation frames) */
+  settle?: Settle;
+  /**
+   * Install the in-page collector with page.addInitScript (default true). Pass
+   * false when the caller already installed collectorInitScript() at CONTEXT
+   * level — before its own init scripts, so the collector captures the unpatched
+   * clock (e.g. ahead of a clock-skew runtime fault).
+   */
+  installCollector?: boolean;
+}
+
+/** Name of the CDP binding the collector pushes an unloading document's data through. */
+export const EMIT_BINDING = "__lbEmit";
+
+let collectorScriptCache: string | undefined;
+
+/**
+ * The complete in-page collector (web-vitals IIFE + collector invocation) as an
+ * init-script string, for callers that install it themselves — typically with
+ * `context.addInitScript({ content: collectorInitScript() })` ahead of other init
+ * scripts, combined with `startSession(..., { installCollector: false })`.
+ * Idempotent per document: injecting it twice registers the observers once.
+ */
+export function collectorInitScript(): string {
+  if (collectorScriptCache === undefined) {
+    collectorScriptCache = `${webVitalsIife()}\n;(${browserCollector.toString()})();\n`;
+  }
+  return collectorScriptCache;
 }
 
 export interface PerfSession {
@@ -199,10 +231,28 @@ export async function startSession(
   opts: SessionOptions = {},
 ): Promise<PerfSession> {
   const cpuRate = opts.cpuRate ?? 1;
-  const memGc = opts.memGc ?? MEM_GC;
+  const memGc = opts.memGc ?? false;
 
-  await page.addInitScript({ content: WEB_VITALS_IIFE });
-  await page.addInitScript(browserCollector);
+  if (opts.installCollector !== false)
+    await page.addInitScript({ content: collectorInitScript() });
+
+  const accumulator = new PerfAccumulator();
+  // An unloading document pushes its undrained remainder through this binding
+  // (pagehide / visibilitychange→hidden), so navigating mid-span loses nothing.
+  const onBinding = (e: unknown) => {
+    const ev = e as { name?: string; payload?: string };
+    if (ev.name !== EMIT_BINDING || typeof ev.payload !== "string") return;
+    try {
+      accumulator.add(JSON.parse(ev.payload) as DrainPayload);
+    } catch {
+      /* malformed payload: ignore */
+    }
+  };
+  client.on("Runtime.bindingCalled", onBinding);
+  // The binding is only exposed to (and reported from) pages while this
+  // session's Runtime domain is enabled.
+  await client.send("Runtime.enable").catch(() => {});
+  await client.send("Runtime.addBinding", { name: EMIT_BINDING }).catch(() => {});
 
   // A broken / stale build typically throws; capture it so the report can warn.
   const pageErrors: string[] = [];
@@ -220,7 +270,7 @@ export async function startSession(
   }
   const finishTrace =
     opts.trace && opts.tracePath
-      ? await startTrace(client, opts.tracePath, opts.cssStats ?? CSS_STATS)
+      ? await startTrace(client, opts.tracePath, opts.cssStats ?? false)
       : undefined;
   // Coverage spans the whole scenario (resetOnNavigation:false). Chromium-only.
   if (opts.coverage && page.coverage) {
@@ -231,19 +281,17 @@ export async function startSession(
     await page.coverage.startCSSCoverage({ resetOnNavigation: false });
   }
 
-  const controller = new PerfController(page, client, undefined, memGc);
+  const controller = new PerfController(page, client, {
+    settle: opts.settle,
+    memGc,
+    settleTimeoutMs: opts.settleTimeoutMs,
+    accumulator,
+  });
 
   const finish = async (title: string) => {
-    // Drain pending PerformanceObserver records first (callbacks are async).
-    await page
-      .evaluate(() => (window as unknown as PerfWindow).__perf?.flush?.())
-      .catch(() => {});
-    const raw = await page
-      .evaluate(() => (window as unknown as PerfWindow).__perf)
-      .catch(() => undefined);
-    const timeOrigin = await page
-      .evaluate(() => performance.timeOrigin)
-      .catch(() => 0);
+    // Final drain of the current document (flushes pending observer records).
+    await controller.drain();
+    client.off("Runtime.bindingCalled", onBinding);
     const glRenderer = await page.evaluate(readGlRenderer).catch(() => null);
     const css = await page.evaluate(readCssProfile).catch(() => undefined);
 
@@ -274,15 +322,7 @@ export async function startSession(
     const report = buildReport(
       title,
       url,
-      raw ?? {
-        vitals: {},
-        longTasks: [],
-        loaf: [],
-        measures: [],
-        events: [],
-        frames: [],
-      },
-      timeOrigin,
+      accumulator,
       controller.spans,
       reqs,
       renderEvents,
@@ -304,7 +344,8 @@ export async function startSession(
     if (pageErrors.length) report.pageErrors = pageErrors;
     if (Object.keys(controller.vitalsBudget).length > 0)
       report.vitalsBudget = controller.vitalsBudget;
-    if (raw === undefined) report.collectorMissing = true;
+    if (!accumulator.sawDocument) report.collectorMissing = true;
+    if (accumulator.clockPatched) report.clockPatched = true;
     if (opts.trace && opts.tracePath) report.tracePath = opts.tracePath;
 
     return { report, covArtifact };

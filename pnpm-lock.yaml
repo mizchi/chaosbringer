@@ -183,6 +183,9 @@ importers:
         specifier: ^5.0.0
         version: 5.3.0
     devDependencies:
+      '@mizchi/playwright-faults':
+        specifier: workspace:*
+        version: link:../playwright-faults
       '@playwright/test':
         specifier: ^1.59.0
         version: 1.59.1

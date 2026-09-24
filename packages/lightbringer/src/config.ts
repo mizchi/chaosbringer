@@ -1,75 +1,113 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import type { SessionOptions } from "./session";
 
 // ---------------------------------------------------------------------------
-// Environment-driven configuration for the collector. Every knob is a PERF_*
-// env var resolved once at module load. Kept in one place so the capture,
-// controller, report, and session layers share the same source of truth.
+// Configuration edges. Nothing here reads the environment or the filesystem at
+// import time: the core takes its options as arguments (SessionOptions), and only
+// the runner edges (the @playwright/test fixture, the auto fixture, the CLI) call
+// sessionOptionsFromEnv() to map PERF_* env vars onto those options.
 // ---------------------------------------------------------------------------
 
 const require = createRequire(import.meta.url);
-// web-vitals' attribution iife declares `var webVitals = ...` at top level.
-// addInitScript runs inside a function wrapper, so the var never reaches window.
-// We append an explicit assignment so it is available at document-start.
-// The deep iife path is not in web-vitals' "exports", so resolve the package
-// main and locate the iife next to it.
-export const WEB_VITALS_IIFE =
-  fs.readFileSync(
-    path.join(
-      path.dirname(require.resolve("web-vitals")),
-      "web-vitals.attribution.iife.js",
-    ),
-    "utf8",
-  ) + "\n;globalThis.webVitals=webVitals;";
 
-export const PERF_OUT_DIR = path.resolve(process.env.PERF_OUT_DIR ?? "perf-results");
+let webVitalsCache: string | undefined;
 
 /**
- * PERF_CSS=1 adds the `disabled-by-default-blink.debug` trace category, which
- * makes Blink emit per-selector match stats (SelectorStats) on every style
- * recalc — so the drilldown can show WHICH selectors cost the recalc time. It's
- * expensive (instruments every match attempt), so it's opt-in and implies a trace.
+ * The web-vitals attribution IIFE, resolved on first use and cached.
+ *
+ * web-vitals' attribution iife declares `var webVitals = ...` at top level.
+ * addInitScript runs inside a function wrapper, so the var never reaches window.
+ * We append an explicit assignment so it is available at document-start.
+ * The deep iife path is not in web-vitals' "exports", so resolve the package
+ * main and locate the iife next to it.
  */
-export const CSS_STATS = process.env.PERF_CSS === "1";
+export function webVitalsIife(): string {
+  if (webVitalsCache === undefined) {
+    webVitalsCache =
+      fs.readFileSync(
+        path.join(
+          path.dirname(require.resolve("web-vitals")),
+          "web-vitals.attribution.iife.js",
+        ),
+        "utf8",
+      ) + "\n;globalThis.webVitals=webVitals;";
+  }
+  return webVitalsCache;
+}
 
-/**
- * PERF_COV=1 records JS + CSS coverage across the whole scenario
- * (resetOnNavigation: false) via Playwright's Chromium coverage API. It reveals
- * how much of each downloaded chunk / stylesheet the scenario actually used —
- * low usage means the chunk is split too coarsely or shipped needlessly. Across
- * scenarios, scripts/coverage.mjs unions the used ranges to find code no scenario
- * touched (dead-code / over-shipping candidates). Chromium-only; expensive.
- */
-export const COV_ENABLED = process.env.PERF_COV === "1";
+/** Network emulation profile (throughput in bytes/s, latency in ms). */
+export interface NetProfile {
+  latency: number;
+  downloadThroughput: number;
+  uploadThroughput: number;
+}
 
-/** With PERF_TRACE=1 (or PERF_CSS=1), save a Chrome trace (openable in DevTools / Perfetto). */
-export const TRACE_ENABLED = process.env.PERF_TRACE === "1" || CSS_STATS;
-
-/** PERF_CPU=N throttles the CPU N times (mid-tier device emulation). 1 = off. */
-export const CPU_RATE = Number(process.env.PERF_CPU ?? "1");
-
-/**
- * PERF_MEM=1 forces a GC (HeapProfiler.collectGarbage) at each span boundary so
- * the memory deltas reflect *retained* memory — the leak signal — instead of
- * not-yet-collected garbage from the step itself. Off by default because the GC
- * adds wall time to the span (it would distort durationMs / settle timing).
- */
-export const MEM_GC = process.env.PERF_MEM === "1";
-
-/** Max time to wait for settle before marking a span capped (ms). */
-export const SETTLE_TIMEOUT_MS = Number(process.env.PERF_SETTLE_TIMEOUT ?? "5000");
-
-/**
- * PERF_NET selects a network emulation profile via CDP. Throughput in bytes/s,
- * latency in ms. Approximate DevTools-style presets.
- */
-const NET_PROFILES: Record<
-  string,
-  { latency: number; downloadThroughput: number; uploadThroughput: number }
-> = {
+/** Approximate DevTools-style presets, selectable by PERF_NET / --net. */
+export const NET_PROFILES: Readonly<Record<string, NetProfile>> = {
   "slow-3g": { latency: 400, downloadThroughput: 51_200, uploadThroughput: 51_200 },
   "fast-3g": { latency: 150, downloadThroughput: 196_608, uploadThroughput: 98_304 },
   "4g": { latency: 40, downloadThroughput: 1_179_648, uploadThroughput: 589_824 },
 };
-export const NET_PROFILE = NET_PROFILES[process.env.PERF_NET ?? ""];
+
+/** Look up a NET_PROFILES preset by name (own keys only); null when unknown/unset. */
+export function netProfileByName(name: string | undefined): NetProfile | null {
+  return name && Object.hasOwn(NET_PROFILES, name) ? NET_PROFILES[name] : null;
+}
+
+/** Default max time to wait for settle before marking a span capped (ms). */
+export const DEFAULT_SETTLE_TIMEOUT_MS = 5000;
+
+/** What sessionOptionsFromEnv resolves: SessionOptions plus the edge-only knobs. */
+export type EnvSessionOptions = SessionOptions & {
+  /** PERF_OUT_DIR (default ./perf-results), resolved against cwd */
+  outDir: string;
+  /** PERF_CPU=N throttles the CPU N times (mid-tier device emulation). 1 = off. */
+  cpuRate: number;
+  /** PERF_NET=slow-3g|fast-3g|4g, or null */
+  netProfile: NetProfile | null;
+  /**
+   * PERF_CSS=1 adds the `disabled-by-default-blink.debug` trace category, which
+   * makes Blink emit per-selector match stats (SelectorStats) on every style
+   * recalc. Expensive, so opt-in; implies a trace.
+   */
+  cssStats: boolean;
+  /** PERF_TRACE=1 (or PERF_CSS=1): save a Chrome trace (DevTools / Perfetto). */
+  trace: boolean;
+  /**
+   * PERF_COV=1 records JS + CSS coverage across the whole scenario
+   * (resetOnNavigation: false). Chromium-only; expensive.
+   */
+  coverage: boolean;
+  /**
+   * PERF_MEM=1 forces a GC (HeapProfiler.collectGarbage) at each span boundary so
+   * memory deltas reflect *retained* memory. Off by default: the GC adds wall time.
+   */
+  memGc: boolean;
+  /** PERF_SETTLE_TIMEOUT (ms, default 5000) */
+  settleTimeoutMs: number;
+  /** PERF_ASSERT=1 fails the test inline on a budget violation */
+  assert: boolean;
+};
+
+/**
+ * Map PERF_* env vars onto session options. The single env edge: only the
+ * fixture / auto fixture / CLI call this; the core never reads the environment.
+ */
+export function sessionOptionsFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): EnvSessionOptions {
+  const cssStats = env.PERF_CSS === "1";
+  return {
+    outDir: path.resolve(env.PERF_OUT_DIR ?? "perf-results"),
+    cpuRate: Number(env.PERF_CPU ?? "1"),
+    netProfile: netProfileByName(env.PERF_NET),
+    cssStats,
+    trace: env.PERF_TRACE === "1" || cssStats,
+    coverage: env.PERF_COV === "1",
+    memGc: env.PERF_MEM === "1",
+    settleTimeoutMs: Number(env.PERF_SETTLE_TIMEOUT ?? String(DEFAULT_SETTLE_TIMEOUT_MS)),
+    assert: env.PERF_ASSERT === "1",
+  };
+}

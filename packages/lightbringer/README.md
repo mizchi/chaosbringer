@@ -104,7 +104,12 @@ Per **span** (one `perf.measure(name, action)` region):
   scenario to find code **no** scenario touched (dead code / over-shipping).
 
 All times are unified to epoch ms so spans correlate with network / CPU even
-across navigations.
+across navigations. The in-page collector is **drained at every span boundary**
+(and, for a document that unloads mid-span, on `pagehide` through a CDP binding),
+so long tasks / LoAF / interactions / frames / app spans of documents you navigated
+away from stay in the report. `report.vitals` are the last document's; when a run
+visits more than one document, `report.documents[]` lists each one's
+`{ url, timeOrigin, vitals }`.
 
 ## CLI (no install, no spec)
 
@@ -517,7 +522,9 @@ tutorial; this is the lookup.
 
 | import / command | what you get |
 | --- | --- |
-| `import { test, expect } from "lightbringer"` | extended Playwright fixture exposing **`perf`** (below) — you mark spans with `perf.measure`. Also re-exports `withSpan` / `startSpan`, `PerfController`, `startSession`, `logSummary`, `toOtelSpans`, and the report types. |
+| `import { test, expect } from "lightbringer"` | extended Playwright fixture exposing **`perf`** (below) — you mark spans with `perf.measure`. Also re-exports everything in `lightbringer/core`. |
+| `import { test, expect } from "lightbringer/fixture"` | the same fixture on its own subpath. |
+| `import { … } from "lightbringer/core"` | the runner-agnostic core — `startSession`, `PerfController`, `buildReport`, `logSummary`, `checkBudgets`, `collectorInitScript`, `sessionOptionsFromEnv`, `withSpan` / `startSpan`, `toOtelSpans`, the report types — with **no `@playwright/test` import** (a plain `playwright` `Page` + `CDPSession` is enough; see [Core](#lightbringercore-no-test-runner)). |
 | `import { test, expect } from "lightbringer/auto"` | same `test`, but every `page.goto` / Locator action becomes a span automatically — no `perf.measure` calls (see [Auto-span](#auto-span-measure-an-existing-spec-1-line-change)). |
 | `import { … } from "lightbringer/analyze"` | the pure CDP-event analysis layer — builder functions + fragment types, **no Playwright / fs dependency** (below). |
 | `npx lightbringer run <scenario.json \| spec.ts \| dir>` | the zero-install CLI (see [CLI](#cli-no-install-no-spec)). |
@@ -529,9 +536,47 @@ tutorial; this is the lookup.
 | `perf.measure(name, action, opts?)` | record one span covering `action` until the page settles; returns the action's result. `opts: { settle?: Settle; budget?: Budget }`. |
 | `perf.measureRepeat(name, action, opts?)` | repeat `action` N times as `name#0..#N` for the leak trend. `opts: { times? = 3; settle?; budget? }`. |
 | `perf.setVitalsBudget(budget)` | page-global web-vitals bounds: `{ LCP?; INP?; CLS?; TTFB?; FCP? }`. |
+| `perf.begin(name, { budget? }) → handle` / `perf.end(handle, { settle? })` | the same span as `measure`, opened and closed separately — for a driver that owns the step loop (a crawler). The region may navigate or even close the page; `end()` still records the span. `settle: false` = you already waited: end now, `capped: false`. |
 
 `Settle = (page) => Promise<void>` (default: two animation frames; capped by
 `PERF_SETTLE_TIMEOUT`). `Budget` fields are listed under [Budgets](#budgets-ci-regression-gate).
+
+### `lightbringer/core` (no test runner)
+
+```ts
+import { chromium } from "playwright";
+import { startSession, logSummary } from "lightbringer/core";
+
+const page = await (await chromium.launch()).newPage();
+const session = await startSession(page, await page.context().newCDPSession(page), {
+  settleTimeoutMs: 3000, // every knob is an argument; nothing is read from env
+});
+const step = await session.controller.begin("load /");
+await page.goto("http://localhost:5173/");
+await session.controller.end(step);
+const { report } = await session.finish("home");
+logSummary(report);
+```
+
+`SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
+`coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`. The fixture
+and CLI map the `PERF_*` env vars onto these with `sessionOptionsFromEnv(env)` —
+the only place the environment is read.
+
+**Init-script order / clock skew.** The collector captures the native
+`performance.now` / `timeOrigin` when it is installed, so spans stay correct even
+if later page JS patches the clock (e.g. a `clock-skew` fault). To guarantee it
+runs first, install it at context level yourself and tell the session not to add
+it again:
+
+```ts
+await context.addInitScript({ content: collectorInitScript() }); // before other init scripts
+const session = await startSession(page, cdp, { installCollector: false });
+```
+
+Injecting it twice in one document is harmless (the second copy is a no-op). If
+the collector finds `performance.now` already patched when it installs (wrong
+order), the report sets `clockPatched: true` and the summary warns.
 
 ### App-code spans
 

@@ -5,7 +5,7 @@
     "moduleResolution": "bundler",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
-    "types": ["node", "vitest/importMeta"],
+    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,

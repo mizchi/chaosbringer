@@ -20,11 +20,10 @@ import {
   buildSpanInteraction,
   buildSpanFrames,
   type VitalSample,
-  type EpochEvent,
 } from "./analyze/vitals";
-import { MEM_GC } from "./config";
 import { palette } from "./color";
-import type { PerfWindow } from "./browser";
+import type { BrowserMetric, PerfWindow } from "./browser";
+import { accumulateSnapshot, type AccumulatedEntries } from "./accumulator";
 import type { RawSpan } from "./controller";
 import {
   checkBudgets,
@@ -38,6 +37,36 @@ import {
 // them into the SpanReport / PerfReport contract.
 // ---------------------------------------------------------------------------
 
+/** Convert a document's raw web-vitals into report samples. */
+function toVitalSamples(
+  raw: Record<string, BrowserMetric>,
+): Record<string, VitalSample> {
+  const vitals: Record<string, VitalSample> = {};
+  for (const [name, m] of Object.entries(raw)) {
+    vitals[name] = {
+      value: round(m.value),
+      rating: m.rating,
+      attribution: pickAttribution(name, m.attribution),
+    };
+  }
+  return vitals;
+}
+
+/**
+ * Assemble the report from the node-side accumulated entries (every drained
+ * document, already in epoch ms). `vitals` is the latest document's; when more
+ * than one document was observed, `documents` lists each one's vitals.
+ */
+export function buildReport(
+  title: string,
+  url: string,
+  entries: AccumulatedEntries,
+  spans: RawSpan[],
+  reqs: NetReq[],
+  /** pre-filtered Paint / GPUTask events (not the full trace) for per-span paint/GPU */
+  renderEvents?: TraceEvent[],
+): PerfReport;
+/** @deprecated single-document form: a `window.__perf` snapshot + its timeOrigin. */
 export function buildReport(
   title: string,
   url: string,
@@ -45,41 +74,41 @@ export function buildReport(
   timeOrigin: number,
   spans: RawSpan[],
   reqs: NetReq[],
-  /** pre-filtered Paint / GPUTask events (not the full trace) for per-span paint/GPU */
   renderEvents?: TraceEvent[],
+): PerfReport;
+export function buildReport(
+  title: string,
+  url: string,
+  source: AccumulatedEntries | NonNullable<PerfWindow["__perf"]>,
+  ...rest: unknown[]
 ): PerfReport {
+  let entries: AccumulatedEntries;
+  let spans: RawSpan[];
+  let reqs: NetReq[];
+  let renderEvents: TraceEvent[] | undefined;
+  if (typeof rest[0] === "number") {
+    entries = accumulateSnapshot(
+      source as NonNullable<PerfWindow["__perf"]>,
+      rest[0],
+      url,
+    );
+    [, spans, reqs, renderEvents] = rest as [number, RawSpan[], NetReq[], TraceEvent[]?];
+  } else {
+    entries = source as AccumulatedEntries;
+    [spans, reqs, renderEvents] = rest as [RawSpan[], NetReq[], TraceEvent[]?];
+  }
+
   // The page's own registrable domain anchors first- vs third-party. Falls back
   // to "" (everything counts as first-party) when the URL has no host.
   const pageHost = hostOf(url);
   const firstPartyDomain = pageHost ? registrableDomain(pageHost) : "";
 
-  const vitals: Record<string, VitalSample> = {};
-  for (const [name, m] of Object.entries(raw.vitals)) {
-    vitals[name] = {
-      value: round(m.value),
-      rating: m.rating,
-      attribution: pickAttribution(name, m.attribution),
-    };
-  }
+  const docs = entries.documents;
+  const last = docs[docs.length - 1];
+  const vitals = toVitalSamples(last?.vitals ?? {});
 
-  const longTasks = raw.longTasks.map((t) => ({
-    epochStart: timeOrigin + t.start,
-    duration: t.duration,
-  }));
-  const loaf = raw.loaf.map((l) => ({
-    epochStart: timeOrigin + l.start,
-    duration: l.duration,
-    blocking: l.blocking,
-  }));
-  const events: EpochEvent[] = (raw.events ?? []).map((e) => ({
-    epochStart: timeOrigin + e.start,
-    duration: e.duration,
-    type: e.type,
-    start: e.start,
-    processingStart: e.processingStart,
-    processingEnd: e.processingEnd,
-  }));
-  const frameEpochs = (raw.frames ?? []).map((t) => timeOrigin + t);
+  const { longTasks, loaf, events } = entries;
+  const frameEpochs = entries.frames;
 
   const spanReports: SpanReport[] = spans.map((s) => {
     const render = renderEvents
@@ -103,15 +132,10 @@ export function buildReport(
     };
   });
 
-  // app measures -> OTel spans -> network/CPU correlation.
-  // __perf.measures uses `start`, PerfMeasureLike uses `startTime`; remap.
-  const measureLikes = raw.measures.map((m) => ({
-    name: m.name,
-    startTime: m.start,
-    duration: m.duration,
-    detail: m.detail,
-  }));
-  const appSpans: AppSpanReport[] = toOtelSpans(measureLikes, timeOrigin).map(
+  // app measures -> OTel spans -> network/CPU correlation. Measures were shifted
+  // to epoch ms at drain time (each with its own document's timeOrigin), so the
+  // conversion's timeOrigin is 0.
+  const appSpans: AppSpanReport[] = toOtelSpans(entries.measures, 0).map(
     (s) => {
       const win: EpochWindow = {
         startEpochMs: s.startUnixMs,
@@ -135,10 +159,19 @@ export function buildReport(
     appSpans,
     network: buildGlobalNetwork(reqs, firstPartyDomain),
     ...(trends.length ? { trends } : {}),
+    ...(docs.length > 1
+      ? {
+          documents: docs.map((d) => ({
+            url: d.url,
+            timeOrigin: d.timeOrigin,
+            vitals: toVitalSamples(d.vitals),
+          })),
+        }
+      : {}),
   };
 }
 
-export function logSummary(report: PerfReport, memGc: boolean = MEM_GC): void {
+export function logSummary(report: PerfReport, memGc: boolean = false): void {
   const p = palette;
   const lines: string[] = [];
 
@@ -168,6 +201,11 @@ export function logSummary(report: PerfReport, memGc: boolean = MEM_GC): void {
   lines.push(
     `  ${p.dim("vitals")} LCP=${rated(v.LCP)}  INP=${rated(v.INP)}  CLS=${rated(v.CLS)}  TTFB=${rated(v.TTFB)}`,
   );
+  if (report.documents && report.documents.length > 1) {
+    lines.push(
+      p.dim(`    ${report.documents.length} documents observed; vitals above are the last (${shortenUrl(report.url)})`),
+    );
+  }
   // LCP sub-parts (where the LCP time goes) + render-blocking resources behind it.
   const lcpAttr = v.LCP?.attribution as
     | {
@@ -407,6 +445,12 @@ export function logSummary(report: PerfReport, memGc: boolean = MEM_GC): void {
     lines.push(
       `  ${p.red("! in-page collector did not run — vitals / cpu / render are missing.")}` +
         p.red(" Navigate with page.goto (page.setContent does not trigger init scripts)."),
+    );
+  }
+  if (report.clockPatched) {
+    lines.push(
+      `  ${p.yellow("! performance.now was patched before the collector ran (clock-skew?): span timing may be skewed.")}` +
+        p.yellow(" Install collectorInitScript() at context level before the fault script."),
     );
   }
   if (report.glRenderer && /swiftshader/i.test(report.glRenderer)) {
