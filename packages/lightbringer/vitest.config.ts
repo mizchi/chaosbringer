@@ -1,8 +1,9 @@
 import { defineConfig } from "vitest/config";
 
 // Unit tests live next to their module as src/**/*.test.ts. The analyze layer
-// is pure; collector.ts pulls in Playwright/web-vitals at module load, so it
-// has no unit test file.
+// is pure; session.ts / capture.ts drive a live Page + CDPSession (session.ts
+// also loads web-vitals via config.ts), so they have no unit test file — the
+// Playwright e2e suite covers them.
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],

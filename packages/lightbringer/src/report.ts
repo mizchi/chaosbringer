@@ -1,8 +1,7 @@
 import { toOtelSpans } from "./otel";
-import { round, type EpochWindow } from "./analyze/util";
+import { kb, round, type EpochWindow } from "./analyze/util";
 import {
-  hostOf,
-  registrableDomain,
+  domainOfUrl,
   shortenUrl,
   buildGlobalNetwork,
   buildSpanNetwork,
@@ -89,8 +88,7 @@ export function buildSpanReport(
 
 /** The registrable domain `buildReport` / `peekSpan` treat as first-party for `url`. */
 export function firstPartyDomainOf(url: string): string {
-  const host = hostOf(url);
-  return host ? registrableDomain(host) : "";
+  return domainOfUrl(url) ?? "";
 }
 
 /**
@@ -381,6 +379,8 @@ export function logSummary(report: PerfReport, memGc: boolean = false): void {
       const body =
         `${t.name} x${t.count}  ${t.metric} ${series}${unit}` +
         `  ${t.growth >= 0 ? "+" : ""}${t.growth}${unit} (${t.perStep >= 0 ? "+" : ""}${t.perStep}/step)`;
+      // buildTrends currently yields leak trends only, but logSummary is public
+      // and a hand-built report may carry non-leak (monotonic / flat) trends.
       lines.push(
         t.leak
           ? `    ${p.red(`${body}  ⚠ likely leak`)}`
@@ -421,7 +421,6 @@ export function logSummary(report: PerfReport, memGc: boolean = false): void {
     }
   }
   if (report.coverage) {
-    const kb = (b: number) => Math.round(b / 102.4) / 10;
     const cov = (label: string, c: CoverageReport) => {
       if (c.totalBytes === 0) return;
       lines.push(`  ${p.dim(`${label}  ${c.usedPct}% used  (${kb(c.usedBytes)}/${kb(c.totalBytes)}KB)`)}`);

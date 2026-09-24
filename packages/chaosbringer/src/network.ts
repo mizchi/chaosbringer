@@ -15,11 +15,7 @@ export interface NetworkConditions {
   uploadThroughput: number;
 }
 
-const BPS = 1024; // 1 kilobit in bytes (125 B/s) — keep math readable.
-const KBPS = 1000 * BPS;
-void BPS;
-void KBPS;
-
+// These presets deliberately differ from lightbringer's NET_PROFILES (config.ts); do not unify them.
 export function networkConditionsFor(profile: NetworkProfile): NetworkConditions {
   switch (profile) {
     case "offline":

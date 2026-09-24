@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { formatLastActionPerf } from "../perf-key.js";
+import { formatLastActionPerf } from "../perf-trim.js";
 import { parsePromptFile, renderUserPrompt, type ParsedPrompt } from "./prompts/loader.js";
 import type {
   ActionAdvisor,

@@ -2,6 +2,22 @@
 // module's import graph imports @playwright/test (only `playwright` types), so a
 // crawler or any custom driver can use it with a plain Page + CDPSession. The
 // @playwright/test fixture lives behind `lightbringer/fixture` (and `.`).
+//
+// Measures the "after interaction" performance of a scenario. Each measured
+// region (span) is broken down into network (CDP), cpu (long task / LoAF) and
+// render (CDP metrics). All times are unified to epoch ms: spans use the
+// collector's captured performance.timeOrigin + performance.now(), in-page
+// entries are shifted with their own document's timeOrigin at drain time, and
+// CDP network uses wallTime — so they line up across navigations.
+//
+//   - config.ts ......... sessionOptionsFromEnv (the PERF_* env edge), web-vitals
+//   - report-types.ts ... the contract layer (Budget / SpanReport / PerfReport)
+//   - browser.ts ........ the document-start collector injected into the page
+//   - accumulator.ts .... node-side store of drained entries (pure)
+//   - controller.ts ..... PerfController (begin/end/measure, settle, GC, drain)
+//   - capture.ts ........ CDP network + Chrome trace capture
+//   - report.ts ......... buildReport + logSummary (report assembly / output)
+//   - session.ts ........ startSession (orchestration) + the browser readers
 export {
   startSession,
   collectorInitScript,
@@ -25,17 +41,17 @@ export type {
   RenderBlocking,
   Settle,
 } from "./report-types";
+export { sessionOptionsFromEnv, webVitalsIife } from "./config";
 export {
-  sessionOptionsFromEnv,
-  webVitalsIife,
   netProfileByName,
   NET_PROFILES,
   DEFAULT_SETTLE_TIMEOUT_MS,
   DEFAULT_EVALUATE_TIMEOUT_MS,
-} from "./config";
+} from "./defaults";
 export { BoundedEvaluator } from "./evaluate";
 export type { EvaluateOutcome } from "./evaluate";
-export type { EnvSessionOptions, NetProfile } from "./config";
+export type { EnvSessionOptions } from "./config";
+export type { NetProfile } from "./defaults";
 export { PerfAccumulator, accumulateSnapshot } from "./accumulator";
 export type {
   AccumulatedEntries,

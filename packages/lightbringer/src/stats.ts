@@ -6,7 +6,8 @@
 // A single run is noisy (JIT / cache / GC), so everything here reads medians:
 // regression checks, before/after comparisons and budget gates.
 import { round } from "./analyze/util";
-import type { Budget, PerfReport, SpanReport, VitalsBudget } from "./report-types";
+import { BUDGET_METRIC } from "./report-types";
+import type { Budget, BudgetMetric, PerfReport, SpanReport, VitalsBudget } from "./report-types";
 
 // ── robust summary ────────────────────────────────────────────────────────
 
@@ -145,9 +146,10 @@ function statBy<T>(items: readonly T[], selector: (item: T) => number): Stat {
 
 /** Names in first-seen order across runs. */
 function namesInOrder(lists: Iterable<readonly { name: string }[]>): string[] {
-  const out: string[] = [];
-  for (const list of lists) for (const s of list) if (!out.includes(s.name)) out.push(s.name);
-  return out;
+  // Set keeps insertion order, so this is first-seen order across the lists.
+  const seen = new Set<string>();
+  for (const list of lists) for (const s of list) seen.add(s.name);
+  return [...seen];
 }
 
 /**
@@ -383,7 +385,7 @@ export function formatGateWarning(
 }
 
 /** Budget field → the aggregated Stat it gates (undefined when not measured). */
-export const MEDIAN_BUDGET_STAT: Record<keyof Budget, (s: MedianSpan) => Stat | undefined> = {
+export const MEDIAN_BUDGET_STAT: Record<BudgetMetric, (s: MedianSpan) => Stat | undefined> = {
   durationMs: (s) => s.durationMs,
   scriptMs: (s) => s.render.scriptMs,
   blockingMs: (s) => s.cpu.blockingMs,
@@ -423,7 +425,7 @@ export function checkMedianBudgets(agg: MedianReport): { violations: string[]; w
     if (!s.budget) continue;
     const values: Record<string, Stat | undefined> = {};
     for (const k of Object.keys(s.budget)) {
-      const get = MEDIAN_BUDGET_STAT[k as keyof Budget];
+      const get = MEDIAN_BUDGET_STAT[k as BudgetMetric];
       if (get) values[k] = get(s);
     }
     const r = gate({ [s.name]: values }, { [s.name]: s.budget as Record<string, number> });
@@ -444,16 +446,21 @@ export function checkMedianBudgets(agg: MedianReport): { violations: string[]; w
  * The metrics `lightbringer run --emit-budgets` writes budgets for: the ones
  * stable enough across runs that ×1.25 of the median is a meaningful bound.
  */
-export const EMIT_BUDGET_METRICS: Record<string, (s: SpanReport) => number | undefined> = {
-  durationMs: (s) => s.durationMs,
-  scriptMs: (s) => s.render.scriptMs,
-  blockingMs: (s) => s.cpu.blockingMs,
-  layoutCount: (s) => s.render.layoutCount,
-  recalcStyleMs: (s) => s.render.recalcStyleMs,
-  encodedKB: (s) => s.network.encodedKB,
-  requestCount: (s) => s.network.requestCount,
-  interactionMs: (s) => s.interaction?.maxDurationMs,
-};
+const EMIT_KEYS = [
+  "durationMs",
+  "scriptMs",
+  "blockingMs",
+  "layoutCount",
+  "recalcStyleMs",
+  "encodedKB",
+  "requestCount",
+  "interactionMs",
+] as const satisfies readonly BudgetMetric[];
+// Readers come from BUDGET_METRIC so a span's emitted budget and the value
+// checkBudgets later compares against it are read the same way.
+export const EMIT_BUDGET_METRICS: Record<string, (s: SpanReport) => number | undefined> = Object.fromEntries(
+  EMIT_KEYS.map((k) => [k, BUDGET_METRIC[k]]),
+);
 
 /** span name → metric → median */
 export type SpanMedians = Record<string, Record<string, number>>;
@@ -468,8 +475,7 @@ export function spanMedians(
   metrics: Record<string, (s: SpanReport) => number | undefined> = EMIT_BUDGET_METRICS,
 ): SpanMedians {
   const out: SpanMedians = {};
-  const names = [...new Set(runs.flatMap((r) => r.spans.map((s) => s.name)))];
-  for (const name of names) {
+  for (const name of namesInOrder(runs.map((r) => r.spans))) {
     const spans = runs.flatMap((r) => r.spans.filter((s) => s.name === name));
     out[name] = {};
     for (const [k, get] of Object.entries(metrics)) {

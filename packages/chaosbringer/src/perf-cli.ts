@@ -47,7 +47,9 @@ import {
   type Stat,
 } from "lightbringer/core";
 import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
-import { DEFAULT_PERF_TRACE_DIR, perfRuleMatcher, urlPattern } from "./perf-key.js";
+import { perfKeyRoute, perfRuleMatcher, urlPattern } from "./perf-key.js";
+import { DEFAULT_PERF_TRACE_DIR } from "./perf-options.js";
+import { reportSpans } from "./perf-summary.js";
 import type { CrawlReport, PerfBudgetRule, PerfSpanReport } from "./types.js";
 import { validatePerfBudgets } from "./validate.js";
 
@@ -112,12 +114,14 @@ export function expandReportPaths(operands: readonly string[]): { paths: string[
   return { paths, skipped };
 }
 
-/** Every measured span of a report: load spans, then action spans. */
-export function reportSpans(report: Pick<CrawlReport, "pages" | "actions">): PerfSpanReport[] {
-  const out: PerfSpanReport[] = [];
-  for (const p of report.pages) if (p.perf) out.push(p.perf);
-  for (const a of report.actions) if (a.perf) out.push(a.perf);
-  return out;
+
+/**
+ * Read a `perfBudgets` JSON file. `source` names it in parse errors. The fs
+ * read lives here rather than in budget.ts, which stays pure; each caller
+ * still validates the rules its own way.
+ */
+export function readPerfBudgetRulesFile(path: string, source: string = path): PerfBudgetRule[] {
+  return perfBudgetRulesFromJson(JSON.parse(readFileSync(path, "utf-8")), source);
 }
 
 /** A report's spans renamed to their key: the shape lightbringer's stats group by. */
@@ -455,7 +459,7 @@ export function findDrilldownTarget(
         : `no span with key "${key}" in ${reportFile}. Keys:\n${shown.join("\n")}`,
     );
   }
-  const route = key.split(" :: ", 1)[0];
+  const route = perfKeyRoute(key);
   const pages = report.pages.filter((p) => p.perf && urlPattern(p.url) === route);
   const withSidecar = pages.filter((p) => p.perfPage?.reportPath);
   if (withSidecar.length === 0) {
@@ -657,10 +661,7 @@ function runGate(argv: string[]): void {
     fail("gate: --budgets <file> is required");
     return;
   }
-  const rules = perfBudgetRulesFromJson(
-    JSON.parse(readFileSync(values.budgets, "utf-8")),
-    values.budgets,
-  );
+  const rules = readPerfBudgetRulesFile(values.budgets);
   // The crawler's check: a misspelt metric (`durationMS`) would otherwise be
   // a budget that never fires yet counts as a gated key.
   try {

@@ -1,19 +1,22 @@
 /**
- * Pure helpers for per-step performance measurement: the stable span key,
- * span names, option normalisation and the report-size trimming. Kept apart
- * from `perf.ts` — which drives a browser — so every rule that decides what a
- * key or a report looks like is unit-testable without launching one.
+ * Pure helpers for per-step performance measurement: the stable span key, span
+ * names and the budget-rule glob. Kept apart from `perf.ts` — which drives a
+ * browser — so every rule that decides what a key looks like is unit-testable
+ * without launching one. The `perf` option helpers live in `perf-options.ts`
+ * and the report trimming in `perf-trim.ts`.
  */
 
-import type { SpanReport } from "lightbringer/core";
-import { normalizeUrl } from "./filters.js";
-import type {
-  ActionResult,
-  ActionTarget,
-  LastActionPerf,
-  PerfOptions,
-  PerfSpanReport,
-} from "./types.js";
+import { escapeRegExp, normalizeUrl } from "./filters.js";
+import type { ActionResult, ActionTarget } from "./types.js";
+
+/**
+ * What separates the route from the kind in a perfKey. The route side never
+ * contains it: `urlPattern` of an absolute URL is a parsed pathname, which
+ * percent-encodes spaces, and the crawler only keys the absolute URLs it
+ * visited. So a key splits at its first separator, even when the kind (a
+ * selector) contains one.
+ */
+export const PERF_KEY_SEPARATOR = " :: ";
 
 /**
  * Collapse one path segment that is an identifier rather than a route name.
@@ -98,7 +101,12 @@ export function candidatePerfKey(
 
 /** The span key budgets and baselines join on: `<urlPattern> :: <kind>`. */
 export function perfKey(url: string, kind: string): string {
-  return `${urlPattern(url)} :: ${kind}`;
+  return `${urlPattern(url)}${PERF_KEY_SEPARATOR}${kind}`;
+}
+
+/** The `<urlPattern>` part of a perfKey. */
+export function perfKeyRoute(key: string): string {
+  return key.split(PERF_KEY_SEPARATOR, 1)[0];
 }
 
 /** Span name for a page load: `load <path>`, the real path rather than the pattern. */
@@ -108,106 +116,6 @@ export function loadSpanName(url: string): string {
   } catch {
     return `load ${url}`;
   }
-}
-
-/** `perf` with every default filled in. */
-export interface ResolvedPerfOptions {
-  level: "light" | "trace";
-  memGc: boolean;
-  coverage: boolean;
-  cssSelectorStats: boolean;
-  outDir?: string;
-  actions: boolean;
-}
-
-/**
- * Where a trace goes when `level: "trace"` is on and no `outDir` was given. A
- * trace is streamed to disk while it is recorded, so it needs a path whether
- * or not the caller asked for artefacts.
- */
-export const DEFAULT_PERF_TRACE_DIR = "chaosbringer-perf";
-
-/**
- * Resolve the `perf` option, or `null` when measurement is off. `true` is
- * `{ level: "light" }`; `false` and `undefined` are off. `cssSelectorStats`
- * is recorded into a trace, so it implies `level: "trace"`, and a trace needs
- * a directory, so trace level without `outDir` gets the default one.
- */
-export function resolvePerfOptions(perf: boolean | PerfOptions | undefined): ResolvedPerfOptions | null {
-  if (perf === undefined || perf === false) return null;
-  const opts: PerfOptions = perf === true ? {} : perf;
-  const cssSelectorStats = opts.cssSelectorStats ?? false;
-  const level = cssSelectorStats ? "trace" : (opts.level ?? "light");
-  const outDir = opts.outDir ?? (level === "trace" ? DEFAULT_PERF_TRACE_DIR : undefined);
-  return {
-    level,
-    memGc: opts.memory?.forceGc ?? false,
-    coverage: opts.coverage ?? false,
-    cssSelectorStats,
-    ...(outDir !== undefined ? { outDir } : {}),
-    actions: opts.actions ?? true,
-  };
-}
-
-/** How many entries each per-span list keeps in the crawl report. */
-export const PERF_REPORT_LIST_CAP = 5;
-
-/**
- * A lightbringer span as it goes into the crawl report: keyed, renamed, and
- * with its per-request lists capped.
- *
- * lightbringer keeps up to 20 requests per span. On a 500-page crawl with
- * five actions a page that is most of the report, so the report keeps the
- * top five of each list (lightbringer sorts requests slowest first and
- * initiators / domains heaviest first) and the full
- * span stays in the per-page sidecar under `outDir`. The totals —
- * `requestCount`, `encodedKB` — are computed before trimming and still count
- * everything. The declared `budget` is dropped: the crawler declares none.
- */
-export function toPerfSpanReport(span: SpanReport, key: string, name: string): PerfSpanReport {
-  const { budget: _budget, ...rest } = span;
-  void _budget;
-  const network = span.network;
-  return {
-    ...rest,
-    name,
-    key,
-    network: {
-      ...network,
-      requests: network.requests.slice(0, PERF_REPORT_LIST_CAP),
-      byInitiator: network.byInitiator.slice(0, PERF_REPORT_LIST_CAP),
-      thirdParty: {
-        ...network.thirdParty,
-        byDomain: network.thirdParty.byDomain.slice(0, PERF_REPORT_LIST_CAP),
-      },
-    },
-  };
-}
-
-/** Trim a span to the facts `LastActionPerf` carries. */
-export function toLastActionPerf(span: SpanReport, key: string): LastActionPerf {
-  return {
-    key,
-    durationMs: span.durationMs,
-    cpu: { blockingMs: span.cpu.blockingMs, longTaskCount: span.cpu.longTaskCount },
-    ...(span.interaction ? { interaction: span.interaction } : {}),
-    network: { requestCount: span.network.requestCount, encodedKB: span.network.encodedKB },
-  };
-}
-
-/**
- * The one line a model prompt gets about the previous action's cost. No key:
- * it holds the selector, which never goes to a model, and the history line
- * right above it already says which action this was.
- */
-export function formatLastActionPerf(p: Omit<LastActionPerf, "key">): string {
-  const parts = [
-    `${p.durationMs}ms`,
-    `${p.cpu.blockingMs}ms main-thread blocking over ${p.cpu.longTaskCount} long task${p.cpu.longTaskCount === 1 ? "" : "s"}`,
-  ];
-  if (p.interaction) parts.push(`${p.interaction.maxDurationMs}ms interaction latency`);
-  parts.push(`${p.network.requestCount} request${p.network.requestCount === 1 ? "" : "s"} (${p.network.encodedKB} KB)`);
-  return `Previous action cost: ${parts.join(", ")}`;
 }
 
 /**
@@ -226,35 +134,6 @@ export function perfSlug(url: string, pageIndex: number, runId: string): string 
   return `${runId}-${String(pageIndex).padStart(3, "0")}-${route || "root"}`;
 }
 
-/** The `--perf*` CLI flags, as `parseArgs` hands them over. */
-export interface PerfCliFlags {
-  perf?: boolean;
-  "perf-trace"?: boolean;
-  "perf-mem"?: boolean;
-  "perf-cov"?: boolean;
-  "perf-out"?: string;
-}
-
-/**
- * Map the `--perf*` flags onto `CrawlerOptions.perf`. Every flag implies
- * `--perf`: a `--perf-trace` that did nothing without a second flag would be
- * read as "the trace was empty". No flag at all leaves `perf` unset.
- */
-export function perfOptionsFromCliFlags(flags: PerfCliFlags): boolean | PerfOptions | undefined {
-  const trace = flags["perf-trace"] === true;
-  const mem = flags["perf-mem"] === true;
-  const cov = flags["perf-cov"] === true;
-  const outDir = flags["perf-out"];
-  if (!flags.perf && !trace && !mem && !cov && outDir === undefined) return undefined;
-  if (!trace && !mem && !cov && outDir === undefined) return true;
-  return {
-    ...(trace ? { level: "trace" as const } : {}),
-    ...(mem ? { memory: { forceGc: true } } : {}),
-    ...(cov ? { coverage: true } : {}),
-    ...(outDir !== undefined ? { outDir } : {}),
-  };
-}
-
 /**
  * Compile a `perfBudgets` `match` glob into an anchored RegExp. `*` is the
  * only wildcard and matches any run of characters (spaces and `/` included,
@@ -266,7 +145,7 @@ export function perfOptionsFromCliFlags(flags: PerfCliFlags): boolean | PerfOpti
 export function compilePerfKeyGlob(match: string): RegExp {
   const body = match
     .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .map(escapeRegExp)
     .join(".*");
   // `s`: `*` must span line terminators too. escapeSelector folds `\n` but a
   // selector or target from script-set text can still carry `\r`, U+2028 or

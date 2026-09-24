@@ -2,7 +2,7 @@
 // (style recalc / layout / script / nodes) and trace Paint/GPUTask events into a
 // span's render breakdown, plus long-task/LoAF into its CPU breakdown.
 // Pure: consumes plain metric maps, trace events, and in-page timing arrays.
-import { round, type EpochWindow } from "./util";
+import { inEpochWindow, round, type EpochWindow } from "./util";
 
 /**
  * Render breakdown of a span (DOM change -> style recalc -> layout -> paint).
@@ -89,8 +89,7 @@ export function buildSpanCpu(
   longTasks: Array<{ epochStart: number; duration: number }>,
   loaf: Array<{ epochStart: number; duration: number; blocking: number }>,
 ): SpanCpu {
-  const inWindow = (epochStart: number) =>
-    epochStart >= span.startEpochMs && epochStart <= span.endEpochMs;
+  const inWindow = (epochStart: number) => inEpochWindow(epochStart, span);
   const lt = longTasks.filter((t) => inWindow(t.epochStart));
   const lf = loaf.filter((l) => inWindow(l.epochStart));
   return {

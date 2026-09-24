@@ -86,7 +86,7 @@ export interface NetworkReport {
 
 /**
  * One captured network request, in epoch ms. Produced by the CDP capture layer
- * (collector.startNetworkCapture) and consumed by the builders below; the record
+ * (capture.startNetworkCapture) and consumed by the builders below; the record
  * contract lives with the analysis that reads it.
  */
 export interface NetReq {
@@ -134,7 +134,23 @@ export function shortenUrl(url: string): string {
     const comma = url.indexOf(",");
     return `${url.slice(0, comma > 0 ? Math.min(comma, 40) : 40)}…`;
   }
-  return url.replace(/^https?:\/\/[^/]+/, "").slice(0, 60) || url.slice(0, 60);
+  return stripOrigin(url, 60, "sliced");
+}
+
+/**
+ * Drop the scheme+host and truncate to `max` chars. When nothing is left (a
+ * bare origin like "https://a.test", or an empty url), fall back to '' ("none"), the whole url ("url") or its first `max` chars
+ * ("sliced") — each caller keeps its historical output. Internal: not
+ * re-exported from analyze/index.ts.
+ */
+export function stripOrigin(
+  url: string,
+  max: number,
+  fallback: "none" | "url" | "sliced",
+): string {
+  const path = url.replace(/^https?:\/\/[^/]+/, "").slice(0, max);
+  if (path) return path;
+  return fallback === "url" ? url : fallback === "sliced" ? url.slice(0, max) : "";
 }
 
 /** Reduce a CDP initiator to a type + a single best-effort triggering frame. */
@@ -175,6 +191,12 @@ export function registrableDomain(host: string): string {
   if (parts.length <= 2) return host;
   const last2 = parts.slice(-2).join(".");
   return MULTI_PART_SUFFIXES.has(last2) ? parts.slice(-3).join(".") : last2;
+}
+
+/** Registrable domain of a URL; null for a URL without a host. Internal. */
+export function domainOfUrl(url: string): string | null {
+  const h = hostOf(url);
+  return h ? registrableDomain(h) : null;
 }
 
 export function isThirdParty(reqUrl: string, firstPartyDomain: string): boolean {

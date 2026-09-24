@@ -39,6 +39,7 @@ export function latencyStats(samplesMs: ReadonlyArray<number>): LatencyStats {
 /**
  * Linear-interpolated quantile on a pre-sorted ascending array.
  * Matches numpy's "linear" interpolation.
+ * Definition: interpolates between the elements at floor/ceil of `(n - 1) * q`, `q` in 0–1.
  */
 export function quantile(sortedAsc: ReadonlyArray<number>, q: number): number {
   if (sortedAsc.length === 0) return 0;

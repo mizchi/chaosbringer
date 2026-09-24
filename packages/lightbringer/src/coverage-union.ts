@@ -2,7 +2,15 @@
 // executed it, so what stays unused is code no scenario needed — dead-code /
 // over-shipping candidates, and chunks split too coarsely. Pure; the driver is
 // scripts/coverage.mjs, over the <slug>.run<N>.coverage.json artifacts.
-import { mergeRanges, type CoverageArtifact } from "./analyze/coverage";
+import {
+  groupRangesByUrl,
+  mergeRanges,
+  pctOf,
+  rangesLen,
+  type CoverageArtifact,
+} from "./analyze/coverage";
+import { stripOrigin } from "./analyze/network";
+import { kb } from "./analyze/util";
 
 export type { CoverageArtifact };
 
@@ -32,9 +40,6 @@ export interface CoverageUnion {
 export const COVERAGE_MIN_FLAG_BYTES = 5_000;
 /** Default "under N% used" threshold for flagging a resource. */
 export const DEFAULT_COVERAGE_MIN_PCT = 30;
-
-const pctOf = (used: number, total: number) =>
-  total > 0 ? Math.round((used / total) * 1000) / 10 : 0;
 
 /**
  * Fold `next` into `acc`: one artifact whose used ranges are the union of
@@ -67,18 +72,13 @@ export function mergeCoverageArtifacts(
 /** Union the used ranges of every artifact, per kind and url. */
 export function unionCoverage(artifacts: readonly Partial<CoverageArtifact>[]): CoverageUnion {
   const summarize = (kind: "js" | "css"): CoverageUnionKind => {
-    const acc = new Map<string, { total: number; used: Array<[number, number]> }>();
-    for (const art of artifacts) {
-      for (const item of art[kind] ?? []) {
-        const cur = acc.get(item.url) ?? { total: 0, used: [] };
-        cur.total = Math.max(cur.total, item.total);
-        cur.used.push(...item.used);
-        acc.set(item.url, cur);
-      }
-    }
-    const rows = [...acc.entries()].map(([url, v]) => {
-      const used = mergeRanges(v.used).reduce((a, [s, e]) => a + (e - s), 0);
-      return { url, total: v.total, used, pct: pctOf(used, v.total) };
+    // empty urls are NOT skipped here (as before): artifacts come url-keyed from buildCoverage
+    const rows = groupRangesByUrl(
+      artifacts.flatMap((a) => a[kind] ?? []),
+      { skipEmptyUrl: false },
+    ).map(({ url, total, used: ranges }) => {
+      const used = rangesLen(ranges);
+      return { url, total, used, pct: pctOf(used, total) };
     });
     const total = rows.reduce((a, r) => a + r.total, 0);
     const used = rows.reduce((a, r) => a + r.used, 0);
@@ -88,8 +88,7 @@ export function unionCoverage(artifacts: readonly Partial<CoverageArtifact>[]): 
   return { js: summarize("js"), css: summarize("css") };
 }
 
-const kb = (b: number) => Math.round(b / 102.4) / 10;
-const shorten = (url: string) => url.replace(/^https?:\/\/[^/]+/, "").slice(0, 70) || url;
+const shorten = (url: string) => stripOrigin(url, 70, "url");
 
 /**
  * The report scripts/coverage.mjs prints: each entry is one console.log call.

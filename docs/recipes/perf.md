@@ -29,7 +29,7 @@ const { report } = await chaos({
 | `outDir` | `--perf-out <dir>` | — | write the full per-page report and artefacts (see [Artefacts](#artefacts)) |
 | `actions: false` | — | `true` | measure page loads only |
 
-Every `--perf-*` flag implies `--perf`. The report's `reproCommand` carries the same `--perf*` flags (and `--perf-budgets <file>`), so a repro measures the way the run did. CPU and network throttling are deliberately not perf options: the crawler already owns them (`faults.cpu()`, `--network`), and a second throttle on the same CDP session would overwrite the first.
+Every `--perf-*` flag implies `--perf`. The report's `reproCommand` carries the same `--perf*` flags (and `--perf-budgets <file>`), so a repro measures the way the run did. CPU and network throttling are deliberately not perf options: the crawler already owns them (`faults.cpu()`, `--network`), and a second throttle on the same CDP session would overwrite the first. The `--network` presets (`slow-3g`, `fast-3g`) are chaosbringer's own and differ from lightbringer's `PERF_NET` / `--net` presets of the same names.
 
 ## Spans
 
@@ -286,9 +286,9 @@ One reference measurement: the fixture site, `--seed 42`, 10 pages and 46 action
 
 With `perf` unset, the crawler opens no CDP session for measurement and records no spans. The only perf work left is the always-on collector.
 
-Durations include harness overhead: lightbringer's accuracy table puts `durationMs` 15–30 ms over the real cost. Budgets derived from medians absorb this, so compare a key's median against its own baseline rather than against an absolute target.
+Durations include harness overhead; see lightbringer's [accuracy table](../../packages/lightbringer/README.md#accuracy). Budgets derived from medians absorb it, so compare a key's median against its own baseline rather than against an absolute target.
 
-SwiftShader GPU numbers are not real: `render.gpuMs` is only meaningful at trace level with real GPU flags.
+GPU numbers under headless SwiftShader are not real; see lightbringer's [caveats](../../packages/lightbringer/README.md#caveats). In a crawl, `render.gpuMs` is only present at trace level.
 
 ## Artefacts
 

@@ -788,19 +788,28 @@ export interface PerformanceMetrics {
   load?: number;
 }
 
+/** Keys of PerformanceMetrics that a budget can target. */
+export const PERF_BUDGET_KEYS = [
+  "ttfb",
+  "fcp",
+  "lcp",
+  "tbt",
+  "domContentLoaded",
+  "load",
+] as const satisfies ReadonlyArray<keyof PerformanceMetrics>;
+
+export type PerfBudgetKey = (typeof PERF_BUDGET_KEYS)[number];
+
 /**
  * Per-metric budget (in ms). A page whose measured metric exceeds the budget
  * is recorded as an invariant violation named `perf-budget.<metric>`, which
  * forces a non-zero exit and shows up in the diff section.
  */
-export interface PerformanceBudget {
-  ttfb?: number;
-  fcp?: number;
-  lcp?: number;
-  tbt?: number;
-  domContentLoaded?: number;
-  load?: number;
-}
+// An interface rather than a type alias so the public name stays an
+// interface (declaration merging, hover text); the keys come from
+// PERF_BUDGET_KEYS so the two cannot drift.
+// biome-ignore lint/suspicious/noEmptyInterface: extends the derived record on purpose
+export interface PerformanceBudget extends Partial<Record<PerfBudgetKey, number>> {}
 
 /** Supported network throttling presets applied via CDP. */
 export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
@@ -813,18 +822,6 @@ export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
 export type SettleMode = "networkidle" | "adaptive" | number;
 
 export const NETWORK_PROFILES = ["slow-3g", "fast-3g", "offline"] as const satisfies ReadonlyArray<NetworkProfile>;
-
-/** Keys of PerformanceMetrics that a budget can target. */
-export const PERF_BUDGET_KEYS = [
-  "ttfb",
-  "fcp",
-  "lcp",
-  "tbt",
-  "domContentLoaded",
-  "load",
-] as const satisfies ReadonlyArray<keyof PerformanceMetrics>;
-
-export type PerfBudgetKey = (typeof PERF_BUDGET_KEYS)[number];
 
 export interface PageResult {
   url: string;

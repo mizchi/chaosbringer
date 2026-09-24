@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ActionRecipe, RecipeStats } from "./types.js";
 import { emptyStats } from "./types.js";
+import { escapeRegExp } from "../filters.js";
 
 export interface RecipeStoreOptions {
   /** Project-local recipe dir. Default: `./chaosbringer-recipes`. Set to `false` to disable. */
@@ -177,7 +178,7 @@ export class RecipeStore {
    * the full store on every step.
    */
   byDomain(host: string): ActionRecipe[] {
-    const needle = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const needle = escapeRegExp(host);
     return this.list().filter((r) => {
       const first = r.preconditions[0]?.urlPattern;
       if (!first) return true; // unscoped recipes

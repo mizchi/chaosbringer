@@ -1,6 +1,6 @@
 import type { CDPSession, Page } from "playwright";
-import { DEFAULT_EVALUATE_TIMEOUT_MS, DEFAULT_SETTLE_TIMEOUT_MS } from "./config";
-import { BoundedEvaluator } from "./evaluate";
+import { DEFAULT_EVALUATE_TIMEOUT_MS, DEFAULT_SETTLE_TIMEOUT_MS } from "./defaults";
+import { BoundedEvaluator, raceTimeout } from "./evaluate";
 import { diffMetrics, type SpanRender } from "./analyze/render";
 import { diffMemory, type SpanMemory } from "./analyze/memory";
 import { PerfAccumulator } from "./accumulator";
@@ -312,10 +312,6 @@ export class PerfController {
 
   /** Run settle but give up after settleTimeoutMs. Returns true if it capped. */
   private async runSettle(settle: Settle): Promise<boolean> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<boolean>((resolve) => {
-      timer = setTimeout(() => resolve(true), this.settleTimeoutMs);
-    });
     const done = settle(this.page).then(
       () => false,
       async (e: unknown) => {
@@ -332,11 +328,7 @@ export class PerfController {
         );
       },
     );
-    try {
-      return await Promise.race([done, timeout]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    return raceTimeout(done, this.settleTimeoutMs, () => true);
   }
 
   /** Force a GC so subsequent memory metrics reflect retained, not pending-collection, memory. */

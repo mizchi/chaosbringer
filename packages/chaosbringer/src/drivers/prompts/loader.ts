@@ -3,7 +3,7 @@
  * as a separate `.md` file so it diffs cleanly and can be tweaked
  * without touching code.
  */
-import { formatLastActionPerf } from "../../perf-key.js";
+import { formatLastActionPerf } from "../../perf-trim.js";
 import type { DriverHistoryEntry, DriverInvariantViolation, DriverProviderInput } from "../types.js";
 
 export interface ParsedPrompt {

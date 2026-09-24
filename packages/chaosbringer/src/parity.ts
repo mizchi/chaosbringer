@@ -471,7 +471,8 @@ async function probeOneSample(url: string, opts: SampleOpts): Promise<ProbedSide
   }
 }
 
-function percentile(sortedAsc: number[], p: number): number {
+/** Nearest-rank percentile with ceiling: the element at `ceil(p/100 * n) - 1`, `p` in 0–100. */
+function nearestRankCeil(sortedAsc: number[], p: number): number {
   if (sortedAsc.length === 0) return 0;
   if (sortedAsc.length === 1) return sortedAsc[0];
   // Nearest-rank with ceiling: matches the conventional "p95 of 10
@@ -489,9 +490,9 @@ function computePerfStats(durations: number[]): PerfStats {
   return {
     samples: sorted.length,
     min: sorted[0],
-    median: percentile(sorted, 50),
-    p95: percentile(sorted, 95),
-    p99: percentile(sorted, 99),
+    median: nearestRankCeil(sorted, 50),
+    p95: nearestRankCeil(sorted, 95),
+    p99: nearestRankCeil(sorted, 99),
   };
 }
 

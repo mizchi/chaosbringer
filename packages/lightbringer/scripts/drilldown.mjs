@@ -16,7 +16,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { analyseDrilldown, formatDrilldown } from "../dist/core.js";
+import { DRILLDOWN_TOP_N, analyseDrilldown, formatDrilldown } from "../dist/core.js";
 
 // The analysis (window filtering, CPU-profiler self time, first/third party,
 // GPU, initiators, selector cost) lives in src/drilldown.ts, shared with
@@ -34,7 +34,7 @@ if (!slug || !spanName) {
   die("usage: node scripts/drilldown.mjs <slug> <spanName> [run] [topN]");
 }
 const run = runArg ?? "0";
-const topN = Number(topArg ?? 15);
+const topN = topArg != null ? Number(topArg) : DRILLDOWN_TOP_N;
 
 const reportPath = path.join(DIR, `${slug}.run${run}.json`);
 const tracePath = path.join(DIR, `${slug}.run${run}.trace.json`);

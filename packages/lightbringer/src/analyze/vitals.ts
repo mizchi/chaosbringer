@@ -1,7 +1,7 @@
 // User-perceived performance analysis. Web-vitals attribution sub-parts
 // (pickAttribution), per-span INP from Event Timing (buildSpanInteraction), and
 // frame cadence from a rAF probe (buildSpanFrames). Pure: consumes plain records.
-import { round, type EpochWindow } from "./util";
+import { inEpochWindow, round, type EpochWindow } from "./util";
 
 export interface VitalSample {
   value: number;
@@ -95,9 +95,7 @@ export function buildSpanInteraction(
   span: EpochWindow,
   events: EpochEvent[],
 ): SpanInteraction | undefined {
-  const inWindow = events.filter(
-    (e) => e.epochStart >= span.startEpochMs && e.epochStart <= span.endEpochMs,
-  );
+  const inWindow = events.filter((e) => inEpochWindow(e.epochStart, span));
   if (inWindow.length === 0) return undefined;
   let worst = inWindow[0];
   for (const e of inWindow) if (e.duration > worst.duration) worst = e;
@@ -117,7 +115,7 @@ export function buildSpanFrames(
   frameEpochs: number[],
 ): SpanFrames | undefined {
   const inWindow = frameEpochs
-    .filter((t) => t >= span.startEpochMs && t <= span.endEpochMs)
+    .filter((t) => inEpochWindow(t, span))
     .sort((a, b) => a - b);
   if (inWindow.length < 2) return undefined;
   let dropped = 0;

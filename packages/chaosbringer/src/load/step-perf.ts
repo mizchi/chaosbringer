@@ -9,9 +9,14 @@
  * session gathered so far.
  */
 import type { Page } from "playwright";
-import { startSession, type PerfSession, type SpanHandle, type SpanReport } from "lightbringer/core";
-import { FINISH_TIMEOUT_MS } from "../perf.js";
-import { pageCdp } from "../page-cdp.js";
+import type { PerfSession, SpanHandle, SpanReport } from "lightbringer/core";
+import {
+  endIfRecorded,
+  FINISH_TIMEOUT_MS,
+  openPerfSession,
+} from "../perf-session.js";
+import { raceTimeout, TIMED_OUT } from "../async-util.js";
+import { spanCost } from "../perf-trim.js";
 import type { WorkerPerfSample } from "./perf-stats.js";
 
 type SpanOwner = Pick<WorkerPerfSample, "scenarioName" | "stepName" | "timestamp">;
@@ -30,8 +35,7 @@ export class StepPerf {
    * the run's faults, not to measurement.
    */
   static async open(page: Page): Promise<StepPerf> {
-    const client = await pageCdp(page.context(), page).session();
-    const session = await startSession(page, client, { installCollector: false });
+    const { session } = await openPerfSession(page, { installCollector: false });
     return new StepPerf(session);
   }
 
@@ -47,9 +51,7 @@ export class StepPerf {
    * the wrong step.
    */
   async end(handle: SpanHandle, owner: SpanOwner): Promise<void> {
-    const before = this.session.controller.spans.length;
-    await this.session.controller.end(handle, { settle: false });
-    if (this.session.controller.spans.length > before) this.owners.push(owner);
+    if (await endIfRecorded(this.session.controller, handle)) this.owners.push(owner);
   }
 
   /**
@@ -61,17 +63,11 @@ export class StepPerf {
    */
   async finish(timeoutMs = FINISH_TIMEOUT_MS): Promise<WorkerPerfSample[]> {
     let spans: ReadonlyArray<SpanReport | undefined> | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), timeoutMs);
-    });
     try {
-      const done = await Promise.race([this.session.finish("load worker"), timeout]);
-      if (done) spans = done.report.spans;
+      const done = await raceTimeout(this.session.finish("load worker"), timeoutMs);
+      if (done !== TIMED_OUT) spans = done.report.spans;
     } catch {
       // fall through to peekSpan
-    } finally {
-      clearTimeout(timer);
     }
     if (!spans) spans = this.owners.map((_, i) => this.session.peekSpan(i));
 
@@ -79,12 +75,7 @@ export class StepPerf {
     this.owners.forEach((owner, i) => {
       const span = spans[i];
       if (!span) return;
-      out.push({
-        ...owner,
-        durationMs: span.durationMs,
-        blockingMs: span.cpu.blockingMs,
-        ...(span.interaction ? { interactionMs: span.interaction.maxDurationMs } : {}),
-      });
+      out.push({ ...owner, ...spanCost(span) });
     });
     return out;
   }

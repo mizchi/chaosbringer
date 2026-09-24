@@ -22,7 +22,9 @@ import {
   type PerfReport,
   type SpanMedians,
 } from "./core";
-import { netProfileByName, sessionOptionsFromEnv } from "./config";
+import { RUN_REPORT_RE, runArtifactPath, slugOfRunReport, slugify } from "./artifacts";
+import { sessionOptionsFromEnv, toSessionOptions } from "./config";
+import { netProfileByName } from "./defaults";
 
 interface Step {
   name: string;
@@ -93,10 +95,7 @@ const isSpec = !scenarioPath.endsWith(".json");
 const scenario: Scenario = isSpec
   ? { url: "", steps: [] }
   : JSON.parse(fs.readFileSync(scenarioPath, "utf8"));
-const slug = path
-  .basename(scenarioPath)
-  .replace(/\.(json|[tj]s)$/, "")
-  .replace(/[^\p{L}\p{N}_]+/gu, "_");
+const slug = slugify(path.basename(scenarioPath).replace(/\.(json|[tj]s)$/, ""));
 
 function settleFn(spec: SettleSpec | undefined) {
   const s = spec ?? scenario.settle ?? "networkidle";
@@ -137,26 +136,33 @@ async function runOnce(index: number): Promise<PerfReport> {
     const page = await context.newPage();
     const client = await context.newCDPSession(page);
     fs.mkdirSync(outDir, { recursive: true });
-    const tracePath = path.join(outDir, `${slug}.run${index}.trace.json`);
-    const session = await startSession(page, client, {
-      cpuRate,
-      netProfile,
-      coverage: cov,
-      memGc: mem,
-      cssStats: css,
-      trace,
-      tracePath,
-      settleTimeoutMs: envOpts.settleTimeoutMs,
-    });
+    const runTag = `run${index}`;
+    const tracePath = runArtifactPath(outDir, slug, runTag, "trace");
+    const session = await startSession(
+      page,
+      client,
+      toSessionOptions(
+        {
+          cpuRate,
+          netProfile,
+          coverage: cov,
+          memGc: mem,
+          cssStats: css,
+          trace,
+          settleTimeoutMs: envOpts.settleTimeoutMs,
+        },
+        tracePath,
+      ),
+    );
     for (const step of scenario.steps) {
       await session.controller.measure(step.name, () => applyStep(page, step), {
         settle: settleFn(step.settle),
       });
     }
     const { report, covArtifact } = await session.finish(scenario.url);
-    fs.writeFileSync(path.join(outDir, `${slug}.run${index}.json`), JSON.stringify(report, null, 2));
+    fs.writeFileSync(runArtifactPath(outDir, slug, runTag, "report"), JSON.stringify(report, null, 2));
     if (covArtifact)
-      fs.writeFileSync(path.join(outDir, `${slug}.run${index}.coverage.json`), JSON.stringify(covArtifact));
+      fs.writeFileSync(runArtifactPath(outDir, slug, runTag, "coverage"), JSON.stringify(covArtifact));
     await context.close();
     return report;
   } finally {
@@ -176,8 +182,8 @@ function loadRunsBySlug(): Map<string, PerfReport[]> {
   const m = new Map<string, PerfReport[]>();
   if (!fs.existsSync(outDir)) return m;
   for (const f of fs.readdirSync(outDir)) {
-    if (!/\.run\d+\.json$/.test(f) || f.includes(".coverage.") || f.includes(".trace.")) continue;
-    const s = f.replace(/\.run\d+\.json$/, "");
+    if (!RUN_REPORT_RE.test(f) || f.includes(".coverage.") || f.includes(".trace.")) continue;
+    const s = slugOfRunReport(f);
     const r = JSON.parse(fs.readFileSync(path.join(outDir, f), "utf8")) as PerfReport;
     (m.get(s) ?? m.set(s, []).get(s)!).push(r);
   }
