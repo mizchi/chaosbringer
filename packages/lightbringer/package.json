@@ -62,6 +62,7 @@
   },
   "scripts": {
     "build": "tsup src/index.ts src/core.ts src/fixture.ts src/cli.ts src/auto.ts src/autowrap.ts src/analyze/index.ts --format esm --dts --clean",
+    "prepare": "tsup src/index.ts src/core.ts src/fixture.ts src/cli.ts src/auto.ts src/autowrap.ts src/analyze/index.ts --format esm --dts --clean",
     "test": "playwright test",
     "test:unit": "vitest run",
     "test:bundle": "playwright test -c playwright.bundle.config.ts",
