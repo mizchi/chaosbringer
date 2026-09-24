@@ -544,3 +544,42 @@ describe("a misspelled option is an error, not silence", () => {
     }
   });
 });
+
+describe("perf", () => {
+  it("accepts a boolean or a well-formed options object", () => {
+    expect(() => validateOptions(base({ perf: true }))).not.toThrow();
+    expect(() => validateOptions(base({ perf: false }))).not.toThrow();
+    expect(() =>
+      validateOptions(
+        base({
+          perf: {
+            level: "trace",
+            memory: { forceGc: true },
+            coverage: true,
+            cssSelectorStats: false,
+            outDir: "perf",
+            actions: false,
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses an unknown perf key rather than measuring at the wrong level", () => {
+    expect(() => validateOptions(base({ perf: { trace: true } }))).toThrow(/"perf.trace" is not a perf option/);
+  });
+
+  it("refuses settleTimeoutMs, which nothing reads until the crawler stops owning settle", () => {
+    expect(() => validateOptions(base({ perf: { settleTimeoutMs: 2000 } }))).toThrow(
+      /"perf.settleTimeoutMs" is not a perf option/,
+    );
+  });
+
+  it("refuses malformed values", () => {
+    expect(() => validateOptions(base({ perf: "yes" }))).toThrow(/"perf" must be a boolean/);
+    expect(() => validateOptions(base({ perf: { level: "heavy" } }))).toThrow(/perf.level/);
+    expect(() => validateOptions(base({ perf: { memory: true } }))).toThrow(/perf.memory/);
+    expect(() => validateOptions(base({ perf: { outDir: "" } }))).toThrow(/perf.outDir/);
+    expect(() => validateOptions(base({ perf: { actions: "no" } }))).toThrow(/perf.actions/);
+  });
+});

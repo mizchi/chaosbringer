@@ -165,6 +165,11 @@ export async function executeLifecycleAction(
 /**
  * Real executor backed by Playwright. CPU throttle requires a CDP session;
  * we attach lazily and reuse across calls on the same page.
+ *
+ * A caller that already holds a CDP session for the page (chaosbringer shares
+ * one per page between its network profile, coverage and perf layers) passes
+ * `cdp` so the executor does not attach a second one. Without it, the executor
+ * opens its own session, which keeps it usable standalone.
  */
 export class PlaywrightLifecycleExecutor implements LifecycleActionExecutor {
   private cdp: Promise<CDPSession> | null = null;
@@ -172,11 +177,12 @@ export class PlaywrightLifecycleExecutor implements LifecycleActionExecutor {
   constructor(
     private readonly page: Page,
     private readonly context: BrowserContext,
+    private readonly cdpProvider?: () => Promise<CDPSession>,
   ) {}
 
   private getCdp(): Promise<CDPSession> {
     if (this.cdp === null) {
-      this.cdp = this.context.newCDPSession(this.page);
+      this.cdp = this.cdpProvider ? this.cdpProvider() : this.context.newCDPSession(this.page);
     }
     return this.cdp;
   }

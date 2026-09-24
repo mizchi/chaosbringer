@@ -36,6 +36,7 @@ import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { perfOptionsFromCliFlags } from "./perf-key.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
@@ -131,6 +132,11 @@ const { values, positionals } = parseArgs({
     "heatmap-top": { type: "string" },
     "heatmap-out": { type: "string" },
     junit: { type: "string" },
+    perf: { type: "boolean", default: false },
+    "perf-trace": { type: "boolean", default: false },
+    "perf-mem": { type: "boolean", default: false },
+    "perf-cov": { type: "boolean", default: false },
+    "perf-out": { type: "string" },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -197,6 +203,11 @@ OPTIONS:
   --heatmap-top <n>     Limit the heatmap to the top N targets (default 20)
   --heatmap-out <path>  Also write the heatmap as JSON
   --junit <path>        Write a Surefire-style JUnit XML for CI dashboards
+  --perf                Measure every page load and action as a span (lightbringer, light level)
+  --perf-trace          Also record a Chrome trace per page (large; implies --perf)
+  --perf-mem            Force GC at span boundaries for retained-only memory deltas (slow; implies --perf)
+  --perf-cov            Record JS/CSS byte coverage per page (implies --perf)
+  --perf-out <dir>      Write each page's full perf report (+ trace/coverage) to <dir> (implies --perf)
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -438,6 +449,7 @@ const options: CrawlerOptions = {
       }
     : undefined,
   invariants: buildInvariants(),
+  perf: perfOptionsFromCliFlags(values),
 };
 
 const outputPath = values.output || "chaos-report.json";

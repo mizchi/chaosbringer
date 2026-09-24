@@ -84,6 +84,7 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
         ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
         blockExternalNavigation: options.blockExternalNavigation ?? true,
         actionWeights: options.actionWeights,
+        perf: options.perf,
         headless: true,
       });
 
@@ -320,6 +321,7 @@ export async function runChaosTest(
     ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
     blockExternalNavigation: options.blockExternalNavigation ?? true,
     actionWeights: options.actionWeights,
+    perf: options.perf,
     headless: true,
   });
 

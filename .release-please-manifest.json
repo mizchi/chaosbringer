@@ -3,5 +3,6 @@
   "packages/server-faults": "1.0.0",
   "packages/playwright-faults": "0.2.0",
   "packages/playwright-v8-coverage": "0.2.0",
-  "packages/cf-faults": "0.2.0"
+  "packages/cf-faults": "0.2.0",
+  "packages/lightbringer": "0.3.1"
 }

@@ -2,6 +2,7 @@
  * Core types for Chaos Crawler
  */
 
+import type { DocumentReport, SpanReport, VitalSample } from "lightbringer/core";
 import type { AdvisorConfig } from "./advisor/types.js";
 import type { ServerFaultEventAttrs } from "./server-fault-events.js";
 
@@ -246,8 +247,99 @@ export interface CrawlerOptions {
    * Default: undefined.
    */
   driverGoal?: string;
+  /**
+   * Per-step performance measurement, with
+   * [lightbringer](../lightbringer) as the engine. Off by default. When on,
+   * every page load and every chaos action becomes a measured span —
+   * network, main-thread blocking, render, memory, interaction latency — on
+   * `PageResult.perf` and `ActionResult.perf`. `true` is `{ level: "light" }`.
+   *
+   * Unset, the crawler opens no extra CDP session and records no spans; the
+   * only perf work left is the always-on collector that fills
+   * `PerformanceMetrics.lcp` / `.tbt`.
+   */
+  perf?: boolean | PerfOptions;
   /** @internal Set by `chaos({ server })`. */
   server?: ChaosRemoteServer;
+}
+
+/**
+ * Settings for `CrawlerOptions.perf`. CPU and network throttling are not
+ * here on purpose: the crawler already owns them (`faults.cpu()`,
+ * `network`), and a second throttle would make the two fight.
+ */
+export interface PerfOptions {
+  /**
+   * `"light"` (default): `Performance.getMetrics` twice per span plus CDP
+   * Network events. `"trace"` also records a Chrome trace per page (paint /
+   * GPU / CPU samples), streamed to `outDir` — tens of MB a page.
+   */
+  level?: "light" | "trace";
+  /**
+   * `forceGc: true` collects garbage twice at every span boundary, so memory
+   * deltas are what the step retained rather than what it had not yet
+   * freed. Slow, and it changes timing.
+   */
+  memory?: { forceGc?: boolean };
+  /** Record JS/CSS byte coverage per page (unused-code analysis). */
+  coverage?: boolean;
+  /** Add per-selector style stats to the trace. Implies `level: "trace"`. */
+  cssSelectorStats?: boolean;
+  /**
+   * Write each page's full lightbringer report (and trace / coverage
+   * artefacts when enabled) to `<outDir>/<slug>.json`. The crawl report
+   * keeps a trimmed copy and the relative path. Defaults to
+   * `chaosbringer-perf` when `level` is `"trace"`, since a trace has to be
+   * streamed somewhere; otherwise no sidecar files are written.
+   */
+  outDir?: string;
+  /** Measure chaos actions too (default true). `false` = page-load spans only. */
+  actions?: boolean;
+}
+
+/**
+ * One measured span — a page load or a chaos action — as lightbringer
+ * reports it, plus the key it is grouped by across runs.
+ *
+ * `network.requests`, `network.byInitiator` and `network.thirdParty.byDomain`
+ * keep their top five entries; the totals still count every request, and the
+ * full lists are in the per-page sidecar when `perf.outDir` is set. Fields
+ * that were not measured are absent, never 0: `interaction` only exists when
+ * the span contained an interaction, `frames` only with enough frames to
+ * describe, `render.paintMs` / `gpuMs` only at trace level.
+ */
+export interface PerfSpanReport extends Omit<SpanReport, "budget"> {
+  /**
+   * `<urlPattern> :: <kind>`, stable from one run to the next. `urlPattern` is
+   * the page's pathname with id-like segments replaced by `:id` (no origin,
+   * query or hash). `kind` is `load` for the page load and
+   * `<type> <selector ?? target>` for an action (`scroll` for a scroll).
+   */
+  key: string;
+}
+
+/**
+ * Page-level measurements that do not belong to one span. Kept small on
+ * purpose; the full lightbringer report is the sidecar at `reportPath`.
+ */
+export interface PagePerfSummary {
+  /** web-vitals of the last document the page showed. */
+  vitals: Record<string, VitalSample>;
+  /** Per-document vitals, present only when the page went through more than one document. */
+  documents?: DocumentReport[];
+  network: {
+    totalRequests: number;
+    totalEncodedKB: number;
+    fromCacheCount: number;
+    /** Present only when some request went to another registrable domain. */
+    thirdParty?: { requestCount: number; encodedKB: number };
+  };
+  /** True when page JS had already patched `performance.now` before the collector ran. */
+  clockPatched?: boolean;
+  /** True when the in-page collector never ran; in-page fields are then absent. */
+  collectorMissing?: boolean;
+  /** Sidecar report path, relative to `perf.outDir`. Present only when `outDir` is set. */
+  reportPath?: string;
 }
 
 /**
@@ -559,6 +651,13 @@ export interface PageResult {
    * read-only: mutating one observed here mutates the other views too.
    */
   serverFaultEvents?: ServerFaultEvent[];
+  /**
+   * The page-load span: `page.goto` through `afterLoad` faults and
+   * invariants to the metrics read. Present only with `perf` on.
+   */
+  perf?: PerfSpanReport;
+  /** Page-level perf extras (vitals, network totals). Present only with `perf` on. */
+  perfPage?: PagePerfSummary;
 }
 
 export interface RecoveryInfo {
@@ -709,6 +808,13 @@ export interface ActionResult {
    * read-only: mutating one observed here mutates the other views too.
    */
   serverFaultEvents?: ServerFaultEvent[];
+  /**
+   * This action's span: from just before the action ran to just after it
+   * returned, including the crawler's own post-click settle. It covers the
+   * same interval that collects `traceIds`. Present only with `perf` on and
+   * `perf.actions` not false; a skipped action records no span.
+   */
+  perf?: PerfSpanReport;
 }
 
 /**
@@ -1013,4 +1119,6 @@ export interface ChaosTestOptions {
   strict?: boolean;
   /** Action weights */
   actionWeights?: ActionWeights;
+  /** Per-step performance measurement; see `CrawlerOptions.perf`. */
+  perf?: boolean | PerfOptions;
 }

@@ -1,0 +1,26 @@
+/* A real stylesheet so a production build emits a render-blocking <link>. Some
+   rules match the rendered DOM (used), many don't (unused) — so CSS coverage lands
+   well under 100%. */
+body { margin: 0; font-family: system-ui, sans-serif; color: #222; }
+main { padding: 24px; max-width: 720px; margin: 0 auto; }
+h1 { font-size: 24px; }
+.thumb { width: 128px; height: 96px; object-fit: cover; border: 1px solid #ccc; }
+button { padding: 8px 16px; cursor: pointer; }
+#out { margin-top: 12px; font-variant-numeric: tabular-nums; }
+
+/* --- below: rules for elements this page never renders (unused CSS) --- */
+.sidebar { position: fixed; left: 0; width: 240px; background: #f4f4f4; }
+.sidebar .nav-item { padding: 8px 12px; border-bottom: 1px solid #e0e0e0; }
+.sidebar .nav-item:hover { background: #e8e8e8; }
+.modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); }
+.modal .dialog { max-width: 480px; margin: 10vh auto; background: #fff; }
+.toast { position: fixed; bottom: 16px; right: 16px; background: #333; color: #fff; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { padding: 6px 10px; border: 1px solid #ddd; }
+.badge { display: inline-block; padding: 2px 6px; border-radius: 4px; }
+.badge.success { background: #d4f7d4; }
+.badge.error { background: #f7d4d4; }
+.tooltip { position: absolute; background: #000; color: #fff; padding: 4px 8px; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+.card .card-title { font-weight: 600; margin-bottom: 8px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
