@@ -107,6 +107,36 @@ CHAOS_SLOW_RATE=0.3 CHAOS_SLOW_DELAY=100 CHAOS_SLOW_CHUNK=16 pnpm dev:v1
 
 Health checks (`/health`) are always exempt — they'd flap the readiness signal otherwise. `x-chaos-bypass: 1` header bypasses chaos per request (useful for warm-up / fixture probes).
 
+## Injected perf regression (`PLAYGROUND_PERF_REGRESSION`)
+
+An opt-in, deterministic main-thread regression for proving the `chaosbringer perf` gates end to end. It is **not** a seeded bug: it is off by default, applies to v1 and v2 alike, and is not in `BUG_LEDGER`, so `pnpm loop`, `chaos:diff` and `chaos:parity` see the same pages they always did.
+
+| Env var                          | Effect                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| `PLAYGROUND_PERF_REGRESSION=1`   | `/users` gets an inline script that busy-loops on `performance.now()`  |
+| `PLAYGROUND_PERF_REGRESSION_MS`  | length of that loop (default `150`)                                    |
+
+A busy loop, not a timer, because the gates hold main-thread cost (`scriptMs`, `blockingMs`); it runs for a fixed time rather than a fixed iteration count, so it costs the same on a laptop and a CI runner. It shows up on the `/users :: load` perfKey.
+
+```bash
+CLI=../packages/chaosbringer/dist/cli.js   # run from dist, not tsx
+crawl() { node $CLI --url http://127.0.0.1:5001 --seed 42 --max-pages 8 --max-actions 2 \
+            --ignore-preset analytics --perf --compact --output "$1"; }
+
+pnpm dev:v1 &                                   # clean
+for i in 1 2 3; do crawl base/r$i.json; done
+node $CLI perf emit-budgets base --headroom 2 --out budgets.json
+kill %1
+
+PLAYGROUND_PERF_REGRESSION=1 pnpm dev:v1 &      # regressed
+for i in 1 2 3; do crawl reg/r$i.json; done
+node $CLI perf gate reg --budgets budgets.json  # exit 1: /users :: load scriptMs / blockingMs
+node $CLI perf regress base --current reg       # exit 1: /users :: load
+kill %1
+```
+
+`--headroom 2` rather than the default 1.25 because every span here is tiny: a 4 ms `scriptMs` median gets a 5 ms budget at ×1.25, and a clean same-seed rerun lands on 5.1–5.7 ms about half the time (3 of 6 clean batches failed `perf gate` at ×1.25, 0 of 6 at ×2). `perf regress` needs no headroom: its per-metric absolute floors absorb the same jitter (0 of 6 clean batches failed).
+
 ## Sub-agent prompt template
 
 Hand this to an Agent invocation (general-purpose / claude). The agent should NOT read `server.ts` until after it has reported its findings — peeking at `BUG_LEDGER` defeats the dogfood point.

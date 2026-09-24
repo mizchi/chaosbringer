@@ -2,7 +2,7 @@
  * Core types for Chaos Crawler
  */
 
-import type { DocumentReport, SpanReport, VitalSample } from "lightbringer/core";
+import type { BudgetMetric, DocumentReport, SpanReport, VitalSample } from "lightbringer/core";
 import type { AdvisorConfig } from "./advisor/types.js";
 import type { ServerFaultEventAttrs } from "./server-fault-events.js";
 
@@ -259,6 +259,27 @@ export interface CrawlerOptions {
    * `PerformanceMetrics.lcp` / `.tbt`.
    */
   perf?: boolean | PerfOptions;
+  /**
+   * Per-span budgets, scoped by a glob over the span's `perfKey`. Checked
+   * when a page finishes, against its load span and every action span; a
+   * span over a limit becomes an `invariant-violation` named
+   * `perf-budget.<metric>`, like a `performanceBudget` breach, so it fails
+   * the run and reaches JUnit, the reporter and error clusters unchanged.
+   *
+   * Every rule whose `match` fits a span applies — not only the first — so a
+   * broad rule (`"* :: click *"`) and a tighter one for a hot route
+   * (`"/cart :: click *"`) both hold. See `PerfBudgetRule`.
+   *
+   * Spans only exist with `perf` on, so rules with `perf` unset turn it on at
+   * light level; `perf: false` together with rules is refused, because every
+   * rule would pass without measuring anything.
+   */
+  perfBudgets?: PerfBudgetRule[];
+  /**
+   * @internal Set by the CLI: the `--perf-budgets` file `perfBudgets` was read
+   * from, so `reproCommand` can point back at it.
+   */
+  perfBudgetsFile?: string;
   /** @internal Set by `chaos({ server })`. */
   server?: ChaosRemoteServer;
 }
@@ -316,6 +337,60 @@ export interface PerfSpanReport extends Omit<SpanReport, "budget"> {
    * `<type> <selector ?? target>` for an action (`scroll` for a scroll).
    */
   key: string;
+}
+
+/**
+ * One `CrawlerOptions.perfBudgets` rule.
+ *
+ * `match` is a glob over the whole `perfKey` (`<urlPattern> :: <kind>`):
+ * `*` matches any run of characters, including none and including `/` and
+ * spaces; every other character is literal, and the glob must match the
+ * entire key. `"/cart* :: click *"` is every click on `/cart` and below;
+ * `"* :: load"` is every page load; `"*"` is every span.
+ *
+ * `budget` is keyed by lightbringer's budget metrics (`durationMs`,
+ * `blockingMs`, `interactionMs`, `encodedKB`, `requestCount`, `layoutCount`,
+ * `droppedFrames`, …). A metric the span did not measure (no interaction,
+ * paint without trace level) is skipped, not failed.
+ *
+ * `exact: true` makes `match` a literal perfKey instead of a glob. The rules
+ * read from an `emit-budgets` file are exact: a key whose selector holds a
+ * `*` (`[class*="btn"]`) would otherwise, as a glob, also match other keys
+ * and impose its budget on them.
+ */
+export interface PerfBudgetRule {
+  match: string;
+  budget: Partial<Record<BudgetMetric, number>>;
+  exact?: boolean;
+}
+
+/** A vital across the crawl's pages: its distribution and the page that did worst. */
+export interface CrawlVitalSummary {
+  p50: number;
+  p75: number;
+  worst: { value: number; url: string };
+}
+
+/**
+ * Crawl-wide view of the per-step measurements, on `CrawlReport.perf`. Built
+ * from the spans already in the report, so it adds no measurement, and kept
+ * to fixed-size lists so a 500-page crawl does not double the report.
+ *
+ * `hotInitiators` and `thirdParty` add up each span's lists as the crawl
+ * report keeps them — the top five per span (see `PerfSpanReport`) — so a
+ * source that was never in any span's top five is missing, and totals are a
+ * lower bound. The per-page sidecars under `perf.outDir` have the full lists.
+ */
+export interface CrawlPerfSummary {
+  /** LCP / INP / CLS / TTFB / FCP over the pages that reported each one. */
+  vitals: Record<string, CrawlVitalSummary>;
+  /** The 10 longest action spans, slowest first. */
+  slowestActions: Array<{ key: string; durationMs: number; blockingMs: number; interactionMs?: number }>;
+  /** The 10 heaviest request initiators across every span, by request count. */
+  hotInitiators: Array<{ frame: string; requestCount: number; encodedKB: number }>;
+  /** Third-party traffic per registrable domain across every span, heaviest first (top 10). */
+  thirdParty: Array<{ domain: string; requestCount: number; encodedKB: number; busyMs: number }>;
+  totals: { spans: number; pages: number };
 }
 
 /**
@@ -962,6 +1037,11 @@ export interface CrawlReport {
    * per-action correlation.
    */
   serverFaults?: ServerFaultEvent[];
+  /**
+   * Crawl-wide perf summary (present only when some page was measured, i.e.
+   * `perf` was on). See `CrawlPerfSummary`.
+   */
+  perf?: CrawlPerfSummary;
 }
 
 export interface ReplayFidelity {

@@ -2,6 +2,8 @@ name: chaos-baseline
 
 # Nightly + after each merge to main: produce baseline + heatmap, upload as
 # `chaos-baseline` artifact. PR-gate workflow downloads this for --baseline.
+# Also N same-seed `--perf` crawls → `chaos-perf-baseline`, which the PR gate
+# feeds to `chaosbringer perf regress`.
 on:
   schedule:
     - cron: "17 18 * * *"  # 03:17 JST
@@ -15,7 +17,9 @@ permissions:
 jobs:
   baseline:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25, not 20: the three `--perf` crawls add ~2 minutes (the PR gate got
+    # the same +5), and running into the timeout would fail the whole run.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: packages/chaosbringer
@@ -70,6 +74,47 @@ jobs:
             --output chaos-report.json \
             --heatmap-out heatmap.json
 
+      # Perf baseline for `chaos-pr-gate`'s `chaosbringer perf regress`. Same
+      # URL, seed and limits as the crawl above so every perfKey the PR run
+      # measures has a counterpart here. N runs because the regress gate
+      # compares MEDIANS: one run is JIT/GC/scheduler noise, three is the
+      # smallest count with a median that ignores one outlier. A separate
+      # crawl rather than `--perf` on the crawl above keeps that report (and
+      # the flaker import fed from it) byte-for-byte what it was.
+      #
+      # The crawl's exit code is not the gate here: chaos findings on the
+      # fixture are the crawl above's business. What must hold is that every
+      # run wrote a report, or the median would silently be over fewer runs.
+      #
+      # continue-on-error: a perf-only failure must not fail this run. The
+      # PR gate downloads `chaos-baseline` from the last *successful* run, so
+      # a red run here would leave the chaos `--baseline` gate on an ever
+      # older baseline. The perf baseline upload below is skipped instead,
+      # and the PR gate reports "no perf baseline" rather than comparing
+      # against a partial one.
+      - name: Perf crawls (baseline, N=3)
+        id: perf_crawls
+        continue-on-error: true
+        env:
+          PERF_RUNS: "3"
+        run: |
+          mkdir -p perf-baseline
+          for i in $(seq 1 "$PERF_RUNS"); do
+            node dist/cli.js \
+              --url http://127.0.0.1:4455 \
+              --max-pages 30 \
+              --max-actions-per-page 5 \
+              --seed 1 \
+              --perf \
+              --output "perf-baseline/run$i.json" \
+              > "perf-baseline/run$i.log" 2>&1 || true
+            if [ ! -f "perf-baseline/run$i.json" ]; then
+              echo "::error::perf crawl $i wrote no report"
+              cat "perf-baseline/run$i.log"
+              exit 1
+            fi
+          done
+
       - name: Stop fixture server
         if: always()
         run: kill "$(cat .fixture.pid)" 2>/dev/null || true
@@ -105,4 +150,16 @@ jobs:
           path: |
             packages/chaosbringer/chaos-report.json
             packages/chaosbringer/heatmap.json
+          retention-days: 30
+
+      # Its own artifact, not extra files in `chaos-baseline`, so the existing
+      # `--baseline` download keeps getting exactly the files it always got,
+      # and a PR gate can tell "no perf baseline yet" (artifact missing, the
+      # first run after this lands) apart from "baseline has no report".
+      - name: Upload perf baseline
+        if: steps.perf_crawls.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-perf-baseline
+          path: packages/chaosbringer/perf-baseline/*.json
           retention-days: 30

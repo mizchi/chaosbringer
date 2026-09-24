@@ -1,5 +1,6 @@
 import type { CDPSession, Page } from "playwright";
-import { webVitalsIife } from "./config";
+import { DEFAULT_EVALUATE_TIMEOUT_MS, webVitalsIife } from "./config";
+import { BoundedEvaluator } from "./evaluate";
 import {
   browserCollector,
   type CollectorOptions,
@@ -53,6 +54,12 @@ export interface SessionOptions {
   settleTimeoutMs?: number;
   /** default settle for measure()/end() (default: two animation frames) */
   settle?: Settle;
+  /**
+   * max time one in-page read (page.evaluate) at a span boundary or in finish()
+   * may take before its fallback is used (ms, default 5000). A page whose
+   * document request never answers otherwise holds every read for minutes.
+   */
+  evaluateTimeoutMs?: number;
   /**
    * Install the in-page collector with page.addInitScript (default true). Pass
    * false when the caller already installed collectorInitScript() at CONTEXT
@@ -295,19 +302,30 @@ export async function startSession(
     await page.coverage.startCSSCoverage({ resetOnNavigation: false });
   }
 
+  // One evaluator for the controller and finish(): a read that timed out in
+  // end() makes finish()'s reads return at once while the page is still hung.
+  const evaluator = new BoundedEvaluator(
+    page,
+    opts.evaluateTimeoutMs ?? DEFAULT_EVALUATE_TIMEOUT_MS,
+  );
   const controller = new PerfController(page, client, {
     settle: opts.settle,
     memGc,
     settleTimeoutMs: opts.settleTimeoutMs,
     accumulator,
+    evaluator,
   });
 
   const finish = async (title: string) => {
     // Final drain of the current document (flushes pending observer records).
     await controller.drain();
     client.off("Runtime.bindingCalled", onBinding);
-    const glRenderer = await page.evaluate(readGlRenderer).catch(() => null);
-    const css = await page.evaluate(readCssProfile).catch(() => undefined);
+    // Each read falls back (as a failed evaluate always did) on timeout too.
+    const glRenderer = await evaluator.evaluate<string | null>(readGlRenderer, () => null);
+    const css = await evaluator.evaluate<CssProfile | undefined>(
+      readCssProfile,
+      () => undefined,
+    );
 
     let coverage: Coverage | undefined;
     let covArtifact: CoverageArtifact | undefined;
@@ -322,10 +340,14 @@ export async function startSession(
       covArtifact = built.artifact;
     }
 
-    const media = await page.evaluate(readMedia).catch(() => undefined);
-    const renderBlocking = await page
-      .evaluate(readRenderBlocking)
-      .catch(() => undefined);
+    const media = await evaluator.evaluate<MediaReport | undefined>(
+      readMedia,
+      () => undefined,
+    );
+    const renderBlocking = await evaluator.evaluate<RenderBlocking | undefined>(
+      readRenderBlocking,
+      () => undefined,
+    );
 
     const url = page.url();
     const reqs = finishNetwork();

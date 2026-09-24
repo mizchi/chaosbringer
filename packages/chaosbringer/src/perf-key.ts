@@ -192,3 +192,33 @@ export function perfOptionsFromCliFlags(flags: PerfCliFlags): boolean | PerfOpti
     ...(outDir !== undefined ? { outDir } : {}),
   };
 }
+
+/**
+ * Compile a `perfBudgets` `match` glob into an anchored RegExp. `*` is the
+ * only wildcard and matches any run of characters (spaces and `/` included,
+ * since a key is `<path> :: <type> <selector>` and a glob has to be able to
+ * span all three); everything else — `.`, `[`, `(`, `?` in selectors — is
+ * literal. There is no `**`/`?`/brace syntax on purpose: a key is not a file
+ * path, and every extra metacharacter is one a CSS selector can contain.
+ */
+export function compilePerfKeyGlob(match: string): RegExp {
+  const body = match
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  // `s`: `*` must span line terminators too. escapeSelector folds `\n` but a
+  // selector or target from script-set text can still carry `\r`, U+2028 or
+  // U+2029, and without dotAll that span would silently escape every rule,
+  // `"*"` included.
+  return new RegExp(`^${body}$`, "s");
+}
+
+/**
+ * The predicate a `perfBudgets` rule applies to a perfKey: a literal
+ * comparison for `exact` rules (emit-budgets keys), the glob otherwise.
+ */
+export function perfRuleMatcher(rule: { match: string; exact?: boolean }): (key: string) => boolean {
+  if (rule.exact) return (key) => key === rule.match;
+  const re = compilePerfKeyGlob(rule.match);
+  return (key) => re.test(key);
+}

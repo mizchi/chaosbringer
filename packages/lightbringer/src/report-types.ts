@@ -200,8 +200,17 @@ export interface RenderBlocking {
 /** Strategy that waits until the page has settled after an action. */
 export type Settle = (page: Page) => Promise<void>;
 
-/** Map a budget field to the actual value on a span report. */
-const BUDGET_METRIC: Record<keyof Budget, (s: SpanReport) => number> = {
+/** A metric a per-span budget can bound: one of Budget's fields. */
+export type BudgetMetric = keyof Budget;
+
+/**
+ * Map a budget field to the actual value on a span report; undefined when the
+ * span did not measure it (paint / GPU without PERF_TRACE, a span with no
+ * interaction or too few frames). Exported so any driver that checks spans
+ * against a Budget (chaosbringer's `perfBudgets`) reads the same values, and
+ * so its list of valid metric names is this object's keys, not a copy.
+ */
+export const BUDGET_METRIC: Readonly<Record<BudgetMetric, (s: SpanReport) => number | undefined>> = {
   durationMs: (s) => s.durationMs,
   scriptMs: (s) => s.render.scriptMs,
   blockingMs: (s) => s.cpu.blockingMs,
@@ -213,17 +222,17 @@ const BUDGET_METRIC: Record<keyof Budget, (s: SpanReport) => number> = {
   recalcStyleMs: (s) => s.render.recalcStyleMs,
   recalcStyleCount: (s) => s.render.recalcStyleCount,
   nodes: (s) => s.render.nodes,
-  thirdPartyKB: (s) => s.network.thirdParty.encodedKB,
-  thirdPartyRequestCount: (s) => s.network.thirdParty.requestCount,
-  paintMs: (s) => s.render.paintMs ?? 0,
-  paintCount: (s) => s.render.paintCount ?? 0,
-  gpuMs: (s) => s.render.gpuMs ?? 0,
-  jsHeapUsedMB: (s) => s.memory.jsHeapUsedMB,
-  jsHeapDeltaMB: (s) => s.memory.jsHeapDeltaMB,
-  listenersDelta: (s) => s.memory.listenersDelta,
-  interactionMs: (s) => s.interaction?.maxDurationMs ?? 0,
-  droppedFrames: (s) => s.frames?.droppedFrames ?? 0,
-  longestFrameMs: (s) => s.frames?.longestFrameMs ?? 0,
+  thirdPartyKB: (s) => s.network.thirdParty?.encodedKB,
+  thirdPartyRequestCount: (s) => s.network.thirdParty?.requestCount,
+  paintMs: (s) => s.render.paintMs,
+  paintCount: (s) => s.render.paintCount,
+  gpuMs: (s) => s.render.gpuMs,
+  jsHeapUsedMB: (s) => s.memory?.jsHeapUsedMB,
+  jsHeapDeltaMB: (s) => s.memory?.jsHeapDeltaMB,
+  listenersDelta: (s) => s.memory?.listenersDelta,
+  interactionMs: (s) => s.interaction?.maxDurationMs,
+  droppedFrames: (s) => s.frames?.droppedFrames,
+  longestFrameMs: (s) => s.frames?.longestFrameMs,
 };
 
 /** Budget violations on a single run (actual > budget). */
@@ -234,8 +243,10 @@ export function checkBudgets(report: PerfReport): string[] {
     for (const k of Object.keys(s.budget) as (keyof Budget)[]) {
       const limit = s.budget[k];
       if (limit == null) continue;
+      // An unmeasured metric cannot exceed its budget (it used to read as 0,
+      // which never exceeds a non-negative limit either).
       const actual = BUDGET_METRIC[k](s);
-      if (actual > limit) {
+      if (actual !== undefined && actual > limit) {
         out.push(`${s.name}.${k}=${actual} > budget ${limit}`);
       }
     }

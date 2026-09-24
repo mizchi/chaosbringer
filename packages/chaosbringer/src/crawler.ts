@@ -19,6 +19,7 @@ import type {
   ActionTarget,
   ActionWeights,
   PerformanceMetrics,
+  PerfSpanReport,
   CrawlReport,
   CrawlSummary,
   RecoveryInfo,
@@ -89,7 +90,7 @@ import {
   weighActionTargets,
   type RawActionTarget,
 } from "./action-targets.js";
-import { checkPerformanceBudget } from "./budget.js";
+import { checkPerfBudgets, checkPerformanceBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
@@ -128,6 +129,7 @@ import { buildReproCommand } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
 import { PagePerf } from "./perf.js";
+import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { resolvePerfOptions, type ResolvedPerfOptions } from "./perf-key.js";
 
 /** Structural type-guard for the opaque `driver` option. */
@@ -366,7 +368,11 @@ export class ChaosCrawler {
     }
 
     this.driver = isDriver(options.driver) ? options.driver : null;
-    this.perfOptions = resolvePerfOptions(options.perf);
+    // `perfBudgets` needs spans to check, so rules without `perf` turn it on
+    // at light level (validateOptions refuses rules with `perf: false`).
+    this.perfOptions = resolvePerfOptions(
+      options.perf ?? (options.perfBudgets && options.perfBudgets.length > 0 ? true : undefined),
+    );
 
     if (options.advisor) {
       const defaults = defaultTriggerPolicy();
@@ -1947,14 +1953,27 @@ export class ChaosCrawler {
     const perf = this.pagePerf;
     if (!perf) return;
     this.pagePerf = null;
+    let spans: PerfSpanReport[];
     try {
-      await perf.finish(result, { navigationFailed });
+      spans = await perf.finish(result, { navigationFailed });
     } catch (err) {
       this.logger.warn("perf_finish_failed", {
         url,
         reason: err instanceof Error ? err.message : String(err),
       });
+      return;
     }
+    // Here rather than at each span's end: an action's key needs its result,
+    // and the spans only exist once lightbringer has built the page report.
+    // The errors go onto the result itself because the page is over — its
+    // `errors` array is the one the report, clusters and exit code read.
+    const violations = checkPerfBudgets(spans, this.options.perfBudgets, url);
+    for (const error of violations) {
+      result.errors.push(error);
+      this.events.onError?.(error);
+      this.logger.logPageError(error);
+    }
+    if (violations.length > 0) result.hasErrors = true;
   }
 
   /**
@@ -2752,6 +2771,7 @@ export class ChaosCrawler {
       har: this.options.har,
       // Field is omitted when no faults observed (matches advisor / coverage convention).
       serverFaults: drainedServerFaults ?? undefined,
+      perf: buildCrawlPerfSummary(this.results, this.actions),
     };
   }
 

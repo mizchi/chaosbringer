@@ -36,6 +36,8 @@ export const DEFAULT_OPTIONS: Required<
     | "driver"
     | "driverGoal"
     | "perf"
+    | "perfBudgets"
+    | "perfBudgetsFile"
   >
 > = {
   maxPages: 50,

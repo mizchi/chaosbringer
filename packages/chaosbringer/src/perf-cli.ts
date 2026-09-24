@@ -1,0 +1,807 @@
+/**
+ * `chaosbringer perf <sub>` — the crawl-report counterparts of lightbringer's
+ * repeated-run tools:
+ *
+ *   emit-budgets  medians per perfKey over N crawl reports → a budgets file
+ *   gate          medians vs a budgets file; noisy metrics warn, breaches fail
+ *   regress       per-perfKey medians, current vs baseline (threshold + floors)
+ *   drilldown     trace breakdown of one span (needs --perf-trace)
+ *
+ * The statistics are lightbringer's own (`aggregateRuns`, `spanMedians`,
+ * `emitBudgets`, `gate`, `regress`, `analyseDrilldown`), called on the spans
+ * of crawl reports instead of lightbringer run reports, so `lightbringer run
+ * --emit-budgets/--gate` and these commands cannot drift apart. The only
+ * translation is naming: lightbringer groups spans by `name`, a crawl groups
+ * them by `perfKey`, so each span is handed over with `name = key`.
+ *
+ * The pure steps are exported for tests; `runPerfCli` only reads files,
+ * prints and sets `process.exitCode`.
+ */
+
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import {
+  aggregateRuns,
+  analyseDrilldown,
+  BUDGET_METRIC,
+  median,
+  DEFAULT_BUDGET_HEADROOM,
+  DEFAULT_REGRESS_THRESHOLD,
+  DRILLDOWN_TOP_N,
+  EMIT_BUDGET_METRICS,
+  emitBudgets,
+  formatDrilldown,
+  formatRegress,
+  gate,
+  MEDIAN_BUDGET_STAT,
+  regress,
+  spanMedians,
+  type Budget,
+  type BudgetMetric,
+  type DrilldownTraceEvent,
+  type GateFinding,
+  type MedianReport,
+  type RegressResult,
+  type SpanReport,
+  type Stat,
+} from "lightbringer/core";
+import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
+import { DEFAULT_PERF_TRACE_DIR, perfRuleMatcher, urlPattern } from "./perf-key.js";
+import type { CrawlReport, PerfBudgetRule, PerfSpanReport } from "./types.js";
+import { validatePerfBudgets } from "./validate.js";
+
+/** Default output path of `perf emit-budgets`. */
+export const DEFAULT_PERF_BUDGETS_PATH = "chaosbringer.perf-budgets.json";
+
+/**
+ * The slug every aggregate is filed under. lightbringer's gate/regress key
+ * by scenario slug and then span name; a crawl is one scenario and its
+ * spans are told apart by perfKey, so one fixed slug is enough.
+ */
+const CRAWL_SLUG = "crawl";
+
+// ── reading reports ─────────────────────────────────────────────────────────
+
+/** Read one crawl report, with an error that names the file. */
+export function loadCrawlReport(path: string): CrawlReport {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (err) {
+    throw new Error(`failed to read ${path}: ${err instanceof Error ? err.message : err}`);
+  }
+  if (!isCrawlReport(parsed)) {
+    throw new Error(`${path} is not a chaosbringer crawl report (no pages / actions arrays)`);
+  }
+  return parsed;
+}
+
+function isCrawlReport(v: unknown): v is CrawlReport {
+  const r = v as Partial<CrawlReport> | null;
+  return !!r && typeof r === "object" && Array.isArray(r.pages) && Array.isArray(r.actions);
+}
+
+/**
+ * Expand CLI operands into report paths: a file is itself, a directory is
+ * every `*.json` in it that is a crawl report. Other JSON in a directory (a
+ * budgets file kept next to the baselines) is skipped and counted, never
+ * silently: `skipped` goes into the output.
+ */
+export function expandReportPaths(operands: readonly string[]): { paths: string[]; skipped: string[] } {
+  const paths: string[] = [];
+  const skipped: string[] = [];
+  for (const op of operands) {
+    if (existsSync(op) && statSync(op).isDirectory()) {
+      for (const name of readdirSync(op).filter((n) => n.endsWith(".json")).sort()) {
+        const p = join(op, name);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(readFileSync(p, "utf-8"));
+        } catch {
+          skipped.push(p);
+          continue;
+        }
+        if (isCrawlReport(parsed)) paths.push(p);
+        else skipped.push(p);
+      }
+    } else {
+      paths.push(op);
+    }
+  }
+  return { paths, skipped };
+}
+
+/** Every measured span of a report: load spans, then action spans. */
+export function reportSpans(report: Pick<CrawlReport, "pages" | "actions">): PerfSpanReport[] {
+  const out: PerfSpanReport[] = [];
+  for (const p of report.pages) if (p.perf) out.push(p.perf);
+  for (const a of report.actions) if (a.perf) out.push(a.perf);
+  return out;
+}
+
+/** A report's spans renamed to their key: the shape lightbringer's stats group by. */
+function keyedRun(report: Pick<CrawlReport, "pages" | "actions">): {
+  vitals: Record<string, never>;
+  spans: SpanReport[];
+} {
+  return { vitals: {}, spans: reportSpans(report).map((s) => ({ ...s, name: s.key })) };
+}
+
+/** lightbringer's per-name aggregate over the reports, with perfKey as the name. */
+export function aggregateByKey(reports: readonly Pick<CrawlReport, "pages" | "actions">[]): MedianReport {
+  return aggregateRuns(CRAWL_SLUG, reports.map(keyedRun));
+}
+
+// ── emit-budgets ────────────────────────────────────────────────────────────
+
+export interface EmitResult {
+  file: PerfBudgetsFile;
+  /** keys seen in fewer than half the reports, left out of `file` */
+  skipped: { key: string; seenIn: number }[];
+  reports: number;
+}
+
+/**
+ * Budgets per perfKey: `ceil(median × headroom)` of the metrics lightbringer's
+ * `--emit-budgets` writes (EMIT_BUDGET_METRICS). A key that appears in fewer
+ * than half the reports is skipped — a budget from one run of five is a
+ * single sample, and a key that comes and goes (a random action target) is
+ * not one CI can hold to — and reported in `skipped`.
+ */
+export function emitPerfBudgets(
+  reports: readonly Pick<CrawlReport, "pages" | "actions">[],
+  { headroom = DEFAULT_BUDGET_HEADROOM }: { headroom?: number } = {},
+): EmitResult {
+  const runs = reports.map(keyedRun);
+  const seenIn = new Map<string, number>();
+  for (const run of runs) {
+    for (const key of new Set(run.spans.map((s) => s.name))) seenIn.set(key, (seenIn.get(key) ?? 0) + 1);
+  }
+  const skipped: EmitResult["skipped"] = [];
+  const medians = spanMedians(runs, EMIT_BUDGET_METRICS);
+  for (const [key, n] of seenIn) {
+    if (n * 2 < reports.length) {
+      skipped.push({ key, seenIn: n });
+      delete medians[key];
+    }
+  }
+  const budgets = emitBudgets(medians, { headroom, metrics: Object.keys(EMIT_BUDGET_METRICS) });
+  return {
+    file: { version: 1, headroom, budgets: budgets as PerfBudgetsFile["budgets"] },
+    skipped,
+    reports: reports.length,
+  };
+}
+
+// ── gate ────────────────────────────────────────────────────────────────────
+
+export interface PerfGateResult {
+  reports: number;
+  /** measured spans across the reports */
+  spans: number;
+  violations: GateFinding[];
+  warnings: GateFinding[];
+  /** budgeted keys (exact form) or rules (glob form) that matched no measured span */
+  unmeasured: string[];
+  /** keys that had at least one budget applied */
+  gatedKeys: number;
+}
+
+/**
+ * Per-key budgets from rules: every rule matching a measured key applies,
+ * as in the crawler's `perfBudgets`; where two rules bound the same metric
+ * of a key, the tighter limit is the one that holds.
+ */
+function budgetsForKeys(
+  keys: readonly string[],
+  rules: readonly PerfBudgetRule[],
+): { budgets: Record<string, Record<string, number>>; unmatched: string[] } {
+  const budgets: Record<string, Record<string, number>> = {};
+  const unmatched: string[] = [];
+  for (const rule of rules) {
+    const hits = keys.filter(perfRuleMatcher(rule));
+    if (hits.length === 0) unmatched.push(rule.match);
+    for (const key of hits) {
+      const b = budgets[key] ?? {};
+      budgets[key] = b;
+      for (const [metric, limit] of Object.entries(rule.budget)) {
+        if (typeof limit !== "number") continue;
+        b[metric] = b[metric] === undefined ? limit : Math.min(b[metric]!, limit);
+      }
+    }
+  }
+  return { budgets, unmatched };
+}
+
+/**
+ * Gate the medians of `reports` against `rules` (either budgets-file keys or
+ * `perfBudgets` globs). lightbringer's `gate`: a median over its limit fails;
+ * a median within it whose metric is noisy and whose p75 crosses it warns,
+ * because that gate could flip from run to run. A budgeted metric the spans
+ * did not measure is skipped, as in lightbringer.
+ */
+export function gatePerf(
+  reports: readonly Pick<CrawlReport, "pages" | "actions">[],
+  rules: readonly PerfBudgetRule[],
+): PerfGateResult {
+  const agg = aggregateByKey(reports);
+  const byKey = new Map(agg.spans.map((s) => [s.name, s]));
+  const rawByKey = new Map<string, PerfSpanReport[]>();
+  for (const r of reports) {
+    for (const s of reportSpans(r)) {
+      const list = rawByKey.get(s.key) ?? [];
+      list.push(s);
+      rawByKey.set(s.key, list);
+    }
+  }
+  const { budgets, unmatched } = budgetsForKeys([...byKey.keys()], rules);
+  const values: Record<string, Record<string, Stat | number | undefined>> = {};
+  for (const [key, b] of Object.entries(budgets)) {
+    const span = byKey.get(key)!;
+    const raw = rawByKey.get(key) ?? [];
+    values[key] = {};
+    for (const metric of Object.keys(b)) {
+      const get = MEDIAN_BUDGET_STAT[metric as keyof Budget];
+      if (!get) continue;
+      // An optional metric (interactionMs on a click that produced no event
+      // timing entry, frames, memory) is counted as 0 by aggregateRuns for
+      // every span that did not measure it. emit-budgets — like lightbringer's
+      // `run --gate` — budgets from spanMedians, which leaves those spans out
+      // of the sample. Gating the padded median against that budget would let
+      // a key whose interaction is measured in 1 of 4 spans pass any slowdown,
+      // so when some span of the key lacks the metric, the value gated is the
+      // measured-only median (a plain number: no noise band, as in `run
+      // --gate`). When every span measured it the two agree, and the Stat is
+      // kept for its noisy-p75 warning.
+      // BUDGET_METRIC has MEDIAN_BUDGET_STAT's keys, so `get` above vouches
+      // for this reader too.
+      const read = BUDGET_METRIC[metric as BudgetMetric];
+      const measured = raw.map((s) => read(s)).filter((v): v is number => typeof v === "number");
+      if (measured.length < raw.length) {
+        if (measured.length > 0) values[key]![metric] = median(measured);
+      } else {
+        values[key]![metric] = get(span);
+      }
+    }
+  }
+  const { violations, warnings } = gate(values, budgets);
+  return {
+    reports: reports.length,
+    spans: [...rawByKey.values()].reduce((n, l) => n + l.length, 0),
+    violations,
+    warnings,
+    unmeasured: unmatched,
+    gatedKeys: Object.keys(budgets).length,
+  };
+}
+
+/**
+ * Why a gate run checked nothing, or undefined when it checked something. A
+ * gate that measured nothing must not read as "within budget": a mistyped
+ * report directory, or a PR whose --perf crawl silently measured no spans,
+ * would otherwise turn CI green.
+ */
+export function perfGateNothingChecked(r: PerfGateResult): string | undefined {
+  if (r.reports === 0) return "no crawl reports to gate";
+  if (r.spans === 0) return `no measured spans in ${r.reports} report(s) — were the crawls run with --perf?`;
+  if (r.gatedKeys === 0) return "no budget matched any measured span — nothing was gated";
+  return undefined;
+}
+
+export function formatPerfGate(r: PerfGateResult): { lines: string[]; failed: boolean } {
+  const lines = [`[perf gate] ${r.reports} report(s), ${r.gatedKeys} budgeted key(s)`];
+  const nothing = perfGateNothingChecked(r);
+  for (const f of r.violations) {
+    lines.push(`  ✗ ${f.scope}  ${f.metric} median=${f.median} > budget ${f.limit}`);
+  }
+  for (const f of r.warnings) {
+    lines.push(
+      `  ~ ${f.scope}  ${f.metric} median=${f.median} <= ${f.limit} but noisy (p75=${f.p75}) — gate may be flaky, add runs`,
+    );
+  }
+  if (r.unmeasured.length > 0) {
+    lines.push(`  ${r.unmeasured.length} budget(s) matched no measured span (not gated):`);
+    for (const k of r.unmeasured) lines.push(`    ${k}`);
+  }
+  const failed = r.violations.length > 0 || nothing !== undefined;
+  lines.push(
+    nothing !== undefined
+      ? `[perf gate] FAILED: ${nothing}`
+      : r.violations.length > 0
+        ? `[perf gate] FAILED: ${r.violations.length} violation(s)`
+        : `[perf gate] passed${r.warnings.length > 0 ? ` with ${r.warnings.length} noisy warning(s)` : ""}`,
+  );
+  return { lines, failed };
+}
+
+// ── regress ─────────────────────────────────────────────────────────────────
+
+/**
+ * lightbringer's `regress` on per-perfKey medians: a metric regresses when
+ * it grows past `threshold` AND by at least its absolute floor; a would-be
+ * regression on a noisy median only warns. Keys with no baseline are listed
+ * as new, not failed.
+ */
+export function regressPerf(
+  baseline: readonly Pick<CrawlReport, "pages" | "actions">[],
+  current: readonly Pick<CrawlReport, "pages" | "actions">[],
+  { threshold = DEFAULT_REGRESS_THRESHOLD }: { threshold?: number } = {},
+): RegressResult {
+  return regress(
+    { [CRAWL_SLUG]: aggregateByKey(baseline) },
+    { [CRAWL_SLUG]: aggregateByKey(current) },
+    { threshold, floors: CRAWL_REGRESS_FLOORS },
+  );
+}
+
+/**
+ * Floors raised over lightbringer's defaults for crawls, passed through
+ * RegressOptions.floors so lightbringer-regress itself is unchanged.
+ *
+ * droppedFrames 4, not 2: headless Chromium on a shared CPU drops a few
+ * frames during a plain page load with no app work at all (0 → 2 and 0 → 4
+ * medians on clean same-seed playground crawls), so 2 flagged runner noise.
+ * Four frames is ~67 ms of jank; smaller main-thread stalls are still caught
+ * by scriptMs / blockingMs, whose floors are far tighter.
+ *
+ * longestFrameMs 17, not 16: frame durations come in whole vsync intervals
+ * (16.7 ms at 60 Hz), so 16 let a one-frame jitter (16.8 → 33.3, seen on a
+ * clean same-seed crawl) fail. 17 is "more than one frame".
+ */
+export const CRAWL_REGRESS_FLOORS: Readonly<Record<string, number>> = {
+  droppedFrames: 4,
+  longestFrameMs: 17,
+};
+
+/**
+ * Why a regress run compared nothing, or undefined. The baseline side
+ * having spans but the current side none is the silent-green case: a PR
+ * whose --perf crawl measured nothing has no metric that can regress.
+ */
+export function regressNothingMeasured(
+  baseline: readonly Pick<CrawlReport, "pages" | "actions">[],
+  current: readonly Pick<CrawlReport, "pages" | "actions">[],
+): string | undefined {
+  const count = (rs: typeof baseline) => rs.reduce((n, r) => n + reportSpans(r).length, 0);
+  if (count(baseline) === 0) return `no measured spans in the ${baseline.length} baseline report(s) — were they crawled with --perf?`;
+  if (count(current) === 0) return `no measured spans in the ${current.length} current report(s) — were they crawled with --perf?`;
+  return undefined;
+}
+
+/** Keys measured in the baseline that no current report measured, sorted. */
+export function missingKeys(
+  baseline: readonly Pick<CrawlReport, "pages" | "actions">[],
+  current: readonly Pick<CrawlReport, "pages" | "actions">[],
+): string[] {
+  const cur = new Set(current.flatMap((r) => reportSpans(r).map((s) => s.key)));
+  return [...new Set(baseline.flatMap((r) => reportSpans(r).map((s) => s.key)))]
+    .filter((k) => !cur.has(k))
+    .sort();
+}
+
+// ── drilldown ───────────────────────────────────────────────────────────────
+
+/** The `--perf-out` directory a report's `reproCommand` names, if any. */
+export function perfOutFromRepro(reproCommand: string | undefined): string | undefined {
+  const m = reproCommand?.match(/--perf-out ('(?:[^']|'\\'')*'|\S+)/);
+  if (!m) return undefined;
+  const raw = m[1]!;
+  return raw.startsWith("'") ? raw.slice(1, -1).replace(/'\\''/g, "'") : raw;
+}
+
+/**
+ * Where a report's sidecar files are. `reportPath` is relative to the
+ * crawl's `perf.outDir`, which the report records only through its repro
+ * command, and relative to the directory the crawl ran in. Candidates, in
+ * order: `--perf-dir`, the repro command's `--perf-out`, the trace default
+ * `chaosbringer-perf`; each against the cwd, then against the report file's
+ * directory. The first holding `reportPath` wins; `tried` lists them all.
+ */
+export function resolveSidecar(
+  reportPath: string,
+  { perfDir, reportFile, reproCommand }: { perfDir?: string; reportFile: string; reproCommand?: string },
+): { path: string | null; tried: string[] } {
+  const dirs = [perfDir, perfOutFromRepro(reproCommand), DEFAULT_PERF_TRACE_DIR].filter(
+    (d): d is string => d !== undefined,
+  );
+  const tried: string[] = [];
+  for (const d of dirs) {
+    const bases = isAbsolute(d) ? [d] : [resolve(d), resolve(dirname(reportFile), d)];
+    for (const base of bases) {
+      const p = join(base, reportPath);
+      if (tried.includes(p)) continue;
+      tried.push(p);
+      if (existsSync(p)) return { path: p, tried };
+    }
+  }
+  return { path: null, tried };
+}
+
+interface SidecarReport {
+  url?: string;
+  tracePath?: string;
+  spans: (SpanReport & { key?: string })[];
+}
+
+export interface DrilldownTarget {
+  span: SpanReport & { key?: string };
+  pageUrl?: string;
+  sidecarPath: string;
+  tracePath: string;
+  /** how many spans across the report had this key (the slowest is drilled) */
+  occurrences: number;
+}
+
+/**
+ * Find the span to drill into: the slowest span with `key` across the pages
+ * of the key's route, read from each page's sidecar (which has the untrimmed
+ * span and the trace path). Throws with the reason — and what to rerun with —
+ * when the key is unknown, the crawl wrote no sidecars, or there is no trace.
+ */
+export function findDrilldownTarget(
+  report: CrawlReport,
+  key: string,
+  { reportFile, perfDir }: { reportFile: string; perfDir?: string },
+): DrilldownTarget {
+  const keys = new Set(reportSpans(report).map((s) => s.key));
+  if (!keys.has(key)) {
+    const list = [...keys].sort();
+    const shown = list.slice(0, 20).map((k) => `  ${k}`);
+    if (list.length > 20) shown.push(`  … and ${list.length - 20} more`);
+    throw new Error(
+      list.length === 0
+        ? `no measured spans in ${reportFile} — was the crawl run with --perf?`
+        : `no span with key "${key}" in ${reportFile}. Keys:\n${shown.join("\n")}`,
+    );
+  }
+  const route = key.split(" :: ", 1)[0];
+  const pages = report.pages.filter((p) => p.perf && urlPattern(p.url) === route);
+  const withSidecar = pages.filter((p) => p.perfPage?.reportPath);
+  if (withSidecar.length === 0) {
+    throw new Error(
+      `the pages of "${route}" have no per-page perf report — rerun the crawl with --perf-trace (or --perf-out <dir> plus --perf-trace)`,
+    );
+  }
+  const candidates: DrilldownTarget[] = [];
+  let missingTrace = false;
+  for (const page of withSidecar) {
+    const { path, tried } = resolveSidecar(page.perfPage!.reportPath!, {
+      reportFile,
+      perfDir,
+      reproCommand: report.reproCommand,
+    });
+    if (!path) {
+      throw new Error(
+        `per-page perf report ${page.perfPage!.reportPath} not found (tried ${tried.join(", ")}); pass --perf-dir <the crawl's --perf-out>`,
+      );
+    }
+    const sidecar = JSON.parse(readFileSync(path, "utf-8")) as SidecarReport;
+    const spans = sidecar.spans.filter((s) => s.key === key);
+    if (spans.length === 0) continue;
+    if (!sidecar.tracePath) {
+      missingTrace = true;
+      continue;
+    }
+    // The trace path is as the crawl wrote it (relative to its cwd); fall
+    // back to the file next to the sidecar, where the crawler puts it.
+    const trace = [sidecar.tracePath, join(dirname(path), basename(sidecar.tracePath))].find((p) =>
+      existsSync(p),
+    );
+    if (!trace) {
+      throw new Error(`trace ${sidecar.tracePath} not found (also looked next to ${path})`);
+    }
+    for (const span of spans) {
+      candidates.push({ span, pageUrl: sidecar.url, sidecarPath: path, tracePath: trace, occurrences: 0 });
+    }
+  }
+  if (candidates.length === 0) {
+    throw new Error(
+      missingTrace
+        ? `"${key}" was measured without a trace — rerun the crawl with --perf-trace`
+        : `no per-page perf report holds "${key}"`,
+    );
+  }
+  const slowest = candidates.reduce((a, b) => (b.span.durationMs > a.span.durationMs ? b : a));
+  return { ...slowest, occurrences: candidates.length };
+}
+
+/** Read a trace file: lightbringer streams a JSON array; DevTools saves `{ traceEvents }`. */
+function readTrace(path: string): DrilldownTraceEvent[] {
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as
+    | DrilldownTraceEvent[]
+    | { traceEvents?: DrilldownTraceEvent[] };
+  return Array.isArray(parsed) ? parsed : (parsed.traceEvents ?? []);
+}
+
+// ── CLI ─────────────────────────────────────────────────────────────────────
+
+const HELP = `Usage: chaosbringer perf <subcommand> [options]
+
+Repeated-run statistics over crawl reports written with --perf. Spans are
+grouped by perfKey ("<urlPattern> :: <kind>"); every number is a median over
+the reports given, with lightbringer's noise rules.
+
+Subcommands:
+  emit-budgets <report.json...> [--headroom 1.25] [--out ${DEFAULT_PERF_BUDGETS_PATH}]
+      Budgets per perfKey: ceil(median × headroom) of durationMs, scriptMs,
+      blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount and
+      interactionMs. Keys seen in fewer than half the reports are skipped
+      (and listed).
+
+  gate <report.json...> --budgets <file> [--json]
+      Medians vs budgets (an emit-budgets file or a perfBudgets array of
+      { match, budget } globs). Exit 1 on a median over budget, or when
+      nothing was gated (no reports, no spans, no budget matched); a noisy
+      metric whose p75 crosses its budget only warns.
+
+  regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15] [--json]
+      Per-perfKey medians, current vs baseline. A regression needs both the
+      relative threshold and the metric's absolute floor; noisy medians warn.
+      Exit 1 on a regression.
+
+  drilldown <report.json> <perfKey> [--top 15] [--perf-dir <dir>]
+      Where the span's time went, from its page's trace (crawl with
+      --perf-trace). With several spans of that key, the slowest is shown.
+
+Examples:
+  for i in 1 2 3 4 5; do chaosbringer --url $URL --seed 42 --perf --output runs/r$i.json; done
+  chaosbringer perf emit-budgets runs/*.json
+  chaosbringer perf gate pr/*.json --budgets ${DEFAULT_PERF_BUDGETS_PATH}
+  chaosbringer perf regress baseline/ --current pr/*.json
+  chaosbringer perf drilldown runs/r1.json "/cart :: click #checkout"
+`;
+
+function fail(msg: string): void {
+  console.error(`perf: ${msg}`);
+  process.exitCode = 1;
+}
+
+function parseNumber(flag: string, raw: string | undefined, def: number, min: number): number {
+  if (raw === undefined) return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min) throw new Error(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
+  return n;
+}
+
+export async function runPerfCli(argv: string[]): Promise<void> {
+  const [sub, ...rest] = argv;
+  if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
+    console.log(HELP);
+    return;
+  }
+  switch (sub) {
+    case "emit-budgets":
+      runEmit(rest);
+      return;
+    case "gate":
+      runGate(rest);
+      return;
+    case "regress":
+      runRegress(rest);
+      return;
+    case "drilldown":
+      runDrilldown(rest);
+      return;
+    default:
+      fail(`unknown subcommand "${sub}" (expected emit-budgets, gate, regress or drilldown)`);
+  }
+}
+
+function runEmit(argv: string[]): void {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      headroom: { type: "string" },
+      out: { type: "string" },
+      help: { type: "boolean", default: false },
+    },
+  });
+  if (values.help) {
+    console.log(HELP);
+    return;
+  }
+  if (positionals.length === 0) {
+    fail("emit-budgets: expected at least one report path");
+    return;
+  }
+  // Below 1 a budget would sit under the median it was measured from.
+  const headroom = parseNumber("--headroom", values.headroom, DEFAULT_BUDGET_HEADROOM, 1);
+  const { paths, skipped: skippedFiles } = expandReportPaths(positionals);
+  const reports = paths.map(loadCrawlReport);
+  if (skippedFiles.length > 0) {
+    console.log(`[perf emit-budgets] skipped ${skippedFiles.length} non-report JSON file(s): ${skippedFiles.join(", ")}`);
+  }
+  const result = emitPerfBudgets(reports, { headroom });
+  const out = values.out ?? DEFAULT_PERF_BUDGETS_PATH;
+  const n = Object.keys(result.file.budgets).length;
+  if (result.skipped.length > 0) {
+    console.log(
+      `  skipped ${result.skipped.length} key(s) seen in fewer than half the reports:`,
+    );
+    for (const s of result.skipped) console.log(`    ${s.key}  (${s.seenIn}/${reports.length})`);
+  }
+  // Checked before writing: an empty result would otherwise overwrite a good
+  // budgets file with `{ budgets: {} }`, and a gate on that passes by
+  // checking nothing.
+  if (n === 0) {
+    fail(
+      `emit-budgets: no measured spans to budget in ${reports.length} report(s) — were the crawls run with --perf? (${out} left untouched)`,
+    );
+    return;
+  }
+  writeFileSync(out, `${JSON.stringify(result.file, null, 2)}\n`);
+  console.log(`[perf emit-budgets] ${n} key(s) from ${reports.length} report(s), headroom ×${headroom} → ${out}`);
+}
+
+function runGate(argv: string[]): void {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      budgets: { type: "string" },
+      json: { type: "boolean", default: false },
+      help: { type: "boolean", default: false },
+    },
+  });
+  if (values.help) {
+    console.log(HELP);
+    return;
+  }
+  if (positionals.length === 0) {
+    fail("gate: expected at least one report path");
+    return;
+  }
+  if (!values.budgets) {
+    fail("gate: --budgets <file> is required");
+    return;
+  }
+  const rules = perfBudgetRulesFromJson(
+    JSON.parse(readFileSync(values.budgets, "utf-8")),
+    values.budgets,
+  );
+  // The crawler's check: a misspelt metric (`durationMS`) would otherwise be
+  // a budget that never fires yet counts as a gated key.
+  try {
+    validatePerfBudgets(rules);
+  } catch (err) {
+    fail(`gate: ${values.budgets}: ${err instanceof Error ? err.message : err}`);
+    return;
+  }
+  const { paths, skipped } = expandReportPaths(positionals);
+  if (skipped.length > 0 && !values.json) {
+    console.log(`[perf gate] skipped ${skipped.length} non-report JSON file(s): ${skipped.join(", ")}`);
+  }
+  const result = gatePerf(paths.map(loadCrawlReport), rules);
+  const { lines, failed } = formatPerfGate(result);
+  if (values.json) console.log(JSON.stringify({ ...result, passed: !failed }, null, 2));
+  else for (const l of lines) (failed && l.startsWith("[perf gate] FAILED") ? console.error : console.log)(l);
+  if (failed) process.exitCode = 1;
+}
+
+/**
+ * Pull `--current`'s operands out of argv: every argument after `--current`
+ * up to the next flag. parseArgs would take only the first and leave the
+ * rest as positionals — the baseline side — so `--current pr/*.json` (a
+ * shell glob) would silently compare most of the PR against itself.
+ */
+export function splitCurrentOperands(argv: readonly string[]): { rest: string[]; current: string[] } {
+  const rest: string[] = [];
+  const current: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--current") {
+      while (i + 1 < argv.length && !argv[i + 1]!.startsWith("--")) current.push(argv[++i]!);
+    } else if (a.startsWith("--current=")) {
+      current.push(a.slice("--current=".length));
+    } else {
+      rest.push(a);
+    }
+  }
+  return { rest, current };
+}
+
+function runRegress(argv: string[]): void {
+  const split = splitCurrentOperands(argv);
+  const { values, positionals } = parseArgs({
+    args: split.rest,
+    allowPositionals: true,
+    options: {
+      threshold: { type: "string" },
+      json: { type: "boolean", default: false },
+      help: { type: "boolean", default: false },
+    },
+  });
+  if (values.help) {
+    console.log(HELP);
+    return;
+  }
+  if (positionals.length === 0) {
+    fail("regress: expected a baseline directory or report paths");
+    return;
+  }
+  if (split.current.length === 0) {
+    fail("regress: --current <report.json...> is required");
+    return;
+  }
+  const threshold = parseNumber("--threshold", values.threshold, DEFAULT_REGRESS_THRESHOLD, 0);
+  const base = expandReportPaths(positionals);
+  const cur = expandReportPaths(split.current);
+  if (base.paths.length === 0) {
+    fail(`regress: no crawl reports in ${positionals.join(", ")}`);
+    return;
+  }
+  // The current side is the one under test: with no reports, or reports
+  // that measured nothing, regress would find no regressions and pass.
+  if (cur.paths.length === 0) {
+    fail(`regress: no crawl reports in --current ${split.current.join(", ")}`);
+    return;
+  }
+  const baseReports = base.paths.map(loadCrawlReport);
+  const curReports = cur.paths.map(loadCrawlReport);
+  const empty = regressNothingMeasured(baseReports, curReports);
+  if (empty) {
+    fail(`regress: ${empty}`);
+    return;
+  }
+  const result = regressPerf(baseReports, curReports, { threshold });
+  const missing = missingKeys(baseReports, curReports);
+  if (missing.length > 0 && !values.json) {
+    // Not a failure: a random crawl reaches a different set of targets from
+    // run to run. Listed so a key that vanished is seen, not ignored.
+    console.log(`[regress] ${missing.length} baseline key(s) not measured in current:`);
+    for (const k of missing.slice(0, 20)) console.log(`    ${k}`);
+    if (missing.length > 20) console.log(`    … and ${missing.length - 20} more`);
+  }
+  const skipped = [...base.skipped, ...cur.skipped];
+  if (values.json) {
+    console.log(JSON.stringify({ ...result, missingKeys: missing, skippedFiles: skipped, failed: result.regressions.length > 0 }, null, 2));
+  } else {
+    const { stdout, stderr } = formatRegress(result, {
+      baselineLabel: `${positionals.join(" ")} (${base.paths.length} report(s))`,
+      currentLabel: `${cur.paths.length} report(s)`,
+    });
+    if (skipped.length > 0) stdout.unshift(`[regress] skipped ${skipped.length} non-report JSON file(s): ${skipped.join(", ")}`);
+    for (const l of stdout) console.log(l);
+    for (const l of stderr) console.error(l);
+  }
+  if (result.regressions.length > 0) process.exitCode = 1;
+}
+
+function runDrilldown(argv: string[]): void {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      top: { type: "string" },
+      "perf-dir": { type: "string" },
+      help: { type: "boolean", default: false },
+    },
+  });
+  if (values.help) {
+    console.log(HELP);
+    return;
+  }
+  if (positionals.length !== 2) {
+    fail("drilldown: expected <report.json> <perfKey>");
+    return;
+  }
+  const [reportFile, key] = positionals as [string, string];
+  const topN = Math.floor(parseNumber("--top", values.top, DRILLDOWN_TOP_N, 1));
+  const report = loadCrawlReport(reportFile);
+  const target = findDrilldownTarget(report, key, { reportFile, perfDir: values["perf-dir"] });
+  const analysis = analyseDrilldown(target.span, readTrace(target.tracePath), {
+    pageUrl: target.pageUrl,
+    topN,
+  });
+  if (target.occurrences > 1) {
+    console.log(`(${target.occurrences} spans have this key; showing the slowest)`);
+  }
+  for (const line of formatDrilldown(analysis, {
+    slug: basename(target.sidecarPath, ".json"),
+    spanName: target.span.key ?? target.span.name,
+  })) {
+    console.log(line);
+  }
+}

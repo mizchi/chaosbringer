@@ -62,6 +62,72 @@ jobs:
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
           pnpm -F "@mizchi/chaosbringer-example-model-faults" typecheck
 
+  lightbringer:
+    # lightbringer is its own published package with its own toolchain (tsup,
+    # vitest 4, oxlint, Playwright specs), and chaosbringer's `--perf` runs on
+    # its `lightbringer/core` build, so it gets its own leg instead of riding
+    # on build-and-test: a break here names itself in the checks list.
+    # `lightbringer-perf.yml` is the separate, path-filtered budget gate; this
+    # job is correctness, on every PR.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/lightbringer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+
+      # `lightbringer...` = lightbringer plus its workspace dependencies:
+      # the clock-skew spec imports `@mizchi/playwright-faults`, which
+      # resolves to that package's dist/.
+      - name: Build
+        working-directory: .
+        run: pnpm -F "lightbringer..." build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system deps only (cache hit path)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # The local specs only: they measure the vite fixture app the config's
+      # webServer starts. example.spec.ts (example.com), react-dev.spec.ts
+      # (react.dev) and real-world.spec.ts (`real:` titles) measure live
+      # internet sites, whose numbers and availability are not this repo's
+      # to gate on. Excluded by title so a new local spec is picked up
+      # without editing this list.
+      - name: Playwright specs (local fixtures)
+        run: pnpm exec playwright test --grep-invert "example.com|react.dev|real:"
+
   example-tests:
     # Runs in parallel with build-and-test. Each matrix value is its own
     # runner, so cloudflare-worker and playwright-test execute concurrently.
