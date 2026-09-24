@@ -179,7 +179,13 @@ describe("per-step perf spans (perf option)", () => {
     expect(cpu.maxLongTaskMs).toBeGreaterThanOrEqual(110);
     const overThreshold = cpu.blockingMs - 50 * cpu.longTaskCount;
     expect(overThreshold).toBeGreaterThanOrEqual(70 - 25);
-    expect(overThreshold).toBeLessThanOrEqual(70 + 25);
+    // No fixed upper bound: the handler spins for 120 ms of wall time, so a
+    // loaded CPU cannot shorten it, but it can stretch that task or add
+    // others to the span, which failed a `≤ 95` bound under a busy full
+    // suite. What cannot vary with load is that a span never blocks for
+    // longer than it lasts, which is what an attribution bug (tasks from
+    // outside the window) would break.
+    expect(cpu.blockingMs).toBeLessThanOrEqual(click.perf!.durationMs);
 
     // The sidecar holds exactly the load span and the busy click: the
     // skipped ghost pick was cancelled, not recorded as an empty span.
