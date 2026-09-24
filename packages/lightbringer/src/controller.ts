@@ -103,6 +103,16 @@ export class PerfController {
    * even close the page: end() still records the span with what is available.
    */
   async begin(name: string, opts: { budget?: Budget } = {}): Promise<SpanHandle> {
+    // A collector installed with `frames: false` has no rAF probe running yet.
+    // Start it before the baseline so this span's frames are recorded; a page
+    // without a collector (or a navigation mid-call) just yields no frames.
+    await this.evalSafe(
+      () => {
+        (window as unknown as PerfWindow).__perf?.startFrames?.();
+        return null;
+      },
+      () => null,
+    );
     // Bring the node side up to date first; frames before this span are dropped.
     await this.drain();
     if (this.open.size === 0 && this.lastClosed)
@@ -172,6 +182,16 @@ export class PerfController {
   }
 
   /**
+   * Discard a span opened by begin() without recording it — for a driver that
+   * opened the span and then decided not to act (a skipped step). Its entries
+   * stay in the accumulator for any other open span. A no-op for a handle that
+   * is unknown, already ended or already cancelled.
+   */
+  cancel(handle: SpanHandle): void {
+    this.open.delete(handle.id);
+  }
+
+  /**
    * Measure a named operation. Runs action, waits for the page to settle, and
    * records the region as one span. Include your waitFor assertions inside
    * action so the span covers "until the operation is done", then its
@@ -188,7 +208,7 @@ export class PerfController {
       result = await action();
     } catch (e) {
       // A failed action records no span (as before); forget the open handle.
-      this.open.delete(handle.id);
+      this.cancel(handle);
       throw e;
     }
     await this.end(handle, { settle: opts.settle });

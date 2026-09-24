@@ -7,9 +7,11 @@ import {
   lifecycleFaultsAtStage,
   lifecycleMatchesUrl,
   lifecycleStatsFrom,
+  PlaywrightLifecycleExecutor,
   shouldFireProbability,
   type LifecycleActionExecutor,
 } from "./lifecycle-faults.js";
+import type { BrowserContext, CDPSession, Page } from "playwright";
 import type { LifecycleFault } from "./types.js";
 
 describe("lifecycleFaultName", () => {
@@ -248,5 +250,58 @@ describe("executeLifecycleAction", () => {
     expect(calls).toEqual([
       { method: "tamperStorage", args: ["sessionStorage", "auth", "expired"] },
     ]);
+  });
+});
+
+describe("PlaywrightLifecycleExecutor CDP session", () => {
+  function fakeSession(log: string[]): CDPSession {
+    return {
+      send: async (method: string, params?: unknown) => {
+        log.push(`${method} ${JSON.stringify(params)}`);
+        return {};
+      },
+    } as unknown as CDPSession;
+  }
+
+  it("uses an injected session provider instead of attaching its own, once", async () => {
+    const sent: string[] = [];
+    let attached = 0;
+    let provided = 0;
+    const context = {
+      newCDPSession: async () => {
+        attached++;
+        return fakeSession(sent);
+      },
+    } as unknown as BrowserContext;
+    const executor = new PlaywrightLifecycleExecutor({} as Page, context, async () => {
+      provided++;
+      return fakeSession(sent);
+    });
+    await executor.cpuThrottle(4);
+    await executor.cpuThrottle(1);
+    expect(attached).toBe(0);
+    expect(provided).toBe(1);
+    expect(sent).toEqual([
+      'Emulation.setCPUThrottlingRate {"rate":4}',
+      'Emulation.setCPUThrottlingRate {"rate":1}',
+    ]);
+  });
+
+  it("attaches its own session lazily when none is injected", async () => {
+    const sent: string[] = [];
+    const pages: unknown[] = [];
+    const page = {} as Page;
+    const context = {
+      newCDPSession: async (p: Page) => {
+        pages.push(p);
+        return fakeSession(sent);
+      },
+    } as unknown as BrowserContext;
+    const executor = new PlaywrightLifecycleExecutor(page, context);
+    expect(pages).toHaveLength(0);
+    await executor.cpuThrottle(2);
+    await executor.cpuThrottle(3);
+    expect(pages).toEqual([page]);
+    expect(sent).toHaveLength(2);
   });
 });

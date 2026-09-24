@@ -136,6 +136,9 @@ importers:
       '@mizchi/playwright-v8-coverage':
         specifier: workspace:^
         version: link:../playwright-v8-coverage
+      lightbringer:
+        specifier: workspace:^
+        version: link:../lightbringer
     devDependencies:
       '@mizchi/flaker':
         specifier: ^0.11.0

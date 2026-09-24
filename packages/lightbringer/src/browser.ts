@@ -80,6 +80,12 @@ export interface PerfStore {
   /** flush, then move every buffered entry out (see DrainPayload) */
   drain?: () => DrainPayload;
   /**
+   * Start the rAF frame probe if it is not running yet (idempotent). The
+   * collector starts it itself unless it was installed with `frames: false`;
+   * PerfController.begin() calls this so a span always gets frame cadence.
+   */
+  startFrames?: () => void;
+  /**
    * Epoch ms from the performance.now / timeOrigin captured when the collector
    * was installed — immune to later monkey-patching of performance.now / Date
    * (e.g. chaosbringer's clock-skew runtime fault).
@@ -100,7 +106,17 @@ export interface PerfWindow {
   __lbEmit?: (payload: string) => void;
 }
 
-export function browserCollector() {
+export interface CollectorOptions {
+  /**
+   * Start the rAF frame probe at install (default true). false installs the
+   * observers only; the probe then starts on the first store.startFrames(),
+   * so an always-on collector adds no per-frame callback to pages nobody
+   * measures.
+   */
+  frames?: boolean;
+}
+
+export function browserCollector(opts?: CollectorOptions) {
   const w = window as unknown as PerfWindow;
   // Idempotent: a second injection into the same document (e.g. context-level
   // collectorInitScript() plus a page-level one) must not double-register.
@@ -138,7 +154,13 @@ export function browserCollector() {
     store.frames.push(t);
     requestAnimationFrame(onFrame);
   };
-  requestAnimationFrame(onFrame);
+  let framesStarted = false;
+  store.startFrames = () => {
+    if (framesStarted) return;
+    framesStarted = true;
+    requestAnimationFrame(onFrame);
+  };
+  if (!opts || opts.frames !== false) store.startFrames();
 
   const record = (m: BrowserMetric) => {
     store.vitals[m.name] = m;

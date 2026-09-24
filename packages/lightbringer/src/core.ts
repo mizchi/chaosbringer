@@ -40,7 +40,14 @@ export type {
   EpochLoaf,
   EpochMeasure,
 } from "./accumulator";
-export type { DrainPayload, PerfStore, PerfWindow, BrowserMetric } from "./browser";
+export type {
+  CollectorOptions,
+  DrainPayload,
+  PerfStore,
+  PerfWindow,
+  BrowserMetric,
+  LongTaskEntry,
+} from "./browser";
 // Per-domain report fragment types (also in `lightbringer/analyze`).
 export type {
   SpanNetwork,

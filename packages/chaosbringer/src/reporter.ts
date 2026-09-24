@@ -4,7 +4,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { CrawlReport, PageResult } from "./types.js";
+import type { ActionResult, CrawlReport, PageResult } from "./types.js";
 
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
@@ -63,6 +63,8 @@ export function formatReport(report: CrawlReport): string {
       lines.push(...entries);
     }
   }
+
+  lines.push(...formatPerfSection(report));
 
   // Error details
   const pagesWithErrors = report.pages.filter((p) => p.errors.length > 0);
@@ -312,6 +314,69 @@ export function saveReport(report: CrawlReport, path: string): void {
 
 export function printReport(report: CrawlReport, compact = false, strict: boolean | ExitCodeOptions = false): void {
   console.log(compact ? formatCompactReport(report, strict) : formatReport(report));
+}
+
+/** One row of the "slowest actions" block. */
+export interface SlowActionRow {
+  key: string;
+  durationMs: number;
+  blockingMs: number;
+  /** Absent when the span contained no interaction. */
+  interactionMs?: number;
+}
+
+/** The `n` measured actions with the longest spans, slowest first. */
+export function slowestActions(actions: readonly ActionResult[], n = 5): SlowActionRow[] {
+  const rows: SlowActionRow[] = [];
+  for (const a of actions) {
+    if (!a.perf) continue;
+    rows.push({
+      key: a.perf.key,
+      durationMs: a.perf.durationMs,
+      blockingMs: a.perf.cpu.blockingMs,
+      ...(a.perf.interaction ? { interactionMs: a.perf.interaction.maxDurationMs } : {}),
+    });
+  }
+  return rows.sort((a, b) => b.durationMs - a.durationMs).slice(0, n);
+}
+
+/**
+ * The per-step performance block: a line per measured page, then the
+ * slowest actions. Empty — not even a header — when nothing was measured,
+ * so a crawl without `perf` prints exactly what it always printed.
+ */
+function formatPerfSection(report: CrawlReport): string[] {
+  const measured = report.pages.filter((p) => p.perf);
+  if (measured.length === 0) return [];
+  const ms = (n: number) => `${Math.round(n)}ms`;
+  const out: string[] = ["", "-".repeat(40), "PER-STEP PERFORMANCE", "-".repeat(40)];
+  for (const page of measured) {
+    const load = page.perf!;
+    const parts = [
+      `load ${ms(load.durationMs)}`,
+      `blocking ${ms(load.cpu.blockingMs)}`,
+      `${load.network.requestCount} req / ${load.network.encodedKB}KB`,
+    ];
+    // Only what was measured: a page without an LCP candidate or without an
+    // interaction shows no column rather than a 0 that reads as "fast".
+    const lcp = page.perfPage?.vitals.LCP?.value ?? page.metrics?.lcp;
+    if (lcp !== undefined) parts.push(`LCP ${ms(lcp)}`);
+    const inp = page.perfPage?.vitals.INP?.value;
+    if (inp !== undefined) parts.push(`INP ${ms(inp)}`);
+    out.push(`  ${load.key.replace(/ :: load$/, "")}  ${parts.join("  ")}`);
+  }
+  const slow = slowestActions(report.actions);
+  if (slow.length > 0) {
+    out.push("");
+    out.push("Slowest actions:");
+    for (const row of slow) {
+      const inp = row.interactionMs !== undefined ? `  interaction ${ms(row.interactionMs)}` : "";
+      out.push(
+        `  ${ms(row.durationMs).padStart(7)}  blocking ${ms(row.blockingMs)}${inp}  ${truncate(row.key, 80)}`,
+      );
+    }
+  }
+  return out;
 }
 
 function truncate(str: string, maxLen: number): string {

@@ -7,6 +7,7 @@ import { chromium, devices } from "playwright";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { collectorInitScript, type PerfWindow, type SpanHandle } from "lightbringer/core";
 import type {
   CrawlerOptions,
   CrawlerEvents,
@@ -123,6 +124,9 @@ import { validateOptions } from "./validate.js";
 import { findFaultRuleShadows } from "./fault-shadow.js";
 import { buildReproCommand } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
+import { pageCdp } from "./page-cdp.js";
+import { PagePerf } from "./perf.js";
+import { resolvePerfOptions, type ResolvedPerfOptions } from "./perf-key.js";
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -305,6 +309,22 @@ export class ChaosCrawler {
   private currentAction: ActionResult | null = null;
   /** Resolved driver (null when caller did not pass `options.driver`). */
   private readonly driver: Driver | null;
+  /** Resolved `perf` option; null when per-step measurement is off. */
+  private readonly perfOptions: ResolvedPerfOptions | null;
+  /**
+   * The current page's measurement, from just before its `goto` to the end
+   * of `crawlPageWithExistingPage`. Null with perf off, and between pages.
+   */
+  private pagePerf: PagePerf | null = null;
+  /** Pages measured so far this run; numbers the per-page sidecar files. */
+  private perfPageIndex = 0;
+  /**
+   * Prefix of this run's sidecar file names. The page index alone restarts at
+   * 0 in every crawler, and the Playwright fixture builds a crawler per test,
+   * so without it every test's first page would write `000-<route>.json` and
+   * overwrite the previous test's report (or race it, across workers).
+   */
+  private perfRunId = randomBytes(4).toString("hex");
   /**
    * Buffer of invariant violations observed since the driver's previous
    * step. Drained at the top of every driver-loop iteration. Empty when
@@ -341,6 +361,7 @@ export class ChaosCrawler {
     }
 
     this.driver = isDriver(options.driver) ? options.driver : null;
+    this.perfOptions = resolvePerfOptions(options.perf);
 
     if (options.advisor) {
       const defaults = defaultTriggerPolicy();
@@ -541,6 +562,8 @@ export class ChaosCrawler {
     this.globalCoverage = new Set();
     this.pageCoverageDeltas = [];
     this.targetNovelty = new Map();
+    this.perfPageIndex = 0;
+    this.perfRunId = randomBytes(4).toString("hex");
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
@@ -631,6 +654,27 @@ export class ChaosCrawler {
       // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
       // and validates the file; we don't touch it.
       storageState: this.options.storageState || undefined,
+    });
+
+    // lightbringer's in-page collector (web-vitals + long-task observers),
+    // which is what `collectMetrics` reads LCP and TBT from. It is installed
+    // first, before every other init script, and the order is load-bearing:
+    // init scripts run in registration order, and the collector captures the
+    // native `performance.now` / `timeOrigin` when it runs. Installed after
+    // the runtime-fault script, a `clock-skew` fault would already have
+    // replaced the clock it captures.
+    //
+    // It runs on every crawl, not only under perf measurement. Without perf
+    // it starts without the rAF frame probe: a per-frame callback on every
+    // page nobody measures is the one steady cost the collector would
+    // otherwise add. With perf the probe runs from each document's first
+    // frame. Starting it lazily when a span opens is not enough here: the
+    // load span opens on the document before `page.goto`, and a click that
+    // navigates opens its span on the document it leaves, so the document
+    // the span is really about would never start its probe and those spans
+    // would carry no frames.
+    await this.context.addInitScript({
+      content: collectorInitScript({ frames: this.perfOptions !== null }),
     });
 
     // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
@@ -1240,7 +1284,14 @@ export class ChaosCrawler {
     if (compiled.length === 0) return;
 
     if (this.lifecycleExecutor === null) {
-      this.lifecycleExecutor = new PlaywrightLifecycleExecutor(page, this.context!);
+      // The page's own context rather than `this.context`: on the
+      // `testPage()` path the page belongs to the caller and the crawler
+      // never opened a context of its own. The CDP session is the page's
+      // shared one, so a CPU throttle does not attach a second session.
+      const context = page.context();
+      this.lifecycleExecutor = new PlaywrightLifecycleExecutor(page, context, () =>
+        pageCdp(context, page).session(),
+      );
     }
     const executor = this.lifecycleExecutor;
 
@@ -1265,14 +1316,15 @@ export class ChaosCrawler {
   }
 
   /**
-   * Attach a CDP session to the page and apply a throttling preset. Called
+   * Apply a throttling preset through the page's shared CDP session. Called
    * per-page because `Network.emulateNetworkConditions` is a Page-level
    * setting in Playwright — there's no context-wide equivalent.
    */
   private async applyNetworkProfile(page: Page, profile: NetworkProfile): Promise<void> {
     try {
-      const client = await this.context!.newCDPSession(page);
-      await client.send("Network.enable");
+      const cdp = pageCdp(page.context(), page);
+      await cdp.enable("Network");
+      const client = await cdp.session();
       await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
     } catch (err) {
       this.logger.warn("network_profile_failed", {
@@ -1386,10 +1438,14 @@ export class ChaosCrawler {
     }
 
     if (this.coverageFeedback) {
-      // Attach a CDP session and start V8 precise coverage BEFORE goto so
-      // load-time function execution is captured.
+      // Start V8 precise coverage BEFORE goto so load-time function
+      // execution is captured. The collector runs on the page's shared CDP
+      // session: its `stop()` only sends `Profiler.stopPreciseCoverage` —
+      // it neither disables a domain nor detaches the session — so it
+      // cannot pull CDP out from under the network profile or a lifecycle
+      // fault using the same session.
       try {
-        const cdp = await this.context!.newCDPSession(page);
+        const cdp = await pageCdp(page.context(), page).session();
         this.coverageCollector = new CoverageCollector(cdp);
         await this.coverageCollector.start();
       } catch (err) {
@@ -1657,16 +1713,27 @@ export class ChaosCrawler {
     const originalBlockedCount = this.blockedExternalCount;
 
     let result: PageResult;
+    // Whether `page.goto` returned. Only a navigation that never did leaves a
+    // load in flight for `finishPagePerf` to stop; a page that loaded and
+    // then failed later (an action, an invariant, a screenshot) still has a
+    // live document.
+    let navigated = false;
 
     try {
       // beforeNavigation lifecycle faults — applied before the load itself,
       // so e.g. CDP CPU throttling slows the navigation request.
       await this.applyLifecycleStage("beforeNavigation", page, url);
 
+      // The load span opens after the beforeNavigation faults, so it
+      // measures the navigation under them rather than the faults' own
+      // setup, and closes after `collectMetrics` below.
+      await this.beginLoadSpan(page, url);
+
       const response = await page.goto(url, {
         timeout: this.options.timeout,
         waitUntil: "networkidle",
       });
+      navigated = true;
 
       // Drain any unhandled rejections captured during load.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
@@ -1685,6 +1752,10 @@ export class ChaosCrawler {
 
       const loadTime = Date.now() - startTime;
       const metrics = await this.collectMetrics(page);
+      // Strictly after `collectMetrics`: it reads the collector's store
+      // without draining it, and closing a span drains the store. The other
+      // order would take LCP and TBT's long tasks away before they are read.
+      await this.pagePerf?.endLoad();
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
       // History-API navigations that fired during page load (auto-routing
@@ -1769,12 +1840,89 @@ export class ChaosCrawler {
 
     // Stop collecting before the caller closes the page — any ERR_ABORTED
     // for in-flight requests cancelled by close() would otherwise be logged
-    // against this result.
+    // against this result. It also comes before `finishPagePerf`, for the
+    // same reason: stopping a timed-out load aborts its requests, and what
+    // the measurement itself causes must not reach the error stream, which
+    // is what a crawl with perf off would report.
     collecting = false;
+
+    // Both paths, before the caller navigates for recovery or closes the
+    // page: a `goto` that timed out still yields a load span that says what
+    // the attempt cost.
+    await this.finishPagePerf(result, url, { navigationFailed: !navigated });
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
     return result;
+  }
+
+  /**
+   * Open the page's perf session and its load span. A session that fails to
+   * open (the CDP attach failed, the page is already gone) is logged and the
+   * page is crawled unmeasured: measurement must never be why a page fails.
+   */
+  private async beginLoadSpan(page: Page, url: string): Promise<void> {
+    this.pagePerf = null;
+    if (!this.perfOptions) return;
+    try {
+      // Decided per page, not per crawler: only a page in the context
+      // `start()` created has the collector already. A caller's page on the
+      // `testPage()` path belongs to a context the crawler never touched,
+      // even when this same crawler ran `start()` before.
+      const perf = await PagePerf.open(page, url, this.perfOptions, {
+        pageIndex: this.perfPageIndex++,
+        runId: this.perfRunId,
+        installCollector: page.context() !== this.context,
+      });
+      await perf.beginLoad();
+      this.pagePerf = perf;
+    } catch (err) {
+      this.logger.warn("perf_session_failed", {
+        url,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Open a span for the action about to run, or null when actions are not
+   * measured. Opened after `currentAction` is set to the placeholder, so the
+   * span and the `traceIds` the placeholder collects cover the same step.
+   */
+  private async beginActionSpan(): Promise<SpanHandle | null> {
+    if (!this.pagePerf || this.perfOptions?.actions !== true) return null;
+    return this.pagePerf.beginAction();
+  }
+
+  /**
+   * Close the span `beginActionSpan` opened. `settle: false` because the
+   * action already did its own settling (`networkidle` after a click); a
+   * null result is a skipped action, and a skipped action is not a step, so
+   * its span is dropped rather than recorded as an empty one.
+   */
+  private async endActionSpan(span: SpanHandle | null, result: ActionResult | null): Promise<void> {
+    if (span === null || !this.pagePerf) return;
+    if (result === null) this.pagePerf.cancelAction(span);
+    else await this.pagePerf.endAction(span, result);
+  }
+
+  /** Build the page's perf report and attach it to `result` and its actions. */
+  private async finishPagePerf(
+    result: PageResult,
+    url: string,
+    { navigationFailed }: { navigationFailed: boolean },
+  ): Promise<void> {
+    const perf = this.pagePerf;
+    if (!perf) return;
+    this.pagePerf = null;
+    try {
+      await perf.finish(result, { navigationFailed });
+    } catch (err) {
+      this.logger.warn("perf_finish_failed", {
+        url,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -1796,6 +1944,31 @@ export class ChaosCrawler {
     }
   }
 
+  /**
+   * Read the page-load metrics once the load has settled.
+   *
+   * TTFB / FCP / DCL / load come from Navigation and Paint Timing, as they
+   * always have. LCP and TBT come from lightbringer's collector, which the
+   * crawler installs at context level in `start()`:
+   *
+   *   - `lcp` is web-vitals' latest LCP candidate. It exists only once the
+   *     browser has reported one, which is why this runs after the load
+   *     settles rather than at `domcontentloaded`.
+   *   - `tbt` is Σ max(0, duration − 50 ms) over long tasks that started at
+   *     or after FCP (from time 0 when there was no paint), up to now. Real
+   *     TBT stops at Time to Interactive; the crawler has no TTI, so this is
+   *     "FCP to the end of load" — an approximation, and documented as one.
+   *
+   * The collector is read without draining it: entries stay in the store for
+   * a perf session that drains them later. `flush()` first moves observer
+   * records the browser has queued but not yet delivered, so a long task at
+   * the very end of the load is not missed.
+   *
+   * A page without the collector — a caller-owned page on the `testPage()`
+   * path, or `setContent` — keeps today's four fields and leaves `lcp` and
+   * `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
+   * "measured, and fast".
+   */
   private async collectMetrics(page: Page): Promise<PerformanceMetrics> {
     try {
       const metrics = await page.evaluate(() => {
@@ -1805,12 +1978,28 @@ export class ChaosCrawler {
 
         const fcp = paint.find((e) => e.name === "first-contentful-paint");
 
-        return {
+        const out: PerformanceMetrics = {
           ttfb: navigation?.responseStart - navigation?.requestStart,
           domContentLoaded: navigation?.domContentLoadedEventEnd - navigation?.startTime,
           load: navigation?.loadEventEnd - navigation?.startTime,
           fcp: fcp?.startTime,
         };
+
+        const store = (window as unknown as PerfWindow).__perf;
+        if (!store || store.__lb !== true) return out;
+        store.flush?.();
+        const lcp = store.vitals.LCP?.value;
+        if (typeof lcp === "number") out.lcp = lcp;
+        // Long-task starts and FCP are both native entry timestamps on this
+        // document's timeline, so a clock-skew fault cannot shift one
+        // against the other.
+        const from = fcp?.startTime ?? 0;
+        let tbt = 0;
+        for (const task of store.longTasks) {
+          if (task.start >= from) tbt += Math.max(0, task.duration - 50);
+        }
+        out.tbt = tbt;
+        return out;
       });
 
       return metrics;
@@ -1908,7 +2097,9 @@ export class ChaosCrawler {
       };
       this.currentAction = placeholder;
 
+      const span = await this.beginActionSpan();
       const result = await this.performActionOnTarget(page, selectedTarget, url);
+      await this.endActionSpan(span, result);
 
       // Skip null results (element not visible)
       if (result === null) {
@@ -2060,6 +2251,7 @@ export class ChaosCrawler {
           timestamp: Date.now(),
         };
         this.currentAction = placeholder;
+        const span = await this.beginActionSpan();
         try {
           result = await pick.perform(page);
         } catch (err) {
@@ -2071,6 +2263,7 @@ export class ChaosCrawler {
             timestamp: Date.now(),
           };
         }
+        await this.endActionSpan(span, result);
       } else {
         const selectedTarget = targets[pick.index];
         if (!selectedTarget) {
@@ -2098,7 +2291,9 @@ export class ChaosCrawler {
           timestamp: Date.now(),
         };
         this.currentAction = placeholder;
+        const span = await this.beginActionSpan();
         result = await this.performActionOnTarget(page, selectedTarget, url, pick.operation);
+        await this.endActionSpan(span, result);
         if (result === null) {
           this.logger.debug("driver_action_skipped", {
             target: selectedTarget.name || selectedTarget.selector,
@@ -2175,6 +2370,7 @@ export class ChaosCrawler {
     for (const action of actions) {
       const timestamp = Date.now();
       let result: ActionResult;
+      const span = await this.beginActionSpan();
       try {
         if (action.blockedExternal) {
           // The original run detected an external link and did not click it.
@@ -2243,6 +2439,7 @@ export class ChaosCrawler {
           timestamp,
         };
       }
+      await this.endActionSpan(span, result);
       this.actions.push(result);
       this.addToHistory(result);
       if (this.isRecordingTrace()) {
@@ -2279,6 +2476,21 @@ export class ChaosCrawler {
     operation?: DriverOperation
   ): Promise<ActionResult | null> {
     const timestamp = Date.now();
+    // What this action is, fixed before it is attempted, so a failed fill
+    // is reported as the fill it was rather than as a click. The perf key is
+    // built from the result's type, and a step that is keyed one way when it
+    // works and another when it throws would split its baseline in two —
+    // with the slow, faulted run being the one that loses its match.
+    const attemptedType: ActionResult["type"] =
+      target.type === "scroll"
+        ? "scroll"
+        : target.type === "select"
+          ? "select"
+          : target.type === "input"
+            ? operation === "clear"
+              ? "clear"
+              : "input"
+            : "click";
 
     try {
       if (target.type === "scroll") {
@@ -2401,10 +2613,12 @@ export class ChaosCrawler {
         timestamp,
       };
     } catch (err) {
+      // A scroll's "selector" is the placeholder `window`, which a successful
+      // scroll never reports; leaving it off keeps both keyed as `scroll`.
       return {
-        type: "click",
+        type: attemptedType,
         target: target.name || target.selector,
-        selector: target.selector,
+        ...(attemptedType === "scroll" ? {} : { selector: target.selector }),
         success: false,
         error: err instanceof Error ? err.message : String(err),
         timestamp,

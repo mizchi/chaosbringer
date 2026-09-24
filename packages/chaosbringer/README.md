@@ -931,7 +931,49 @@ await chaos({
 
 Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
 
+Where the numbers come from, measured once the page load has settled:
+
+- `ttfb`, `fcp`, `domContentLoaded`, `load` — Navigation and Paint Timing.
+- `lcp` — the latest Largest Contentful Paint candidate reported by [web-vitals](https://github.com/GoogleChrome/web-vitals), through the [lightbringer](https://github.com/mizchi/chaosbringer/tree/main/packages/lightbringer) collector the crawler installs on every page.
+- `tbt` — the sum of `duration − 50 ms` over long tasks that started at or after FCP. This is an **approximation**: real Total Blocking Time runs from FCP to Time to Interactive, and the crawler has no TTI, so `tbt` covers FCP to the end of the load instead.
+
+The collector is installed before every other init script, so a `clock-skew` runtime fault cannot shift `lcp` or `tbt`. On a page the crawler does not own (`testPage()` on a page opened elsewhere), `lcp` and `tbt` are absent rather than 0, and their budgets are not enforced.
+
 Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
+
+## Per-step performance (`--perf`)
+
+`performanceBudget` sees one number per page. `--perf` measures every **step**: each page load and each chaos action becomes a span, with its own network, main-thread blocking, render, memory and interaction-latency breakdown. The measuring engine is [lightbringer](https://github.com/mizchi/chaosbringer/tree/main/packages/lightbringer), running on the page's shared CDP session.
+
+```bash
+chaosbringer --url http://localhost:3000 --seed 42 --perf
+chaosbringer --url http://localhost:3000 --perf-out perf/          # + a full JSON report per page
+chaosbringer --url http://localhost:3000 --perf-trace --perf-out perf/   # + a Chrome trace per page (large)
+```
+
+```ts
+await chaos({
+  baseUrl: "http://localhost:3000",
+  perf: true, // ≡ { level: "light" }
+  // perf: { level: "trace", memory: { forceGc: true }, coverage: true, outDir: "perf", actions: true },
+});
+```
+
+- `PageResult.perf` is the **load span**: from just before `page.goto`, through `afterLoad` faults and invariants, to the metrics read. `PageResult.perfPage` holds page-level extras: web-vitals, per-document vitals when the page navigated, network totals.
+- `ActionResult.perf` is that action's span: from just before the action to just after it returned, including the crawler's post-click settle. A skipped action (target not visible) records no span.
+- Every span has a `key`, `<route> :: <kind>`, that stays the same from run to run: `/items/:id :: load`, `/cart :: click button:has-text("Add")`. The route is the pathname with id-like segments collapsed, so the key survives a port change; fill values never appear in it.
+- Fields that were not measured are absent, never 0.
+
+The text report gains one line per page and the five slowest actions:
+
+```
+PER-STEP PERFORMANCE
+  /items/:id  load 412ms  blocking 0ms  6 req / 38.2KB  LCP 180ms
+Slowest actions:
+    2104ms  blocking 132ms  interaction 148ms  /items/:id :: click #buy
+```
+
+In the JSON report each span keeps its top five requests and initiators; the full lists go to `<outDir>/<run>-<NNN>-<route>.json` when `--perf-out` / `perf.outDir` is set. Off, the crawler opens no extra CDP session and records nothing. Measured on the fixture site (10 pages, 46 actions), `--perf` added about 4% wall-clock. See [docs/recipes/perf.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md) for levels, overhead and artefacts.
 
 ## Trace record / replay / minimize
 
@@ -1292,6 +1334,11 @@ chaosbringer --url http://localhost:3000 \
 | `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |
 | `--heatmap-out <path>` | Write the heatmap as JSON | — |
 | `--junit <path>` | Write a Surefire-style JUnit XML for CI dashboards | — |
+| `--perf` | Measure every page load and action as a span (see [Per-step performance](#per-step-performance---perf)) | false |
+| `--perf-trace` | Also record a Chrome trace per page; implies `--perf` | false |
+| `--perf-mem` | Force GC at span boundaries (retained-only memory); implies `--perf` | false |
+| `--perf-cov` | Record JS/CSS byte coverage per page; implies `--perf` | false |
+| `--perf-out <dir>` | Write each page's full perf report (+ trace / coverage) to `<dir>`; implies `--perf` | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |

@@ -71,6 +71,14 @@ measuring can occur during load, it belongs here rather than in an `afterLoad`
 invariant. Each string is evaluated verbatim on every navigation: wrap it in an
 IIFE and guard against a second install.
 
+`perf: true` (CLI `--perf`) measures every page load and chaos action as a
+span — network, main-thread blocking, render, memory, interaction latency — on
+`PageResult.perf` and `ActionResult.perf`, each with a run-stable `key` like
+`/items/:id :: click #buy`. It is measurement, not a fault: pair it with fault
+rules to see what a fault *costs* the user. Off by default and free when off;
+`docs/recipes/perf.md` has the levels and artefacts. Note `cpu.blockingMs` is
+total long-task time, not TBT.
+
 ### Reading whether a fault fired
 
 The counters live in different places with different names, and getting this

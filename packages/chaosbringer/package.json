@@ -68,7 +68,8 @@
   ],
   "dependencies": {
     "@mizchi/playwright-faults": "workspace:^",
-    "@mizchi/playwright-v8-coverage": "workspace:^"
+    "@mizchi/playwright-v8-coverage": "workspace:^",
+    "lightbringer": "workspace:^"
   },
   "peerDependencies": {
     "@playwright/test": "^1.40.0",

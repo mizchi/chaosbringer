@@ -1,6 +1,10 @@
 import type { CDPSession, Page } from "playwright";
 import { webVitalsIife } from "./config";
-import { browserCollector, type DrainPayload } from "./browser";
+import {
+  browserCollector,
+  type CollectorOptions,
+  type DrainPayload,
+} from "./browser";
 import { PerfController } from "./controller";
 import { PerfAccumulator } from "./accumulator";
 import { startNetworkCapture, startTrace } from "./capture";
@@ -61,7 +65,7 @@ export interface SessionOptions {
 /** Name of the CDP binding the collector pushes an unloading document's data through. */
 export const EMIT_BINDING = "__lbEmit";
 
-let collectorScriptCache: string | undefined;
+const collectorScriptCache = new Map<boolean, string>();
 
 /**
  * The complete in-page collector (web-vitals IIFE + collector invocation) as an
@@ -69,12 +73,22 @@ let collectorScriptCache: string | undefined;
  * `context.addInitScript({ content: collectorInitScript() })` ahead of other init
  * scripts, combined with `startSession(..., { installCollector: false })`.
  * Idempotent per document: injecting it twice registers the observers once.
+ *
+ * `frames: false` leaves the rAF frame probe off until a span begins (see
+ * PerfStore.startFrames), for a collector that is installed on every page but
+ * only occasionally measured. Default true.
  */
-export function collectorInitScript(): string {
-  if (collectorScriptCache === undefined) {
-    collectorScriptCache = `${webVitalsIife()}\n;(${browserCollector.toString()})();\n`;
+export function collectorInitScript(opts: CollectorOptions = {}): string {
+  const frames = opts.frames !== false;
+  let script = collectorScriptCache.get(frames);
+  if (script === undefined) {
+    // The options object is inlined as a literal: the collector runs inside the
+    // page, so it cannot close over anything on the node side.
+    const arg = frames ? "" : JSON.stringify({ frames: false });
+    script = `${webVitalsIife()}\n;(${browserCollector.toString()})(${arg});\n`;
+    collectorScriptCache.set(frames, script);
   }
-  return collectorScriptCache;
+  return script;
 }
 
 export interface PerfSession {

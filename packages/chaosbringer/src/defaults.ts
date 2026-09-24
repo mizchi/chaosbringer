@@ -32,6 +32,7 @@ export const DEFAULT_OPTIONS: Required<
     | "server"
     | "driver"
     | "driverGoal"
+    | "perf"
   >
 > = {
   maxPages: 50,
