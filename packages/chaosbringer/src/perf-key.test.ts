@@ -2,13 +2,17 @@ import type { SpanReport } from "lightbringer/core";
 import { describe, expect, it } from "vitest";
 import {
   actionKind,
+  attemptedActionType,
+  candidatePerfKey,
   DEFAULT_PERF_TRACE_DIR,
+  formatLastActionPerf,
   loadSpanName,
   PERF_REPORT_LIST_CAP,
   perfKey,
   perfOptionsFromCliFlags,
   perfSlug,
   resolvePerfOptions,
+  toLastActionPerf,
   toPerfSpanReport,
   urlPattern,
 } from "./perf-key.js";
@@ -216,5 +220,60 @@ describe("perfSlug", () => {
 
   it("gives the same page of two runs different stems", () => {
     expect(perfSlug("http://x.test/", 0, "aaaaaaaa")).not.toBe(perfSlug("http://x.test/", 0, "bbbbbbbb"));
+  });
+});
+
+describe("attemptedActionType / candidatePerfKey", () => {
+  it("maps each target type to the result type the crawler records", () => {
+    expect(attemptedActionType("scroll")).toBe("scroll");
+    expect(attemptedActionType("select")).toBe("select");
+    expect(attemptedActionType("input")).toBe("input");
+    expect(attemptedActionType("input", "clear")).toBe("clear");
+    for (const t of ["link", "button", "interactive"] as const) expect(attemptedActionType(t)).toBe("click");
+  });
+
+  it("gives a candidate the key its action's span will carry", () => {
+    const url = "http://localhost:3000/items/42?tab=1";
+    expect(candidatePerfKey(url, { type: "button", selector: "#save" })).toBe(
+      perfKey(url, actionKind({ type: "click", selector: "#save", target: "Save" })),
+    );
+    expect(candidatePerfKey(url, { type: "input", selector: "#q" })).toBe("/items/:id :: input #q");
+    // A scroll result has no selector, so neither does its key.
+    expect(candidatePerfKey(url, { type: "scroll", selector: "window" })).toBe(
+      perfKey(url, actionKind({ type: "scroll", target: "scrollY: 523" })),
+    );
+  });
+});
+
+describe("toLastActionPerf / formatLastActionPerf", () => {
+  it("keeps only the picked facts, and interaction only when measured", () => {
+    const s = span(3);
+    const out = toLastActionPerf({ ...s, durationMs: 40, cpu: { ...s.cpu, blockingMs: 12, longTaskCount: 1 } }, "k");
+    expect(out).toEqual({
+      key: "k",
+      durationMs: 40,
+      cpu: { blockingMs: 12, longTaskCount: 1 },
+      network: { requestCount: 3, encodedKB: 3 },
+    });
+    expect("interaction" in out).toBe(false);
+    const interaction = {
+      count: 1,
+      maxDurationMs: 90,
+      type: "click",
+      inputDelayMs: 1,
+      processingMs: 80,
+      presentationMs: 9,
+    };
+    expect(toLastActionPerf({ ...s, interaction }, "k").interaction).toEqual(interaction);
+  });
+
+  it("formats one line, singular where it should be", () => {
+    expect(
+      formatLastActionPerf({
+        durationMs: 20,
+        cpu: { blockingMs: 0, longTaskCount: 1 },
+        network: { requestCount: 1, encodedKB: 0.5 },
+      }),
+    ).toBe("Previous action cost: 20ms, 0ms main-thread blocking over 1 long task, 1 request (0.5 KB)");
   });
 });

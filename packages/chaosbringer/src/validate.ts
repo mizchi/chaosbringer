@@ -11,6 +11,7 @@ import { validateFaultSchedule } from "./schedule.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
 import type { CrawlerOptions, UrlMatcher } from "./types.js";
 import { cdpEndpointUrl } from "./cdp.js";
+import { validateSettle } from "./settle.js";
 
 /**
  * Validate user-supplied options up front so downstream code can assume
@@ -42,7 +43,7 @@ export const KNOWN_OPTION_NAMES = [
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
   "initScripts", "perf", "perfBudgets", "perfBudgetsFile", "cdpEndpoint", "cdpTargetId",
-  "terminalBrowser",
+  "terminalBrowser", "settle",
 ] as const;
 
 /**
@@ -155,6 +156,7 @@ export function validateOptions(options: CrawlerOptions): void {
   requirePositive("maxActionsPerPage", options.maxActionsPerPage, 0);
   requirePositive("timeout", options.timeout, 1);
   requirePositive("recoveryHistorySize", options.recoveryHistorySize, 0);
+  validateSettle(options.settle);
 
   if (options.shardIndex !== undefined || options.shardCount !== undefined) {
     if (options.shardCount === undefined || options.shardIndex === undefined) {

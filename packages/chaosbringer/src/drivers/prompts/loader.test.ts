@@ -129,3 +129,42 @@ describe("stripCodeFence", () => {
     expect(stripCodeFence("plain")).toBe("plain");
   });
 });
+
+describe("renderUserPrompt with lastActionPerf", () => {
+  const base = {
+    url: "https://x",
+    screenshot: async () => Buffer.from([]),
+    candidates: [{ index: 0, description: "a", type: "button" as const, weight: 1 }],
+    history: [{ type: "click" as const, target: "Save", success: true }],
+    invariantViolations: [],
+    stepIndex: 1,
+  };
+  const template = "H:\n{{history}}\nC:\n{{candidates}}";
+
+  it("adds one line under the history, without the key", () => {
+    const { key: _key, ...perf } = {
+  key: "/app :: click #save",
+  durationMs: 412,
+  cpu: { blockingMs: 180, longTaskCount: 2 },
+  interaction: {
+    count: 1,
+    maxDurationMs: 96,
+    type: "click",
+    inputDelayMs: 10,
+    processingMs: 80,
+    presentationMs: 6,
+  },
+  network: { requestCount: 3, encodedKB: 12.4 },
+};
+    void _key;
+    const out = renderUserPrompt(template, { ...base, lastActionPerf: perf });
+    expect(out).toBe(
+      "H:\n1. click Save — ok\nPrevious action cost: 412ms, 180ms main-thread blocking over 2 long tasks, 96ms interaction latency, 3 requests (12.4 KB)\nC:\n0. a",
+    );
+    expect(out).not.toContain("#save");
+  });
+
+  it("renders exactly as before when absent", () => {
+    expect(renderUserPrompt(template, base)).toBe("H:\n1. click Save — ok\nC:\n0. a");
+  });
+});

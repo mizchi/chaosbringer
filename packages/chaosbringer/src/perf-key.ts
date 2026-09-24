@@ -7,7 +7,13 @@
 
 import type { SpanReport } from "lightbringer/core";
 import { normalizeUrl } from "./filters.js";
-import type { ActionResult, PerfOptions, PerfSpanReport } from "./types.js";
+import type {
+  ActionResult,
+  ActionTarget,
+  LastActionPerf,
+  PerfOptions,
+  PerfSpanReport,
+} from "./types.js";
 
 /**
  * Collapse one path segment that is an identifier rather than a route name.
@@ -58,6 +64,36 @@ export function actionKind(action: Pick<ActionResult, "type" | "selector" | "tar
   if (action.type === "scroll" && !action.selector) return "scroll";
   const what = action.selector ?? action.target;
   return what ? `${action.type} ${what}` : action.type;
+}
+
+/**
+ * The `ActionResult.type` an action on a target of this type is recorded
+ * with — fixed before it is attempted, whether it then works or throws.
+ * The crawler records with it and `candidatePerfKey` predicts with it, so a
+ * candidate's key is the key its action's span will carry.
+ */
+export function attemptedActionType(
+  targetType: ActionTarget["type"],
+  operation?: "clear",
+): ActionResult["type"] {
+  if (targetType === "scroll") return "scroll";
+  if (targetType === "select") return "select";
+  if (targetType === "input") return operation === "clear" ? "clear" : "input";
+  return "click";
+}
+
+/**
+ * The perfKey the span of acting on this candidate will carry, on the page
+ * visit `url` (`DriverStep.url` — the key is built from the visit, not the
+ * live route). The default operation only: a `clear` pick keys differently.
+ * A scroll's selector is dropped, as `actionKind` drops it from the result.
+ */
+export function candidatePerfKey(
+  url: string,
+  candidate: { type: ActionTarget["type"]; selector: string },
+): string {
+  const type = attemptedActionType(candidate.type);
+  return perfKey(url, actionKind(type === "scroll" ? { type } : { type, selector: candidate.selector }));
 }
 
 /** The span key budgets and baselines join on: `<urlPattern> :: <kind>`. */
@@ -146,6 +182,32 @@ export function toPerfSpanReport(span: SpanReport, key: string, name: string): P
       },
     },
   };
+}
+
+/** Trim a span to the facts `LastActionPerf` carries. */
+export function toLastActionPerf(span: SpanReport, key: string): LastActionPerf {
+  return {
+    key,
+    durationMs: span.durationMs,
+    cpu: { blockingMs: span.cpu.blockingMs, longTaskCount: span.cpu.longTaskCount },
+    ...(span.interaction ? { interaction: span.interaction } : {}),
+    network: { requestCount: span.network.requestCount, encodedKB: span.network.encodedKB },
+  };
+}
+
+/**
+ * The one line a model prompt gets about the previous action's cost. No key:
+ * it holds the selector, which never goes to a model, and the history line
+ * right above it already says which action this was.
+ */
+export function formatLastActionPerf(p: Omit<LastActionPerf, "key">): string {
+  const parts = [
+    `${p.durationMs}ms`,
+    `${p.cpu.blockingMs}ms main-thread blocking over ${p.cpu.longTaskCount} long task${p.cpu.longTaskCount === 1 ? "" : "s"}`,
+  ];
+  if (p.interaction) parts.push(`${p.interaction.maxDurationMs}ms interaction latency`);
+  parts.push(`${p.network.requestCount} request${p.network.requestCount === 1 ? "" : "s"} (${p.network.encodedKB} KB)`);
+  return `Previous action cost: ${parts.join(", ")}`;
 }
 
 /**

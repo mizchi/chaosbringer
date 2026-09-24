@@ -11,6 +11,7 @@
  * RPS optimisation.
  */
 import { chromium, type Browser, type BrowserContext } from "playwright";
+import { collectorInitScript } from "lightbringer/core";
 import {
   buildRuntimeFaultsScript,
   compileRuntimeFaults,
@@ -23,6 +24,7 @@ import {
   installFaultRoutes,
 } from "./fault-routes.js";
 import { parseDurationMs } from "./histogram.js";
+import { resolveLoadPerf, sampledWorkerIndexes } from "./perf-stats.js";
 import { buildLoadReport } from "./report.js";
 import { ScenarioWorker, type WorkerSamples } from "./worker.js";
 import type { ScenarioLoadOptions, ScenarioSpec, LoadReport } from "./types.js";
@@ -95,10 +97,15 @@ export async function scenarioLoad(
     ? parseDurationMs(options.duration)
     : DEFAULT_DURATION_MS;
   const rampUpMs = options.rampUp !== undefined ? parseDurationMs(options.rampUp) : 0;
+  // Resolved before anything launches, so an unsupported level fails fast.
+  const perf = resolveLoadPerf(options.perf);
   const planned = planWorkers(options.scenarios, rampUpMs);
   if (planned.length === 0) {
     throw new Error("scenarioLoad: every scenario spec had workers <= 0");
   }
+  const sampled = perf
+    ? sampledWorkerIndexes(planned, perf.sampleWorkers)
+    : new Set<number>();
 
   const compiledFaultRules = compileLoadFaultRules(options.faultInjection);
   const compiledRuntimeFaults = compileRuntimeFaults(
@@ -130,7 +137,12 @@ export async function scenarioLoad(
           invariants: options.invariants,
           maxIterations: options.maxIterationsPerWorker,
           shouldStop,
-          onContextCreated: makeContextHook(compiledFaultRules, runtimeFaultScript),
+          perf: sampled.has(p.workerIndex),
+          onContextCreated: makeContextHook(
+            compiledFaultRules,
+            runtimeFaultScript,
+            sampled.has(p.workerIndex),
+          ),
         }),
     );
 
@@ -161,6 +173,7 @@ export async function scenarioLoad(
       samples,
       timelineBucketMs: options.timelineBucketMs,
       faultFirings: faultFiringsFrom(compiledFaultRules),
+      ...(perf ? { perf: { level: perf.level, sampledWorkers: sampled.size } } : {}),
     });
     const faultStats = faultStatsFrom(compiledFaultRules);
     // Surface runtime fault stats in a side channel — runtime faults
@@ -188,8 +201,16 @@ export async function scenarioLoad(
 function makeContextHook(
   compiledFaults: ReturnType<typeof compileLoadFaultRules>,
   runtimeScript: string | null,
+  perf: boolean,
 ): (context: BrowserContext) => Promise<void> {
   return async (context) => {
+    // The collector goes first: init scripts run in registration order and it
+    // captures the native clock when it runs, so after the runtime-fault
+    // script a `clock-skew` fault would already have replaced it. Only
+    // sampled workers get it — an unmeasured worker pays nothing.
+    if (perf) {
+      await context.addInitScript({ content: collectorInitScript() });
+    }
     if (runtimeScript) {
       await context.addInitScript(runtimeScript);
     }

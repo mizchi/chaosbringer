@@ -11,6 +11,7 @@
  *   --max-pages <n>       Max pages to visit (default: 50)
  *   --max-actions <n>     Max random actions per page (default: 5)
  *   --timeout <ms>        Page load timeout (default: 30000)
+ *   --settle <mode>       networkidle (default), adaptive, or an adaptive quiet window in ms
  *   --headless            Run headless (default: true)
  *   --no-headless         Show browser window
  *   --cdp <port|url>      Connect to an existing Chromium tab
@@ -38,6 +39,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { perfBudgetRulesFromJson } from "./budget.js";
 import { perfOptionsFromCliFlags } from "./perf-key.js";
+import { parseSettleArg } from "./settle.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
@@ -89,6 +91,7 @@ const { values, positionals } = parseArgs({
     // chaos-pr-gate workflow and surfaced as a synonym in docs).
     "max-actions-per-page": { type: "string" },
     timeout: { type: "string" },
+    settle: { type: "string" },
     headless: { type: "boolean", default: true },
     cdp: { type: "string" },
     "cdp-target": { type: "string" },
@@ -161,6 +164,9 @@ OPTIONS:
   --max-actions <n>     Max random actions per page (default: 5)
                         (alias: --max-actions-per-page)
   --timeout <ms>        Page load timeout (default: 30000)
+  --settle <mode>       How each load and action settles: networkidle (default), adaptive
+                        (no requests / long tasks for 100 ms + 2 frames, capped at the old
+                        timeouts), or <ms> — adaptive with that quiet window
   --no-headless         Show the browser window (headless is the default)
   --cdp <port|url>      Crawl in an existing Chromium tab over CDP
   --cdp-target <id>     Select a tab by its CDP target id
@@ -363,6 +369,16 @@ if (perfBudgetsFile !== undefined) {
   }
 }
 
+let settle: CrawlerOptions["settle"];
+if (values.settle !== undefined) {
+  try {
+    settle = parseSettleArg(values.settle);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+}
+
 let shardIndex: number | undefined;
 let shardCount: number | undefined;
 if (values.shard) {
@@ -445,6 +461,7 @@ const options: CrawlerOptions = {
     return raw ? parseInt(raw, 10) : undefined;
   })(),
   timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
+  settle,
   headless: values.headless,
   cdpEndpoint: values.cdp,
   cdpTargetId: values["cdp-target"],

@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync, unlinkSync, rmSync } from "node:fs";
 import { formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
+import { fakeAction, fakePage, fakeSpan } from "./perf-fixtures.test-helpers.js";
+import { buildCrawlPerfSummary } from "./perf-summary.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
 
 function makeSummary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -313,5 +315,34 @@ describe("getExitCode and an escaping rejection", () => {
 
   it("does not fail a clean run under strict", () => {
     expect(getExitCode(withRejections(0), true)).toBe(0);
+  });
+});
+
+describe("formatReport perf-under-chaos lines", () => {
+  it("prints degradation, coverage and trends only when present", () => {
+    const k = "/item/:id :: load";
+    const pages = [
+      fakePage("http://x/item/1", fakeSpan(k, { durationMs: 450, requestCount: 3, faults: ["api-delay"] })),
+      fakePage("http://x/item/2", fakeSpan(k, { durationMs: 100, requestCount: 2 })),
+    ];
+    const mem = (n: number) => ({ jsEventListeners: n, jsHeapUsedMB: 1, domNodes: 10, arrayBuffers: 0 });
+    const actions = [20, 60, 100, 140].map((n, i) => ({
+      ...fakeAction(fakeSpan("/app :: click #nav", { memory: mem(n) })),
+      timestamp: i,
+    }));
+    const perf = buildCrawlPerfSummary(pages, actions, {
+      coverage: { js: [{ url: "http://x/app.js", total: 1000, used: [[0, 250]] }] },
+    });
+    const text = formatReport(makeReport({ pages, actions, perf }));
+    expect(text).toContain("Degradation under faults (median with vs without):");
+    expect(text).toMatch(/\+350ms {2}\/item\/:id :: load {2}under api-delay {2}\(450ms n=1 vs 100ms n=1\) {2}\+1 req/);
+    expect(text).toContain("JS coverage (union over the crawl): 25% used, least used http://x/app.js (25%)");
+    expect(text).toContain("Memory climbing across repeats of a step (likely leak):");
+    expect(text).toContain("jsEventListeners +120 over 4 repeats (20 -> 140)  /app :: click #nav");
+
+    const plain = formatReport(makeReport({ pages: [pages[1]!], perf: buildCrawlPerfSummary([pages[1]!], []) }));
+    expect(plain).not.toContain("Degradation under faults");
+    expect(plain).not.toContain("coverage (union");
+    expect(plain).not.toContain("Memory climbing");
   });
 });

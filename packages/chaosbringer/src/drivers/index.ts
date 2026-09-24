@@ -2,6 +2,7 @@
  * Public surface for the driver layer.
  *
  * - `weightedRandomDriver` — the original heuristic action picker.
+ * - `perfSeekingDriver` — picks what was slow before (needs `perf` on).
  * - `aiDriver` — per-step vision-model driver that asks a `DriverProvider`
  *   what to do next.
  * - `compositeDriver` / `samplingDriver` / `probabilityDriver` — combinators
@@ -27,6 +28,13 @@ export type {
   ScreenshotMode,
 } from "./types.js";
 export { weightedRandomDriver, type WeightedRandomDriverOptions } from "./weighted-random.js";
+export {
+  perfSeekingCost,
+  perfSeekingDriver,
+  PERF_SEEKING_COST_FLOOR_MS,
+  PERF_SEEKING_DEFAULT_EPSILON,
+  type PerfSeekingDriverOptions,
+} from "./perf-seeking.js";
 export { aiDriver, type AiDriverOptions } from "./ai-driver.js";
 export {
   compositeDriver,

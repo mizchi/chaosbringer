@@ -67,3 +67,19 @@ describe("renderUserPrompt", () => {
     expect(out).toBe("<script>");
   });
 });
+
+describe("renderUserPrompt lastActionPerf", () => {
+  it("appends the line after the rendered template when given", () => {
+    const out = renderUserPrompt("URL: {{url}}", {
+      url: "u",
+      reason: "r",
+      candidates: "c",
+      lastActionPerf: "Previous action cost: 5ms",
+    });
+    expect(out).toBe("URL: u\n\nPrevious action cost: 5ms");
+  });
+
+  it("is unchanged without it", () => {
+    expect(renderUserPrompt("URL: {{url}}", { url: "u", reason: "r", candidates: "c" })).toBe("URL: u");
+  });
+});

@@ -85,6 +85,7 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
         blockExternalNavigation: options.blockExternalNavigation ?? true,
         actionWeights: options.actionWeights,
         perf: options.perf,
+        settle: options.settle,
         headless: true,
       });
 
@@ -322,6 +323,7 @@ export async function runChaosTest(
     blockExternalNavigation: options.blockExternalNavigation ?? true,
     actionWeights: options.actionWeights,
     perf: options.perf,
+    settle: options.settle,
     headless: true,
   });
 

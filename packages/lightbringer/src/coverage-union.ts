@@ -4,6 +4,8 @@
 // scripts/coverage.mjs, over the <slug>.run<N>.coverage.json artifacts.
 import { mergeRanges, type CoverageArtifact } from "./analyze/coverage";
 
+export type { CoverageArtifact };
+
 export interface CoverageUnionRow {
   url: string;
   /** bytes (the largest size any run saw for the url) */
@@ -33,6 +35,34 @@ export const DEFAULT_COVERAGE_MIN_PCT = 30;
 
 const pctOf = (used: number, total: number) =>
   total > 0 ? Math.round((used / total) * 1000) / 10 : 0;
+
+/**
+ * Fold `next` into `acc`: one artifact whose used ranges are the union of
+ * both, per kind and url. `unionCoverage([mergeCoverageArtifacts(a, b)])`
+ * equals `unionCoverage([a, b])`, so a driver that sees artifacts one at a
+ * time (a crawler, page after page) can keep one merged artifact instead of
+ * every page's — its size is bounded by the resources, not by the pages.
+ * Pure: neither input is mutated.
+ */
+export function mergeCoverageArtifacts(
+  acc: Partial<CoverageArtifact>,
+  next: Partial<CoverageArtifact>,
+): CoverageArtifact {
+  const merge = (kind: "js" | "css"): CoverageArtifact["js"] => {
+    const byUrl = new Map<string, { url: string; total: number; used: Array<[number, number]> }>();
+    for (const item of [...(acc[kind] ?? []), ...(next[kind] ?? [])]) {
+      const cur = byUrl.get(item.url);
+      if (!cur) {
+        byUrl.set(item.url, { url: item.url, total: item.total, used: [...item.used] });
+        continue;
+      }
+      cur.total = Math.max(cur.total, item.total);
+      cur.used = mergeRanges([...cur.used, ...item.used]);
+    }
+    return [...byUrl.values()];
+  };
+  return { js: merge("js"), css: merge("css") };
+}
 
 /** Union the used ranges of every artifact, per kind and url. */
 export function unionCoverage(artifacts: readonly Partial<CoverageArtifact>[]): CoverageUnion {

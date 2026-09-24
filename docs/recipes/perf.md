@@ -36,7 +36,7 @@ Every `--perf-*` flag implies `--perf`. The report's `reproCommand` carries the 
 | Span | Opens | Closes | On |
 |---|---|---|---|
 | load | just before `page.goto` (after `beforeNavigation` lifecycle faults) | after `afterLoad` faults, the coverage baseline, `afterLoad` invariants and the metrics read | `PageResult.perf` |
-| action | just before the crawler performs the action | just after it returns, including the crawler's own post-click `networkidle` wait | `ActionResult.perf` |
+| action | just before the crawler performs the action | just after it returns, including the crawler's own settle: the post-click `networkidle` wait, or with `--settle adaptive` the adaptive settle after every action | `ActionResult.perf` |
 
 - All three action loops are measured: weighted random, `driver`, and `--trace-replay`.
 - An action span covers the same interval as the `traceIds` the action collects. With `traceparent` and a server-fault collector you can join a slow span to the server-side events it caused.
@@ -45,7 +45,7 @@ Every `--perf-*` flag implies `--perf`. The report's `reproCommand` carries the 
 
 Each span is a lightbringer `SpanReport`:
 
-- `durationMs`, `capped`. `capped` is always `false` for now: the crawler does its own settling (`networkidle`) before it closes a span, so lightbringer never waits on a span and never hits its cap. It becomes meaningful with adaptive settle;
+- `durationMs`, `capped`. The crawler does its own settling before it closes a span, so lightbringer never waits on a span and never hits *its* cap. `capped` is the crawler's verdict instead: `true` when the step's [adaptive settle](#settling-between-steps---settle) hit its cap. Under the default `networkidle` it is always `false`;
 - `network`: request count, KB, busy time, waves, third-party share, top initiators, slowest requests;
 - `cpu`: long-task count, `blockingMs` (total long-task time), heaviest task, LoAF;
 - `render`: script / layout / style-recalc cost from CDP `Performance.getMetrics`, plus paint and GPU at trace level;
@@ -57,7 +57,27 @@ Fields that were not measured are **absent, never 0**. A 0 passes every budget a
 
 `blockingMs` is lightbringer's *total* long-task time, not TBT. A single 120 ms click handler reads as `blockingMs ≈ 120`, and its TBT share, the part over the 50 ms long-task threshold, is about 70 ms. `PerformanceMetrics.tbt` is TBT-style (Σ `duration − 50`).
 
+- `faults` (chaosbringer's addition): the faults active during the span, sorted, absent when none. See [Perf under chaos](#perf-under-chaos-faults-and-degradation).
+
 `PageResult.perfPage` holds page-level extras that do not belong to one span: web-vitals of the final document, per-document vitals when the page went through more than one, network totals, and the `clockPatched` / `collectorMissing` warnings.
+
+## Settling between steps (`--settle`)
+
+How long the crawler waits after each load and each action decides both how fast a crawl is and what the next step sees.
+
+| `settle` | CLI | After `goto` | After an action |
+|---|---|---|---|
+| `"networkidle"` (default) | `--settle networkidle` | `waitUntil: "networkidle"` (500 ms with no connections) | `waitForLoadState("networkidle", 2000 ms)` after a click, then a fixed 100 ms |
+| `"adaptive"` | `--settle adaptive` | `waitUntil: "load"`, then adaptive, capped at `timeout` | adaptive, capped at 2000 ms; no fixed pause |
+| a number, e.g. `150` | `--settle 150` | as `"adaptive"`, with that quiet window | as `"adaptive"`, with that quiet window |
+
+Adaptive settle resolves when **no request of the page has been in flight for the quiet window** (100 ms by default), **no long task ended within it**, and **at least two animation frames have run** since the step. Requests are counted from the page's own request events, and long tasks come from the always-on collector, read without draining it. EventSource streams are not counted. A request older than the cap no longer holds later steps: a hung request caps the step that fired it, not every step after it. A `hang` fault's parked route is treated the same way, and `drainHeldRoutes` still releases it when the page is done.
+
+A settle that hits its cap does not fail the step or the page. It is reported: `capped: true` on the step's span (with `--perf`) and `PageResult.settleCapped`, the number of the page's settles that capped (present only under adaptive settle). A step that never goes quiet is a finding, where `networkidle` would spend a silent 2 s on it.
+
+What `networkidle` really waits for after a click: `waitForLoadState` resolves at once when the current document has already reached networkidle, and after the load it has. So **a click that only fires an XHR is not waited for**. The next step starts after the fixed 100 ms, whether or not the response has rendered. Adaptive settle waits for that XHR (up to the cap), so the next step sees what it rendered.
+
+Adaptive settle is **opt-in, and staying that way**. The default stays `networkidle`, so existing crawls, recorded traces and calibrated `TimingProfile`s keep their timing. The report's `reproCommand` carries `--settle` when it is not the default. The same-seed parity e2e (`settle.e2e.test.ts`) crawls the fixture site under both modes and checks they give the same visited pages and error fingerprints. On the fixture site (seed 42, 10 pages, 46 actions) a crawl took about 32.5 s under `networkidle` and about 8.8 s under adaptive, with identical pages, clusters and action sequences.
 
 ## `perfKey`: the key that survives a rerun
 
@@ -168,8 +188,89 @@ With `perf` on, the report gets a small `perf` block, and the reporter prints a 
 | `hotInitiators` | the 10 heaviest request initiators across every span |
 | `thirdParty` | third-party traffic per registrable domain across every span (top 10) |
 | `totals` | `{ spans, pages }` measured |
+| `degradation` | the 10 `(perfKey, fault)` pairs whose steps got slowest under the fault; see [below](#perf-under-chaos-faults-and-degradation). Absent without faults |
+| `trends` | memory that climbs across repeats of one step; see [Leaks](#leaks-from-steps-the-crawl-repeats). Absent when nothing climbs |
+| `coverage` | JS/CSS coverage unioned over the crawl; see [Coverage](#coverage-over-the-whole-crawl). Only with `perf.coverage` |
 
-`hotInitiators` and `thirdParty` add up the lists the crawl report keeps per span, which are the top five of each. A source that never made any span's top five is missing, so the totals are a lower bound. The per-page sidecars have the full lists. The summary is rebuilt from the merged pages when shards are merged.
+`hotInitiators` and `thirdParty` add up the lists the crawl report keeps per span, which are the top five of each. A source that never made any span's top five is missing, so the totals are a lower bound. The per-page sidecars have the full lists. The summary is rebuilt from the merged pages when shards are merged; `coverage` is the exception and is absent from a merged report, since byte ranges cannot be unioned from each shard's totals.
+
+## Perf under chaos: faults and degradation
+
+A span's `faults` names every fault that took effect in its window:
+
+| Layer | Tagged onto | Name |
+|---|---|---|
+| network (`faultInjection`) | the spans open when the rule fired on a request (a delay tags the span that made the request) | the rule's `name`, or its pattern: the `faultInjections[].rule` label |
+| lifecycle (`lifecycleFaults`) | the span open when it fired and every later span of the same page visit: a CPU throttle or wiped storage lasts the visit. `beforeNavigation` faults tag the load span | the lifecycle stats name (`cpu-throttle:4x`, or `name`) |
+| runtime (`runtimeFaults`) | every span: the fault script is on every page | the runtime stats name |
+| server (`server-faults` + `traceparent`) | the span whose requests carried the event's trace id | `server:<kind>` (`server:5xx`, `server:latency`) |
+
+`CrawlReport.perf.degradation` compares, for each perfKey and each fault on its spans, the median span *with* the fault against the median span *without* it:
+
+```jsonc
+{ "key": "/item/:id :: load", "fault": "api-delay",
+  "faulted": { "n": 4, "durationMs": 452, "blockingMs": 0, "requestCount": 3 },
+  "clean":   { "n": 4, "durationMs": 118, "blockingMs": 0, "requestCount": 3 },
+  "delta":   { "durationMs": 334, "blockingMs": 0, "requestCount": 0 } }
+```
+
+- A pair appears only when both sides have a span. A fault that hit every span of a key (any runtime fault) has nothing to compare with, and a page is visited once per crawl, so a load key needs a route pattern several pages share (`/item/:id`) or a probabilistic fault on a step the crawl repeats.
+- The clean side is "without this fault", so it can carry other faults.
+- `interactionMs` appears on each side only over spans that had an interaction, and in `delta` only when both sides did.
+- Sorted by `delta.durationMs`, largest first; the reporter prints the top five as "Degradation under faults". A `requestCount` delta is the retry storm the `amplification` oracle counts, priced in time.
+
+## Leaks from steps the crawl repeats
+
+lightbringer finds leaks in the `#0..#N` repeats of a `measureRepeat`. A crawl repeats steps without being asked: the same nav click on every page, the same button clicked again. `perf.trends` runs lightbringer's `buildTrends` over the spans that share a perfKey, in crawl order (loads by visit, actions by time), so its rules apply unchanged: at least three repeats, and only growth that is sustained, spread across the repeats and past the gauge's floor (10 listeners, 50 DOM nodes, 2 MB heap, 5 ArrayBuffers) is reported. `name` is the perfKey.
+
+The gauges are the renderer's totals at each span's end, and a document the crawl navigated away from stays counted until a GC collects it. A run of full navigations therefore climbs on garbage alone (on the fixture site, each nav link repeated three times "leaked" about 34 listeners a step), so spans that created a document (`memory.documentsDelta > 0`: every load, every click that navigates) are left out. The garbage also shows in the totals of every span after a navigation, so a key's repeats form one series only while no document was created between them: a button clicked in between nav clicks on the same visit starts a new series after each navigation, and each series is judged on its own (a key can appear once per run that climbed). What remains are runs of steps that stay on one document, such as a client-side nav click or a button, where a climb is retention. `--perf-mem` (forced GC at span boundaries) makes heap numbers retained-only and trends more trustworthy.
+
+## Coverage over the whole crawl
+
+With `perf.coverage` (`--perf-cov`), each page's JS/CSS coverage is folded into one union as the crawl goes, and `perf.coverage` reports `{ js, css }`, each `{ totalBytes, usedBytes, usedPct, lowUsage }`, where `lowUsage` lists the 10 resources with the most unused bytes. A byte counts as used if any page visit executed it.
+
+This is lightbringer's `coverage` script's union, but over a crawl rather than over hand-written scenarios: it includes every page and action the crawler reached, including ones no spec covers. Code that stays unused here is a much stronger dead-code or over-shipping signal. It is still only what this crawl reached; a flow behind a login the crawler never passed is unused here too.
+
+## Steering the crawl by cost: `lastActionPerf` and `perfSeekingDriver`
+
+With `perf` on, each driver step carries what the previous action on the page cost, and the advisor's context carries the same thing:
+
+```ts
+step.lastActionPerf
+// { key: "/cart :: click #apply", durationMs: 412,
+//   cpu: { blockingMs: 180, longTaskCount: 2 },
+//   interaction?: { maxDurationMs, type, inputDelayMs, processingMs, presentationMs, count },
+//   network: { requestCount: 3, encodedKB: 12.4 } }
+```
+
+- It is a `Pick` of the action's span (`LastActionPerf`), read as the step starts, from what lightbringer has collected so far. That read is node-side filtering with no page call, and it happens once per action and only when a step asks for it.
+- **Absent, never zeroed** when there is nothing measured: perf off, `perf.actions: false`, the page's first step, or a previous action whose span was not recorded. A driver can therefore tell "not measured" from "cost nothing".
+- Read mid-page, it can differ from the report's copy of the same span. A request still in flight counts without its bytes. `interaction` is often missing, because the browser reports an interaction only after the paint that ends it, and under the default `networkidle` settle that usually lands after the span closed. The long task behind a slow handler is there.
+- `key` joins the fact to a candidate: `candidatePerfKey(step.url, candidate)` is the key that candidate's span will carry. The key contains the selector, so it stops at the model seam. `aiDriver` hands its provider the facts without `key`, and the bundled providers add one line under the action history ("Previous action cost: 412ms, 180ms main-thread blocking over 2 long tasks, 3 requests (12.4 KB)"). Without perf the prompts are byte-for-byte what they were.
+
+`perfSeekingDriver()` uses those facts to look for the slowest interaction, where coverage feedback looks for the newest code:
+
+```ts
+import { readFileSync } from "node:fs";
+import { chaos, perfSeekingDriver, type CrawlReport } from "chaosbringer";
+
+// Optional: start from what was slow last run. Keys drop the origin.
+const prior = JSON.parse(readFileSync("baseline.json", "utf8")) as CrawlReport;
+
+await chaos({
+  baseUrl,
+  perf: true,
+  driver: perfSeekingDriver({ prior, epsilon: 0.2 }),
+});
+```
+
+- A candidate's weight is the mean observed cost of its perfKey, `blockingMs + interaction.maxDurationMs`, plus a 1 ms floor. Costs come from the steps of this crawl and, with `prior`, from every action span in an earlier report. `durationMs` is not part of the cost: it includes settle and network time, so a step that is slow only because its request is slow would outrank one that freezes the page.
+- Candidates that have not been measured are explored in two ways. With probability `epsilon` (default 0.2) the pick is uniform among them. Otherwise each one is weighted as if it cost the average of the measured candidates on the same screen. Without that second rule, the first key the driver measured, cheap or not, would crowd out every control it had not tried yet.
+- Every draw comes from `step.rng`, so a seed reproduces the same picks for the same measurements. Measurements vary from run to run, so the picks can too.
+- It needs perf on. When an action has run and nothing was measured, it warns once (`onWarn`, default `console.warn`) and picks uniformly until a measurement arrives. A `prior` is not used on its own in that case.
+- The last action on each page is never seen by a later step, because the next page starts without a previous action. Its span still reaches the report, and from there any later run's `prior`.
+
+On a page of five buttons where one handler blocks for 150 ms, the e2e test (`perf-seeking.e2e.test.ts`) saw the slow button take about 16 of 24 steps under `perfSeekingDriver`, against 6 of 24 under `weightedRandomDriver` with the same seed.
 
 ## Levels and overhead
 
@@ -209,4 +310,5 @@ The crawl report itself stays small. Each span keeps its top five `network.reque
 
 - **Chromium only**: the whole layer is CDP, like the rest of the crawler.
 - **`clock-skew` runtime faults**: the collector is installed before the runtime-fault script and captures the unpatched clock, so spans stay correct. If page JS had patched `performance.now` before the collector ran, `perfPage.clockPatched` is set.
+- **Load runs**: `scenarioLoad({ perf: true })` measures each scenario step on a sampled worker, light level only — see [scenario-load.md](./scenario-load.md#recipe-browser-cost-under-load-perf).
 - **`testPage()` on a caller's page**: the crawler owns no context there, so a perf session installs the collector on the page itself. A page that was already loaded before that gets `collectorMissing` until its next navigation.

@@ -261,3 +261,38 @@ describe("aiDriver", () => {
     expect(await driver.selectAction(makeStep())).not.toBeNull();
   });
 });
+
+describe("aiDriver lastActionPerf", () => {
+  it("forwards the facts to the provider without the key", async () => {
+    const provider = fixedProvider({ index: 0, reasoning: "x" });
+    await aiDriver({ provider }).selectAction(makeStep({ lastActionPerf: {
+  key: "/app :: click #save",
+  durationMs: 412,
+  cpu: { blockingMs: 180, longTaskCount: 2 },
+  interaction: {
+    count: 1,
+    maxDurationMs: 96,
+    type: "click",
+    inputDelayMs: 10,
+    processingMs: 80,
+    presentationMs: 6,
+  },
+  network: { requestCount: 3, encodedKB: 12.4 },
+} }));
+    const input = (provider.selectAction as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(input.lastActionPerf).toEqual({
+      durationMs: 412,
+      cpu: { blockingMs: 180, longTaskCount: 2 },
+      interaction: expect.objectContaining({ maxDurationMs: 96 }),
+      network: { requestCount: 3, encodedKB: 12.4 },
+    });
+    expect("key" in input.lastActionPerf).toBe(false);
+  });
+
+  it("leaves the field off the provider input when the step has none", async () => {
+    const provider = fixedProvider({ index: 0, reasoning: "x" });
+    await aiDriver({ provider }).selectAction(makeStep());
+    const input = (provider.selectAction as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect("lastActionPerf" in input).toBe(false);
+  });
+});

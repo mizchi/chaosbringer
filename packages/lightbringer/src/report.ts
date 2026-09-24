@@ -53,6 +53,47 @@ function toVitalSamples(
 }
 
 /**
+ * One recorded span's report, from the entries and requests gathered so far.
+ * `buildReport` maps every span through this; `PerfSession.peekSpan` calls it
+ * on its own, mid-scenario, for a caller that wants the span it just closed
+ * without finishing the session. `firstPartyDomain` is the page's registrable
+ * domain ("" when it has no host: everything counts as first-party).
+ */
+export function buildSpanReport(
+  s: RawSpan,
+  entries: AccumulatedEntries,
+  reqs: NetReq[],
+  firstPartyDomain: string,
+  renderEvents?: TraceEvent[],
+): SpanReport {
+  const render = renderEvents
+    ? {
+        ...s.render,
+        ...buildTraceRender(renderEvents, s.traceStartUs, s.traceEndUs),
+      }
+    : s.render;
+  return {
+    name: s.name,
+    durationMs: round(s.endEpochMs - s.startEpochMs),
+    capped: s.capped,
+    network: buildSpanNetwork(s, reqs, firstPartyDomain),
+    cpu: buildSpanCpu(s, entries.longTasks, entries.loaf),
+    render,
+    memory: s.memory,
+    interaction: buildSpanInteraction(s, entries.events),
+    frames: buildSpanFrames(s, entries.frames),
+    traceWindowUs: [s.traceStartUs, s.traceEndUs],
+    budget: s.budget,
+  };
+}
+
+/** The registrable domain `buildReport` / `peekSpan` treat as first-party for `url`. */
+export function firstPartyDomainOf(url: string): string {
+  const host = hostOf(url);
+  return host ? registrableDomain(host) : "";
+}
+
+/**
  * Assemble the report from the node-side accumulated entries (every drained
  * document, already in epoch ms). `vitals` is the latest document's; when more
  * than one document was observed, `documents` lists each one's vitals.
@@ -98,39 +139,18 @@ export function buildReport(
     [spans, reqs, renderEvents] = rest as [RawSpan[], NetReq[], TraceEvent[]?];
   }
 
-  // The page's own registrable domain anchors first- vs third-party. Falls back
-  // to "" (everything counts as first-party) when the URL has no host.
-  const pageHost = hostOf(url);
-  const firstPartyDomain = pageHost ? registrableDomain(pageHost) : "";
+  // The page's own registrable domain anchors first- vs third-party.
+  const firstPartyDomain = firstPartyDomainOf(url);
 
   const docs = entries.documents;
   const last = docs[docs.length - 1];
   const vitals = toVitalSamples(last?.vitals ?? {});
 
-  const { longTasks, loaf, events } = entries;
-  const frameEpochs = entries.frames;
+  const { longTasks, loaf } = entries;
 
-  const spanReports: SpanReport[] = spans.map((s) => {
-    const render = renderEvents
-      ? {
-          ...s.render,
-          ...buildTraceRender(renderEvents, s.traceStartUs, s.traceEndUs),
-        }
-      : s.render;
-    return {
-      name: s.name,
-      durationMs: round(s.endEpochMs - s.startEpochMs),
-      capped: s.capped,
-      network: buildSpanNetwork(s, reqs, firstPartyDomain),
-      cpu: buildSpanCpu(s, longTasks, loaf),
-      render,
-      memory: s.memory,
-      interaction: buildSpanInteraction(s, events),
-      frames: buildSpanFrames(s, frameEpochs),
-      traceWindowUs: [s.traceStartUs, s.traceEndUs],
-      budget: s.budget,
-    };
-  });
+  const spanReports: SpanReport[] = spans.map((s) =>
+    buildSpanReport(s, entries, reqs, firstPartyDomain, renderEvents),
+  );
 
   // app measures -> OTel spans -> network/CPU correlation. Measures were shifted
   // to epoch ms at drain time (each with its own document's timeOrigin), so the

@@ -12,6 +12,8 @@ export interface SpanShape {
   encodedKB?: number;
   initiators?: { frame: string; requestCount: number; encodedKB: number }[];
   thirdParty?: { domain: string; requestCount: number; encodedKB: number; busyMs: number }[];
+  faults?: string[];
+  memory?: Partial<PerfSpanReport["memory"]>;
 }
 
 /** A span with every required field, the named ones set and the rest 0. */
@@ -49,7 +51,8 @@ export function fakeSpan(key: string, o: SpanShape = {}): PerfSpanReport {
       recalcStyleMs: 0,
       nodes: 0,
     } as PerfSpanReport["render"],
-    memory: {} as PerfSpanReport["memory"],
+    memory: (o.memory ?? {}) as PerfSpanReport["memory"],
+    ...(o.faults ? { faults: o.faults } : {}),
     ...(o.interactionMs !== undefined
       ? { interaction: { maxDurationMs: o.interactionMs } as PerfSpanReport["interaction"] }
       : {}),

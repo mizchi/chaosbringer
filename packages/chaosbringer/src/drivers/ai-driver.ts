@@ -27,6 +27,7 @@
  * ```
  */
 import { DriverBudget, type DriverBudgetOptions } from "./budget.js";
+import type { LastActionPerf } from "../types.js";
 import type {
   Driver,
   DriverPick,
@@ -103,6 +104,7 @@ export function aiDriver(opts: AiDriverOptions): Driver {
         invariantViolations: step.invariantViolations,
         goal: opts.goal,
         stepIndex: step.stepIndex,
+        ...(step.lastActionPerf ? { lastActionPerf: withoutKey(step.lastActionPerf) } : {}),
       };
 
       let raw: typeof TIMEOUT_SENTINEL | Awaited<ReturnType<DriverProvider["selectAction"]>>;
@@ -150,4 +152,14 @@ export function aiDriver(opts: AiDriverOptions): Driver {
 /** Exposed for tests / callers that want to inspect spend. */
 export function aiDriverBudget(driver: Driver): DriverBudget | null {
   return (driver as unknown as { __budget?: DriverBudget }).__budget ?? null;
+}
+
+/**
+ * Destructure-to-omit, as for the candidates: a perfKey embeds the action's
+ * selector, which must not reach a provider.
+ */
+function withoutKey(p: LastActionPerf): Omit<LastActionPerf, "key"> {
+  const { key: _key, ...facts } = p;
+  void _key;
+  return facts;
 }

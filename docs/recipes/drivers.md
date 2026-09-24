@@ -13,6 +13,7 @@ Drivers are activated by passing `driver` to `chaos()` / `ChaosCrawler`. The leg
 | `formDriver()` | Detects `<form>`s, fills every supported field, submits | Apps with login / signup / settings / data-entry forms |
 | `payloadDriver({ payloads })` | `formDriver` with attack payload sets (XSS / SQLi / path / large / unicode) | **Authorized** pentest of your own app; pair with invariants that detect the attack class |
 | `flowDriver({ steps })` | Walks a scripted user journey (register → verify → login → …) across pages | Critical-path coverage under fault injection |
+| `perfSeekingDriver({ prior?, epsilon? })` | Weights candidates by what their perfKey cost earlier (`blockingMs + interactionMs`), exploring untried ones | Hunting the slowest interaction; needs `perf` on. See [perf.md](perf.md#steering-the-crawl-by-cost-lastactionperf-and-perfseekingdriver) |
 
 ## Combinators
 
@@ -57,6 +58,8 @@ const textOnly: DriverProvider = {
 A capture that fails throws out of the thunk. In a provider that already collapses its failures to `null` that needs no extra handling — the driver stands down and the composite falls through, the same as for a 5xx.
 
 The advisor seam matches: `AdvisorCandidate` carries `type` and the same geometry, and `ctx.screenshot` is a thunk whose failure becomes that consult's soft failure.
+
+With `perf` on, `input.lastActionPerf` says what the previous action cost: its duration, main-thread blocking, interaction latency when the browser reported one, and requests. It is `DriverStep.lastActionPerf` without its `key`, because the key embeds the selector. It is absent (not zeroed) when nothing was measured. The bundled providers render it as one line under the history, and without it they render exactly the prompt they always did. `ctx.lastActionPerf` on the advisor seam is the same fact, with the key, and the bundled advisor leaves the key out of its prompt too.
 
 ## Recipes
 
@@ -273,6 +276,7 @@ The action is reported as `type: "clear"` rather than `"input"`, because a trace
 - **`step.url` is the URL of the page *visit*** and holds still for every step on that page; budgets and `onPageStart` key off it. **`step.currentUrl` is where the app has actually routed to** as of this step. Group by `url`, decide on `currentUrl`.
 - **A form field's description falls back to its `name` attribute** when it has neither text nor an `aria-label`, which is the usual case: without it two fields on one page both read `(input)`.
 - **Every candidate carries geometry**: `bbox`, `inViewport`, `inert` (`pointer-events: none`), and `coveredBy`. Absent only on the `scroll` target and on a page the scrape could not read.
+- **`step.lastActionPerf` is what the previous action on this page cost**, present only with `perf` on and only once an action on the page was measured. Its `key` is that action's perfKey, and `candidatePerfKey(step.url, candidate)` gives the key a candidate's span will carry, so a driver can join the two. See [perf.md](perf.md#steering-the-crawl-by-cost-lastactionperf-and-perfseekingdriver) for what is measured when.
 
 ### Skipping a control the click will not reach
 

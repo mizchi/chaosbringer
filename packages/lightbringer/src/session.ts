@@ -9,7 +9,7 @@ import {
 import { PerfController } from "./controller";
 import { PerfAccumulator } from "./accumulator";
 import { startNetworkCapture, startTrace } from "./capture";
-import { buildReport } from "./report";
+import { buildReport, buildSpanReport, firstPartyDomainOf } from "./report";
 import {
   buildCoverage,
   type Coverage,
@@ -23,6 +23,7 @@ import type {
   PerfReport,
   RenderBlocking,
   Settle,
+  SpanReport,
 } from "./report-types";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,16 @@ export interface PerfSession {
   controller: PerfController;
   /** uncaught page errors observed during the run */
   pageErrors: string[];
+  /**
+   * The report of `controller.spans[index]` from what the session has gathered
+   * so far, without finishing it — for a driver that decides its next step by
+   * what the last one cost. `end()` drained the page before recording the
+   * span, so its long tasks and interactions are in; a request still in
+   * flight counts without its bytes, and trace-level paint / GPU numbers are
+   * left out (the trace is only read at `finish`). Pure node-side filtering:
+   * no page or CDP call. Undefined for an index with no recorded span.
+   */
+  peekSpan: (index: number) => SpanReport | undefined;
   /** finalize: gather everything and build the report (`title` labels it) */
   finish: (title: string) => Promise<{
     report: PerfReport;
@@ -387,5 +398,18 @@ export async function startSession(
     return { report, covArtifact };
   };
 
-  return { controller, pageErrors, finish };
+  const peekSpan = (index: number): SpanReport | undefined => {
+    const raw = controller.spans[index];
+    if (!raw) return undefined;
+    let url = "";
+    try {
+      url = page.url();
+    } catch {
+      // A closed page: every request counts as first-party, as with no host.
+    }
+    // `finishNetwork` only snapshots the capture; it stops nothing.
+    return buildSpanReport(raw, accumulator, finishNetwork(), firstPartyDomainOf(url));
+  };
+
+  return { controller, pageErrors, peekSpan, finish };
 }
