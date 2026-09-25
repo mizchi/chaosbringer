@@ -69,6 +69,15 @@ export interface SpanReport {
   cpu: SpanCpu;
   render: SpanRender;
   memory: SpanMemory;
+  /**
+   * Documents the span navigated to: observed documents whose timeOrigin (the
+   * start of their navigation) falls inside the span. Absent when 0. Unlike
+   * `memory.documentsDelta`, a GC cannot hide one: under memGc the forced GC
+   * at span end collects the document navigated away from before the reading,
+   * so `documentsDelta` reads 0 on a navigation. Only documents the collector
+   * reported count (same-document navigations create none).
+   */
+  navigations?: number;
   /** responsiveness of interactions in the span (per-step INP); absent if none */
   interaction?: SpanInteraction;
   /** frame cadence during the span (animation smoothness); absent if too few frames */

@@ -25,7 +25,7 @@ import {
 } from "./perf-session.js";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import { SpanFaultTags } from "./perf-faults.js";
-import { actionKind, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
+import { actionKind, actionRouteUrl, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
 import type { ResolvedPerfOptions } from "./perf-options.js";
 import { toLastActionPerf, toPerfSpanReport } from "./perf-trim.js";
 import type {
@@ -45,7 +45,7 @@ import type {
  */
 type SpanOwner = (
   | { kind: "load"; settleCapped: boolean }
-  | { kind: "action"; action: ActionResult; settleCapped: boolean }
+  | { kind: "action"; action: ActionResult; settleCapped: boolean; routeUrl: string }
 ) & { faults?: string[] };
 
 // Moved to the leaf `perf-session.ts` (shared with the load runner); kept
@@ -69,7 +69,12 @@ export class PagePerf {
    * controller, or null when its span was not recorded — so a stale span
    * from an earlier action is never reported as the last one's.
    */
-  private lastAction: { spanIndex: number; action: ActionResult } | null = null;
+  private lastAction: { spanIndex: number; action: ActionResult; routeUrl: string } | null = null;
+  /**
+   * The URL each open action span's key is built from: the page's own URL
+   * when the action began (see `actionRouteUrl`), not the visit's.
+   */
+  private readonly actionRouteUrls = new Map<SpanHandle, string>();
   /** `lastActionPerf()`'s answer for `lastAction`, once it was asked for. */
   private lastActionFacts: LastActionPerf | undefined;
   /** The page's coverage artifact after `finish()` (`perf.coverage` only). */
@@ -82,6 +87,8 @@ export class PagePerf {
     private readonly opts: ResolvedPerfOptions,
     private readonly slug: string,
     pageFaults: readonly string[],
+    /** For the live URL an action's key is built from; absent in unit fakes. */
+    private readonly page?: Pick<Page, "url">,
   ) {
     this.faultTags = new SpanFaultTags(pageFaults);
   }
@@ -131,7 +138,7 @@ export class PagePerf {
       coverage: opts.coverage,
       cssStats: opts.cssSelectorStats,
     });
-    return new PagePerf(session, client, url, opts, slug, pageFaults);
+    return new PagePerf(session, client, url, opts, slug, pageFaults, page);
   }
 
   /** Open the page-load span. Call right before `page.goto`. */
@@ -176,7 +183,18 @@ export class PagePerf {
 
   /** Open an action span. The name is provisional; `finish()` names it from the result. */
   async beginAction(): Promise<SpanHandle> {
+    // Read before `begin` awaits, so the route is the one the action is
+    // about to run on. `page.url()` is synchronous and only throws on a
+    // closed page, where the visit URL is the honest answer.
+    let liveUrl = this.url;
+    try {
+      if (this.page) liveUrl = this.page.url();
+    } catch {
+      // closed page
+    }
+    const routeUrl = actionRouteUrl(this.url, liveUrl);
     const handle = await this.session.controller.begin("action");
+    this.actionRouteUrls.set(handle, routeUrl);
     this.openActions.add(handle);
     this.faultTags.begin(handle);
     return handle;
@@ -189,8 +207,10 @@ export class PagePerf {
     { settleCapped = false }: { settleCapped?: boolean } = {},
   ): Promise<void> {
     if (!this.openActions.delete(handle)) return;
-    const spanIndex = await this.record(handle, { kind: "action", action, settleCapped });
-    this.lastAction = spanIndex === null ? null : { spanIndex, action };
+    const routeUrl = this.actionRouteUrls.get(handle) ?? this.url;
+    this.actionRouteUrls.delete(handle);
+    const spanIndex = await this.record(handle, { kind: "action", action, settleCapped, routeUrl });
+    this.lastAction = spanIndex === null ? null : { spanIndex, action, routeUrl };
     this.lastActionFacts = undefined;
   }
 
@@ -207,13 +227,14 @@ export class PagePerf {
     if (this.lastActionFacts) return this.lastActionFacts;
     const span = this.session.peekSpan(last.spanIndex);
     if (!span) return undefined;
-    this.lastActionFacts = toLastActionPerf(span, perfKey(this.url, actionKind(last.action)));
+    this.lastActionFacts = toLastActionPerf(span, perfKey(last.routeUrl, actionKind(last.action)));
     return this.lastActionFacts;
   }
 
   /** Drop an action span without recording it — the action was skipped. */
   cancelAction(handle: SpanHandle): void {
     if (!this.openActions.delete(handle)) return;
+    this.actionRouteUrls.delete(handle);
     this.faultTags.end(handle);
     this.session.controller.cancel(handle);
   }
@@ -279,7 +300,7 @@ export class PagePerf {
       if (!owner) return span;
       const kind = owner.kind === "load" ? "load" : actionKind(owner.action);
       const name = owner.kind === "load" ? loadSpanName(this.url) : kind;
-      const key = perfKey(this.url, kind);
+      const key = perfKey(owner.kind === "load" ? this.url : owner.routeUrl, kind);
       // Re-spreading `name`/`key` keeps the positions `toPerfSpanReport` gave
       // them; `capped`/`faults` land where the old assignments put them.
       const decor = {

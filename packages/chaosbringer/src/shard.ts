@@ -25,6 +25,7 @@ import type {
   DiscoveryMetrics,
   FaultInjectionStats,
   PageResult,
+  PerfSettleRecord,
 } from "./types.js";
 
 /**
@@ -160,8 +161,22 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
     diff: undefined,
     // Rebuilt from the merged pages, like the clusters: a per-shard summary
     // cannot be added up (percentiles do not sum).
-    perf: buildCrawlPerfSummary(mergedPages, actions),
+    perf: buildCrawlPerfSummary(mergedPages, actions, { settle: agreedSettle(reports) }),
   };
+}
+
+/**
+ * The settle mode every shard recorded, or undefined when any shard did not
+ * record one or two disagree: a merged report must not claim one mode for
+ * spans measured under another, and `perf regress` treats a missing mode as
+ * unknown (a warning), not as a match.
+ */
+function agreedSettle(reports: readonly CrawlReport[]): PerfSettleRecord | undefined {
+  const modes = reports.map((r) => r.perf?.settle);
+  const first = modes[0];
+  if (!first) return undefined;
+  const same = (m: PerfSettleRecord | undefined) => m !== undefined && JSON.stringify(m) === JSON.stringify(first);
+  return modes.every(same) ? first : undefined;
 }
 
 /**

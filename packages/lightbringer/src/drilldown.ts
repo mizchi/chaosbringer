@@ -13,6 +13,25 @@ import type { SpanReport } from "./report-types";
 export interface DrilldownTraceEvent extends TraceEvent {
   // Trace args vary per event name; each reader below narrows what it needs.
   args?: any;
+  /** process / thread ids (Chrome trace format); used to find the renderer main threads */
+  pid?: number;
+  tid?: number;
+}
+
+/**
+ * `pid:tid` of every renderer main thread named by the trace's `thread_name`
+ * metadata, or null when the trace names no threads (hand-built or stripped
+ * events), in which case callers fall back to not filtering.
+ */
+function rendererMainThreads(events: readonly DrilldownTraceEvent[]): Set<string> | null {
+  let named = false;
+  const main = new Set<string>();
+  for (const e of events) {
+    if (e.ph !== "M" || e.name !== "thread_name") continue;
+    named = true;
+    if (e.args?.name === "CrRendererMain") main.add(`${e.pid}:${e.tid}`);
+  }
+  return named ? main : null;
 }
 
 /** The span fields the drilldown reads (a SpanReport satisfies it). */
@@ -55,7 +74,10 @@ export interface SelectorCost {
 export interface DrilldownAnalysis {
   span: DrilldownSpan;
   topN: number;
-  /** RunTask events in the window (main-thread tasks) */
+  /**
+   * RunTask events in the window on the renderer main thread(s), per the
+   * trace's thread_name metadata (every RunTask when the trace names no threads)
+   */
   tasks: { totalMs: number; count: number; /** tasks >= 50 ms, longest first */ longTasksMs: number[] };
   /** event-name breakdown (which subsystem), RunTask excluded; top 12 */
   byEventName: NamedTotal[];
@@ -121,6 +143,35 @@ export const HARNESS_FRAME_NAMES: ReadonlySet<string> = new Set([
   "drainMeasure",
 ]);
 
+/**
+ * Harness frames that mark their whole script as harness. Injected scripts
+ * carry no URL, so a script's other frames — the collector's bundled
+ * web-vitals (minified `A`, `i.m`, `r`), its anonymous callbacks, the
+ * native-looking `evaluate` / `query` of Playwright's utility script — would
+ * otherwise read as `[native]`. V8 gives every frame its script's
+ * `scriptId`, so one recognised frame is enough to claim the script. Only
+ * distinctive names are listed: a generic one (`visit`, `emit`) could claim
+ * an app's own URL-less `eval` script.
+ */
+export const HARNESS_SCRIPT_MARKERS: ReadonlySet<string> = new Set([
+  // lightbringer's in-page collector (browser.ts) and session probes
+  "browserCollector",
+  "onFrame",
+  "plainVitals",
+  "store.drain",
+  "store.flush",
+  "store.startFrames",
+  "drainLongTask",
+  "drainLoaf",
+  "drainMeasure",
+  "drainEvent",
+  "readGlRenderer",
+  "readCssProfile",
+  // Playwright's injected and utility scripts
+  "InjectedScript",
+  "UtilityScript",
+]);
+
 /** V8 synthetic frames: idle / GC time, not JS anyone wrote. */
 const SYNTHETIC_FRAMES = new Set(["(idle)", "(program)", "(garbage collector)", "(root)"]);
 
@@ -147,7 +198,21 @@ function addTotal(m: Map<string, { totalMs: number; count: number }>, key: strin
 export function analyseDrilldown(
   span: DrilldownSpan,
   events: readonly DrilldownTraceEvent[],
-  { pageUrl, topN = DRILLDOWN_TOP_N }: { pageUrl?: string; topN?: number } = {},
+  {
+    pageUrl,
+    topN = DRILLDOWN_TOP_N,
+    harnessFrames = [],
+  }: {
+    pageUrl?: string;
+    topN?: number;
+    /**
+     * Function names of the caller's own injected code (a crawler's init
+     * scripts and `page.evaluate` helpers), labelled harness like
+     * HARNESS_FRAME_NAMES and, like HARNESS_SCRIPT_MARKERS, claiming the
+     * URL-less script they are in.
+     */
+    harnessFrames?: Iterable<string>;
+  } = {},
 ): DrilldownAnalysis {
   const [startUs, endUs] = span.traceWindowUs;
   const firstPartyDomain = pageUrl ? domainOfUrl(pageUrl) : null;
@@ -157,7 +222,19 @@ export function analyseDrilldown(
     (e) => e.ph === "X" && e.ts != null && e.ts >= startUs && e.ts <= endUs,
   );
 
-  const taskDurs = inWindow.filter((e) => e.name === "RunTask").map((e) => e.dur! / 1000);
+  // RunTask exists on every thread of every process in the trace. Only the
+  // renderer main thread's are the page's tasks — what its long-task observer
+  // (and so `cpu.blockingMs`) sees. Counting the browser process's
+  // CrBrowserMain / DevTools pipe tasks made a navigating click show 50-65 ms
+  // "long tasks" next to blockingMs 0, which read as missed long tasks.
+  const mainThreads = rendererMainThreads(events);
+  const taskDurs = inWindow
+    .filter(
+      (e) =>
+        e.name === "RunTask" &&
+        (mainThreads === null || mainThreads.has(`${e.pid}:${e.tid}`)),
+    )
+    .map((e) => e.dur! / 1000);
   const tasks = {
     totalMs: taskDurs.reduce((a, d) => a + d, 0),
     count: taskDurs.length,
@@ -201,12 +278,31 @@ export function analyseDrilldown(
   // walked and only samples inside the window are counted.
   type Frame = { label: string; kind: FrameKind; party: "first" | "third" | null; domain: string | null };
   const nodeFrame = new Map<number, Frame | null>();
-  const selfByFrame = new Map<string, { ms: number; kind: FrameKind; party: Frame["party"] }>();
+  const selfByFrame = new Map<string, { label: string; ms: number; kind: FrameKind; party: Frame["party"] }>();
   const byKind: Record<FrameKind, number> = { app: 0, harness: 0, native: 0 };
   const byParty = { first: 0, third: 0 };
   const selfByDomain = new Map<string, number>();
   let profileStartUs: number | null = null;
   let cursorUs: number | null = null;
+
+  // Scripts known to be harness: a URL-less, non-builtin script (scriptId
+  // other than 0, which V8 gives to builtins like requestAnimationFrame) with
+  // a recognised frame anywhere in the trace. Collected over every chunk
+  // first: nodes are defined incrementally, and a script's marker frame may
+  // be defined after (or outside the window of) the frames it claims.
+  const extraHarness = new Set(harnessFrames);
+  const isScript = (sid: unknown) => sid != null && sid !== "" && String(sid) !== "0";
+  const harnessScripts = new Set<string>();
+  for (const e of events) {
+    if (e.name !== "ProfileChunk") continue;
+    for (const n of e.args?.data?.cpuProfile?.nodes ?? []) {
+      const cf = n.callFrame ?? {};
+      const fn: string = cf.functionName ?? "";
+      if (!cf.url && isScript(cf.scriptId) && (HARNESS_SCRIPT_MARKERS.has(fn) || extraHarness.has(fn))) {
+        harnessScripts.add(String(cf.scriptId));
+      }
+    }
+  }
 
   for (const e of events) {
     if (e.name === "Profile" && e.args?.data?.startTime != null) {
@@ -223,8 +319,14 @@ export function analyseDrilldown(
         nodeFrame.set(n.id, null);
         continue;
       }
-      // app = has a script URL; harness = known injected/collector name; native = rest
-      const kind: FrameKind = cf.url ? "app" : HARNESS_FRAME_NAMES.has(fn) ? "harness" : "native";
+      // app = has a script URL; harness = known injected/collector name, or
+      // any frame of a script one of those is in; native = the rest (builtins,
+      // and URL-less scripts nothing identifies, such as an app's eval)
+      const harness =
+        HARNESS_FRAME_NAMES.has(fn) ||
+        extraHarness.has(fn) ||
+        (isScript(cf.scriptId) && harnessScripts.has(String(cf.scriptId)));
+      const kind: FrameKind = cf.url ? "app" : harness ? "harness" : "native";
       const loc = cf.url ? `${shorten(cf.url)}:${(cf.lineNumber ?? 0) + 1}` : "";
       const domain = kind === "app" ? domainOfUrl(cf.url) : null;
       const party =
@@ -240,9 +342,13 @@ export function analyseDrilldown(
       if (cursorUs < startUs || cursorUs > endUs) continue;
       const frame = nodeFrame.get(samples[i]!);
       if (!frame) continue;
-      const cur = selfByFrame.get(frame.label) ?? { ms: 0, kind: frame.kind, party: frame.party };
+      // Keyed by kind too: URL-less frames of different scripts share a
+      // label ("(anonymous)"), and a harness row must not absorb (and
+      // relabel) a native one's time, or the other way round.
+      const rowKey = `${frame.kind}\0${frame.label}`;
+      const cur = selfByFrame.get(rowKey) ?? { label: frame.label, ms: 0, kind: frame.kind, party: frame.party };
       cur.ms += dt / 1000;
-      selfByFrame.set(frame.label, cur);
+      selfByFrame.set(rowKey, cur);
       byKind[frame.kind] += dt / 1000;
       if (frame.party) byParty[frame.party] += dt / 1000;
       if (frame.party === "third" && frame.domain) {
@@ -250,8 +356,8 @@ export function analyseDrilldown(
       }
     }
   }
-  const ranked = [...selfByFrame.entries()]
-    .map(([key, v]) => ({ key, selfMs: round(v.ms), kind: v.kind, party: v.party }))
+  const ranked = [...selfByFrame.values()]
+    .map((v) => ({ key: v.label, selfMs: round(v.ms), kind: v.kind, party: v.party }))
     .filter((r) => r.selfMs > 0)
     .sort((a, b) => b.selfMs - a.selfMs)
     .slice(0, topN);
@@ -329,10 +435,29 @@ export function analyseDrilldown(
  */
 export function formatDrilldown(
   a: DrilldownAnalysis,
-  { slug, spanName }: { slug: string; spanName: string },
+  {
+    slug,
+    spanName,
+    selectorStatsHint,
+  }: {
+    slug: string;
+    spanName: string;
+    /**
+     * How to get SelectorStats into the trace, for the "no SelectorStats"
+     * line. Defaults to lightbringer's `PERF_CSS=1`; a caller with its own
+     * switch (chaosbringer's `perf.cssSelectorStats`) names that instead,
+     * and the selector section's note then says "SelectorStats" rather
+     * than "PERF_CSS".
+     */
+    selectorStatsHint?: string;
+  },
 ): string[] {
   const out: string[] = [];
   const { span, topN } = a;
+  // Without a caller hint the wording is lightbringer's own, byte for byte
+  // as before the option existed (its scripts' output must not drift).
+  const cssHint = selectorStatsHint ?? "run with PERF_CSS=1";
+  const cssSwitch = selectorStatsHint === undefined ? "PERF_CSS instruments" : "SelectorStats instrument";
   const pad = (v: number | string, n: number) => String(v).padStart(n);
   out.push(`\n[drilldown] ${slug}`);
   out.push(
@@ -404,7 +529,7 @@ export function formatDrilldown(
       `\n  CSS selector match cost (${sel.count} selectors, ${round(sel.totalUs / 1000)}ms total matching):`,
     );
     out.push(
-      `    note: PERF_CSS instruments every match attempt, so the recalc TIME is inflated` +
+      `    note: ${cssSwitch} every match attempt, so the recalc TIME is inflated` +
         ` (this run's recalc=${span.render?.recalcStyleMs ?? "n/a"}ms). Use this to find WHICH` +
         ` selectors; read recalcStyleMs from a normal run for the real magnitude.`,
     );
@@ -422,7 +547,7 @@ export function formatDrilldown(
     }
   } else if ((span.render?.recalcStyleMs ?? 0) > 0) {
     out.push(
-      `\n  CSS selector match cost: no SelectorStats in window (run with PERF_CSS=1 to see per-selector cost)`,
+      `\n  CSS selector match cost: no SelectorStats in window (${cssHint} to see per-selector cost)`,
     );
   }
   return out;

@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  checkKeyVersions,
+  checkSettleModes,
+  crawlBudgetsSettleMismatch,
   emitPerfBudgets,
   formatPerfGate,
   gatePerf,
@@ -15,7 +18,29 @@ import {
   splitCurrentOperands,
 } from "./perf-cli.js";
 import { appRun, fakeAction, fakePage, fakeReport, fakeSpan } from "./perf-fixtures.test-helpers.js";
-import type { CrawlReport, PerfSpanReport } from "./types.js";
+import type { CrawlReport, PerfSettleRecord, PerfSpanReport } from "./types.js";
+
+const NETWORKIDLE: PerfSettleRecord = { mode: "networkidle" };
+const ADAPTIVE: PerfSettleRecord = { mode: "adaptive", quietMs: 100 };
+
+/** `report` as a crawl recording perfKey version `keyVersion` writes it (`perf.keyVersion`). */
+function keyed(report: CrawlReport, keyVersion: number): CrawlReport {
+  return {
+    ...report,
+    perf: {
+      ...(report.perf ?? { vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } }),
+      keyVersion,
+    },
+  };
+}
+
+/** `report` as a crawl settled with `settle` records it (`perf.settle`). */
+function settled(report: CrawlReport, settle: PerfSettleRecord): CrawlReport {
+  return {
+    ...report,
+    perf: { settle, vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } },
+  };
+}
 
 describe("emitPerfBudgets", () => {
   it("writes ceil(median × headroom) per key for lightbringer's emit metrics", () => {
@@ -174,6 +199,77 @@ describe("regressPerf", () => {
   });
 });
 
+describe("checkSettleModes", () => {
+  it("agrees on one mode, flags two, and lists sources that recorded none", () => {
+    expect(
+      checkSettleModes([
+        { side: "baseline", source: "a", settle: NETWORKIDLE },
+        { side: "current", source: "b", settle: { mode: "networkidle" } },
+      ]),
+    ).toEqual({ unrecorded: [], agreed: NETWORKIDLE });
+
+    const mixed = checkSettleModes([
+      { side: "baseline", source: "a", settle: NETWORKIDLE },
+      { side: "baseline", source: "b", settle: NETWORKIDLE },
+      { side: "current", source: "c", settle: ADAPTIVE },
+      { side: "current", source: "d", settle: undefined },
+    ]);
+    expect(mixed.mismatch).toContain("baseline: networkidle ×2; current: adaptive (quiet 100 ms) ×1");
+    expect(mixed.unrecorded).toEqual(["d"]);
+    expect(mixed.agreed).toBeUndefined();
+
+    // Two adaptive quiet windows are two modes: the settle inside the span differs.
+    expect(
+      checkSettleModes([
+        { side: "baseline", source: "a", settle: ADAPTIVE },
+        { side: "current", source: "b", settle: { mode: "adaptive", quietMs: 250 } },
+      ]).mismatch,
+    ).toBeDefined();
+  });
+});
+
+// The crawler's own `--perf-budgets` check was not settle-checked: budgets
+// emitted from networkidle crawls, enforced during an adaptive crawl, fail on
+// the settle (now inside the action span), not on the app.
+describe("checkKeyVersions", () => {
+  it("accepts one version and reads an absent version as 1", () => {
+    expect(checkKeyVersions([{ side: "baseline", source: "a", keyVersion: undefined }, { side: "current", source: "b", keyVersion: 1 }])).toBeUndefined();
+    expect(checkKeyVersions([{ side: "baseline", source: "a", keyVersion: 2 }, { side: "current", source: "b", keyVersion: 2 }])).toBeUndefined();
+  });
+
+  it("refuses to join keys of different versions, naming each side", () => {
+    const why = checkKeyVersions([
+      { side: "baseline", source: "a", keyVersion: undefined },
+      { side: "current", source: "b", keyVersion: 2 },
+    ]);
+    expect(why).toContain("different perfKey versions");
+    expect(why).toContain("baseline: v1 ×1");
+    expect(why).toContain("current: v2 ×1");
+  });
+});
+
+describe("crawlBudgetsSettleMismatch", () => {
+  const file = (settle?: PerfSettleRecord) => ({
+    version: 1,
+    headroom: 1.5,
+    budgets: { "/ :: click #go": { durationMs: 50 } },
+    ...(settle ? { settle } : {}),
+  });
+
+  it("flags an emit-budgets file measured under another settle mode than the crawl's", () => {
+    expect(crawlBudgetsSettleMismatch(file(NETWORKIDLE), ADAPTIVE)).toContain(
+      "measured under networkidle, but this crawl settles adaptive (quiet 100 ms)",
+    );
+    expect(crawlBudgetsSettleMismatch(file(ADAPTIVE), { mode: "adaptive", quietMs: 250 })).toBeDefined();
+  });
+
+  it("passes the same mode, a file that recorded none, and a hand-written rules array", () => {
+    expect(crawlBudgetsSettleMismatch(file(ADAPTIVE), { mode: "adaptive", quietMs: 100 })).toBeUndefined();
+    expect(crawlBudgetsSettleMismatch(file(), ADAPTIVE)).toBeUndefined();
+    expect(crawlBudgetsSettleMismatch([{ match: "*", budget: { durationMs: 5 } }], ADAPTIVE)).toBeUndefined();
+  });
+});
+
 describe("argument helpers", () => {
   it("splitCurrentOperands takes every operand after --current up to the next flag", () => {
     expect(splitCurrentOperands(["base/", "--current", "a.json", "b.json", "--threshold", "0.2"])).toEqual({
@@ -280,6 +376,45 @@ describe("runPerfCli", () => {
     );
   });
 
+  it("regress refuses (exit 2) a baseline whose perfKeys are another version, unless --allow-key-mismatch", async () => {
+    const baseDir = join(dir, "v1-baseline");
+    mkdirSync(baseDir);
+    // Written before keyVersion was recorded: version 1.
+    for (const i of [1, 2, 3]) writeFileSync(join(baseDir, `r${i}.json`), JSON.stringify(appRun({ blockingMs: 100 })));
+    const cur = [1, 2, 3].map((i) => write(`k${i}.json`, keyed(appRun({ blockingMs: 250 }), 2)));
+
+    await runPerfCli(["regress", baseDir, "--current", ...cur]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("different perfKey versions");
+    expect(errored()).not.toContain("blockingMs 100 → 250");
+
+    process.exitCode = 0;
+    await runPerfCli(["regress", baseDir, "--current", ...cur, "--allow-key-mismatch"]);
+    expect(process.exitCode).toBe(1);
+    expect(errored()).toContain("WARNING (--allow-key-mismatch)");
+    expect(errored()).toContain("/app :: click #go.cpu.blockingMs 100 → 250");
+  });
+
+  it("emit-budgets records the reports' key version, and gate refuses reports of another version", async () => {
+    const v2 = [1, 2, 3].map((i) => write(`v2-${i}.json`, keyed(appRun({ blockingMs: 10 + i }), 2)));
+    const out = join(dir, "v2-budgets.json");
+    await runPerfCli(["emit-budgets", ...v2, "--out", out]);
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(out, "utf-8")).keyVersion).toBe(2);
+
+    await runPerfCli(["gate", write("old.json", appRun({ blockingMs: 11 })), "--budgets", out]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("budgets: v2 ×1");
+
+    process.exitCode = 0;
+    const v1Out = join(dir, "v1-budgets.json");
+    await runPerfCli(["emit-budgets", ...[1, 2].map((i) => write(`v1-${i}.json`, appRun({ blockingMs: 10 }))), "--out", v1Out]);
+    expect(JSON.parse(readFileSync(v1Out, "utf-8")).keyVersion).toBe(1);
+
+    await runPerfCli(["emit-budgets", v2[0]!, write("mixed.json", appRun({ blockingMs: 10 })), "--out", join(dir, "m.json")]);
+    expect(process.exitCode).toBe(2);
+  });
+
   it("regress reads a baseline directory (skipping non-report JSON) and exits 1 on a regression", async () => {
     const baseDir = join(dir, "baseline");
     mkdirSync(baseDir);
@@ -364,6 +499,91 @@ describe("runPerfCli", () => {
     expect(readFileSync(out, "utf-8")).toBe(before);
   });
 
+  // B5: a networkidle baseline against an adaptive current read as a +488%
+  // regression on every scroll (the 100 ms pause moves into the span) and
+  // exited 1. The comparison is refused with its own exit code instead.
+  it("regress refuses (exit 2) baseline and current crawled under different settle modes", async () => {
+    const base = [1, 2, 3].map((i) => write(`b${i}.json`, settled(appRun({ durationMs: 5 }), NETWORKIDLE)));
+    const cur = [1, 2, 3].map((i) => write(`c${i}.json`, settled(appRun({ durationMs: 30 }), ADAPTIVE)));
+
+    await runPerfCli(["regress", ...base, "--current", ...cur]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("refusing to compare");
+    expect(errored()).toContain("baseline: networkidle ×3; current: adaptive (quiet 100 ms) ×3");
+    expect(errored()).toContain("--allow-settle-mismatch");
+    // Refused before comparing: no regression table.
+    expect(errored()).not.toContain("durationMs 5 → 30");
+
+    // Overridden: compared, the regression counts (exit 1), and the mismatch is still said loudly.
+    process.exitCode = 0;
+    errSpy.mockClear();
+    await runPerfCli(["regress", ...base, "--current", ...cur, "--allow-settle-mismatch"]);
+    expect(process.exitCode).toBe(1);
+    expect(errored()).toContain("WARNING (--allow-settle-mismatch)");
+    expect(errored()).toContain("/app :: click #go.durationMs 5 → 30");
+
+    // The same mode on both sides: no settle message at all.
+    process.exitCode = 0;
+    errSpy.mockClear();
+    const same = [1, 2, 3].map((i) => write(`s${i}.json`, settled(appRun({ durationMs: 5 }), NETWORKIDLE)));
+    await runPerfCli(["regress", ...base, "--current", ...same]);
+    expect(process.exitCode).toBe(0);
+    expect(errored()).not.toMatch(/settle/);
+  });
+
+  it("regress only warns when a report does not record its settle mode (older chaosbringer)", async () => {
+    const base = write("old.json", appRun({ durationMs: 5 }));
+    const cur = write("new.json", settled(appRun({ durationMs: 5 }), ADAPTIVE));
+    await runPerfCli(["regress", base, "--current", cur, "--json"]);
+    expect(process.exitCode).toBe(0);
+    expect(errored()).toContain("1 input(s) do not record their settle mode");
+    expect(errored()).toContain("old.json");
+    // The warning stays off stdout: --json output still parses.
+    expect(JSON.parse(logged()).failed).toBe(false);
+  });
+
+  it("emit-budgets records the settle mode, and gate refuses reports settled differently", async () => {
+    const runs = [1, 2, 3].map((i) => write(`r${i}.json`, settled(appRun({ durationMs: 5 }), NETWORKIDLE)));
+    const out = join(dir, "budgets.json");
+    await runPerfCli(["emit-budgets", ...runs, "--out", out]);
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(out, "utf-8")).settle).toEqual(NETWORKIDLE);
+
+    const adaptive = write("a.json", settled(appRun({ durationMs: 5 }), ADAPTIVE));
+    await runPerfCli(["gate", adaptive, "--budgets", out]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("budgets: networkidle ×1; reports: adaptive (quiet 100 ms) ×1");
+
+    process.exitCode = 0;
+    await runPerfCli(["gate", adaptive, "--budgets", out, "--allow-settle-mismatch"]);
+    expect(process.exitCode).toBe(0);
+    expect(logged()).toContain("[perf gate] passed");
+
+    // The gated reports are checked among themselves too, even against a
+    // hand-written perfBudgets array (which records no mode).
+    process.exitCode = 0;
+    const globs = write("globs.json", [{ match: "*", budget: { durationMs: 1000 } }]);
+    await runPerfCli(["gate", runs[0]!, adaptive, "--budgets", globs]);
+    expect(process.exitCode).toBe(2);
+  });
+
+  it("emit-budgets refuses reports of mixed settle modes, and records none from unrecorded ones", async () => {
+    const out = join(dir, "budgets.json");
+    const mixed = [
+      write("n.json", settled(appRun({}), NETWORKIDLE)),
+      write("a.json", settled(appRun({}), ADAPTIVE)),
+    ];
+    await runPerfCli(["emit-budgets", ...mixed, "--out", out]);
+    expect(process.exitCode).toBe(2);
+    expect(() => readFileSync(out)).toThrow();
+
+    process.exitCode = 0;
+    await runPerfCli(["emit-budgets", write("n2.json", settled(appRun({}), NETWORKIDLE)), write("old.json", appRun({})), "--out", out]);
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(out, "utf-8")).settle).toBeUndefined();
+    expect(errored()).toContain("do not record their settle mode");
+  });
+
   describe("drilldown", () => {
     const KEY = "/app :: click #go";
 
@@ -432,6 +652,79 @@ describe("runPerfCli", () => {
       const out = logged();
       expect(out).toContain(`span "${KEY}"`);
       expect(out).toContain("RunTask total 120ms / 1 tasks");
+    });
+
+    // An action keyed by the route it navigated to (B17: `/cart :: click
+    // #buy`) lives in the sidecar of the visit that started on `/app`; the
+    // drilldown used to look only at pages whose URL is `/cart`.
+    it("drills into a post-navigation key whose route has no visit of its own", async () => {
+      const perfOut = join(dir, "perf");
+      mkdirSync(perfOut);
+      const tracePath = join(perfOut, "p.trace.json");
+      writeFileSync(tracePath, JSON.stringify([{ name: "RunTask", ph: "X", ts: 2000, dur: 120000 }]));
+      const cartKey = "/cart :: click #buy";
+      const span = { ...fakeSpan(cartKey, { durationMs: 200, blockingMs: 120 }), traceWindowUs: [1000, 300000] as [number, number] };
+      writeFileSync(join(perfOut, "p.json"), JSON.stringify({ url: "http://localhost:3000/app", tracePath, spans: [span] }));
+      const base = tracedRun({ reportPath: "p.json", perfOut });
+      const r = write("r.json", { ...base, actions: [...base.actions, fakeAction(span)] });
+      await runPerfCli(["drilldown", r, cartKey]);
+      expect(process.exitCode).toBe(0);
+      expect(logged()).toContain(`span "${cartKey}"`);
+      expect(logged()).toContain("RunTask total 120ms / 1 tasks");
+    });
+
+    // B13: the self-time table read `A  [native]`, `evaluate  [native]` for
+    // the collector and chaosbringer's own injected helpers, and the CSS hint
+    // said PERF_CSS=1, which a crawl never reads.
+    it("labels the injected collector and chaosbringer's helpers harness, and names the crawl's CSS switch", async () => {
+      const perfOut = join(dir, "perf");
+      mkdirSync(perfOut);
+      const tracePath = join(perfOut, "p.trace.json");
+      const node = (id: number, functionName: string, scriptId: number) => ({ id, callFrame: { functionName, scriptId } });
+      writeFileSync(
+        tracePath,
+        JSON.stringify([
+          { name: "Profile", ph: "P", ts: 1000, args: { data: { startTime: 1000 } } },
+          {
+            name: "ProfileChunk",
+            ph: "P",
+            ts: 1000,
+            args: {
+              data: {
+                cpuProfile: {
+                  // Script 3 is the collector (browserCollector + its minified
+                  // web-vitals `A`); script 25 is chaosbringer's collectRawLinks
+                  // with a nested anonymous callback; 0 is a builtin.
+                  nodes: [
+                    node(1, "(root)", 0),
+                    node(2, "browserCollector", 3),
+                    node(3, "A", 3),
+                    node(4, "collectRawLinks", 25),
+                    node(5, "linkFilter", 25),
+                    node(6, "requestAnimationFrame", 0),
+                  ],
+                  samples: [3, 3, 4, 5, 6],
+                },
+                timeDeltas: [1000, 1000, 1000, 1000, 1000],
+              },
+            },
+          },
+        ]),
+      );
+      const span = { ...fakeSpan(KEY, { durationMs: 200 }), traceWindowUs: [1000, 300000] as [number, number] };
+      span.render = { ...span.render, recalcStyleMs: 3 };
+      writeFileSync(join(perfOut, "p.json"), JSON.stringify({ url: "http://localhost:3000/app", tracePath, spans: [span] }));
+      const r = write("r.json", tracedRun({ reportPath: "p.json", perfOut }));
+      await runPerfCli(["drilldown", r, KEY]);
+      expect(process.exitCode).toBe(0);
+      const out = logged();
+      expect(out).toMatch(/A +\[harness\]/);
+      expect(out).toMatch(/collectRawLinks +\[harness\]/);
+      expect(out).toMatch(/linkFilter +\[harness\]/);
+      expect(out).toMatch(/requestAnimationFrame +\[native\]/);
+      expect(out).toContain("[app 0ms / harness 4ms / native 1ms]");
+      expect(out).not.toContain("PERF_CSS");
+      expect(out).toContain("no SelectorStats in window (crawl with perf: { cssSelectorStats: true }");
     });
 
     it("refuses a wrong operand count", async () => {

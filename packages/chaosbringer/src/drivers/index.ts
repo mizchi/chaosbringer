@@ -31,6 +31,7 @@ export { weightedRandomDriver, type WeightedRandomDriverOptions } from "./weight
 export {
   perfSeekingCost,
   perfSeekingDriver,
+  PERF_SEEKING_COST_BUCKET_MS,
   PERF_SEEKING_COST_FLOOR_MS,
   PERF_SEEKING_DEFAULT_EPSILON,
   type PerfSeekingDriverOptions,

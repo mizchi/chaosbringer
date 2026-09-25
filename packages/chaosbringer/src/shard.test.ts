@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { fakeSpan } from "./perf-fixtures.test-helpers.js";
 import { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
@@ -253,5 +254,19 @@ describe("mergeReports", () => {
     const r1 = merged.faultInjections!.find((f) => f.rule === "r1");
     expect(r1).toEqual({ rule: "r1", matched: 8, injected: 3 });
     expect(merged.faultInjections).toHaveLength(2);
+  });
+
+  it("keeps the settle mode the shards agree on, and drops one they disagree on (B5)", () => {
+    const measured = (url: string, settle: NonNullable<CrawlReport["perf"]>["settle"]) =>
+      report({
+        pages: [page(url, [], { perf: fakeSpan(`${new URL(url).pathname} :: load`) })],
+        perf: { settle, vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 1, pages: 1 } },
+      });
+    const idle = { mode: "networkidle" } as const;
+    expect(mergeReports([measured("http://x/a", idle), measured("http://x/b", idle)]).perf?.settle).toEqual(idle);
+    // Spans of two modes in one report: claiming either would let perf regress compare it as that mode.
+    const mixed = mergeReports([measured("http://x/a", idle), measured("http://x/b", { mode: "adaptive", quietMs: 100 })]);
+    expect(mixed.perf).toBeDefined();
+    expect(mixed.perf!.settle).toBeUndefined();
   });
 });

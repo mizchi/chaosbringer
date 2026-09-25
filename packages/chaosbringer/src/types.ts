@@ -452,7 +452,32 @@ export interface CrawlVitalSummary {
  * lower bound. The per-page sidecars under `perf.outDir` have the full lists.
  */
 export interface CrawlPerfSummary {
-  /** LCP / INP / CLS / TTFB / FCP over the pages that reported each one. */
+  /**
+   * How this crawl's steps settled: `CrawlerOptions.settle`, resolved
+   * (`"adaptive"` becomes `{ mode: "adaptive", quietMs: 100 }`). Recorded
+   * because the settle mode changes what a span measures — under
+   * `networkidle` the crawler's fixed 100 ms pause between actions falls
+   * outside the action span, under adaptive the settle is inside it — so
+   * spans from crawls settled differently are not comparable. `perf regress`
+   * and `perf gate` refuse such comparisons. Absent in reports written before
+   * it was recorded, and in a report merged from shards that disagreed.
+   */
+  settle?: PerfSettleRecord;
+  /**
+   * `PERF_KEY_VERSION` of the perfKeys in this report. A key's meaning
+   * changed once (actions after a navigating click are now keyed by the page
+   * they ran on), so the same key string in reports of different versions
+   * can name different steps; `perf regress` and `perf gate` refuse to join
+   * them. Absent in reports written before it was recorded, which are
+   * version 1.
+   */
+  keyVersion?: number;
+  /**
+   * LCP / INP / CLS / TTFB / FCP over the documents that reported each one.
+   * A page visit an action navigated away from counts each of its documents
+   * (`PagePerfSummary.documents`), under that document's own URL, so `worst.url`
+   * is the document the value was measured on, not the page the visit began at.
+   */
   vitals: Record<string, CrawlVitalSummary>;
   /** The 10 longest action spans, slowest first. */
   slowestActions: Array<{ key: string; durationMs: number; blockingMs: number; interactionMs?: number }>;
@@ -518,9 +543,15 @@ export interface PerfDegradationEntry {
 export interface CrawlCoverageKind {
   totalBytes: number;
   usedBytes: number;
-  /** usedBytes / totalBytes as a percentage, one decimal. */
-  usedPct: number;
-  /** The 10 resources with the most unused bytes, most unused first. */
+  /**
+   * usedBytes / totalBytes as a percentage, one decimal. Absent when the crawl
+   * saw no resources of this kind (`totalBytes` 0), rather than a misleading 0.
+   */
+  usedPct?: number;
+  /**
+   * Up to 10 resources with unused bytes, most unused first. Fully used
+   * resources are never listed, so this can be shorter than 10 or empty.
+   */
   lowUsage: Array<{ url: string; totalBytes: number; usedBytes: number; usedPct: number }>;
 }
 
@@ -529,7 +560,11 @@ export interface CrawlCoverageKind {
  * purpose; the full lightbringer report is the sidecar at `reportPath`.
  */
 export interface PagePerfSummary {
-  /** web-vitals of the last document the page showed. */
+  /**
+   * web-vitals of the last document the page showed — after a click that
+   * navigated, that is the next page's, not `PageResult.url`'s; `documents`
+   * has each document's under its own URL.
+   */
   vitals: Record<string, VitalSample>;
   /** Per-document vitals, present only when the page went through more than one document. */
   documents?: DocumentReport[];
@@ -820,6 +855,9 @@ export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
  * See `settle.ts`.
  */
 export type SettleMode = "networkidle" | "adaptive" | number;
+
+/** A resolved `SettleMode`, as recorded in `CrawlPerfSummary.settle`. */
+export type PerfSettleRecord = { mode: "networkidle" } | { mode: "adaptive"; quietMs: number };
 
 export const NETWORK_PROFILES = ["slow-3g", "fast-3g", "offline"] as const satisfies ReadonlyArray<NetworkProfile>;
 

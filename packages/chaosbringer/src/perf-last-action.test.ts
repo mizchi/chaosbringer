@@ -9,7 +9,7 @@ import type { ActionResult } from "./types.js";
  * closed mid-span), and `peekSpan` reports each recorded span's blocking
  * time as its index * 100 so the tests can tell which span was read.
  */
-function fakePerf() {
+function fakePerf(page?: { url: () => string }) {
   const spans: Array<{ name: string }> = [];
   let dropNext = false;
   let id = 0;
@@ -43,7 +43,7 @@ function fakePerf() {
     finish: async () => ({ report: { spans: [] } }),
   };
   const Ctor = PagePerf as unknown as new (...args: unknown[]) => PagePerf;
-  const perf = new Ctor(session, { send: async () => ({}) }, "http://localhost:3000/items/7", { level: "light" }, "slug", []);
+  const perf = new Ctor(session, { send: async () => ({}) }, "http://localhost:3000/items/7", { level: "light" }, "slug", [], page);
   return { perf, peekSpan, drop: () => (dropNext = true) };
 }
 
@@ -69,6 +69,28 @@ describe("PagePerf.lastActionPerf", () => {
       cpu: { blockingMs: 100, longTaskCount: 1 },
       network: { requestCount: 1, encodedKB: 0.5 },
     });
+  });
+
+  it("keys an action by the page's URL when it began, not the visit's", async () => {
+    // The visit is /items/7; a link click took the page to /cart.
+    let live = "http://localhost:3000/items/7";
+    const { perf } = fakePerf({ url: () => live });
+    const nav = await perf.beginAction();
+    live = "http://localhost:3000/cart";
+    await perf.endAction(nav, click("a.cart"));
+    // The click that navigated ran on the page it started on …
+    expect(perf.lastActionPerf()?.key).toBe("/items/:id :: click a.cart");
+    // … and the next one runs on /cart.
+    const next = await perf.beginAction();
+    await perf.endAction(next, click("#checkout"));
+    expect(perf.lastActionPerf()?.key).toBe("/cart :: click #checkout");
+  });
+
+  it("keeps the visit's route when the page is on another origin", async () => {
+    const { perf } = fakePerf({ url: () => "chrome-error://chromewebdata/" });
+    const h = await perf.beginAction();
+    await perf.endAction(h, click("#x"));
+    expect(perf.lastActionPerf()?.key).toBe("/items/:id :: click #x");
   });
 
   it("builds once per action, however often it is asked", async () => {

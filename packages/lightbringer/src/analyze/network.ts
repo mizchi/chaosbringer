@@ -46,12 +46,26 @@ export interface ThirdPartyBreakdown {
 }
 
 /** Network breakdown of a span (network bottleneck analysis). */
+/**
+ * A span's network. A request belongs to the span it STARTED in:
+ * `requestCount`, `encodedKB`, `waves`, `thirdParty`, `byInitiator` and
+ * `requests` cover only those (a request is never counted in two
+ * non-overlapping spans). `busyMs` is the one exception: it is how long the
+ * network was busy inside the window, so a request an earlier span fired that
+ * is still running adds its clipped overlap there.
+ */
 export interface SpanNetwork {
+  /** requests that started inside the span */
   requestCount: number;
+  /** bytes of the requests that started inside the span (a request with no response yet counts 0) */
   encodedKB: number;
-  /** Wall time the network was busy during the span (union of request intervals, ms). */
+  /**
+   * Wall time the network was busy during the span (union of the overlapping
+   * requests' intervals, clipped to the span, ms), including requests started
+   * before it.
+   */
   busyMs: number;
-  /** Waterfall waves = approximate depth of serial dependency. 1 = one parallel wave. */
+  /** Waterfall waves = approximate depth of serial dependency. 1 = one parallel wave. Over the span's own requests. */
   waves: number;
   /** subset of this span's network attributable to third-party origins */
   thirdParty: ThirdPartyBreakdown;
@@ -60,9 +74,15 @@ export interface SpanNetwork {
   requests: Array<{
     url: string;
     type: string;
-    /** start offset relative to the span start (ms) */
+    /** start offset relative to the span start (ms); never negative */
     startOffsetMs: number;
+    /** start to response end (ms), even past the span's end; 0 when `unfinished` */
     durationMs: number;
+    /**
+     * true when no response was recorded by the time the report was built
+     * (still in flight, or failed / aborted), so `durationMs` 0 is unknown.
+     */
+    unfinished?: true;
     kb: number;
     /** true if served from a registrable domain other than the page's */
     thirdParty: boolean;
@@ -372,16 +392,31 @@ export function buildSpanNetwork(
     interval?: [number, number];
     initiator?: Initiator;
   }> = [];
+  // Requests that started inside the span, and so belong to it: waves (the
+  // dependency depth of what the span fired) is counted over these only.
+  const ownIntervals: Array<[number, number]> = [];
   let encoded = 0;
   for (const r of reqs) {
+    // A request with no response yet (still in flight, or failed / aborted:
+    // capture only records `loadingFinished`) has no known end; it is a point.
     const end = r.endEpochMs ?? r.startEpochMs;
     if (r.startEpochMs > span.endEpochMs || end < span.startEpochMs) continue;
-    encoded += r.encoded ?? 0;
     const clipStart = Math.max(r.startEpochMs, span.startEpochMs);
     const clipEnd = Math.min(end, span.endEpochMs);
     const interval: [number, number] | undefined =
       clipEnd > clipStart ? [clipStart, clipEnd] : undefined;
+    // busyMs is "how long the network was busy during this span", so every
+    // overlapping request contributes its clipped interval, including one a
+    // previous span fired that is still running.
     if (interval) intervals.push(interval);
+    // Everything else attributes the request to the span that STARTED it.
+    // Counting it in every span it overlaps (the pre-fix behaviour) listed a
+    // slow request once per step it outlived: a click that fired nothing read
+    // `requestCount: 2`, the "a step with no request stays at none" budget
+    // broke, and a delay fault's cost landed on the clean spans after it.
+    if (r.startEpochMs < span.startEpochMs) continue;
+    if (interval) ownIntervals.push(interval);
+    encoded += r.encoded ?? 0;
     const tp = isThirdParty(r.url, firstPartyDomain);
     requests.push({
       url: r.url,
@@ -391,6 +426,8 @@ export function buildSpanNetwork(
       kb: round((r.encoded ?? 0) / 1024),
       thirdParty: tp,
       initiator: r.initiator,
+      // durationMs 0 here is "no response recorded", not "instant".
+      ...(r.endEpochMs == null ? { unfinished: true as const } : {}),
     });
     tpRecords.push({
       url: r.url,
@@ -408,7 +445,7 @@ export function buildSpanNetwork(
     requestCount,
     encodedKB: round(encoded / 1024),
     busyMs: round(unionLength(intervals)),
-    waves: countWaves(intervals),
+    waves: countWaves(ownIntervals),
     thirdParty: buildThirdParty(tpRecords, firstPartyDomain),
     byInitiator: buildInitiators(tpRecords),
     requests: requests.slice(0, REQUESTS_PER_SPAN_LIMIT),

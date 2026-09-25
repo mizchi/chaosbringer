@@ -115,6 +115,29 @@ describe("buildLoadReport", () => {
     expect(report.workers[1]!.iterationFailures).toBe(1);
   });
 
+  it("reports the iterations the deadline cut short, per scenario and worker", () => {
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: 1000,
+      endTime: 11000,
+      durationMs: 10000,
+      plannedDurationMs: 10000,
+      rampUpMs: 0,
+      planned: [
+        { workerIndex: 0, spec },
+        { workerIndex: 1, spec },
+      ],
+      samples: [{ ...sampleFor(0), truncatedIterations: 1 }, sampleFor(1)],
+    });
+    // Finished iterations only; the cut-short one is counted apart.
+    expect(report.scenarios[0]!.iterations).toBe(2);
+    expect(report.scenarios[0]!.truncatedIterations).toBe(1);
+    expect(report.totals.truncatedIterations).toBe(1);
+    expect(report.workers[0]!.truncatedIterations).toBe(1);
+    expect(report.workers[1]!.truncatedIterations).toBeUndefined();
+    expect(formatLoadReport(report)).toContain("truncated=1");
+  });
+
   it("produces a per-second timeline aligned to start time", () => {
     const start = 10_000;
     const sample: WorkerSamples = {

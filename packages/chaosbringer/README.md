@@ -993,6 +993,17 @@ Slowest actions:
 
 Spans (`PageResult.perf`, `ActionResult.perf`), their stable `perfKey`s, levels, overhead and artefacts are in [docs/recipes/perf.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md).
 
+Before you trust a number:
+
+- **Under the default `networkidle` settle, a span's `durationMs` is mostly the crawler's wait.** Rank hotspots by `busyMs`, `blockingMs` and `scriptMs`, or crawl with `--settle adaptive`, where `durationMs` follows the app. The settle mode is recorded in the report, and `perf gate` / `regress` refuse (exit 2) to compare runs crawled under different modes.
+- **`--settle adaptive` does not wait for timers**, so errors a page throws a few hundred ms after it goes quiet are missed. Hunt late async errors under `networkidle` or a long fixed settle.
+- **Leak `trends` need `--perf-mem`.** Without the forced GC, a step's uncollected garbage reads as growth, and non-leaking pages get flagged.
+- **A probabilistic fault shares the crawler's RNG**, so the same seed with and without it is a different crawl. Compare within one run (`perf.degradation`) or use a `schedule`.
+- **Gate CPU regressions on `scriptMs`**, which scales with the work; `blockingMs` reads 0 until a task crosses 50 ms. For hand-set budgets on a shared runner, allow +20–25% or +20 ms, whichever is larger, over the median of 3–5 runs.
+- **A click that navigates has no `interactionMs`**, and work a harness runs through `page.evaluate` does not show in `blockingMs`.
+
+The details, with the measurements behind them, are in perf.md's [settling](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle), [noise](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#how-much-noise-to-expect) and [caveats](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#caveats) sections.
+
 ## Trace record / replay / minimize
 
 For failures that are hard to diagnose from a seed alone, record the exact sequence of visits + actions to a JSONL file, then replay or minimize that sequence.
@@ -1355,6 +1366,7 @@ chaosbringer --url http://localhost:3000 \
 | `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |
 | `--heatmap-out <path>` | Write the heatmap as JSON | — |
 | `--junit <path>` | Write a Surefire-style JUnit XML for CI dashboards | — |
+| `--settle <mode>` | How each load and action settles: `networkidle`, `adaptive`, or an adaptive quiet window in ms (see [perf.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle)) | networkidle |
 | `--perf` | Measure every page load and action as a span (see [Per-step performance](#per-step-performance---perf)) | false |
 | `--perf-trace` | Also record a Chrome trace per page; implies `--perf` | false |
 | `--perf-mem` | Force GC at span boundaries (retained-only memory); implies `--perf` | false |

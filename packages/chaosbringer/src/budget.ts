@@ -9,6 +9,7 @@ import { perfRuleMatcher } from "./perf-key.js";
 import type {
   PageError,
   PerfBudgetRule,
+  PerfSettleRecord,
   PerformanceBudget,
   PerformanceMetrics,
   PerfSpanReport,
@@ -99,6 +100,19 @@ export interface PerfBudgetsFile {
   version: 1;
   headroom: number;
   budgets: Record<string, Partial<Record<BudgetMetric, number>>>;
+  /**
+   * The settle mode of the crawls the budgets were measured from, when they
+   * all recorded the same one. `perf gate` refuses reports settled
+   * differently: the settle mode changes what an action span covers. Absent
+   * in files written before it was recorded.
+   */
+  settle?: PerfSettleRecord;
+  /**
+   * `PERF_KEY_VERSION` of the keys in `budgets`. Keys of another version can
+   * name different steps, so `perf gate` refuses reports of another version.
+   * Absent in files written before it was recorded, which are version 1.
+   */
+  keyVersion?: number;
 }
 
 /**

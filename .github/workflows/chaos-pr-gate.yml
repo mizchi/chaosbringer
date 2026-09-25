@@ -158,6 +158,14 @@ jobs:
           code=${PIPESTATUS[0]}
           set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Exit 2 is "not comparable" (different settle mode or perfKey
+          # version), not a regression: the baseline predates a change to what
+          # the spans measure, and the next chaos-baseline run on main records
+          # a comparable one. Surface it without failing the PR.
+          if [ "$code" -eq 2 ]; then
+            echo "::notice::perf baseline is not comparable with this PR's reports (settle mode or perfKey version changed); skipping perf regress until main records a new baseline"
+            exit 0
+          fi
           exit "$code"
 
       - name: Stop fixture server

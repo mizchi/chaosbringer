@@ -19,6 +19,23 @@ import type { ActionResult, ActionTarget } from "./types.js";
 export const PERF_KEY_SEPARATOR = " :: ";
 
 /**
+ * Version of what a perfKey means, recorded as `CrawlReport.perf.keyVersion`
+ * and in budgets files so `perf regress` / `perf gate` can refuse to join
+ * keys that name different steps.
+ *
+ * - 1: actions after a navigating click were keyed under the URL the visit
+ *   began at, not the page they ran on. Every report written before the
+ *   version was recorded used this, so an absent version reads as 1.
+ * - 2: every action is keyed by the page it ran on.
+ */
+export const PERF_KEY_VERSION = 2;
+
+/** The perfKey version a report or budgets file was written with; absent means 1. */
+export function perfKeyVersionOf(recorded: number | undefined): number {
+  return recorded ?? 1;
+}
+
+/**
  * Collapse one path segment that is an identifier rather than a route name.
  * Three shapes cover the ids real apps put in URLs: database row numbers,
  * UUIDs, and long hex digests (Mongo ObjectIds, content hashes). A shorter
@@ -86,15 +103,45 @@ export function attemptedActionType(
 }
 
 /**
- * The perfKey the span of acting on this candidate will carry, on the page
- * visit `url` (`DriverStep.url` — the key is built from the visit, not the
- * live route). The default operation only: a `clear` pick keys differently.
- * A scroll's selector is dropped, as `actionKind` drops it from the result.
+ * The URL an action's perfKey is built from: the page's live URL when the
+ * action began, so a step after a click that navigated (a full navigation or
+ * an SPA route change) is keyed by the screen it ran on. Keying every step by
+ * the visit URL put the new screen's controls under the old route, where
+ * neither a candidate predicted from the live route nor a later visit of the
+ * new route (whose steps carry its own route) could ever match them.
+ *
+ * The visit URL is kept when the live URL is not on the visit's origin: an
+ * error page (`chrome-error://…`), `about:blank`, or an external page an
+ * unblocked link reached. Those have no route of the app to key by.
+ */
+export function actionRouteUrl(visitUrl: string, liveUrl: string | undefined): string {
+  if (!liveUrl || liveUrl === visitUrl) return visitUrl;
+  try {
+    const visit = new URL(visitUrl);
+    const live = new URL(liveUrl);
+    if (live.origin === visit.origin && (live.protocol === "http:" || live.protocol === "https:")) {
+      return liveUrl;
+    }
+  } catch {
+    // Not absolute: keep the visit's route.
+  }
+  return visitUrl;
+}
+
+/**
+ * The perfKey the span of acting on this candidate will carry. Pass the
+ * driver step (`{ url, currentUrl }`): the key is built from the route the
+ * page is on (`actionRouteUrl`), which is what the crawler keys the span by.
+ * A string is used as that route URL as it is — `step.url` alone is only
+ * right until an action navigates. The default operation only: a `clear`
+ * pick keys differently. A scroll's selector is dropped, as `actionKind`
+ * drops it from the result.
  */
 export function candidatePerfKey(
-  url: string,
+  at: string | { url: string; currentUrl?: string },
   candidate: { type: ActionTarget["type"]; selector: string },
 ): string {
+  const url = typeof at === "string" ? at : actionRouteUrl(at.url, at.currentUrl);
   const type = attemptedActionType(candidate.type);
   return perfKey(url, actionKind(type === "scroll" ? { type } : { type, selector: candidate.selector }));
 }

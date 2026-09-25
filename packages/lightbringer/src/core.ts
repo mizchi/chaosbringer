@@ -147,6 +147,7 @@ export {
   analyseDrilldown,
   formatDrilldown,
   HARNESS_FRAME_NAMES,
+  HARNESS_SCRIPT_MARKERS,
   DRILLDOWN_TOP_N,
 } from "./drilldown";
 export type {

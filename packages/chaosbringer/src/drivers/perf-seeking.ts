@@ -51,12 +51,31 @@ export interface PerfSeekingDriverOptions {
  */
 export const PERF_SEEKING_COST_FLOOR_MS = 1;
 
+/**
+ * Width of the buckets a key's mean cost is rounded down into before it
+ * becomes a weight. Two runs of the same seed measure the same click a
+ * millisecond or two apart, and with raw costs that jitter moves every pick
+ * boundary: a cheap key at 2.3ms weighs 3.3 against 1.4 at 0.4ms, so the
+ * same roll lands on a different near-tied candidate and the runs diverge
+ * from there. Bucketed, every cheap key (0–4.9ms) weighs the floor alike,
+ * and a 200ms key moves only when its mean crosses a bucket edge, which
+ * jitter of a few ms rarely does and which shifts its weight by ~2% when it
+ * does. It cannot make the picks immune to noise — a mean sitting on an
+ * edge still flips — only far less likely to change. 5ms is under the
+ * cost differences the driver is meant to rank (a long task is 50ms+).
+ */
+export const PERF_SEEKING_COST_BUCKET_MS = 5;
+
 /** Default `epsilon`. */
 export const PERF_SEEKING_DEFAULT_EPSILON = 0.2;
 
 /** The cost a span contributes to its key. */
 export function perfSeekingCost(p: Pick<LastActionPerf, "cpu" | "interaction">): number {
   return p.cpu.blockingMs + (p.interaction?.maxDurationMs ?? 0);
+}
+
+function bucketCost(ms: number): number {
+  return Math.floor(ms / PERF_SEEKING_COST_BUCKET_MS) * PERF_SEEKING_COST_BUCKET_MS;
 }
 
 export function perfSeekingDriver(opts: PerfSeekingDriverOptions = {}): Driver {
@@ -120,8 +139,11 @@ export function perfSeekingDriver(opts: PerfSeekingDriverOptions = {}): Driver {
       const measured: Array<{ candidate: DriverCandidate; cost: number }> = [];
       const unmeasured: DriverCandidate[] = [];
       for (const candidate of step.candidates) {
-        const entry = costs.get(candidatePerfKey(step.url, candidate));
-        if (entry) measured.push({ candidate, cost: entry.total / entry.n });
+        // Keyed by the route the page is on (`currentUrl`), as the crawler
+        // keys the span: after a click that navigated, the visit URL names a
+        // screen these candidates are not on.
+        const entry = costs.get(candidatePerfKey(step, candidate));
+        if (entry) measured.push({ candidate, cost: bucketCost(entry.total / entry.n) });
         else unmeasured.push(candidate);
       }
 

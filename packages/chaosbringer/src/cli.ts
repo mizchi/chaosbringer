@@ -38,7 +38,7 @@ import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
-import { parseSettleArg } from "./settle.js";
+import { parseSettleArg, resolveSettle } from "./settle.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
@@ -142,6 +142,7 @@ const { values, positionals } = parseArgs({
     "perf-cov": { type: "boolean", default: false },
     "perf-out": { type: "string" },
     "perf-budgets": { type: "string" },
+    "allow-settle-mismatch": { type: "boolean", default: false },
     compact: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     quiet: { type: "boolean", default: false },
@@ -217,7 +218,9 @@ OPTIONS:
   --perf-cov            Record JS/CSS byte coverage per page (implies --perf)
   --perf-out <dir>      Write each page's full perf report (+ trace/coverage) to <dir> (implies --perf)
   --perf-budgets <file> Per-span budgets by perfKey glob: a perfBudgets JSON array or a
-                        \`perf emit-budgets\` file; a breach is a perf-budget.<metric> violation (implies --perf)
+                        \`perf emit-budgets\` file; a breach is a perf-budget.<metric> violation (implies --perf).
+                        An emit-budgets file measured under another --settle mode is refused (exit 2)
+  --allow-settle-mismatch  Enforce such --perf-budgets anyway, with a warning
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
@@ -351,6 +354,16 @@ if (values.budget && values.budget.length > 0) {
   }
 }
 
+let settle: CrawlerOptions["settle"];
+if (values.settle !== undefined) {
+  try {
+    settle = parseSettleArg(values.settle);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+}
+
 // Read here, not by the crawler, so a bad file fails before a browser starts
 // and the error names the flag. The rules' contents are validated by the
 // crawler (validatePerfBudgets), the same as for the programmatic option.
@@ -359,18 +372,24 @@ const perfBudgetsFile = values["perf-budgets"];
 if (perfBudgetsFile !== undefined) {
   try {
     // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-    const { readPerfBudgetRulesFile } = await import("./perf-cli.js");
-    perfBudgets = readPerfBudgetRulesFile(perfBudgetsFile, `--perf-budgets ${perfBudgetsFile}`);
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
-}
-
-let settle: CrawlerOptions["settle"];
-if (values.settle !== undefined) {
-  try {
-    settle = parseSettleArg(values.settle);
+    const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
+    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(settle), `--perf-budgets ${perfBudgetsFile}`);
+    perfBudgets = read.rules;
+    // An emit-budgets file records the settle mode it was measured under;
+    // enforcing it on a crawl settled another way fails (or passes) every
+    // action budget on the settle, not the app — refused like `perf gate`.
+    if (read.settleMismatch) {
+      if (values["allow-settle-mismatch"]) {
+        console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
+      } else {
+        console.error(
+          `Error: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
+            `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
+            `or pass --allow-settle-mismatch to enforce anyway.`,
+        );
+        process.exit(read.exitCode);
+      }
+    }
   } catch (err) {
     console.error(`Error: ${err instanceof Error ? err.message : err}`);
     process.exit(1);

@@ -195,6 +195,14 @@ export interface ScenarioReport {
   workers: number;
   iterations: number;
   iterationFailures: number;
+  /**
+   * Iterations the run's deadline cut short — started, then stopped with
+   * steps still to run. Not in `iterations` (nor in throughput, iteration
+   * failures or the timeline): they finished no scenario. The steps they did
+   * run are in the step stats, so an early step can show up to one
+   * invocation more per worker than there are iterations. Absent when none was.
+   */
+  truncatedIterations?: number;
   /** iterations / duration_seconds across the run. */
   throughputPerSec: number;
   steps: StepReport[];
@@ -214,6 +222,8 @@ export interface WorkerSummary {
   scenarioName: string;
   iterations: number;
   iterationFailures: number;
+  /** Iterations the deadline cut short (see `ScenarioReport`); absent when none. */
+  truncatedIterations?: number;
   /** Final iteration end timestamp; null if the worker never finished one. */
   lastIterationAt: number | null;
 }
@@ -269,6 +279,8 @@ export interface LoadReport {
   totals: {
     iterations: number;
     iterationFailures: number;
+    /** Iterations the deadline cut short (see `ScenarioReport`); absent when none. */
+    truncatedIterations?: number;
     stepFailures: number;
     networkRequests: number;
     networkErrors: number;

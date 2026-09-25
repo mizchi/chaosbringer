@@ -52,6 +52,13 @@ Per **span** (one `perf.measure(name, action)` region):
   intervals = how long the network was actually busy), and `waves` (approximate
   serial-dependency depth of the waterfall), and how many requests were served
   from cache (`fromCacheCount` — disk / memory / prefetch / SW, no network fetch).
+  In a span, a request belongs to the span it **started** in: `requestCount`,
+  KB, `waves`, `thirdParty`, `byInitiator` and `requests[]` count it there
+  only, with its full duration even past the span's end. `busyMs` alone is
+  window-based: a request an earlier span fired that is still running adds the
+  part of it that overlaps the span. A request with no response recorded when
+  the report is built (in flight, failed or aborted) is listed with
+  `durationMs: 0` and `unfinished: true`.
   Each request also carries its
   **initiator** (the code or parser that issued it); `network.byInitiator` rolls
   them up so a deep waterfall points straight at the responsible function
@@ -109,7 +116,11 @@ across navigations. The in-page collector is **drained at every span boundary**
 so long tasks / LoAF / interactions / frames / app spans of documents you navigated
 away from stay in the report. `report.vitals` are the last document's; when a run
 visits more than one document, `report.documents[]` lists each one's
-`{ url, timeOrigin, vitals }`.
+`{ url, timeOrigin, vitals }`. A span that navigated carries `navigations`: how
+many of those documents started inside it (absent when none). Use it, not
+`memory.documentsDelta`, to tell a navigating step: under `PERF_MEM=1` the forced
+GC at span end collects the document left behind before the reading, so
+`documentsDelta` reads 0 on a navigation.
 
 ## CLI (no install, no spec)
 
@@ -281,6 +292,17 @@ frames like `(idle)` / `(program)` filtered out — a **GPU** rollup (GPUTask /
 RasterTask), and **network initiators** (which code issued the span's requests,
 straight from the report, so it needs no trace).
 
+Each self-time row is labelled `app` (a frame with a script URL), `harness`
+(measurement code: the in-page collector with its bundled web-vitals, Playwright's
+injected and utility scripts) or `native` (browser builtins, and URL-less scripts
+nothing identifies, such as an app's `eval` without a `sourceURL`). Injected
+scripts have no URL, so a frame is recognised by name (`HARNESS_FRAME_NAMES`,
+`HARNESS_SCRIPT_MARKERS`) and a marker claims every frame of its script, by V8
+`scriptId`. A caller that injects its own helpers passes their function names as
+`analyseDrilldown(span, events, { harnessFrames })`, and can reword the
+"no SelectorStats" hint with `formatDrilldown(a, { …, selectorStatsHint })`
+(chaosbringer points it at its `perf.cssSelectorStats` option).
+
 With `PERF_CSS=1` it also prints **CSS selector match cost** — per-selector style
 recalc stats (`disabled-by-default-blink.debug` SelectorStats): the slowest
 selectors by match time, and the *wasteful* ones (high `match_attempts`,
@@ -350,13 +372,16 @@ monotonically across them:
 
 Run it under `PERF_MEM=1` so each repeat's memory is measured after a forced GC
 (retained-only) — that's what makes even `jsHeapUsedMB` resolve into a clean line.
-A non-leaking step reports no trend. This stays inside one scenario, so it isn't
+Without it, a trend is not evidence of a leak: the step's own uncollected garbage
+climbs too. A button that adds and then removes 20 listeners and 100 nodes per
+click read `jsEventListeners` 91→375 without the GC and a flat 29 with it, and was
+flagged as a leak every time. Under `PERF_MEM=1` a non-leaking step reports no trend. This stays inside one scenario, so it isn't
 the out-of-scope cross-scenario analysis.
 
 ### Coverage & chunk-split analysis (`PERF_COV`)
 
 `PERF_COV=1` records JS + CSS coverage across the whole scenario (it doesn't reset
-on navigation, so it accrues over every page and interaction). The per-run summary
+on navigation, so JS accrues over every page and interaction). The per-run summary
 shows how much of each chunk the scenario used:
 
 ```
@@ -366,6 +391,31 @@ shows how much of each chunk the scenario used:
        17.1% used  286.8KB unused  /assets/vendor-turf-….js
   css  95.4% used  (96.5/101.2KB)
 ```
+
+Two things to know when reading it:
+
+- **Inline blocks are listed one by one.** Chromium reports each inline
+  `<script>` / `<style>` under its page's URL; when a page has several with
+  different content they appear as `<page url>#inline-1`, `#inline-2`, … in
+  document order (a page with one keeps the bare URL). The same page gets the
+  same keys on every visit, so they union across scenarios like a chunk does.
+  The blocks are told apart by content, because a coverage entry does not say
+  which document it came from. So a script whose content changes per response
+  (an inline block embedding a CSRF token or the server time, or a dynamically
+  generated external file), loaded twice in one scenario (a reload, a form
+  posting back to its own URL), is split into one `#inline-<n>` row per
+  response (with the suffix even on an external URL) and its bytes are counted
+  once per response.
+- **CSS usage is only that of the last document.** Chromium's rule-usage
+  tracking (`CSS.stopRuleUsageTracking`) forgets the rules of a document once
+  the page navigates away from it. The stylesheets of earlier documents are
+  still listed, but with no used rules, so a stylesheet shared with a later
+  page only counts what that page used, and one only an earlier page loaded
+  reads 0%. Taking a usage delta before each navigation does not fix this
+  reliably (whether it lands before the old document is gone is a race), and
+  a second tracking session would steal the deltas from Playwright's. JS
+  coverage is not affected. For a trustworthy CSS number, keep a scenario to
+  one document or measure each page in its own scenario.
 
 To find code that **no** scenario in the suite used (dead code / over-shipping),
 run the whole suite with `PERF_COV=1`, then union the per-scenario coverage:
@@ -738,8 +788,8 @@ Things that bite, learned from the accuracy probe:
   full trace file (`JSON.parse`) — fine for normal traces, but a multi-GB trace
   will strain it. `examples/stress.spec.ts` is the regression fixture for this.
 - **Per-span request detail is capped at the 20 slowest.** `requestCount`,
-  `encodedKB`, `busyMs`, `waves`, and `thirdParty` are computed over *all*
-  requests; only the per-request `requests[]` list is truncated, so a
+  `encodedKB`, `busyMs`, `waves`, and `thirdParty` are computed over *all* the
+  span's requests; only the per-request `requests[]` list is truncated, so a
   request-heavy page doesn't bloat every report.
 - **First/third-party split is by registrable domain** (eTLD+1) using a compact
   built-in suffix set, not the full Public Suffix List. It's correct for common
@@ -772,6 +822,12 @@ Things that bite, learned from the accuracy probe:
   chunks a real CDN would compress — confirm against production hosting.
 - **Per-span interaction** uses Event Timing with a 16 ms `durationThreshold`, so
   sub-16 ms (already-responsive) interactions don't appear — absence is good news.
+  The exception is a click that **navigates**: the entry is reported after the
+  paint that ends the interaction, and the navigation usually unloads the
+  document first, so a link click almost never has `interaction` however slow
+  it was (0 of 19 link clicks in one probe, against 20 of 20 same-page button
+  clicks). An `interactionMs` budget skips such a step; budget it on
+  `blockingMs` / `durationMs`.
 - **Frames** come from a rAF probe, so dropped frames are measured against a 60 Hz
   budget (16.7 ms) even though headless Chromium runs unthrottled (~120 fps) — a
   smooth span simply reports no hitch. The probe pushes one timestamp per frame

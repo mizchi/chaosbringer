@@ -55,6 +55,19 @@ const FETCHING = `<!doctype html><title>fetching</title><body>
   </script>
 </body>`;
 
+/**
+ * `/chain/<n>`: a static page with a "next" link to `/chain/<n+1>`, 20·n
+ * inert listeners and 100·n nodes. Nothing leaks — every page is a fresh
+ * document — but the renderer's totals climb from one page to the next.
+ */
+const chain = (n: number) => `<!doctype html><title>chain ${n}</title><body>
+  <h1>chain ${n}</h1><a href="/chain/${n + 1}">next</a>
+  <script>
+    for (let i = 0; i < ${20 * n}; i++) window.addEventListener("resize", () => i);
+    for (let i = 0; i < ${100 * n}; i++) document.body.appendChild(document.createElement("i"));
+  </script>
+</body>`;
+
 const QUIET = `<!doctype html><title>quiet</title><body>
   <h1>Nothing to see</h1>
   <button id="noop">Noop</button>
@@ -97,6 +110,12 @@ describe("per-step perf spans (perf option)", () => {
     server = http.createServer((req, res) => {
       const path = req.url ?? "";
       if (path === "/hang") return; // never answers: the goto times out
+      const chainN = /^\/chain\/(\d+)$/.exec(path);
+      if (chainN) {
+        res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+        res.end(chain(Number(chainN[1])));
+        return;
+      }
       const body =
         path === "/perf"
           ? PERF
@@ -208,6 +227,8 @@ describe("per-step perf spans (perf option)", () => {
     const report = await crawl("/items/42", { perf: true, maxActionsPerPage: 3 });
     const page = report.pages[0]!;
     expect(page.perf?.key).toBe("/items/:id :: load");
+    // The default settle, recorded so perf regress / gate can check it (B5).
+    expect(report.perf?.settle).toEqual({ mode: "networkidle" });
     expect(page.perfPage?.reportPath).toBeUndefined();
     expect(report.actions.length).toBeGreaterThan(0);
     for (const a of report.actions) {
@@ -223,6 +244,25 @@ describe("per-step perf spans (perf option)", () => {
     const busy = report.actions.find((a) => a.selector && a.perf?.key.includes(a.selector));
     expect(busy?.perf?.cpu.longTaskCount).toBeGreaterThanOrEqual(1);
   });
+
+  it("with --perf-mem, flags no leak on a chain of navigations: loads and navigating clicks are never trended", async () => {
+    // Evaluation B1: the forced GC at each span end collects the document
+    // the step navigated away from before the reading, so documentsDelta
+    // read 0 on every load and every `next` click, and both the loads and
+    // the clicks of `/chain/:id` were flagged as leaking (5 of 5 seeds).
+    const report = await crawl("/chain/1", {
+      perf: { memory: { forceGc: true } },
+      maxPages: 4,
+      maxActionsPerPage: 3,
+      driver: scriptedDriver(["next", "next", "next"]),
+    });
+    expect(report.perf?.trends).toBeUndefined();
+    expect(report.pages.length).toBeGreaterThanOrEqual(3);
+    for (const p of report.pages) expect(p.perf?.navigations).toBe(1);
+    const navigated = report.actions.filter((a) => a.perf && a.success);
+    expect(navigated.length).toBeGreaterThanOrEqual(6);
+    for (const a of navigated) expect(a.perf?.navigations).toBeGreaterThanOrEqual(1);
+  }, 60_000);
 
   it("with actions: false, measures the load only", async () => {
     const report = await crawl("/perf", {

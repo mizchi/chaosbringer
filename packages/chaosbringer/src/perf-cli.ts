@@ -47,10 +47,10 @@ import {
   type Stat,
 } from "lightbringer/core";
 import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
-import { perfKeyRoute, perfRuleMatcher, urlPattern } from "./perf-key.js";
+import { PERF_KEY_VERSION, perfKeyVersionOf, perfRuleMatcher } from "./perf-key.js";
 import { DEFAULT_PERF_TRACE_DIR } from "./perf-options.js";
 import { reportSpans } from "./perf-summary.js";
-import type { CrawlReport, PerfBudgetRule, PerfSpanReport } from "./types.js";
+import type { CrawlReport, PerfBudgetRule, PerfSettleRecord, PerfSpanReport } from "./types.js";
 import { validatePerfBudgets } from "./validate.js";
 
 /** Default output path of `perf emit-budgets`. */
@@ -124,6 +124,22 @@ export function readPerfBudgetRulesFile(path: string, source: string = path): Pe
   return perfBudgetRulesFromJson(JSON.parse(readFileSync(path, "utf-8")), source);
 }
 
+/**
+ * The crawler's `--perf-budgets` read: the rules, plus why the file cannot
+ * be enforced on a crawl settling `crawl` (`crawlBudgetsSettleMismatch`) and
+ * the exit code a refusal uses.
+ */
+export function readPerfBudgetsForCrawl(
+  path: string,
+  crawl: PerfSettleRecord,
+  source: string = path,
+): { rules: PerfBudgetRule[]; settleMismatch?: string; exitCode: number } {
+  const json: unknown = JSON.parse(readFileSync(path, "utf-8"));
+  const rules = perfBudgetRulesFromJson(json, source);
+  const settleMismatch = crawlBudgetsSettleMismatch(json, crawl);
+  return { rules, ...(settleMismatch ? { settleMismatch } : {}), exitCode: SETTLE_MISMATCH_EXIT_CODE };
+}
+
 /** A report's spans renamed to their key: the shape lightbringer's stats group by. */
 function keyedRun(report: Pick<CrawlReport, "pages" | "actions">): {
   vitals: Record<string, never>;
@@ -154,8 +170,8 @@ export interface EmitResult {
  * not one CI can hold to — and reported in `skipped`.
  */
 export function emitPerfBudgets(
-  reports: readonly Pick<CrawlReport, "pages" | "actions">[],
-  { headroom = DEFAULT_BUDGET_HEADROOM }: { headroom?: number } = {},
+  reports: readonly (Pick<CrawlReport, "pages" | "actions"> & { perf?: Pick<NonNullable<CrawlReport["perf"]>, "keyVersion"> })[],
+  { headroom = DEFAULT_BUDGET_HEADROOM, settle }: { headroom?: number; settle?: PerfSettleRecord } = {},
 ): EmitResult {
   const runs = reports.map(keyedRun);
   const seenIn = new Map<string, number>();
@@ -172,10 +188,216 @@ export function emitPerfBudgets(
   }
   const budgets = emitBudgets(medians, { headroom, metrics: Object.keys(EMIT_BUDGET_METRICS) });
   return {
-    file: { version: 1, headroom, budgets: budgets as PerfBudgetsFile["budgets"] },
+    file: {
+      version: 1,
+      headroom,
+      budgets: budgets as PerfBudgetsFile["budgets"],
+      // Recorded so `perf gate` can refuse reports settled another way.
+      ...(settle ? { settle: { ...settle } } : {}),
+      // The version of the reports' keys (the caller refuses mixed versions),
+      // so gate can refuse reports whose keys mean something else.
+      keyVersion: reports.length === 0 ? PERF_KEY_VERSION : perfKeyVersionOf(reports[0]!.perf?.keyVersion),
+    },
     skipped,
     reports: reports.length,
   };
+}
+
+// ── settle mode ─────────────────────────────────────────────────────────────
+
+/**
+ * Exit code of a comparison refused because its inputs were settled
+ * differently. Not 1: nothing regressed or broke a budget, the numbers were
+ * never compared, and CI should be able to tell the two apart.
+ */
+export const SETTLE_MISMATCH_EXIT_CODE = 2;
+
+/** A recorded settle mode as the `--settle` value that produces it. */
+export function settleLabel(s: PerfSettleRecord): string {
+  return s.mode === "networkidle" ? "networkidle" : `adaptive (quiet ${s.quietMs} ms)`;
+}
+
+/** One input of a comparison and the settle mode it recorded, if any. */
+export interface SettleSource {
+  /** which side of the comparison: "baseline", "current", "reports", "budgets" */
+  side: string;
+  /** file path, for the "not recorded" warning */
+  source: string;
+  settle: PerfSettleRecord | undefined;
+}
+
+export interface SettleCheck {
+  /** Why the inputs cannot be compared (they recorded different modes), or undefined. */
+  mismatch?: string;
+  /** Sources that recorded no mode (written before it was recorded): not checked. */
+  unrecorded: string[];
+  /** The one mode every recording source agreed on, if there was exactly one. */
+  agreed?: PerfSettleRecord;
+}
+
+/**
+ * Were the inputs of a regress / gate / emit-budgets settled the same way?
+ * The settle mode changes what a span measures — under `networkidle` the
+ * crawler's fixed 100 ms pause after an action falls outside the action span
+ * and the load span includes the networkidle wait; under adaptive the settle
+ * is inside the action span and the load stops once the page is quiet — so
+ * medians from two modes differ by the settle, not by the app, and read as
+ * regressions (or improvements) that are not there. Sources that recorded no
+ * mode cannot be checked and are listed, never assumed to match.
+ */
+export function checkSettleModes(sources: readonly SettleSource[]): SettleCheck {
+  const bySide = new Map<string, Map<string, number>>();
+  const modes = new Map<string, PerfSettleRecord>();
+  const unrecorded: string[] = [];
+  for (const s of sources) {
+    if (!s.settle) {
+      unrecorded.push(s.source);
+      continue;
+    }
+    const label = settleLabel(s.settle);
+    modes.set(label, s.settle);
+    const side = bySide.get(s.side) ?? new Map<string, number>();
+    bySide.set(s.side, side);
+    side.set(label, (side.get(label) ?? 0) + 1);
+  }
+  if (modes.size <= 1) {
+    const agreed = [...modes.values()][0];
+    return { unrecorded, ...(agreed ? { agreed } : {}) };
+  }
+  const sides = [...bySide]
+    .map(([side, m]) => `${side}: ${[...m].map(([label, n]) => `${label} ×${n}`).join(", ")}`)
+    .join("; ");
+  return {
+    unrecorded,
+    mismatch:
+      `the inputs were crawled under different settle modes (${sides}). The settle mode changes what a ` +
+      `span measures (under networkidle the crawler's 100 ms pause after an action is outside the action ` +
+      `span; under adaptive the settle is inside it), so the medians would differ by the settle, not by the app`,
+  };
+}
+
+/**
+ * Run the settle check for a CLI subcommand and print its outcome. Returns
+ * the check to go on with, or undefined after refusing (exit 2). With
+ * `allow` a mismatch is a loud warning instead. Warnings go to stderr so
+ * `--json` output stays parseable.
+ */
+function settleGate(cmd: string, sources: readonly SettleSource[], allow: boolean): SettleCheck | undefined {
+  const check = checkSettleModes(sources);
+  if (check.unrecorded.length > 0) {
+    const shown = check.unrecorded.slice(0, 5).join(", ");
+    const more = check.unrecorded.length > 5 ? ` and ${check.unrecorded.length - 5} more` : "";
+    console.error(
+      `[perf ${cmd}] warning: ${check.unrecorded.length} input(s) do not record their settle mode ` +
+        `(perf.settle; written by an older chaosbringer), so they cannot be checked against the others — ` +
+        `comparing crawls settled differently reports false regressions: ${shown}${more}`,
+    );
+  }
+  if (check.mismatch) {
+    if (allow) {
+      console.error(`[perf ${cmd}] WARNING (--allow-settle-mismatch): ${check.mismatch}.`);
+      return check;
+    }
+    console.error(
+      `perf: ${cmd}: refusing to compare: ${check.mismatch}. Crawl every side with the same --settle, ` +
+        `or pass --allow-settle-mismatch to compare anyway.`,
+    );
+    process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+    return undefined;
+  }
+  return check;
+}
+
+// ── perfKey version ─────────────────────────────────────────────────────────
+
+/** One input of a comparison and the perfKey version it was written with. */
+export interface KeyVersionSource {
+  side: string;
+  source: string;
+  /** as recorded; absent means version 1 */
+  keyVersion: number | undefined;
+}
+
+/**
+ * Why the inputs cannot be joined by key, or undefined. A perfKey's meaning
+ * changed between versions (see `PERF_KEY_VERSION`), so the same key string
+ * in inputs of different versions can name different steps: joined, their
+ * medians differ by which steps were grouped, not by the app. Unlike an
+ * unrecorded settle mode, an absent version is known — every report written
+ * before it was recorded is version 1 — so it is checked, not just warned
+ * about.
+ */
+export function checkKeyVersions(sources: readonly KeyVersionSource[]): string | undefined {
+  const bySide = new Map<string, Map<number, number>>();
+  const versions = new Set<number>();
+  for (const s of sources) {
+    const v = perfKeyVersionOf(s.keyVersion);
+    versions.add(v);
+    const side = bySide.get(s.side) ?? new Map<number, number>();
+    bySide.set(s.side, side);
+    side.set(v, (side.get(v) ?? 0) + 1);
+  }
+  if (versions.size <= 1) return undefined;
+  const sides = [...bySide]
+    .map(([side, m]) => `${side}: ${[...m].map(([v, n]) => `v${v} ×${n}`).join(", ")}`)
+    .join("; ");
+  return (
+    `the inputs use different perfKey versions (${sides}). Version 2 keys an action after a navigating ` +
+    `click by the page it ran on, version 1 by the page the visit began at, so the same key can name ` +
+    `different steps`
+  );
+}
+
+/**
+ * Run the key-version check for a subcommand. Returns false after refusing
+ * (exit 2, the same code as a settle mismatch: nothing was compared). With
+ * `allow` a mismatch is a warning instead.
+ */
+function keyVersionGate(cmd: string, sources: readonly KeyVersionSource[], allow: boolean): boolean {
+  const mismatch = checkKeyVersions(sources);
+  if (!mismatch) return true;
+  if (allow) {
+    console.error(`[perf ${cmd}] WARNING (--allow-key-mismatch): ${mismatch}.`);
+    return true;
+  }
+  console.error(
+    `perf: ${cmd}: refusing to compare: ${mismatch}. Re-record the older side with this chaosbringer ` +
+      `(re-emit budgets, or let the next baseline run replace the baseline), or pass --allow-key-mismatch ` +
+      `to compare anyway.`,
+  );
+  process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+  return false;
+}
+
+/** The key-version sources of a set of report files. */
+function reportKeySources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): KeyVersionSource[] {
+  return reports.map((r, i) => ({ side, source: paths[i]!, keyVersion: r.perf?.keyVersion }));
+}
+
+/**
+ * The crawler's `--perf-budgets` check, settle-wise: why the budgets file
+ * (its parsed JSON) cannot be enforced on a crawl settling `crawl`, or
+ * undefined. The same reasoning as `perf gate` — budgets from networkidle
+ * crawls exclude the settle from action spans, an adaptive crawl includes
+ * it, so every durationMs budget fails on the settle, not on the app. A
+ * hand-written rules array, or a file written before `settle` was recorded,
+ * has no mode to compare and passes.
+ */
+export function crawlBudgetsSettleMismatch(budgetsJson: unknown, crawl: PerfSettleRecord): string | undefined {
+  if (budgetsJson === null || typeof budgetsJson !== "object" || Array.isArray(budgetsJson)) return undefined;
+  const recorded = (budgetsJson as Partial<PerfBudgetsFile>).settle;
+  if (!recorded || settleLabel(recorded) === settleLabel(crawl)) return undefined;
+  return (
+    `the budgets were measured under ${settleLabel(recorded)}, but this crawl settles ${settleLabel(crawl)}. ` +
+    `The settle mode changes what a span measures (under networkidle the crawler's 100 ms pause after an ` +
+    `action is outside the action span; under adaptive the settle is inside it), so the budgets would fail ` +
+    `(or pass) on the settle, not on the app`
+  );
+}
+
+/** The settle sources of a set of report files. */
+function reportSettleSources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): SettleSource[] {
+  return reports.map((r, i) => ({ side, source: paths[i]!, settle: r.perf?.settle }));
 }
 
 // ── gate ────────────────────────────────────────────────────────────────────
@@ -438,8 +660,8 @@ export interface DrilldownTarget {
 }
 
 /**
- * Find the span to drill into: the slowest span with `key` across the pages
- * of the key's route, read from each page's sidecar (which has the untrimmed
+ * Find the span to drill into: the slowest span with `key` across the
+ * crawl's pages, read from each page's sidecar (which has the untrimmed
  * span and the trace path). Throws with the reason — and what to rerun with —
  * when the key is unknown, the crawl wrote no sidecars, or there is no trace.
  */
@@ -459,12 +681,15 @@ export function findDrilldownTarget(
         : `no span with key "${key}" in ${reportFile}. Keys:\n${shown.join("\n")}`,
     );
   }
-  const route = perfKeyRoute(key);
-  const pages = report.pages.filter((p) => p.perf && urlPattern(p.url) === route);
-  const withSidecar = pages.filter((p) => p.perfPage?.reportPath);
+  // Every page's sidecar, not just the pages of the key's route: an action's
+  // route is the live URL when it began (B17), so a step after a navigating
+  // click, or any step of a redirected visit (`/cart :: click #buy`), is in
+  // the sidecar of a visit to another URL (`/`) — and the same key can be in
+  // both, so the slowest must be picked across all of them.
+  const withSidecar = report.pages.filter((p) => p.perf && p.perfPage?.reportPath);
   if (withSidecar.length === 0) {
     throw new Error(
-      `the pages of "${route}" have no per-page perf report — rerun the crawl with --perf-trace (or --perf-out <dir> plus --perf-trace)`,
+      `${reportFile} has no per-page perf report — rerun the crawl with --perf-trace (or --perf-out <dir> plus --perf-trace)`,
     );
   }
   const candidates: DrilldownTarget[] = [];
@@ -511,6 +736,29 @@ export function findDrilldownTarget(
 }
 
 /** Read a trace file: lightbringer streams a JSON array; DevTools saves `{ traceEvents }`. */
+/**
+ * Function names of chaosbringer's own in-page code (init scripts and
+ * `page.evaluate` helpers). URL-less like every injected script, so without
+ * these the drilldown files their samples — and, through the script they
+ * share, their anonymous callbacks — as `[native]`. lightbringer already
+ * knows its collector's and Playwright's frames.
+ */
+export const CHAOSBRINGER_HARNESS_FRAMES: readonly string[] = [
+  "collectRawLinks",
+  "collectRawTargets",
+  "installRejectionCapture",
+  "chaosbringerSettleProbe",
+];
+
+/**
+ * The drilldown's "no SelectorStats" hint. lightbringer's says `PERF_CSS=1`,
+ * an env var of lightbringer's Playwright fixture that a crawl never reads;
+ * a crawl gets SelectorStats from `perf.cssSelectorStats`, which has no CLI
+ * flag.
+ */
+export const CRAWL_SELECTOR_STATS_HINT =
+  "crawl with perf: { cssSelectorStats: true }, a programmatic option with no CLI flag,";
+
 function readTrace(path: string): DrilldownTraceEvent[] {
   const parsed = JSON.parse(readFileSync(path, "utf-8")) as
     | DrilldownTraceEvent[]
@@ -531,7 +779,7 @@ Subcommands:
       Budgets per perfKey: ceil(median × headroom) of durationMs, scriptMs,
       blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount and
       interactionMs. Keys seen in fewer than half the reports are skipped
-      (and listed).
+      (and listed). The reports' settle mode is written into the file.
 
   gate <report.json...> --budgets <file> [--json]
       Medians vs budgets (an emit-budgets file or a perfBudgets array of
@@ -543,6 +791,15 @@ Subcommands:
       Per-perfKey medians, current vs baseline. A regression needs both the
       relative threshold and the metric's absolute floor; noisy medians warn.
       Exit 1 on a regression.
+
+  emit-budgets, gate and regress refuse (exit 2) inputs crawled under
+  different --settle modes: the settle mode changes what a span measures.
+  --allow-settle-mismatch compares anyway, with a warning. Reports that do
+  not record their mode (older chaosbringer) only warn.
+  They also refuse (exit 2) inputs whose perfKeys have different versions
+  (perf.keyVersion; absent means 1): version 2 keys an action after a
+  navigating click by the page it ran on. --allow-key-mismatch compares
+  anyway, with a warning.
 
   drilldown <report.json> <perfKey> [--top 15] [--perf-dir <dir>]
       Where the span's time went, from its page's trace (crawl with
@@ -599,6 +856,8 @@ function runEmit(argv: string[]): void {
     options: {
       headroom: { type: "string" },
       out: { type: "string" },
+      "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -617,7 +876,15 @@ function runEmit(argv: string[]): void {
   if (skippedFiles.length > 0) {
     console.log(`[perf emit-budgets] skipped ${skippedFiles.length} non-report JSON file(s): ${skippedFiles.join(", ")}`);
   }
-  const result = emitPerfBudgets(reports, { headroom });
+  // Budgets from mixed modes would be a median of two different measurements.
+  const settle = settleGate("emit-budgets", reportSettleSources("reports", paths, reports), values["allow-settle-mismatch"]);
+  if (!settle) return;
+  // Mixed key versions would median different steps under one key.
+  if (!keyVersionGate("emit-budgets", reportKeySources("reports", paths, reports), values["allow-key-mismatch"])) return;
+  // Only a mode every report recorded is written: a file claiming one mode
+  // for budgets measured partly under another would make gate's check lie.
+  const recorded = settle.mismatch || settle.unrecorded.length > 0 ? undefined : settle.agreed;
+  const result = emitPerfBudgets(reports, { headroom, ...(recorded ? { settle: recorded } : {}) });
   const out = values.out ?? DEFAULT_PERF_BUDGETS_PATH;
   const n = Object.keys(result.file.budgets).length;
   if (result.skipped.length > 0) {
@@ -646,6 +913,8 @@ function runGate(argv: string[]): void {
     options: {
       budgets: { type: "string" },
       json: { type: "boolean", default: false },
+      "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -661,7 +930,8 @@ function runGate(argv: string[]): void {
     fail("gate: --budgets <file> is required");
     return;
   }
-  const rules = readPerfBudgetRulesFile(values.budgets);
+  const budgetsJson: unknown = JSON.parse(readFileSync(values.budgets, "utf-8"));
+  const rules = perfBudgetRulesFromJson(budgetsJson, values.budgets);
   // The crawler's check: a misspelt metric (`durationMS`) would otherwise be
   // a budget that never fires yet counts as a gated key.
   try {
@@ -674,7 +944,29 @@ function runGate(argv: string[]): void {
   if (skipped.length > 0 && !values.json) {
     console.log(`[perf gate] skipped ${skipped.length} non-report JSON file(s): ${skipped.join(", ")}`);
   }
-  const result = gatePerf(paths.map(loadCrawlReport), rules);
+  const reports = paths.map(loadCrawlReport);
+  // An emit-budgets file records the mode its budgets were measured under;
+  // a hand-written perfBudgets array was measured under nothing, so it
+  // takes no part in the check (the reports are still checked among themselves).
+  const budgetsSources: SettleSource[] =
+    budgetsJson !== null && typeof budgetsJson === "object" && !Array.isArray(budgetsJson)
+      ? [{ side: "budgets", source: values.budgets, settle: (budgetsJson as Partial<PerfBudgetsFile>).settle }]
+      : [];
+  if (!settleGate("gate", [...budgetsSources, ...reportSettleSources("reports", paths, reports)], values["allow-settle-mismatch"])) {
+    return;
+  }
+  // A hand-written rules array has no version: its globs are the author's,
+  // not keys emitted by a crawl, so only an emitted budgets file is checked.
+  const budgetsKeySources: KeyVersionSource[] =
+    budgetsJson !== null && typeof budgetsJson === "object" && !Array.isArray(budgetsJson)
+      ? [{ side: "budgets", source: values.budgets, keyVersion: (budgetsJson as Partial<PerfBudgetsFile>).keyVersion }]
+      : [];
+  if (
+    !keyVersionGate("gate", [...budgetsKeySources, ...reportKeySources("reports", paths, reports)], values["allow-key-mismatch"])
+  ) {
+    return;
+  }
+  const result = gatePerf(reports, rules);
   const { lines, failed } = formatPerfGate(result);
   if (values.json) console.log(JSON.stringify({ ...result, passed: !failed }, null, 2));
   else for (const l of lines) (failed && l.startsWith("[perf gate] FAILED") ? console.error : console.log)(l);
@@ -711,6 +1003,8 @@ function runRegress(argv: string[]): void {
     options: {
       threshold: { type: "string" },
       json: { type: "boolean", default: false },
+      "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -741,6 +1035,16 @@ function runRegress(argv: string[]): void {
   }
   const baseReports = base.paths.map(loadCrawlReport);
   const curReports = cur.paths.map(loadCrawlReport);
+  const settleSources = [
+    ...reportSettleSources("baseline", base.paths, baseReports),
+    ...reportSettleSources("current", cur.paths, curReports),
+  ];
+  if (!settleGate("regress", settleSources, values["allow-settle-mismatch"])) return;
+  const keySources = [
+    ...reportKeySources("baseline", base.paths, baseReports),
+    ...reportKeySources("current", cur.paths, curReports),
+  ];
+  if (!keyVersionGate("regress", keySources, values["allow-key-mismatch"])) return;
   const empty = regressNothingMeasured(baseReports, curReports);
   if (empty) {
     fail(`regress: ${empty}`);
@@ -795,6 +1099,7 @@ function runDrilldown(argv: string[]): void {
   const analysis = analyseDrilldown(target.span, readTrace(target.tracePath), {
     pageUrl: target.pageUrl,
     topN,
+    harnessFrames: CHAOSBRINGER_HARNESS_FRAMES,
   });
   if (target.occurrences > 1) {
     console.log(`(${target.occurrences} spans have this key; showing the slowest)`);
@@ -802,6 +1107,7 @@ function runDrilldown(argv: string[]): void {
   for (const line of formatDrilldown(analysis, {
     slug: basename(target.sidecarPath, ".json"),
     spanName: target.span.key ?? target.span.name,
+    selectorStatsHint: CRAWL_SELECTOR_STATS_HINT,
   })) {
     console.log(line);
   }

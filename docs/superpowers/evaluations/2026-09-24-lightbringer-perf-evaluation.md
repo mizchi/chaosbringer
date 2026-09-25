@@ -3,6 +3,7 @@
 **Date:** 2026-09-24
 **Project:** chaosbringer
 **Status:** Exploratory evaluation of the absorbed perf layer (Phases 0–3 plus the refactor) at commit `19af79a`, which is merged `main` after PR #153. No code changes.
+**Follow-up:** The bugs in §12 were addressed afterwards, each with a test that fails on the old code. B1, B3, B4, B5, B11, B13, B14, B17 and B19 are fixed. B2's double counting is fixed, but its negative degradation delta under networkidle is inherent to that settle mode and is now documented. B18 is mitigated (costs are bucketed to 5 ms), not eliminated. B6–B10, B12, B15 and B16 are addressed in the docs. The numbers below describe `19af79a`, before those fixes.
 **Design under test:** `docs/superpowers/specs/2026-09-23-lightbringer-absorption-design.md`
 
 **Goal:** Measure what the perf layer costs, whether it finds real problems, and where its numbers mislead. The layer covers `--perf`, `--perf-trace`, `--perf-mem`, `--perf-cov`, `--settle adaptive`, `scenarioLoad` + `perf`, perf under fault injection, and `perfSeekingDriver`. All seven planned experiments (E1–E7) ran. E2b was added after review to test whether settle modes miss late async errors.

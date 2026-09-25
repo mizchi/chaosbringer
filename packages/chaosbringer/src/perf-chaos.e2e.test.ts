@@ -50,6 +50,27 @@ const LEAKY = `<!doctype html><title>leaky</title><body>
   </script>
 </body>`;
 
+/**
+ * Two inline scripts: the first runs all of its code, the second only
+ * defines a function nobody calls. Chromium reports both under the page's
+ * URL, each with offsets from 0. The first is the longer one, so laying the
+ * second's ranges over it (the bug) read the page as 100% used.
+ */
+const COV_INLINE = `<!doctype html><title>cov inline</title><body>
+  <script>
+    var total = 0;
+    for (var i = 0; i < 10; i++) { total += i * 2; }
+    document.title = "sum " + total + "${"padding ".repeat(60)}".length;
+  </script>
+  <script>
+    function neverCalled(x) {
+      var out = [];
+      for (var i = 0; i < x; i++) { out.push(i * i); if (out.length > 100) { out.shift(); } }
+      return out.reduce(function (a, b) { return a + b; }, 0) + "${"padding ".repeat(40)}";
+    }
+  </script>
+</body>`;
+
 /** Picks the candidate whose description contains `label`, `times` times, then skips. */
 function repeatDriver(label: string, times: number): Driver {
   let i = 0;
@@ -79,7 +100,7 @@ describe("perf under chaos", () => {
         return;
       }
       const body =
-        path === "/shop" ? SHOP : /^\/item\/\d+$/.test(path ?? "") ? ITEM : path === "/leaky" ? LEAKY : null;
+        path === "/shop" ? SHOP : /^\/item\/\d+$/.test(path ?? "") ? ITEM : path === "/leaky" ? LEAKY : path === "/cov-inline" ? COV_INLINE : null;
       if (!body) {
         res.writeHead(404, { "content-type": "text/plain" });
         res.end("not found");
@@ -194,10 +215,32 @@ describe("perf under chaos", () => {
     expect(js!.totalBytes).toBeGreaterThan(0);
     expect(js!.usedBytes).toBeGreaterThan(0);
     expect(js!.usedBytes).toBeLessThanOrEqual(js!.totalBytes);
-    expect(js!.lowUsage.length).toBeGreaterThan(0);
+    // The item pages' scripts run end to end; fully used resources are not
+    // "low usage", so only rows with unused bytes may appear (B19).
+    for (const r of js!.lowUsage) expect(r.usedBytes).toBeLessThan(r.totalBytes);
     // One row per resource across the crawl, not one per page visit.
     const urls = js!.lowUsage.map((r) => r.url);
     expect(new Set(urls).size).toBe(urls.length);
     expect(report.perf?.coverage?.css.totalBytes).toBe(0);
+    // No stylesheet anywhere: no percentage rather than a misleading 0% (B19).
+    expect(report.perf?.coverage?.css.usedPct).toBeUndefined();
+  }, 60_000);
+
+  // B4: the two inline scripts used to be merged into one entry whose ranges
+  // lay over each other, and the page read 100% used.
+  it("keeps a page's inline scripts apart in the coverage", async () => {
+    const report = await crawl("/cov-inline", {
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      perf: { coverage: true },
+    });
+    const js = report.perf?.coverage?.js;
+    expect(js).toBeDefined();
+    expect(js!.usedPct).toBeLessThan(80);
+    const second = js!.lowUsage.find((r) => r.url === `${origin}/cov-inline#inline-2`);
+    expect(second).toBeDefined();
+    expect(second!.usedPct).toBeLessThan(30);
+    // the first script ran end to end, so it is not low usage
+    expect(js!.lowUsage.map((r) => r.url)).not.toContain(`${origin}/cov-inline`);
   }, 60_000);
 });
