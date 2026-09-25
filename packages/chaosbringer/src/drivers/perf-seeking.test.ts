@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRng } from "../random.js";
 import type { ActionResult, CrawlReport, LastActionPerf } from "../types.js";
+import type { Rng } from "../random.js";
 import {
   PERF_SEEKING_COST_FLOOR_MS,
+  PERF_SEEKING_COST_THRESHOLD_MS,
+  perfSeekingBucketCost,
   perfSeekingCost,
   perfSeekingDriver,
 } from "./perf-seeking.js";
@@ -64,9 +67,13 @@ function priorWith(spans: Array<[string, number]>): Pick<CrawlReport, "actions">
 }
 
 describe("perfSeekingCost", () => {
-  it("adds interaction latency to blocking time, and counts a missing interaction as 0", () => {
-    expect(perfSeekingCost(facts("#a", 50, 120))).toBe(170);
-    expect(perfSeekingCost(facts("#a", 50))).toBe(50);
+  it("takes the larger of blocking time and interaction latency, and counts a missing interaction as 0", () => {
+    // Not the sum: a busy handler is in both, and its interaction often
+    // arrives after the step read the span (see perfSeekingCost).
+    expect(perfSeekingCost(facts("#a", 50, 120))).toBe(120);
+    expect(perfSeekingCost(facts("#a", 200, 208))).toBe(208);
+    expect(perfSeekingCost(facts("#a", 200))).toBe(200);
+    expect(perfSeekingCost(facts("#a", 0, 400))).toBe(400);
   });
 });
 
@@ -127,26 +134,28 @@ describe("perfSeekingDriver", () => {
   it("counts one measurement once, however many attempts see it", async () => {
     const driver = perfSeekingDriver({ epsilon: 0 });
     const rng = createRng(2);
-    // One 100ms measurement of #fast1 handed to three attempts of a step,
-    // then a 0ms one: counted once, #fast1's mean is 50; counted three
-    // times it would be 75. #fast2 at 60 sits between the two.
-    const costly = facts("#fast1", 100);
+    // One 300ms measurement of #fast1 handed to three attempts of a step,
+    // then a 0ms one: counted once, #fast1's mean is 150; counted three
+    // times it would be 225. #fast2 at 250 shares the bucket of 225 (213–319)
+    // and sits one above that of 150 (142–213).
+    const costly = facts("#fast1", 300);
     for (let i = 0; i < 3; i++) await driver.selectAction(step({ rng, history: [ran], lastActionPerf: costly }));
     await driver.selectAction(step({ rng, history: [ran], lastActionPerf: facts("#fast1", 0) }));
-    await driver.selectAction(step({ rng, history: [ran], lastActionPerf: facts("#fast2", 60) }));
+    await driver.selectAction(step({ rng, history: [ran], lastActionPerf: facts("#fast2", 250) }));
     const two = candidates.slice(0, 2);
     let fast2 = 0;
     const n = 2000;
     for (let i = 0; i < n; i++) {
       if ((await pickIndex(driver, step({ rng, candidates: two, history: [ran] }))) === 1) fast2 += 1;
     }
-    // Expected 61/112 = 0.545 counted once, 61/137 = 0.445 counted thrice.
-    expect(fast2 / n).toBeGreaterThan(0.5);
+    // Expected 261/435 = 0.60 counted once, 0.5 counted thrice.
+    expect(fast2 / n).toBeGreaterThan(0.55);
   });
 
   it("weights an unmeasured candidate as the average measured one on the screen", async () => {
-    // #slow at 1000 and #fast1 at 0 average 500, so #fast2 and #fast3 weigh
-    // 501 each against 1001 and 1: half of the picks go to the two untried.
+    // #slow at 1000 (bucketed ~880) and #fast1 at 0 average ~440, so #fast2
+    // and #fast3 weigh ~441 each against ~881 and 1: half of the picks go to
+    // the two untried.
     const driver = perfSeekingDriver({ epsilon: 0 });
     const rng = createRng(9);
     await driver.selectAction(step({ rng, history: [ran], lastActionPerf: facts("#slow", 1000) }));
@@ -335,8 +344,147 @@ describe("perfSeekingDriver", () => {
     expect(b).toEqual(a);
   });
 
+  // B18: two runs of one seed on the same page must pick the same sequence.
+  // Each test below replays one crawl twice through a driver, feeding every
+  // step the measurement of the action the driver picked the step before,
+  // with the two runs' measurements differing only the way two real runs do.
+  const replay = async (
+    seed: number,
+    measure: (selector: string, i: number) => LastActionPerf,
+    opts: Parameters<typeof perfSeekingDriver>[0] = {},
+    steps = 60,
+  ): Promise<number[]> => {
+    const driver = perfSeekingDriver(opts);
+    const rng = createRng(seed);
+    const out: number[] = [];
+    let last: LastActionPerf | undefined;
+    for (let i = 0; i < steps; i++) {
+      const index = await pickIndex(
+        driver,
+        step({ rng, history: i > 0 ? [ran] : [], ...(last ? { lastActionPerf: last } : {}) }),
+      );
+      out.push(index);
+      last = measure(candidates[index]!.selector, i);
+    }
+    return out;
+  };
+
+  it("makes the same picks when a key's mean lands a few buckets of 5 ms apart (162 vs 177)", async () => {
+    // The E7 recheck: the Medium key's mean was 162.4 ms in one run and
+    // 177.3 in the other. Linear 5 ms buckets put those three buckets apart,
+    // and against a 200 ms key that moves every pick boundary by ~2%.
+    const costs = (mid: number, slow: number) => (sel: string) =>
+      facts(sel, sel === "#fast1" ? mid : sel === "#slow" ? slow : 0);
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const a = await replay(seed, costs(162, 200));
+      const b = await replay(seed, costs(177, 208));
+      expect(b).toEqual(a);
+    }
+  });
+
+  it("makes the same picks whether or not an interaction arrived before the step read the span", async () => {
+    // The root cause of the E7 divergences: `lastActionPerf` is read mid-page,
+    // and the browser reports an interaction only after the paint that ends
+    // it, so the same 200 ms click read { blocking 200 } in one run and
+    // { blocking 200, interaction 208 } in the other. Summed, that is 200 vs
+    // 408 for the same key.
+    const busy: Record<string, number> = { "#fast1": 80, "#slow": 200 };
+    const late = (sel: string) => facts(sel, busy[sel] ?? 0);
+    const inTime = (sel: string, i: number) =>
+      facts(sel, busy[sel] ?? 0, i % 2 === 0 ? Math.ceil(((busy[sel] ?? 0) + 1) / 8) * 8 : undefined);
+    for (const seed of [1, 2, 3, 4, 5]) {
+      expect(await replay(seed, inTime)).toEqual(await replay(seed, late));
+    }
+  });
+
+  it("draws exactly two values from step.rng per step on every branch", async () => {
+    const counting = (seed: number) => {
+      const inner = createRng(seed);
+      const rng: Rng & { draws: number } = { seed, draws: 0, next: () => (rng.draws++, inner.next()) };
+      return rng;
+    };
+    const drawsFor = async (
+      driver: ReturnType<typeof perfSeekingDriver>,
+      o: Partial<DriverStep>,
+    ): Promise<number> => {
+      const rng = counting(3);
+      await driver.selectAction(step({ ...o, rng }));
+      return rng.draws;
+    };
+    const measureAll = async (driver: ReturnType<typeof perfSeekingDriver>) => {
+      for (const c of candidates) {
+        await driver.selectAction(step({ history: [ran], lastActionPerf: facts(c.selector, c.selector === "#slow" ? 300 : 0) }));
+      }
+    };
+    // Nothing measured, epsilon 1: the uniform-among-untried branch.
+    expect(await drawsFor(perfSeekingDriver({ epsilon: 1 }), {})).toBe(2);
+    // Some measured, epsilon 0: weighted with untried candidates beside.
+    const partly = perfSeekingDriver({ epsilon: 0 });
+    await partly.selectAction(step({ history: [ran], lastActionPerf: facts("#slow", 300) }));
+    expect(await drawsFor(partly, { history: [ran] })).toBe(2);
+    // Every candidate measured: no untried one, so no exploration to roll for.
+    const all = perfSeekingDriver();
+    await measureAll(all);
+    expect(await drawsFor(all, { history: [ran] })).toBe(2);
+    // Perf off: the uniform fallback.
+    const off = perfSeekingDriver({ onWarn: () => {} });
+    expect(await drawsFor(off, { history: [ran] })).toBe(2);
+  });
+
+  it("does not depend on the order measurements arrived in", async () => {
+    // Same measurements, two arrival orders. As floats, 14.7 + 0.2 + 0.1 is
+    // 14.999999999999998 while 0.1 + 0.2 + 14.7 is 15, so a mean can land on
+    // either side of a bucket edge (5 ms before, 63 ms now) by order alone.
+    const spans: Array<[string, number]> = [
+      ["#fast1", 0.1], ["#fast1", 0.2], ["#fast1", 14.7],
+      ["#fast2", 0.1], ["#fast2", 0.2], ["#fast2", 188.7],
+      ["#slow", 150], ["#fast3", 0],
+    ];
+    const picks = async (order: Array<[string, number]>) => {
+      const driver = perfSeekingDriver({ epsilon: 0, prior: priorWith(order) });
+      const rng = createRng(17);
+      const out: number[] = [];
+      for (let i = 0; i < 60; i++) out.push(await pickIndex(driver, step({ rng })));
+      return out;
+    };
+    const forward = await picks(spans);
+    expect(await picks([...spans].reverse())).toEqual(forward);
+    // Interleaved differently again, as live steps would deliver them.
+    const shuffled = [spans[7]!, spans[2]!, spans[5]!, spans[0]!, spans[6]!, spans[4]!, spans[1]!, spans[3]!];
+    expect(await picks(shuffled)).toEqual(forward);
+  });
+
   it("refuses an epsilon outside [0, 1]", () => {
     expect(() => perfSeekingDriver({ epsilon: 1.5 })).toThrow(/epsilon/);
     expect(() => perfSeekingDriver({ epsilon: Number.NaN })).toThrow(/epsilon/);
+  });
+});
+
+describe("perfSeekingBucketCost", () => {
+  it("weighs every cost under the threshold as nothing", () => {
+    for (const ms of [0, 1, 16, 24, 41.9]) expect(perfSeekingBucketCost(ms)).toBe(0);
+    expect(perfSeekingBucketCost(Number.NaN)).toBe(0);
+    expect(perfSeekingBucketCost(PERF_SEEKING_COST_THRESHOLD_MS)).toBeGreaterThan(0);
+  });
+
+  it("puts multiplicative jitter of a slow step into one bucket", () => {
+    expect(perfSeekingBucketCost(177.3)).toBe(perfSeekingBucketCost(162.4));
+    expect(perfSeekingBucketCost(208)).toBe(perfSeekingBucketCost(200));
+    expect(perfSeekingBucketCost(88)).toBe(perfSeekingBucketCost(80));
+    expect(perfSeekingBucketCost(1040)).toBe(perfSeekingBucketCost(960));
+  });
+
+  it("still ranks costs a bucket apart, so the steering keeps its order", () => {
+    const heavy = perfSeekingBucketCost(200);
+    const medium = perfSeekingBucketCost(80);
+    expect(heavy / medium).toBeGreaterThan(2);
+    expect(heavy + PERF_SEEKING_COST_FLOOR_MS).toBeGreaterThan(150 * PERF_SEEKING_COST_FLOOR_MS);
+    let prev = 0;
+    for (let ms = 0; ms <= 5000; ms += 7) {
+      const b = perfSeekingBucketCost(ms);
+      expect(b).toBeGreaterThanOrEqual(prev);
+      prev = b;
+    }
+    expect(perfSeekingBucketCost(Number.POSITIVE_INFINITY)).toBeGreaterThan(perfSeekingBucketCost(1e9));
   });
 });

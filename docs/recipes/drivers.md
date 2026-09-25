@@ -13,7 +13,7 @@ Drivers are activated by passing `driver` to `chaos()` / `ChaosCrawler`. The leg
 | `formDriver()` | Detects `<form>`s, fills every supported field, submits | Apps with login / signup / settings / data-entry forms |
 | `payloadDriver({ payloads })` | `formDriver` with attack payload sets (XSS / SQLi / path / large / unicode) | **Authorized** pentest of your own app; pair with invariants that detect the attack class |
 | `flowDriver({ steps })` | Walks a scripted user journey (register → verify → login → …) across pages | Critical-path coverage under fault injection |
-| `perfSeekingDriver({ prior?, epsilon? })` | Weights candidates by what their perfKey cost earlier (`blockingMs + interactionMs`), exploring untried ones | Hunting the slowest interaction; needs `perf` on. See [perf.md](perf.md#steering-the-crawl-by-cost-lastactionperf-and-perfseekingdriver) |
+| `perfSeekingDriver({ prior?, epsilon? })` | Weights candidates by what their perfKey cost earlier (the larger of `blockingMs` and `interactionMs`, in log-scale buckets), exploring untried ones. A seed replays the same picks as long as no key's mean cost crosses into another bucket | Hunting the slowest interaction; needs `perf` on. See [perf.md](perf.md#steering-the-crawl-by-cost-lastactionperf-and-perfseekingdriver) |
 
 ## Combinators
 
