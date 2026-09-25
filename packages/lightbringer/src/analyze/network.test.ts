@@ -108,3 +108,49 @@ describe("buildSpanNetwork attributes a request to the span it started in", () =
     expect(buildSpanNetwork(first, [delayed], "example.com").requests[0]).not.toHaveProperty("unfinished");
   });
 });
+
+// B2 follow-up (2026-09-24 evaluation): under the networkidle settle a click
+// that fires a fetch closes a few ms after the fetch starts, so its
+// durationMs never includes a delay fault on that fetch. `settledMs` is when
+// the span's own requests were done.
+describe("buildSpanNetwork settledMs", () => {
+  const click = { startEpochMs: 1000, endEpochMs: 1005 };
+  const req = (startEpochMs: number, endEpochMs: number | undefined, url = "https://example.com/api/x"): NetReq => ({
+    url, type: "Fetch", startMono: 0, startEpochMs, endEpochMs, encoded: 100,
+  });
+  it("is the end of the last request the span started, past the span's end", () => {
+    const net = buildSpanNetwork(click, [req(1002, 1302), req(1003, 1040)], "example.com");
+    expect(net.settledMs).toBe(302);
+    expect(net).not.toHaveProperty("settledUnfinished");
+  });
+  it("is absent when the span started no request, even while an earlier one runs", () => {
+    const net = buildSpanNetwork(click, [req(900, 1300)], "example.com");
+    expect(net.busyMs).toBe(5);
+    expect(net).not.toHaveProperty("settledMs");
+    expect(net).not.toHaveProperty("settledUnfinished");
+  });
+  it("is computed over every own request, before the detail list is capped", () => {
+    const span = { startEpochMs: 0, endEpochMs: 1000 };
+    // 20 slow requests fill the slowest-first list; a short late one ends last.
+    const slow = Array.from({ length: 20 }, (_, i) => req(0, 100 + i, `https://example.com/s${i}`));
+    const net = buildSpanNetwork(span, [...slow, req(500, 510, "https://example.com/late")], "example.com");
+    expect(net.requests).toHaveLength(20);
+    expect(net.requests.some((r) => r.url.endsWith("/late"))).toBe(false);
+    expect(net.settledMs).toBe(510);
+  });
+  it("leaves an unfinished request out rather than inventing its end, and flags it", () => {
+    const partial = buildSpanNetwork(click, [req(1002, 1302), req(1003, undefined)], "example.com");
+    expect(partial.settledMs).toBe(302);
+    expect(partial.settledUnfinished).toBe(true);
+    const none = buildSpanNetwork(click, [req(1003, undefined)], "example.com");
+    expect(none).not.toHaveProperty("settledMs");
+    expect(none.settledUnfinished).toBe(true);
+  });
+  it("counts a failed / aborted request at the time it failed, keeping its detail entry unfinished", () => {
+    const aborted: NetReq = { ...req(1003, undefined), failedEpochMs: 1150 };
+    const net = buildSpanNetwork(click, [req(1002, 1040), aborted], "example.com");
+    expect(net.settledMs).toBe(150);
+    expect(net).not.toHaveProperty("settledUnfinished");
+    expect(net.requests.find((r) => r.durationMs === 0)).toMatchObject({ unfinished: true });
+  });
+});

@@ -24,6 +24,7 @@ import {
   openPerfSession,
 } from "./perf-session.js";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
+import { ACTION_SETTLE_CAP_MS } from "./settle.js";
 import { SpanFaultTags } from "./perf-faults.js";
 import { actionKind, actionRouteUrl, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
 import type { ResolvedPerfOptions } from "./perf-options.js";
@@ -50,6 +51,19 @@ type SpanOwner = (
 
 // Moved to the leaf `perf-session.ts` (shared with the load runner); kept
 // exported here for existing importers.
+
+/**
+ * How long `finish()` waits, at most, for requests the page's action spans
+ * started that are still running — the same cap an action's adaptive settle
+ * has. Under `networkidle` a click that fires a fetch closes a few ms after
+ * the fetch starts; when that click is the page's last step, the report was
+ * built (and the page left) before the fetch answered, so its span's
+ * `network.settledMs` — what `degradation`'s `effectiveMs` reads a delay
+ * fault from — was missing. Past the cap the span keeps `settledUnfinished`.
+ */
+export const ACTION_REQUEST_DRAIN_MS = ACTION_SETTLE_CAP_MS;
+/** How often the drain re-checks (node-side `peekSpan`, no page call). */
+const DRAIN_POLL_MS = 25;
 
 export class PagePerf {
   private loadHandle: SpanHandle | null = null;
@@ -88,7 +102,7 @@ export class PagePerf {
     private readonly slug: string,
     pageFaults: readonly string[],
     /** For the live URL an action's key is built from; absent in unit fakes. */
-    private readonly page?: Pick<Page, "url">,
+    private readonly page?: Pick<Page, "url"> & Partial<Pick<Page, "isClosed">>,
   ) {
     this.faultTags = new SpanFaultTags(pageFaults);
   }
@@ -275,19 +289,20 @@ export class PagePerf {
     }: { navigationFailed?: boolean; timeoutMs?: number } = {},
   ): Promise<PerfSpanReport[]> {
     if (navigationFailed) await this.client.send("Page.stopLoading").catch(() => {});
-    const outcome = await raceTimeout(this.build(result), timeoutMs);
+    const outcome = await raceTimeout(this.build(result, { drain: !navigationFailed }), timeoutMs);
     // The crawler logs this as `perf_finish_failed` and keeps crawling.
     if (outcome === TIMED_OUT) throw new Error(`perf finish timed out after ${timeoutMs}ms`);
     return outcome;
   }
 
-  private async build(result: PageResult): Promise<PerfSpanReport[]> {
+  private async build(result: PageResult, { drain }: { drain: boolean }): Promise<PerfSpanReport[]> {
     if (this.loadHandle) await this.endLoad();
     for (const handle of this.openActions) {
       this.faultTags.end(handle);
       this.session.controller.cancel(handle);
     }
     this.openActions.clear();
+    if (drain) await this.drainActionRequests(ACTION_REQUEST_DRAIN_MS);
 
     const { report, covArtifact } = await this.session.finish(loadSpanName(this.url));
     this.coverage = covArtifact;
@@ -339,6 +354,26 @@ export class PagePerf {
     }
     result.perfPage = summary;
     return attached;
+  }
+
+  /**
+   * Wait, up to `capMs`, until no request an action span of this page
+   * started is still running (lightbringer's `settledUnfinished`), so the
+   * report records when each step's own work finished. A request that fails
+   * or is aborted counts as over. Returns at once when no action span has
+   * one in flight — always the case under adaptive settle unless that settle
+   * capped — or when the page is closed.
+   */
+  private async drainActionRequests(capMs: number): Promise<void> {
+    const actionSpans = this.owners.flatMap((o, i) => (o.kind === "action" ? [i] : []));
+    if (actionSpans.length === 0) return;
+    const deadline = Date.now() + capMs;
+    const running = () =>
+      actionSpans.some((i) => this.session.peekSpan(i)?.network.settledUnfinished === true);
+    while (running() && Date.now() < deadline) {
+      if (this.page?.isClosed?.()) return;
+      await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
+    }
   }
 
   /**

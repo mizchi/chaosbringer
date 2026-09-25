@@ -90,11 +90,23 @@ export function tagServerFaults(
 /** How many `(key, fault)` pairs the degradation report keeps. */
 export const DEGRADATION_TOP_N = 10;
 
+/**
+ * How long until a span's own work finished: its wall time, or — when it
+ * fired requests it did not wait for — until the last of them finished.
+ * Under the `networkidle` settle a click that fires a fetch closes a few ms
+ * after the fetch starts; a delay fault on that fetch then lands in
+ * `network.settledMs`, never in `durationMs`.
+ */
+export function effectiveDurationMs(span: Pick<PerfSpanReport, "durationMs" | "network">): number {
+  return Math.max(span.durationMs, span.network.settledMs ?? 0);
+}
+
 function side(spans: readonly PerfSpanReport[]): PerfDegradationSide {
   const interactions = spans.flatMap((s) => (s.interaction ? [s.interaction.maxDurationMs] : []));
   return {
     n: spans.length,
     durationMs: median(spans.map((s) => s.durationMs)),
+    effectiveMs: median(spans.map(effectiveDurationMs)),
     blockingMs: median(spans.map((s) => s.cpu.blockingMs)),
     requestCount: median(spans.map((s) => s.network.requestCount)),
     ...(interactions.length > 0 ? { interactionMs: median(interactions) } : {}),
@@ -119,7 +131,14 @@ function side(spans: readonly PerfSpanReport[]): PerfDegradationSide {
  * stays "every span with this fault", other faults included, so faults that
  * always fire together still get a row.
  *
- * Sorted by the `durationMs` delta, largest first; ties keep the order the
+ * Each side also carries `effectiveMs` (`effectiveDurationMs`): a step's
+ * wall time stretched to when the requests it started finished. That is the
+ * number a delay fault on a fetch the step did not wait for shows up in —
+ * under `networkidle` a click's `durationMs` delta for it reads ~0 (or
+ * slightly negative, noise) while its `effectiveMs` delta reads the delay.
+ * `durationMs` stays as the span measured it.
+ *
+ * Sorted by the `effectiveMs` delta, largest first; ties keep the order the
  * keys were first seen. Negative deltas stay in: a fault that made a step
  * faster (a 503 skipping the render) is a finding too, it just sorts last.
  */
@@ -149,6 +168,7 @@ export function buildDegradation(
         clean: base,
         delta: {
           durationMs: round1(faulted.durationMs - base.durationMs),
+          effectiveMs: round1(faulted.effectiveMs - base.effectiveMs),
           blockingMs: round1(faulted.blockingMs - base.blockingMs),
           requestCount: round1(faulted.requestCount - base.requestCount),
           ...(faulted.interactionMs !== undefined && base.interactionMs !== undefined
@@ -159,5 +179,5 @@ export function buildDegradation(
     }
   }
   // Array.prototype.sort is stable, so equal deltas keep first-seen order.
-  return entries.sort((a, b) => b.delta.durationMs - a.delta.durationMs).slice(0, topN);
+  return entries.sort((a, b) => b.delta.effectiveMs - a.delta.effectiveMs).slice(0, topN);
 }

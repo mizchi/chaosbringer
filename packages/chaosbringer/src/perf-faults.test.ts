@@ -92,9 +92,9 @@ describe("buildDegradation", () => {
       {
         key,
         fault: "api-delay",
-        faulted: { n: 3, durationMs: 420, blockingMs: 6, requestCount: 3 },
-        clean: { n: 2, durationMs: 110, blockingMs: 5, requestCount: 3 },
-        delta: { durationMs: 310, blockingMs: 1, requestCount: 0 },
+        faulted: { n: 3, durationMs: 420, effectiveMs: 420, blockingMs: 6, requestCount: 3 },
+        clean: { n: 2, durationMs: 110, effectiveMs: 110, blockingMs: 5, requestCount: 3 },
+        delta: { durationMs: 310, effectiveMs: 310, blockingMs: 1, requestCount: 0 },
       },
     ]);
   });
@@ -157,6 +157,50 @@ describe("buildDegradation", () => {
     expect(rows[0]!.delta.durationMs).toBe(90);
     expect(rows.at(-1)!.delta.durationMs).toBe(0);
     expect(buildDegradation(spans, 20).at(-1)!.delta.durationMs).toBe(-20);
+  });
+
+  // B2 follow-up (2026-09-24 evaluation, E4 xhr-site): under networkidle the
+  // Reload click closes ~5 ms after its fetch starts, so a 300 ms delay on
+  // that fetch never reached durationMs and the entry read -16..-30 ms.
+  it("counts the requests a span fired but did not wait for in effectiveMs", () => {
+    const k = "/items/:id :: click Reload";
+    const rows = buildDegradation([
+      // faulted: span closed at 5 ms, its fetch answered 300 ms later
+      fakeSpan(k, { durationMs: 5, requestCount: 1, settledMs: 305, faults: ["api-delay-300"] }),
+      fakeSpan(k, { durationMs: 6, requestCount: 1, settledMs: 306, faults: ["api-delay-300"] }),
+      fakeSpan(k, { durationMs: 7, requestCount: 1, settledMs: 8 }),
+      fakeSpan(k, { durationMs: 5, requestCount: 1, settledMs: 4 }),
+    ]);
+    expect(rows).toHaveLength(1);
+    const [r] = rows;
+    expect(r!.faulted).toMatchObject({ durationMs: 5.5, effectiveMs: 305.5 });
+    expect(r!.clean).toMatchObject({ durationMs: 6, effectiveMs: 6.5 });
+    expect(r!.delta.durationMs).toBe(-0.5);
+    expect(r!.delta.effectiveMs).toBe(299);
+  });
+
+  it("uses durationMs as the effective duration when a span's requests finished inside it or it fired none", () => {
+    const k = "/ :: load";
+    const [r] = buildDegradation([
+      fakeSpan(k, { durationMs: 400, settledMs: 250, faults: ["f"] }),
+      fakeSpan(k, { durationMs: 100 }),
+    ]);
+    expect(r!.faulted.effectiveMs).toBe(400);
+    expect(r!.clean.effectiveMs).toBe(100);
+    expect(r!.delta.effectiveMs).toBe(300);
+  });
+
+  it("sorts by the effectiveMs delta", () => {
+    const rows = buildDegradation([
+      fakeSpan("/a :: load", { durationMs: 200, faults: ["f"] }),
+      fakeSpan("/a :: load", { durationMs: 100 }),
+      fakeSpan("/b :: click #go", { durationMs: 5, settledMs: 305, faults: ["f"] }),
+      fakeSpan("/b :: click #go", { durationMs: 5, settledMs: 6 }),
+    ]);
+    expect(rows.map((r) => [r.key, r.delta.durationMs, r.delta.effectiveMs])).toEqual([
+      ["/b :: click #go", 0, 299],
+      ["/a :: load", 100, 100],
+    ]);
   });
 
   it("is empty with no faults at all", () => {

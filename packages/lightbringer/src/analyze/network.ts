@@ -71,6 +71,27 @@ export interface SpanNetwork {
   thirdParty: ThirdPartyBreakdown;
   /** requests grouped by what issued them (top issuers first); over ALL requests */
   byInitiator: InitiatorStat[];
+  /**
+   * When the span's own work on the network was done: ms from the span start
+   * until the last request that STARTED in the span finished (max of
+   * `startOffsetMs + durationMs` over them; a failed / aborted request counts
+   * at the time it failed), computed over every such request, not only the
+   * capped `requests` list. It can exceed `durationMs` — a click
+   * that fires a fetch and is not waited for (`networkidle` returns before the
+   * fetch settles) closes in a few ms while its request runs on — and can be
+   * less than it. `max(durationMs, settledMs)` is then "how long until this
+   * step's own work finished". Absent when the span started no request, or
+   * when none of its requests is over yet.
+   */
+  settledMs?: number;
+  /**
+   * true when some request that started in the span was still running when
+   * the report was built (neither finished nor failed). Those requests have
+   * no known end and are left out of `settledMs` rather than given an
+   * invented one, so `settledMs` is then a lower bound (or absent, when no
+   * request of the span was over).
+   */
+  settledUnfinished?: true;
   requests: Array<{
     url: string;
     type: string;
@@ -115,6 +136,13 @@ export interface NetReq {
   startMono: number;
   startEpochMs: number;
   endEpochMs?: number;
+  /**
+   * When the request failed or was aborted (CDP `loadingFailed`), for a
+   * request that never finished. Only `settledMs` reads it: the request is
+   * over, though `endEpochMs` stays unset and its detail entry stays
+   * `unfinished`.
+   */
+  failedEpochMs?: number;
   encoded?: number;
   initiator?: Initiator;
   /** served from disk / memory / prefetch / service-worker cache (no network fetch) */
@@ -396,6 +424,11 @@ export function buildSpanNetwork(
   // dependency depth of what the span fired) is counted over these only.
   const ownIntervals: Array<[number, number]> = [];
   let encoded = 0;
+  // Latest end (epoch ms) of the span's own requests that are over (finished,
+  // or failed / aborted); an own request still running at report time sets
+  // `unsettled` instead of being given an invented end.
+  let settledEnd: number | undefined;
+  let unsettled = false;
   for (const r of reqs) {
     // A request with no response yet (still in flight, or failed / aborted:
     // capture only records `loadingFinished`) has no known end; it is a point.
@@ -416,6 +449,9 @@ export function buildSpanNetwork(
     // broke, and a delay fault's cost landed on the clean spans after it.
     if (r.startEpochMs < span.startEpochMs) continue;
     if (interval) ownIntervals.push(interval);
+    const over = r.endEpochMs ?? r.failedEpochMs;
+    if (over == null) unsettled = true;
+    else settledEnd = Math.max(settledEnd ?? over, over);
     encoded += r.encoded ?? 0;
     const tp = isThirdParty(r.url, firstPartyDomain);
     requests.push({
@@ -448,6 +484,9 @@ export function buildSpanNetwork(
     waves: countWaves(ownIntervals),
     thirdParty: buildThirdParty(tpRecords, firstPartyDomain),
     byInitiator: buildInitiators(tpRecords),
+    // Over every own request, before the detail list below is capped.
+    ...(settledEnd != null ? { settledMs: round(settledEnd - span.startEpochMs) } : {}),
+    ...(unsettled ? { settledUnfinished: true as const } : {}),
     requests: requests.slice(0, REQUESTS_PER_SPAN_LIMIT),
   };
 }
