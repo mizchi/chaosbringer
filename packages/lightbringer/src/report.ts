@@ -71,6 +71,11 @@ export function buildSpanReport(
         ...buildTraceRender(renderEvents, s.traceStartUs, s.traceEndUs),
       }
     : s.render;
+  // A navigation's timeOrigin is on the same epoch clock as the span bounds
+  // (both come from the page's `timeOrigin + performance.now()`).
+  const navigations = entries.documents.filter(
+    (d) => d.timeOrigin >= s.startEpochMs && d.timeOrigin <= s.endEpochMs,
+  ).length;
   return {
     name: s.name,
     durationMs: round(s.endEpochMs - s.startEpochMs),
@@ -79,6 +84,7 @@ export function buildSpanReport(
     cpu: buildSpanCpu(s, entries.longTasks, entries.loaf),
     render,
     memory: s.memory,
+    ...(navigations > 0 ? { navigations } : {}),
     interaction: buildSpanInteraction(s, entries.events),
     frames: buildSpanFrames(s, entries.frames),
     traceWindowUs: [s.traceStartUs, s.traceEndUs],

@@ -63,3 +63,48 @@ describe("buildSpanNetwork", () => {
     expect(buildSpanNetwork(span, reqs, "example.com").requestCount).toBe(0);
   });
 });
+
+// B2 (2026-09-24 evaluation): a request started by one span and still running
+// through the next spans used to be counted, with its bytes, in every span it
+// overlapped, so a click that fired nothing read `requestCount: 2`.
+describe("buildSpanNetwork attributes a request to the span it started in", () => {
+  const first = { startEpochMs: 1000, endEpochMs: 1050 };
+  const second = { startEpochMs: 1150, endEpochMs: 1200 };
+  const third = { startEpochMs: 1300, endEpochMs: 1380 };
+  // fired 30 ms into `first`, answered 300 ms later: in flight through `second`
+  // and into `third`.
+  const delayed: NetReq = {
+    url: "https://example.com/api/item/6", type: "Fetch", startMono: 0,
+    startEpochMs: 1030, endEpochMs: 1335, encoded: 2048,
+  };
+  it("counts it, its bytes and its full duration on the span that fired it", () => {
+    const net = buildSpanNetwork(first, [delayed], "example.com");
+    expect(net.requestCount).toBe(1);
+    expect(net.encodedKB).toBe(2);
+    expect(net.requests).toEqual([
+      expect.objectContaining({ startOffsetMs: 30, durationMs: 305 }),
+    ]);
+    // busy time stays what the span itself saw of the network
+    expect(net.busyMs).toBe(20);
+  });
+  it("does not count it on later spans it only overlaps, which still see the network busy", () => {
+    for (const span of [second, third]) {
+      const net = buildSpanNetwork(span, [delayed], "example.com");
+      expect(net.requestCount).toBe(0);
+      expect(net.encodedKB).toBe(0);
+      expect(net.requests).toEqual([]);
+      expect(net.thirdParty.requestCount).toBe(0);
+      expect(net.byInitiator).toEqual([]);
+      expect(net.waves).toBe(0);
+    }
+    expect(buildSpanNetwork(second, [delayed], "example.com").busyMs).toBe(50);
+    expect(buildSpanNetwork(third, [delayed], "example.com").busyMs).toBe(35);
+  });
+  it("flags a request with no response yet instead of passing 0 off as its duration", () => {
+    const pending: NetReq = { ...delayed, endEpochMs: undefined, encoded: undefined };
+    const net = buildSpanNetwork(first, [pending], "example.com");
+    expect(net.requestCount).toBe(1);
+    expect(net.requests[0]).toMatchObject({ durationMs: 0, unfinished: true });
+    expect(buildSpanNetwork(first, [delayed], "example.com").requests[0]).not.toHaveProperty("unfinished");
+  });
+});

@@ -2,6 +2,7 @@ import type { SpanReport } from "lightbringer/core";
 import { describe, expect, it } from "vitest";
 import {
   actionKind,
+  actionRouteUrl,
   attemptedActionType,
   candidatePerfKey,
   loadSpanName,
@@ -275,5 +276,30 @@ describe("toLastActionPerf / formatLastActionPerf", () => {
         network: { requestCount: 1, encodedKB: 0.5 },
       }),
     ).toBe("Previous action cost: 20ms, 0ms main-thread blocking over 1 long task, 1 request (0.5 KB)");
+  });
+});
+
+describe("actionRouteUrl", () => {
+  const visit = "http://localhost:3000/list";
+  it("follows the live URL on the visit's origin", () => {
+    expect(actionRouteUrl(visit, "http://localhost:3000/items/7?x=1")).toBe("http://localhost:3000/items/7?x=1");
+  });
+  it("keeps the visit URL for another origin, an error page, or nothing", () => {
+    expect(actionRouteUrl(visit, "https://elsewhere.test/")).toBe(visit);
+    expect(actionRouteUrl(visit, "chrome-error://chromewebdata/")).toBe(visit);
+    expect(actionRouteUrl(visit, "about:blank")).toBe(visit);
+    expect(actionRouteUrl(visit, undefined)).toBe(visit);
+  });
+});
+
+describe("candidatePerfKey with a driver step", () => {
+  const button = { type: "button" as const, selector: "#buy" };
+  it("keys by the route the page is on, not the visit", () => {
+    const step = { url: "http://localhost:3000/list", currentUrl: "http://localhost:3000/items/7" };
+    expect(candidatePerfKey(step, button)).toBe("/items/:id :: click #buy");
+  });
+  it("is the visit key while the page has not left it", () => {
+    const step = { url: "http://localhost:3000/list", currentUrl: "http://localhost:3000/list" };
+    expect(candidatePerfKey(step, button)).toBe(candidatePerfKey(step.url, button));
   });
 });

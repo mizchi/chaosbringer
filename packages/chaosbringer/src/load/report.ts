@@ -62,14 +62,16 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     iterations: WorkerSamples["iterations"];
     steps: WorkerSamples["steps"];
     perf: WorkerPerfSample[];
+    truncated: number;
   }>();
   for (let i = 0; i < input.planned.length; i++) {
     const plan = input.planned[i]!;
     const samples = input.samples[i]!;
     const name = plan.spec.scenario.name;
-    const entry = byScenario.get(name) ?? { workerCount: 0, iterations: [], steps: [], perf: [] };
+    const entry = byScenario.get(name) ?? { workerCount: 0, iterations: [], steps: [], perf: [], truncated: 0 };
     entry.workerCount += 1;
     entry.iterations.push(...samples.iterations);
+    entry.truncated += samples.truncatedIterations ?? 0;
     entry.steps.push(...samples.steps);
     if (samples.perf) entry.perf.push(...samples.perf);
     byScenario.set(name, entry);
@@ -108,6 +110,7 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
       workers: group.workerCount,
       iterations: group.iterations.length,
       iterationFailures,
+      ...(group.truncated > 0 ? { truncatedIterations: group.truncated } : {}),
       throughputPerSec: seconds > 0 ? group.iterations.length / seconds : 0,
       steps: stepReports,
     });
@@ -124,6 +127,7 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
       scenarioName: plan.spec.scenario.name,
       iterations: samples.iterations.length,
       iterationFailures: samples.iterations.filter((it) => !it.success).length,
+      ...(samples.truncatedIterations ? { truncatedIterations: samples.truncatedIterations } : {}),
       lastIterationAt: last,
     };
   });
@@ -175,9 +179,11 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     .sort((a, b) => a.timestamp - b.timestamp)
     .slice(0, MAX_ERRORS_IN_REPORT);
 
+  const truncatedIterations = scenarios.reduce((a, s) => a + (s.truncatedIterations ?? 0), 0);
   const totals = {
     iterations: scenarios.reduce((a, s) => a + s.iterations, 0),
     iterationFailures: scenarios.reduce((a, s) => a + s.iterationFailures, 0),
+    ...(truncatedIterations > 0 ? { truncatedIterations } : {}),
     stepFailures: scenarios.reduce(
       (a, s) => a + s.steps.reduce((b, st) => b + st.failures, 0),
       0,
@@ -328,7 +334,7 @@ export function formatLoadReport(report: LoadReport): string {
     `  duration=${ms(report.durationMs)} workers=${report.config.workers} rampUp=${ms(report.config.rampUpMs)}`,
   );
   lines.push(
-    `  iterations=${report.totals.iterations} failures=${report.totals.iterationFailures} stepFailures=${report.totals.stepFailures}`,
+    `  iterations=${report.totals.iterations}${report.totals.truncatedIterations ? ` truncated=${report.totals.truncatedIterations}` : ""} failures=${report.totals.iterationFailures} stepFailures=${report.totals.stepFailures}`,
   );
   lines.push(
     `  network: ${report.totals.networkRequests} reqs / ${report.totals.networkErrors} errors`,

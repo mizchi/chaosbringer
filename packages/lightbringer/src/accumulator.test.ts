@@ -144,6 +144,28 @@ describe("buildReport from accumulated entries", () => {
     expect(r.documents?.map((d) => d.url)).toEqual(["http://x.test/a", "http://x.test/b"]);
   });
 
+  it("counts the documents a span navigated to, from their timeOrigin, whatever memory reads", () => {
+    // Under memGc the forced GC collects the old document before the end
+    // reading, so `memory.documentsDelta` reads 0 on a navigation. The new
+    // document's timeOrigin still falls inside the span.
+    const acc = new PerfAccumulator();
+    acc.add(payload({ timeOrigin: 1_000_000 }));
+    acc.add(payload({ timeOrigin: 1_000_500, url: "http://x.test/b" }));
+    acc.add(payload({ timeOrigin: 1_000_900, url: "http://x.test/c" }));
+    const r = buildReport(
+      "t",
+      "http://x.test/c",
+      acc,
+      [span("load", 999_990, 1_000_100), span("stay", 1_000_200, 1_000_400), span("nav2", 1_000_450, 1_001_000)],
+      [],
+    );
+    expect(r.spans.map((s) => s.memory.documentsDelta)).toEqual([0, 0, 0]);
+    expect(r.spans[0].navigations).toBe(1);
+    // absent, not 0, on a span that stayed on its document
+    expect(r.spans[1]).not.toHaveProperty("navigations");
+    expect(r.spans[2].navigations).toBe(2);
+  });
+
   it("omits documents for a single document and matches the legacy snapshot form", () => {
     const raw = {
       vitals: { LCP: vital("LCP", 42) },

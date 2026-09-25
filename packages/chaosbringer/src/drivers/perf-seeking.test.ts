@@ -293,6 +293,48 @@ describe("perfSeekingDriver", () => {
     for (let i = 0; i < 20; i++) expect(await pickIndex(driver, step({ rng, candidates: mixed, history: [ran] }))).toBe(1);
   });
 
+  it("keys candidates by the route the page is on after a click navigated", async () => {
+    // The visit is `/app`; a link click took the page to `/other`, where the
+    // crawler keys spans by `/other`. The driver must look candidates up by
+    // that route too, or what it measured there never matches anything.
+    const driver = perfSeekingDriver({ epsilon: 0 });
+    const rng = createRng(16);
+    const other = "http://localhost:4000/other";
+    const two = candidates.filter((c) => c.selector === "#fast1" || c.selector === "#slow");
+    const onOther = (o: Partial<DriverStep>) => step({ rng, candidates: two, currentUrl: other, history: [ran], ...o });
+    await driver.selectAction(onOther({ lastActionPerf: { ...facts("#fast1", 0), key: "/other :: click #fast1" } }));
+    await driver.selectAction(onOther({ lastActionPerf: { ...facts("#slow", 2000), key: "/other :: click #slow" } }));
+    let slow = 0;
+    for (let i = 0; i < 50; i++) if ((await pickIndex(driver, onOther({}))) === 2) slow += 1;
+    expect(slow).toBeGreaterThan(45);
+  });
+
+  it("makes the same picks for a seed when costs differ only by timing noise", async () => {
+    // Two runs of one crawl: same seed, same screen, and every step costs
+    // what it cost in the other run give or take ~1.5ms — the jitter two
+    // runs of the same click show. Cheap steps cost 0–3ms, the slow one
+    // ~201ms. Weighting by the raw numbers let that jitter move the pick
+    // boundaries (a cheap key at 2.3ms weighs 3.3, at 0.4 it weighs 1.4),
+    // so near-tied candidates swapped and the runs diverged.
+    const base: Record<string, number> = { "#fast1": 1, "#fast2": 1.5, "#slow": 201, "#fast3": 0.5 };
+    const run = async (noise: readonly number[]) => {
+      const driver = perfSeekingDriver();
+      const rng = createRng(21);
+      const out: number[] = [];
+      let last: LastActionPerf | undefined;
+      for (let i = 0; i < 60; i++) {
+        const index = await pickIndex(driver, step({ rng, history: i > 0 ? [ran] : [], ...(last ? { lastActionPerf: last } : {}) }));
+        out.push(index);
+        const sel = candidates[index]!.selector;
+        last = facts(sel, Math.max(0, base[sel]! + noise[i % noise.length]!));
+      }
+      return out;
+    };
+    const a = await run([0.4, -0.7, 1.2, -0.3, 0.9, -1.0, 0.1]);
+    const b = await run([-0.8, 1.3, -0.2, 0.7, -1.1, 0.5, 1.4]);
+    expect(b).toEqual(a);
+  });
+
   it("refuses an epsilon outside [0, 1]", () => {
     expect(() => perfSeekingDriver({ epsilon: 1.5 })).toThrow(/epsilon/);
     expect(() => perfSeekingDriver({ epsilon: Number.NaN })).toThrow(/epsilon/);

@@ -126,6 +126,9 @@ describe("adaptive settle (e2e)", () => {
     expect(click.perf!.capped).toBe(false);
     expect(report.pages[0]!.settleCapped).toBe(0);
     expect(slowAnsweredAt).toHaveLength(1);
+    // Recorded in the report (B5): `perf regress` refuses to compare these
+    // spans with a networkidle crawl's, whose action spans exclude the settle.
+    expect(report.perf?.settle).toEqual({ mode: "adaptive", quietMs: 100 });
   }, 60_000);
 
   it("networkidle (default): the post-click wait does not wait for the XHR", async () => {

@@ -27,6 +27,7 @@ import type {
   CrawlPerfSummary,
   CrawlVitalSummary,
   PageResult,
+  PerfSettleRecord,
   PerfSpanReport,
 } from "./types.js";
 
@@ -61,17 +62,43 @@ export function slowestActions(actions: readonly ActionResult[], n = 5): SlowAct
 }
 
 /**
- * p50 / p75 / worst of each vital over the pages that reported it. Every
- * vital is lower-is-better, so "worst" is the largest value, with the page
- * it came from. A vital no page reported is absent, not 0.
+ * Each document a page visit showed, with its own URL and vitals.
+ * `perfPage.vitals` are the *last* document's: when an action navigated
+ * away, labelling them with the visited `p.url` would credit the next
+ * page's vitals to it and drop its own. So a visit that went through several
+ * documents contributes each of `perfPage.documents`, under the document's
+ * URL; a single-document visit (no `documents`) is `p.url` and its vitals.
+ */
+function documentVitals(
+  pages: readonly PageResult[],
+): Array<{ url: string; vitals: NonNullable<PageResult["perfPage"]>["vitals"] }> {
+  const out: Array<{ url: string; vitals: NonNullable<PageResult["perfPage"]>["vitals"] }> = [];
+  for (const p of pages) {
+    const pp = p.perfPage;
+    if (!pp) continue;
+    if (pp.documents && pp.documents.length > 0) {
+      for (const d of pp.documents) out.push({ url: d.url || p.url, vitals: d.vitals });
+    } else {
+      out.push({ url: p.url, vitals: pp.vitals });
+    }
+  }
+  return out;
+}
+
+/**
+ * p50 / p75 / worst of each vital over the documents that reported it (see
+ * `documentVitals`). Every vital is lower-is-better, so "worst" is the
+ * largest value, with the URL of the document it came from. A vital no
+ * document reported is absent, not 0.
  */
 function vitalSummaries(pages: readonly PageResult[]): Record<string, CrawlVitalSummary> {
   const out: Record<string, CrawlVitalSummary> = {};
+  const docs = documentVitals(pages);
   for (const name of SUMMARY_VITALS) {
     const samples: { value: number; url: string }[] = [];
-    for (const p of pages) {
-      const v = p.perfPage?.vitals[name]?.value;
-      if (typeof v === "number" && Number.isFinite(v)) samples.push({ value: v, url: p.url });
+    for (const d of docs) {
+      const v = d.vitals[name]?.value;
+      if (typeof v === "number" && Number.isFinite(v)) samples.push({ value: v, url: d.url });
     }
     if (samples.length === 0) continue;
     // Both percentiles nearest-rank (lightbringer's `percentile`), so p50 and
@@ -121,8 +148,8 @@ function addUp<T extends Record<string, number | string>>(
  * span without memory gauges (a collector that never answered) is skipped
  * rather than read as zero, which would fake a climb.
  *
- * So is a span that created a document (`documentsDelta > 0`: every load, a
- * click that navigates). The gauges are the renderer's totals, and the
+ * So is a span that created a document: every load, and an action that
+ * navigated. The gauges are the renderer's totals, and the
  * documents a crawl leaves behind stay counted until a GC collects them, so
  * a run of navigations climbs on garbage alone: on the fixture site every
  * nav link repeated three times "leaked" ~34 listeners a step. What is left
@@ -140,24 +167,35 @@ function addUp<T extends Record<string, number | string>>(
  * a visit boundary with no navigating action on either side does not split a
  * run; each visit is a fresh tab, and a key only spans visits when two
  * visits share a URL pattern.
+ *
+ * "Created a document" must not rest on `memory.documentsDelta` alone: under
+ * `--perf-mem` the forced GC at span end collects the document navigated
+ * away from before the reading, so a navigation reads 0 there (the 2026-09
+ * evaluation's `/chain` crawl flagged 5 of 5 seeds). So loads are always
+ * navigations, whatever their gauges say, and an action is one when
+ * lightbringer saw a document start inside it (`navigations`, from the new
+ * document's timeOrigin, which no GC touches) or, for reports that predate
+ * that field, when `documentsDelta > 0`.
  */
 export function buildPerfTrends(
   pages: readonly PageResult[],
   actions: readonly ActionResult[],
 ): MemoryTrend[] {
-  const ordered: PerfSpanReport[] = [];
-  for (const p of pages) if (p.perf) ordered.push(p.perf);
+  const ordered: Array<{ span: PerfSpanReport; load: boolean }> = [];
+  for (const p of pages) if (p.perf) ordered.push({ span: p.perf, load: true });
   const timed = actions.filter((a) => a.perf);
   timed.sort((a, b) => a.timestamp - b.timestamp);
-  for (const a of timed) ordered.push(a.perf!);
+  for (const a of timed) ordered.push({ span: a.perf!, load: false });
 
   // `epoch` counts documents created so far; a key's run is broken when the
   // epoch moved since its last repeat.
   let epoch = 0;
   const runs = new Map<string, { epoch: number; run: Array<{ name: string; memory: PerfSpanReport["memory"] }> }>();
   const finished: Array<Array<{ name: string; memory: PerfSpanReport["memory"] }>> = [];
-  for (const s of ordered) {
-    if (s.memory && s.memory.documentsDelta > 0) {
+  for (const { span: s, load } of ordered) {
+    const navigated =
+      load || (s.navigations ?? 0) > 0 || (s.memory !== undefined && s.memory.documentsDelta > 0);
+    if (navigated) {
       epoch++;
       continue;
     }
@@ -186,8 +224,12 @@ function coverageKind(u: CoverageUnionKind): CrawlCoverageKind {
   return {
     totalBytes: u.total,
     usedBytes: u.used,
-    usedPct: u.pct,
-    lowUsage: u.rows.slice(0, COVERAGE_LOW_USAGE_TOP_N).map((r) => ({
+    // With no resources of this kind (a crawl of pages without JS) there is no
+    // percentage: 0 would read as "nothing was used".
+    ...(u.total > 0 ? { usedPct: u.pct } : {}),
+    // Fully used resources are not "low usage"; without this filter a crawl
+    // with fewer than 10 partly unused resources padded the list with 100% ones.
+    lowUsage: u.rows.filter((r) => r.used < r.total).slice(0, COVERAGE_LOW_USAGE_TOP_N).map((r) => ({
       url: r.url,
       totalBytes: r.total,
       usedBytes: r.used,
@@ -208,12 +250,14 @@ export function buildCoverageSummary(artifact: Partial<CoverageArtifact>): {
 /**
  * Build `CrawlReport.perf`, or undefined when nothing was measured (a crawl
  * without `perf` must not grow an empty block). `coverage` is the crawl's
- * merged coverage artifact, when `perf.coverage` produced one.
+ * merged coverage artifact, when `perf.coverage` produced one. `settle` is
+ * how the crawl settled its steps, recorded so `perf regress` / `perf gate`
+ * can refuse to compare spans measured under different settle modes.
  */
 export function buildCrawlPerfSummary(
   pages: readonly PageResult[],
   actions: readonly ActionResult[],
-  { coverage }: { coverage?: Partial<CoverageArtifact> } = {},
+  { coverage, settle }: { coverage?: Partial<CoverageArtifact>; settle?: PerfSettleRecord } = {},
 ): CrawlPerfSummary | undefined {
   const spans = reportSpans({ pages, actions });
   const measuredPages = pages.filter((p) => p.perf || p.perfPage).length;
@@ -250,6 +294,8 @@ export function buildCrawlPerfSummary(
   const degradation = buildDegradation(spans);
   const trends = buildPerfTrends(pages, actions);
   return {
+    // First, so a reader of the report sees what the numbers below were measured under.
+    ...(settle ? { settle: { ...settle } } : {}),
     vitals: vitalSummaries(pages),
     slowestActions: slowestActions(actions, PERF_SUMMARY_TOP_N),
     hotInitiators,

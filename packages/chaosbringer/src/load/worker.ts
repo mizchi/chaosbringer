@@ -60,6 +60,15 @@ export interface WorkerSamples {
   runtimeFaultStats: Record<string, { matched: number; fired: number }>;
   /** One sample per measured step; absent unless this worker was sampled. */
   perf?: WorkerPerfSample[];
+  /**
+   * Iterations the deadline cut short: started, then stopped before a step
+   * that would have run. They are not in `iterations` — they finished no
+   * scenario, and counting one as a successful iteration would pair an
+   * iteration count with step counts that never reached it — but the steps
+   * they did run are in `steps` (and `perf`), each a complete measurement.
+   * Absent when none was.
+   */
+  truncatedIterations?: number;
 }
 
 export interface WorkerOptions {
@@ -177,6 +186,8 @@ export class ScenarioWorker {
     };
     const iterStart = performance.now();
     let iterationFailed = false;
+    // The deadline fired with steps of this iteration still to run.
+    let truncated = false;
 
     if (scenario.beforeIteration) {
       try {
@@ -189,7 +200,10 @@ export class ScenarioWorker {
 
     if (!iterationFailed) {
       for (const step of scenario.steps) {
-        if (this.opts.shouldStop()) break;
+        if (this.opts.shouldStop()) {
+          truncated = true;
+          break;
+        }
         // The span opens before the wall-clock start and closes after the
         // wall-clock end, so lightbringer's own CDP round-trips never count
         // toward the step latency the SLOs read.
@@ -249,6 +263,14 @@ export class ScenarioWorker {
       } catch (err) {
         this.recordError("afterIteration", err);
       }
+    }
+
+    if (truncated) {
+      // Left out of `iterations` (see `WorkerSamples.truncatedIterations`):
+      // its duration covers only part of the scenario and its success says
+      // nothing about the steps that never ran.
+      this.samples.truncatedIterations = (this.samples.truncatedIterations ?? 0) + 1;
+      return;
     }
 
     const iterEnd = performance.now();

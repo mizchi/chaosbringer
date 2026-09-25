@@ -35,7 +35,7 @@
 import type { PerfWindow } from "lightbringer/core";
 import type { Page, Request } from "playwright";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
-import type { SettleMode } from "./types.js";
+import type { PerfSettleRecord, SettleMode } from "./types.js";
 
 export type { SettleMode };
 
@@ -57,9 +57,9 @@ const MAX_IDLE_WAIT_MS = 250;
 /** Back-off after a probe hit a document that was being replaced. */
 const NAVIGATION_RETRY_MS = 16;
 
-export type ResolvedSettle =
-  | { mode: "networkidle" }
-  | { mode: "adaptive"; quietMs: number };
+// The same shape the crawl report records (`CrawlPerfSummary.settle`), so
+// the report cannot drift from what the crawler did.
+export type ResolvedSettle = PerfSettleRecord;
 
 /**
  * Validate a `settle` value. Every message starts with `chaosbringer:` and
@@ -386,7 +386,9 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
     async probe(frames, timeoutMs) {
       if (page.isClosed()) return { kind: "gone" };
       const read = page
-        .evaluate(async (minFrames) => {
+        // Named so `perf drilldown` can label its CPU samples harness, not
+        // native: this probe runs inside every adaptive action span.
+        .evaluate(async function chaosbringerSettleProbe(minFrames: number) {
           if (minFrames > 0 && document.visibilityState !== "hidden") {
             for (let i = 0; i < minFrames; i++) {
               await new Promise((r) => requestAnimationFrame(() => r(null)));

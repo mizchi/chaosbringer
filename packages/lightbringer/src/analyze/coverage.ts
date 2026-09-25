@@ -4,6 +4,10 @@
 
 /** Coverage of one downloaded resource (a JS chunk or a stylesheet). */
 export interface CoverageFile {
+  /**
+   * The resource's URL; for a page with several inline <script>/<style> blocks
+   * of different content, `<page url>#inline-<n>` per block (see buildCoverage).
+   */
   url: string;
   totalBytes: number;
   usedBytes: number;
@@ -159,20 +163,60 @@ function toCoverageReport(
   };
 }
 
+/**
+ * The key each entry is grouped under. Chromium reports every inline <script>
+ * (and <style>) block under its document's URL, each with its own source and
+ * offsets starting at 0, so grouping by URL alone laid the blocks' ranges over
+ * each other and one fully-run block made the whole page read ~100% used.
+ * Entries that share a URL but differ in content are therefore told apart as
+ * `<url>#inline-<n>`, n counting the distinct contents in the order Chromium
+ * reported them (document order). Entries with the same content keep one key,
+ * so a script seen in several documents of one collection (a reload, the
+ * same external file) is still unioned; a URL with one content (every
+ * external file) keeps the bare URL as before. The numbering depends only on
+ * the page's own blocks, so the same page gets the same keys on every visit
+ * and cross-scenario / cross-page unions line up.
+ *
+ * Known limit: an entry does not say which document it came from (Playwright
+ * gives url, scriptId, source, functions), so blocks cannot be numbered per
+ * document. A script whose content differs per response (a CSRF token in an
+ * inline block, a generated external file) loaded twice in one collection is
+ * therefore split into one `#inline-<n>` key per response, bytes counted
+ * each time. Numbering by occurrence instead would re-merge a page's distinct
+ * blocks (B4) and still not know where one document ends; documented in the
+ * README rather than guessed at.
+ */
+function distinctContentKeys(items: Array<{ url: string; content: string | undefined }>): string[] {
+  const contents = new Map<string, Array<string | undefined>>();
+  for (const { url, content } of items) {
+    const seen = contents.get(url) ?? [];
+    if (!seen.includes(content)) seen.push(content);
+    contents.set(url, seen);
+  }
+  return items.map(({ url, content }) => {
+    const seen = contents.get(url)!;
+    // an empty url is dropped later (skipEmptyUrl); nothing to number
+    if (!url || seen.length < 2) return url;
+    return `${url}#inline-${seen.indexOf(content) + 1}`;
+  });
+}
+
 /** Build the scenario coverage report + the range artifact (for cross-scenario union). */
 export function buildCoverage(
   js: JSCoverageEntry[],
   css: CSSCoverageEntry[],
 ): { coverage: Coverage; artifact: CoverageArtifact } {
-  const jsItems = js.map((e) => {
+  const jsKeys = distinctContentKeys(js.map((e) => ({ url: e.url, content: e.source })));
+  const jsItems = js.map((e, i) => {
     let maxEnd = 0;
     for (const fn of e.functions)
       for (const r of fn.ranges) if (r.endOffset > maxEnd) maxEnd = r.endOffset;
     const total = e.source?.length ?? maxEnd;
-    return { url: e.url, total, used: jsUsedRanges(e.functions, total) };
+    return { url: jsKeys[i], total, used: jsUsedRanges(e.functions, total) };
   });
-  const cssItems = css.map((e) => ({
-    url: e.url,
+  const cssKeys = distinctContentKeys(css.map((e) => ({ url: e.url, content: e.text })));
+  const cssItems = css.map((e, i) => ({
+    url: cssKeys[i],
     total: e.text?.length ?? 0,
     used: e.ranges.map((r) => [r.start, r.end] as [number, number]),
   }));

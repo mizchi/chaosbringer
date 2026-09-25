@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { perfSeekingDriver } from "./drivers/perf-seeking.js";
+import { candidatePerfKey } from "./perf-key.js";
 import type { Driver, DriverStep } from "./drivers/types.js";
 import { weightedRandomDriver } from "./drivers/weighted-random.js";
 import type { CrawlerOptions, CrawlReport, LastActionPerf } from "./types.js";
@@ -149,5 +150,69 @@ describe("perf facts at the driver seam, and perfSeekingDriver", () => {
     });
     expect(report.actions.length).toBe(6);
     expect(warnings).toHaveLength(1);
+  }, 60_000);
+});
+
+describe("perf keys after a click that navigates", () => {
+  // `/` links to `/second`; `/second` has two buttons and no links, so every
+  // step after the link click runs on `/second`, inside the visit of `/`.
+  const HOME = `<!doctype html><title>home</title><body><a href="/second">Go second</a></body>`;
+  const SECOND = `<!doctype html><title>second</title><body>
+    <button id="a">Button A</button><button id="b">Button B</button></body>`;
+  let server: http.Server;
+  let origin: string;
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+      res.end(req.url?.startsWith("/second") ? SECOND : HOME);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("keys the steps after it by the page they ran on, as candidatePerfKey predicts", async () => {
+    const predicted: string[] = [];
+    const seenKeys: Array<string | undefined> = [];
+    const driver: Driver = {
+      name: "link-then-buttons",
+      async selectAction(step) {
+        seenKeys.push(step.lastActionPerf?.key);
+        const link = step.candidates.findIndex((c) => c.selector.includes("Go second"));
+        const index = link >= 0 ? link : step.stepIndex % step.candidates.length;
+        // The live URL: same-origin here, so it is what the step form
+        // (`candidatePerfKey(step, …)`) resolves to as well.
+        predicted.push(candidatePerfKey(step.currentUrl, step.candidates[index]!));
+        return { kind: "select", index };
+      },
+    };
+    const report = await new ChaosCrawler({
+      baseUrl: `${origin}/`,
+      maxPages: 1,
+      maxActionsPerPage: 4,
+      headless: true,
+      timeout: 10_000,
+      logLevel: "silent",
+      seed: 3,
+      perf: true,
+      driver,
+    }).start();
+
+    const keys = report.actions.map((a) => a.perf?.key);
+    expect(keys).toHaveLength(4);
+    // The link click ran on `/`; everything after it ran on `/second`.
+    expect(keys[0]).toMatch(/^\/ :: click /);
+    for (const k of keys.slice(1)) expect(k).toMatch(/^\/second :: /);
+    // The key a driver predicts for its pick is the key the span carries,
+    // and the next step's facts come back under it — before, every step
+    // after the navigation was keyed `/ :: …`, which no candidate on
+    // `/second` (nor a later visit of `/second`) could match.
+    expect(predicted).toEqual(keys);
+    expect(seenKeys.slice(1)).toEqual(keys.slice(0, -1));
   }, 60_000);
 });

@@ -103,10 +103,21 @@ function side(spans: readonly PerfSpanReport[]): PerfDegradationSide {
 
 /**
  * For every perfKey and every fault seen on its spans: the median span with
- * the fault against the median span without it. A pair appears only when
- * both sides have a span — a fault that hit every span of a key (a runtime
- * fault is on every page) has nothing to compare with. Medians rather than
- * means, so one outlier on either side does not make the delta.
+ * the fault against the median clean span. A pair appears only when both
+ * sides have a span — a fault that hit every span of a key (a runtime fault
+ * is on every page) has nothing to compare with. Medians rather than means,
+ * so one outlier on either side does not make the delta.
+ *
+ * "Clean" is a span with none of the key's faults, not merely without this
+ * one: a span carrying another fault has that fault's cost in it. When a key
+ * had loads hit by server latency and one by a 503 and none by neither, the
+ * 503's "clean" side was the latency-faulted loads and the entry read as
+ * "a 503 makes the load 300 ms faster". The faults on *every* span of the key
+ * (runtime faults, a lifecycle fault fired before the load) are the key's
+ * baseline rather than a difference, so they do not disqualify a span; without
+ * that, any runtime fault would leave no clean span at all. The faulted side
+ * stays "every span with this fault", other faults included, so faults that
+ * always fire together still get a row.
  *
  * Sorted by the `durationMs` delta, largest first; ties keep the order the
  * keys were first seen. Negative deltas stay in: a fault that made a step
@@ -122,23 +133,26 @@ export function buildDegradation(
   const entries: PerfDegradationEntry[] = [];
   for (const [key, group] of byKey) {
     const faults = new Set(group.flatMap((s) => s.faults ?? []));
+    const everywhere = new Set([...faults].filter((f) => group.every((s) => s.faults?.includes(f))));
+    const clean = group.filter((s) => (s.faults ?? []).every((f) => everywhere.has(f)));
     for (const fault of [...faults].sort()) {
+      // On every span: nothing to compare with (and `clean` would be the hit spans).
+      if (everywhere.has(fault)) continue;
       const hit = group.filter((s) => s.faults?.includes(fault));
-      const miss = group.filter((s) => !s.faults?.includes(fault));
-      if (hit.length === 0 || miss.length === 0) continue;
+      if (hit.length === 0 || clean.length === 0) continue;
       const faulted = side(hit);
-      const clean = side(miss);
+      const base = side(clean);
       entries.push({
         key,
         fault,
         faulted,
-        clean,
+        clean: base,
         delta: {
-          durationMs: round1(faulted.durationMs - clean.durationMs),
-          blockingMs: round1(faulted.blockingMs - clean.blockingMs),
-          requestCount: round1(faulted.requestCount - clean.requestCount),
-          ...(faulted.interactionMs !== undefined && clean.interactionMs !== undefined
-            ? { interactionMs: round1(faulted.interactionMs - clean.interactionMs) }
+          durationMs: round1(faulted.durationMs - base.durationMs),
+          blockingMs: round1(faulted.blockingMs - base.blockingMs),
+          requestCount: round1(faulted.requestCount - base.requestCount),
+          ...(faulted.interactionMs !== undefined && base.interactionMs !== undefined
+            ? { interactionMs: round1(faulted.interactionMs - base.interactionMs) }
             : {}),
         },
       });

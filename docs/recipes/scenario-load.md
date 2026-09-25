@@ -113,7 +113,8 @@ scenarios: [
 
 | Field | What |
 |---|---|
-| `totals.iterations` / `iterationFailures` / `stepFailures` | Run-wide counters. |
+| `totals.iterations` / `iterationFailures` / `stepFailures` | Run-wide counters. `iterations` counts finished iterations only. |
+| `totals.truncatedIterations` (also per scenario and worker) | Iterations the `duration` deadline cut short — the deadline fired with steps still to run. They are left out of `iterations`, throughput, iteration failures and the timeline, since they finished no scenario; the steps they did run stay in the step stats (each one a complete measurement), so an early step can show up to one invocation more per worker than there are iterations. Absent when none. |
 | `totals.networkRequests` / `networkErrors` | Counts a request as errored if `status == 0` or `status >= 500`. |
 | `scenarios[].throughputPerSec` | iterations / wall-clock seconds. |
 | `scenarios[].steps[].latency.{p50Ms,p95Ms,p99Ms}` | Per-step percentiles across every worker × iteration. |
@@ -260,6 +261,28 @@ Gate on it with `StepSloThresholds.perf` (below). How it works and what it costs
   so an interaction whose paint landed after its step ended is still counted.
   Measurement never fails the run: a worker whose session cannot open runs
   unmeasured, and a final read that hangs falls back to what was gathered.
+- A step whose click **navigates** (a link to the next page) almost never
+  gets `interactionMs`: the browser reports an interaction after the paint
+  that ends it, and the navigation unloads the document first. A probe run
+  measured it on 20 of 20 same-page button clicks and 0 of 19 link clicks,
+  so an `interactionMsP95` SLO on a navigating step fails with `actual: null`.
+  Gate such steps on `blockingMsP95` / `durationMsP95`.
+- Work a step runs through `page.evaluate` is not seen as a long task, so
+  it reads `blockingMs: 0` (the same loop behind a page `setTimeout` reads in
+  full). Drive the app's own handlers (click, type) in a step you measure.
+- `timeline[].perf` is thin with the default `sampleWorkers: 1`: one worker
+  gives a handful of spans per bucket, a p95 over two or three spans is
+  their maximum, and a bucket with none reads `spans: 0` with 0 blocking,
+  which the sparkline draws as a dip. Read the blocking row against `spans`.
+  For a blocking-against-concurrency curve, sample more workers or widen
+  `timelineBucketMs`. The step-level percentiles are thin too: one worker
+  over a 25 s run gave 16–30 spans per step.
+- With more workers than CPU cores, the browser contexts share one Chromium
+  and contend for it: on the playground, 8 workers on 4 cores raised fixed
+  work's blocking p95 by about 15% and step latency p95 by 2–3× against one
+  worker. Leave that much headroom in `perf` and latency SLOs when CI runs
+  oversubscribed, or keep `workers` at or below the core count for the
+  gating run.
 
 ## Recipe: SLO gating in CI
 
@@ -300,8 +323,9 @@ expectations, so a silently-skipped check defeats the purpose.
 
 A `perf` threshold on a step that has no `perf` (perf off, or no sampled
 worker ran the step) is a violation with `actual: null`, and so is an
-`interactionMs*` threshold on a step none of whose spans had an interaction:
-a browser SLO nothing measured has not passed.
+`interactionMs*` threshold on a step none of whose spans had an interaction
+(the usual case for a click that navigates; see above): a browser SLO
+nothing measured has not passed.
 
 If you want non-throwing handling, use `evaluateSlo(report, slo)` which
 returns `{ ok, violations[] }`.

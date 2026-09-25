@@ -25,6 +25,19 @@ describe("buildCrawlPerfSummary", () => {
     expect(buildCrawlPerfSummary([fakePage("http://x/")], [fakeAction()])).toBeUndefined();
   });
 
+  it("records the crawl's settle mode, so perf regress / gate can refuse mixed modes (B5)", () => {
+    const pages = [fakePage("http://x/", fakeSpan("/ :: load"))];
+    expect(buildCrawlPerfSummary(pages, [], { settle: { mode: "networkidle" } })!.settle).toEqual({
+      mode: "networkidle",
+    });
+    expect(buildCrawlPerfSummary(pages, [], { settle: { mode: "adaptive", quietMs: 250 } })!.settle).toEqual({
+      mode: "adaptive",
+      quietMs: 250,
+    });
+    // Not given (a caller of the exported builder that does not know): left out, not guessed.
+    expect(buildCrawlPerfSummary(pages, [])!).not.toHaveProperty("settle");
+  });
+
   it("summarises each vital as p50 / p75 / worst with the worst page", () => {
     const pages = [
       withVitals("http://x/a", { LCP: 1000, CLS: 0.01 }),
@@ -42,6 +55,29 @@ describe("buildCrawlPerfSummary", () => {
     expect(s.vitals.INP).toBeUndefined();
     expect(Object.keys(s.vitals)).toEqual(["LCP", "CLS", "TTFB"]);
     expect(s.totals).toEqual({ spans: 4, pages: 4 });
+  });
+
+  it("credits each document's vitals to that document's URL, not to the visited page", () => {
+    // E3 v1 r1: page `/` was left by a click to /api/users. `perfPage.vitals`
+    // are the last document's (/api/users, LCP 44), and the summary used to
+    // label them `/`, dropping `/`'s own LCP 60.
+    const doc = (url: string, vitals: Record<string, number>) => ({
+      url,
+      timeOrigin: 0,
+      vitals: Object.fromEntries(
+        Object.entries(vitals).map(([k, value]) => [k, { value, rating: "good" } as never]),
+      ),
+    });
+    const root = withVitals("http://x/", { LCP: 44, TTFB: 8.5 });
+    root.perfPage!.documents = [doc("http://x/", { LCP: 60, TTFB: 15.3 }), doc("http://x/api/users", { LCP: 44, TTFB: 8.5 })];
+    const users = withVitals("http://x/users", { LCP: 32 });
+    const s = buildCrawlPerfSummary([root, users], [])!;
+    expect(s.vitals.LCP).toEqual({ p50: 44, p75: 60, worst: { value: 60, url: "http://x/" } });
+    expect(s.vitals.TTFB?.worst).toEqual({ value: 15.3, url: "http://x/" });
+    // a document's own URL, even when it is the one the summary picks
+    const leftFor = withVitals("http://x/a", { LCP: 900 });
+    leftFor.perfPage!.documents = [doc("http://x/a", { LCP: 10 }), doc("http://x/b", { LCP: 900 })];
+    expect(buildCrawlPerfSummary([leftFor], [])!.vitals.LCP?.worst).toEqual({ value: 900, url: "http://x/b" });
   });
 
   it("keeps the 10 slowest actions, slowest first", () => {
@@ -146,6 +182,42 @@ describe("buildPerfTrends", () => {
     expect(buildPerfTrends([], actions)).toEqual([]);
   });
 
+  it("never trends load spans, even when their documentsDelta reads 0 (--perf-mem)", () => {
+    // /chain/1..6: every page is a fresh document with 20·n inert listeners.
+    // Under --perf-mem the forced GC collects the old document before the
+    // end reading, so each load reads documentsDelta 0 and the loads of
+    // `/chain/:id` climbed into a false leak.
+    const pages = [1, 2, 3, 4, 5, 6].map((n) =>
+      fakePage(`http://x/chain/${n}`, fakeSpan("/chain/:id :: load", { memory: mem(20 * n) })),
+    );
+    expect(buildPerfTrends(pages, [])).toEqual([]);
+  });
+
+  it("splits a run on a span that navigated even when a forced GC zeroed its documentsDelta", () => {
+    // The same /chain crawl's `next` clicks: each one navigates, but under
+    // --perf-mem documentsDelta reads 0; `navigations` (from the new
+    // document's timeOrigin) still says so.
+    const actions = [1, 2, 3, 4, 5].map((n, t) => ({
+      ...fakeAction({
+        ...fakeSpan("/chain/:id :: click a#next", { memory: mem(20 * n + 36) }),
+        navigations: 1,
+      }),
+      timestamp: t,
+    }));
+    expect(buildPerfTrends([], actions)).toEqual([]);
+    // and a no-op button between them starts a new series after each one
+    const mixed = [];
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      mixed.push({ ...fakeAction(fakeSpan("/ :: click #noop", { memory: mem(300 + i * 74) })), timestamp: t++ });
+      mixed.push({
+        ...fakeAction({ ...fakeSpan("/ :: click a#home", { memory: mem(340 + i * 74) }), navigations: 1 }),
+        timestamp: t++,
+      });
+    }
+    expect(buildPerfTrends([], mixed)).toEqual([]);
+  });
+
   it("still trends a run within one document, even after a navigation", () => {
     const at = (key: string, listeners: number, documentsDelta: number, timestamp: number) => ({
       ...fakeAction(fakeSpan(key, { memory: { ...mem(listeners), documentsDelta } })),
@@ -175,12 +247,35 @@ describe("crawl-wide coverage", () => {
     expect(c.js.usedPct).toBe(27.5);
     expect(c.js.lowUsage).toHaveLength(COVERAGE_LOW_USAGE_TOP_N);
     expect(c.js.lowUsage[0]).toEqual({ url: "http://x/c0.js", totalBytes: 1000, usedBytes: 0, usedPct: 0 });
-    expect(c.css).toEqual({ totalBytes: 0, usedBytes: 0, usedPct: 0, lowUsage: [] });
+    expect(c.css).toEqual({ totalBytes: 0, usedBytes: 0, lowUsage: [] });
 
     const load = fakeSpan("/ :: load");
     const s = buildCrawlPerfSummary([fakePage("http://x/", load)], [], { coverage: { js } })!;
     expect(s.coverage?.js.usedPct).toBe(27.5);
     expect(buildCrawlPerfSummary([fakePage("http://x/", load)], [])!.coverage).toBeUndefined();
+  });
+});
+
+// B19: a kind the crawl saw no resources of used to read `usedPct: 0`, which
+// looks like "nothing was used"; and `lowUsage` listed fully-used resources
+// whenever fewer than 10 had unused bytes.
+describe("crawl-wide coverage edge cases", () => {
+  it("leaves usedPct out for a kind with no resources", () => {
+    const c = buildCoverageSummary({ js: [], css: [] });
+    expect(c.js).toEqual({ totalBytes: 0, usedBytes: 0, lowUsage: [] });
+    expect(c.css).toEqual({ totalBytes: 0, usedBytes: 0, lowUsage: [] });
+    expect("usedPct" in c.js).toBe(false);
+  });
+
+  it("lists only resources with unused bytes in lowUsage", () => {
+    const c = buildCoverageSummary({
+      js: [
+        { url: "http://x/a.js", total: 689, used: [[0, 689]] },
+        { url: "http://x/b.js", total: 673, used: [[0, 1]] },
+      ],
+    });
+    expect(c.js.usedPct).toBe(50.7);
+    expect(c.js.lowUsage).toEqual([{ url: "http://x/b.js", totalBytes: 673, usedBytes: 1, usedPct: 0.1 }]);
   });
 });
 

@@ -115,18 +115,35 @@ describe("buildDegradation", () => {
     expect(none[0]!.delta.interactionMs).toBeUndefined();
   });
 
-  it("treats spans with another fault as the clean side of this one", () => {
+  it("keeps spans carrying another fault off the clean side", () => {
+    // Every span also carries a runtime fault (on every page, so it cannot
+    // be compared and must not empty the clean side).
     const k = "/ :: load";
     const rows = buildDegradation([
-      fakeSpan(k, { durationMs: 300, faults: ["a", "b"] }),
-      fakeSpan(k, { durationMs: 200, faults: ["b"] }),
-      fakeSpan(k, { durationMs: 100 }),
+      fakeSpan(k, { durationMs: 300, faults: ["a", "b", "clock-skew"] }),
+      fakeSpan(k, { durationMs: 200, faults: ["b", "clock-skew"] }),
+      fakeSpan(k, { durationMs: 100, faults: ["clock-skew"] }),
     ]);
     const a = rows.find((r) => r.fault === "a")!;
-    expect(a.clean).toMatchObject({ n: 2, durationMs: 150 });
+    expect(a.clean).toMatchObject({ n: 1, durationMs: 100 });
     const b = rows.find((r) => r.fault === "b")!;
     expect(b.faulted).toMatchObject({ n: 2, durationMs: 250 });
-    expect(rows.map((r) => r.fault)).toEqual(["a", "b"]); // 150 before 150: first seen
+    expect(b.clean).toMatchObject({ n: 1, durationMs: 100 });
+    expect(rows.map((r) => r.fault)).toEqual(["a", "b"]);
+  });
+
+  it("reports no pair when the only unfaulted-by-it spans carry another fault", () => {
+    // E4 playground-server run: `/users/:id :: load` had two loads hit by
+    // server latency and one by a 503, and no load without either. The old
+    // clean side read the latency-faulted loads, so the 503 read as
+    // "makes loads 300 ms faster" (delta -297.5).
+    const k = "/users/:id :: load";
+    const rows = buildDegradation([
+      fakeSpan(k, { durationMs: 829.1, faults: ["server:latency"] }),
+      fakeSpan(k, { durationMs: 531.6, faults: ["server:5xx"] }),
+      fakeSpan(k, { durationMs: 829.2, faults: ["server:latency"] }),
+    ]);
+    expect(rows).toEqual([]);
   });
 
   it("keeps the top 10 by durationMs delta, largest first, negatives last", () => {

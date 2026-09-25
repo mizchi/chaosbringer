@@ -2785,6 +2785,7 @@ export class ChaosCrawler {
       serverFaults: drainedServerFaults ?? undefined,
       perf: buildCrawlPerfSummary(this.results, this.actions, {
         ...(this.perf.coverage ? { coverage: this.perf.coverage } : {}),
+        settle: this.settle,
       }),
     };
   }
