@@ -9,6 +9,8 @@ export interface SpanShape {
   blockingMs?: number;
   interactionMs?: number;
   requestCount?: number;
+  /** lightbringer's `network.settledMs`: when the span's own requests finished */
+  settledMs?: number;
   encodedKB?: number;
   initiators?: { frame: string; requestCount: number; encodedKB: number }[];
   thirdParty?: { domain: string; requestCount: number; encodedKB: number; busyMs: number }[];
@@ -36,6 +38,7 @@ export function fakeSpan(key: string, o: SpanShape = {}): PerfSpanReport {
         byDomain: o.thirdParty ?? [],
       },
       byInitiator: (o.initiators ?? []).map((i) => ({ ...i, type: "script" })),
+      ...(o.settledMs !== undefined ? { settledMs: o.settledMs } : {}),
       requests: [],
     },
     cpu: {

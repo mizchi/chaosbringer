@@ -58,7 +58,16 @@ Per **span** (one `perf.measure(name, action)` region):
   window-based: a request an earlier span fired that is still running adds the
   part of it that overlaps the span. A request with no response recorded when
   the report is built (in flight, failed or aborted) is listed with
-  `durationMs: 0` and `unfinished: true`.
+  `durationMs: 0` and `unfinished: true`. `settledMs` is when the span's own
+  network work was done: ms from the span start until the last request that
+  started in it finished (a failed / aborted one counts at the time it failed),
+  over every such request, not only the 20 listed. It can exceed the span's
+  `durationMs` — a click whose fetch the settle did not wait for — so
+  `max(durationMs, settledMs)` is "how long until this step's work finished".
+  Absent when the span started no request. A request still running when the
+  report is built is left out rather than given an invented end, and
+  `settledUnfinished: true` says so (`settledMs` is then a lower bound, or
+  absent).
   Each request also carries its
   **initiator** (the code or parser that issued it); `network.byInitiator` rolls
   them up so a deep waterfall points straight at the responsible function

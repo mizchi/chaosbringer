@@ -78,6 +78,18 @@ export async function startNetworkCapture(
     }
   });
 
+  // A failed / aborted request (a fault's abort, a navigation cancelling an
+  // in-flight fetch) never gets `loadingFinished`. Its failure time is kept
+  // apart from `endEpochMs`: the request did not complete, but it is no
+  // longer running either.
+  client.on("Network.loadingFailed", (e) => {
+    const p = e as unknown as { requestId: string; timestamp: number };
+    const r = reqs.get(p.requestId);
+    if (r && r.endEpochMs == null) {
+      r.failedEpochMs = r.startEpochMs + (p.timestamp - r.startMono) * 1000;
+    }
+  });
+
   return () => [...reqs.values()];
 }
 

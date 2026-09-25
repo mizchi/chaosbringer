@@ -414,7 +414,8 @@ function formatCrawlPerfSummary(report: CrawlReport): string[] {
 
 /**
  * The top five `(perfKey, fault)` pairs of `perf.degradation`, one line
- * each: the median step with the fault against without it. The JSON keeps
+ * each: the median step with the fault against without it, by `effectiveMs`
+ * (falling back to `durationMs` for a report written before that field). The JSON keeps
  * all ten and the blocking / request / interaction sides.
  */
 function formatDegradation(rows: readonly PerfDegradationEntry[]): string[] {
@@ -422,14 +423,19 @@ function formatDegradation(rows: readonly PerfDegradationEntry[]): string[] {
   const signed = (n: number, unit = "") => `${n >= 0 ? "+" : ""}${Math.round(n)}${unit}`;
   const out = ["", "Degradation under faults (median with vs without):"];
   for (const r of rows.slice(0, 5)) {
+    // The lead number is the effective delta (wall time stretched to when the
+    // step's own requests finished); the span's own wall-time delta is added
+    // when it differs, e.g. a click whose fetch networkidle did not wait for.
+    const effective = r.delta.effectiveMs ?? r.delta.durationMs;
     const extra = [
+      Math.round(effective) !== Math.round(r.delta.durationMs) ? `span ${signed(r.delta.durationMs, "ms")}` : "",
       r.delta.blockingMs !== 0 ? `blocking ${signed(r.delta.blockingMs, "ms")}` : "",
       r.delta.requestCount !== 0 ? `${signed(r.delta.requestCount)} req` : "",
       r.delta.interactionMs !== undefined ? `interaction ${signed(r.delta.interactionMs, "ms")}` : "",
     ].filter(Boolean);
     out.push(
-      `  ${signed(r.delta.durationMs, "ms").padStart(8)}  ${truncate(r.key, 60)}  under ${truncate(r.fault, 40)}` +
-        `  (${Math.round(r.faulted.durationMs)}ms n=${r.faulted.n} vs ${Math.round(r.clean.durationMs)}ms n=${r.clean.n})` +
+      `  ${signed(effective, "ms").padStart(8)}  ${truncate(r.key, 60)}  under ${truncate(r.fault, 40)}` +
+        `  (${Math.round(r.faulted.effectiveMs ?? r.faulted.durationMs)}ms n=${r.faulted.n} vs ${Math.round(r.clean.effectiveMs ?? r.clean.durationMs)}ms n=${r.clean.n})` +
         (extra.length > 0 ? `  ${extra.join("  ")}` : ""),
     );
   }

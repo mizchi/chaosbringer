@@ -488,7 +488,8 @@ export interface CrawlPerfSummary {
   totals: { spans: number; pages: number };
   /**
    * What each fault cost the steps it hit: the 10 `(perfKey, fault)` pairs
-   * whose median span got longest under the fault, longest first. Present
+   * whose median span got longest under the fault (by `effectiveMs`, which
+   * includes the requests a step fired but did not wait for), longest first. Present
    * only when some key has spans both with and without the same fault.
    */
   degradation?: PerfDegradationEntry[];
@@ -519,6 +520,17 @@ export interface CrawlPerfSummary {
 export interface PerfDegradationSide {
   n: number;
   durationMs: number;
+  /**
+   * Median "effective duration": per span, `max(durationMs,
+   * network.settledMs)` — how long until the step's own work finished,
+   * including requests it fired but did not wait for. Under the default
+   * `networkidle` settle a click that fires a fetch closes a few ms after the
+   * fetch starts, so a delay fault on that fetch shows here and not in
+   * `durationMs`. Requests with no response by report time are not counted
+   * (lightbringer's `settledUnfinished`), so it is a lower bound for spans
+   * with one.
+   */
+  effectiveMs: number;
   blockingMs: number;
   requestCount: number;
   /** Median over the spans that had an interaction; absent when none did. */

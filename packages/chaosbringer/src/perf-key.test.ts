@@ -197,6 +197,15 @@ describe("toPerfSpanReport", () => {
     expect(out.network.requests[0]?.url).toBe("http://x.test/r0");
   });
 
+  it("keeps settledMs and settledUnfinished, computed by lightbringer before any cap", () => {
+    const s = span(20);
+    s.network = { ...s.network, settledMs: 912, settledUnfinished: true };
+    const out = toPerfSpanReport(s, "/ :: click #a", "click #a");
+    expect(out.network.requests).toHaveLength(PERF_REPORT_LIST_CAP);
+    expect(out.network.settledMs).toBe(912);
+    expect(out.network.settledUnfinished).toBe(true);
+  });
+
   it("sets key and name and drops the budget", () => {
     const out = toPerfSpanReport(span(1), "/ :: load", "load /");
     expect(out.key).toBe("/ :: load");

@@ -71,6 +71,24 @@ const COV_INLINE = `<!doctype html><title>cov inline</title><body>
   </script>
 </body>`;
 
+/**
+ * The E4 xhr-site shape (B2): a button whose click fires a fetch nobody
+ * awaits. Under the default `networkidle` settle the click's span closes a
+ * few ms after the fetch starts, so a delay on that fetch is not in the
+ * span's `durationMs`.
+ */
+const XHR = `<!doctype html><title>xhr</title><body>
+  <p id="status">idle</p>
+  <button type="button" id="reload">Reload</button>
+  <script>
+    document.getElementById("reload").addEventListener("click", () => {
+      fetch("/api/x").then((r) => r.json()).then((d) => {
+        document.getElementById("status").textContent = d.ok ? "ok" : "bad";
+      });
+    });
+  </script>
+</body>`;
+
 /** Picks the candidate whose description contains `label`, `times` times, then skips. */
 function repeatDriver(label: string, times: number): Driver {
   let i = 0;
@@ -94,13 +112,13 @@ describe("perf under chaos", () => {
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       const path = (req.url ?? "").split("?")[0];
-      if (path === "/api/item") {
+      if (path === "/api/item" || path === "/api/x") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ name: "widget" }));
         return;
       }
       const body =
-        path === "/shop" ? SHOP : /^\/item\/\d+$/.test(path ?? "") ? ITEM : path === "/leaky" ? LEAKY : path === "/cov-inline" ? COV_INLINE : null;
+        path === "/shop" ? SHOP : /^\/item\/\d+$/.test(path ?? "") ? ITEM : path === "/leaky" ? LEAKY : path === "/cov-inline" ? COV_INLINE : path === "/xhr" ? XHR : null;
       if (!body) {
         res.writeHead(404, { "content-type": "text/plain" });
         res.end("not found");
@@ -171,6 +189,54 @@ describe("perf under chaos", () => {
     expect(text).toContain("Degradation under faults (median with vs without):");
     expect(text).toMatch(/\/item\/:id :: load {2}under api-delay/);
     // Nine pages, each settling on `networkidle`: seconds, not the default 5.
+  }, 60_000);
+
+  // B2 follow-up (2026-09-24 evaluation, E4 xhr-site): the delayed fetch's
+  // 300 ms never reached the click's durationMs, so the degradation entry
+  // read slightly negative. `effectiveMs` counts until the click's own
+  // request finished — including the last click, whose fetch outlives the
+  // page's last step and is waited for when the report is built.
+  it("reports a delay on a fetch a click fired but did not wait for in effectiveMs", async () => {
+    const clicks = 8;
+    const report = await crawl("/xhr", {
+      maxPages: 1,
+      maxActionsPerPage: clicks,
+      driver: repeatDriver("Reload", clicks),
+      faultInjection: [faults.delay(300, { urlPattern: /\/api\/x$/, probability: 0.5, name: "api-delay-300" })],
+    });
+    expect(report.perf?.settle?.mode ?? "networkidle").toBe("networkidle");
+    expect(report.actions).toHaveLength(clicks);
+    const key = report.actions[0]!.perf!.key;
+    expect(key).toMatch(/^\/xhr :: click .*Reload/);
+    const spans = report.actions.map((a) => a.perf!);
+    for (const s of spans) {
+      expect(s.key).toBe(key);
+      // each click fired its own fetch, and every one was over by report time
+      expect(s.network.requestCount).toBe(1);
+      expect(s.network.settledUnfinished).toBeUndefined();
+      expect(s.network.settledMs).toBeGreaterThan(0);
+    }
+    const hit = spans.filter((s) => s.faults?.includes("api-delay-300"));
+    expect(hit.length).toBe(report.faultInjections?.find((f) => f.rule === "api-delay-300")?.injected);
+    expect(hit.length).toBeGreaterThan(0);
+    expect(hit.length).toBeLessThan(clicks);
+    // networkidle did not wait: every delayed click closed before its fetch
+    // answered, which ran at least the 300 ms delay past its start.
+    for (const s of hit) {
+      expect(s.network.settledMs!).toBeGreaterThan(s.durationMs);
+      expect(s.network.settledMs!).toBeGreaterThanOrEqual(300);
+    }
+
+    const row = report.perf?.degradation?.find((d) => d.key === key && d.fault === "api-delay-300");
+    expect(row).toBeDefined();
+    expect(row!.faulted.n).toBe(hit.length);
+    expect(row!.faulted.effectiveMs).toBeGreaterThanOrEqual(300);
+    expect(row!.delta.effectiveMs).toBeGreaterThanOrEqual(250);
+    // the span's own wall time did not carry the delay
+    expect(row!.delta.durationMs).toBeLessThan(150);
+    expect(row!.delta.effectiveMs - row!.delta.durationMs).toBeGreaterThanOrEqual(200);
+
+    expect(formatReport(report)).toMatch(/under api-delay-300 .*span [+-]\d+ms/);
   }, 60_000);
 
   it("flags listeners climbing across a repeated nav click, and tags page-wide faults", async () => {
