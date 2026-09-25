@@ -30,8 +30,11 @@ export type {
 export { weightedRandomDriver, type WeightedRandomDriverOptions } from "./weighted-random.js";
 export {
   perfSeekingCost,
+  perfSeekingBucketCost,
   perfSeekingDriver,
   PERF_SEEKING_COST_BUCKET_MS,
+  PERF_SEEKING_COST_BUCKET_RATIO,
+  PERF_SEEKING_COST_THRESHOLD_MS,
   PERF_SEEKING_COST_FLOOR_MS,
   PERF_SEEKING_DEFAULT_EPSILON,
   type PerfSeekingDriverOptions,
