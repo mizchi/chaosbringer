@@ -464,6 +464,15 @@ export interface CrawlPerfSummary {
    */
   settle?: PerfSettleRecord;
   /**
+   * `PERF_KEY_VERSION` of the perfKeys in this report. A key's meaning
+   * changed once (actions after a navigating click are now keyed by the page
+   * they ran on), so the same key string in reports of different versions
+   * can name different steps; `perf regress` and `perf gate` refuse to join
+   * them. Absent in reports written before it was recorded, which are
+   * version 1.
+   */
+  keyVersion?: number;
+  /**
    * LCP / INP / CLS / TTFB / FCP over the documents that reported each one.
    * A page visit an action navigated away from counts each of its documents
    * (`PagePerfSummary.documents`), under that document's own URL, so `worst.url`

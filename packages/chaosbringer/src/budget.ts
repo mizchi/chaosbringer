@@ -107,6 +107,12 @@ export interface PerfBudgetsFile {
    * in files written before it was recorded.
    */
   settle?: PerfSettleRecord;
+  /**
+   * `PERF_KEY_VERSION` of the keys in `budgets`. Keys of another version can
+   * name different steps, so `perf gate` refuses reports of another version.
+   * Absent in files written before it was recorded, which are version 1.
+   */
+  keyVersion?: number;
 }
 
 /**

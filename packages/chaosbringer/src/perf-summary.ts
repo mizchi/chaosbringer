@@ -19,6 +19,7 @@ import {
   type MemoryTrend,
 } from "lightbringer/core";
 import { buildDegradation } from "./perf-faults.js";
+import { PERF_KEY_VERSION } from "./perf-key.js";
 import { round1 } from "./perf-math.js";
 import { spanCost } from "./perf-trim.js";
 import type {
@@ -296,6 +297,7 @@ export function buildCrawlPerfSummary(
   return {
     // First, so a reader of the report sees what the numbers below were measured under.
     ...(settle ? { settle: { ...settle } } : {}),
+    keyVersion: PERF_KEY_VERSION,
     vitals: vitalSummaries(pages),
     slowestActions: slowestActions(actions, PERF_SUMMARY_TOP_N),
     hotInitiators,

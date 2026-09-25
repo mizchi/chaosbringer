@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  checkKeyVersions,
   checkSettleModes,
   crawlBudgetsSettleMismatch,
   emitPerfBudgets,
@@ -21,6 +22,17 @@ import type { CrawlReport, PerfSettleRecord, PerfSpanReport } from "./types.js";
 
 const NETWORKIDLE: PerfSettleRecord = { mode: "networkidle" };
 const ADAPTIVE: PerfSettleRecord = { mode: "adaptive", quietMs: 100 };
+
+/** `report` as a crawl recording perfKey version `keyVersion` writes it (`perf.keyVersion`). */
+function keyed(report: CrawlReport, keyVersion: number): CrawlReport {
+  return {
+    ...report,
+    perf: {
+      ...(report.perf ?? { vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } }),
+      keyVersion,
+    },
+  };
+}
 
 /** `report` as a crawl settled with `settle` records it (`perf.settle`). */
 function settled(report: CrawlReport, settle: PerfSettleRecord): CrawlReport {
@@ -219,6 +231,23 @@ describe("checkSettleModes", () => {
 // The crawler's own `--perf-budgets` check was not settle-checked: budgets
 // emitted from networkidle crawls, enforced during an adaptive crawl, fail on
 // the settle (now inside the action span), not on the app.
+describe("checkKeyVersions", () => {
+  it("accepts one version and reads an absent version as 1", () => {
+    expect(checkKeyVersions([{ side: "baseline", source: "a", keyVersion: undefined }, { side: "current", source: "b", keyVersion: 1 }])).toBeUndefined();
+    expect(checkKeyVersions([{ side: "baseline", source: "a", keyVersion: 2 }, { side: "current", source: "b", keyVersion: 2 }])).toBeUndefined();
+  });
+
+  it("refuses to join keys of different versions, naming each side", () => {
+    const why = checkKeyVersions([
+      { side: "baseline", source: "a", keyVersion: undefined },
+      { side: "current", source: "b", keyVersion: 2 },
+    ]);
+    expect(why).toContain("different perfKey versions");
+    expect(why).toContain("baseline: v1 ×1");
+    expect(why).toContain("current: v2 ×1");
+  });
+});
+
 describe("crawlBudgetsSettleMismatch", () => {
   const file = (settle?: PerfSettleRecord) => ({
     version: 1,
@@ -345,6 +374,45 @@ describe("runPerfCli", () => {
     await expect(runPerfCli(["emit-budgets", write("y.json", appRun({})), "--headroom", "0.5"])).rejects.toThrow(
       /--headroom must be a number >= 1/,
     );
+  });
+
+  it("regress refuses (exit 2) a baseline whose perfKeys are another version, unless --allow-key-mismatch", async () => {
+    const baseDir = join(dir, "v1-baseline");
+    mkdirSync(baseDir);
+    // Written before keyVersion was recorded: version 1.
+    for (const i of [1, 2, 3]) writeFileSync(join(baseDir, `r${i}.json`), JSON.stringify(appRun({ blockingMs: 100 })));
+    const cur = [1, 2, 3].map((i) => write(`k${i}.json`, keyed(appRun({ blockingMs: 250 }), 2)));
+
+    await runPerfCli(["regress", baseDir, "--current", ...cur]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("different perfKey versions");
+    expect(errored()).not.toContain("blockingMs 100 → 250");
+
+    process.exitCode = 0;
+    await runPerfCli(["regress", baseDir, "--current", ...cur, "--allow-key-mismatch"]);
+    expect(process.exitCode).toBe(1);
+    expect(errored()).toContain("WARNING (--allow-key-mismatch)");
+    expect(errored()).toContain("/app :: click #go.cpu.blockingMs 100 → 250");
+  });
+
+  it("emit-budgets records the reports' key version, and gate refuses reports of another version", async () => {
+    const v2 = [1, 2, 3].map((i) => write(`v2-${i}.json`, keyed(appRun({ blockingMs: 10 + i }), 2)));
+    const out = join(dir, "v2-budgets.json");
+    await runPerfCli(["emit-budgets", ...v2, "--out", out]);
+    expect(process.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(out, "utf-8")).keyVersion).toBe(2);
+
+    await runPerfCli(["gate", write("old.json", appRun({ blockingMs: 11 })), "--budgets", out]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain("budgets: v2 ×1");
+
+    process.exitCode = 0;
+    const v1Out = join(dir, "v1-budgets.json");
+    await runPerfCli(["emit-budgets", ...[1, 2].map((i) => write(`v1-${i}.json`, appRun({ blockingMs: 10 }))), "--out", v1Out]);
+    expect(JSON.parse(readFileSync(v1Out, "utf-8")).keyVersion).toBe(1);
+
+    await runPerfCli(["emit-budgets", v2[0]!, write("mixed.json", appRun({ blockingMs: 10 })), "--out", join(dir, "m.json")]);
+    expect(process.exitCode).toBe(2);
   });
 
   it("regress reads a baseline directory (skipping non-report JSON) and exits 1 on a regression", async () => {

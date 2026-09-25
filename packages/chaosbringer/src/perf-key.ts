@@ -19,6 +19,23 @@ import type { ActionResult, ActionTarget } from "./types.js";
 export const PERF_KEY_SEPARATOR = " :: ";
 
 /**
+ * Version of what a perfKey means, recorded as `CrawlReport.perf.keyVersion`
+ * and in budgets files so `perf regress` / `perf gate` can refuse to join
+ * keys that name different steps.
+ *
+ * - 1: actions after a navigating click were keyed under the URL the visit
+ *   began at, not the page they ran on. Every report written before the
+ *   version was recorded used this, so an absent version reads as 1.
+ * - 2: every action is keyed by the page it ran on.
+ */
+export const PERF_KEY_VERSION = 2;
+
+/** The perfKey version a report or budgets file was written with; absent means 1. */
+export function perfKeyVersionOf(recorded: number | undefined): number {
+  return recorded ?? 1;
+}
+
+/**
  * Collapse one path segment that is an identifier rather than a route name.
  * Three shapes cover the ids real apps put in URLs: database row numbers,
  * UUIDs, and long hex digests (Mongo ObjectIds, content hashes). A shorter

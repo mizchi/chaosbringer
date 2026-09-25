@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fakeAction, fakePage, fakeSpan } from "./perf-fixtures.test-helpers.js";
+import { PERF_KEY_VERSION } from "./perf-key.js";
 import {
   buildCoverageSummary,
   buildCrawlPerfSummary,
@@ -36,6 +37,11 @@ describe("buildCrawlPerfSummary", () => {
     });
     // Not given (a caller of the exported builder that does not know): left out, not guessed.
     expect(buildCrawlPerfSummary(pages, [])!).not.toHaveProperty("settle");
+  });
+
+  it("records the perfKey version, so perf regress / gate can refuse keys that mean other steps", () => {
+    const pages = [fakePage("http://x/", fakeSpan("/ :: load"))];
+    expect(buildCrawlPerfSummary(pages, [])!.keyVersion).toBe(PERF_KEY_VERSION);
   });
 
   it("summarises each vital as p50 / p75 / worst with the worst page", () => {

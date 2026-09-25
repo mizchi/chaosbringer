@@ -47,7 +47,7 @@ import {
   type Stat,
 } from "lightbringer/core";
 import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
-import { perfRuleMatcher } from "./perf-key.js";
+import { PERF_KEY_VERSION, perfKeyVersionOf, perfRuleMatcher } from "./perf-key.js";
 import { DEFAULT_PERF_TRACE_DIR } from "./perf-options.js";
 import { reportSpans } from "./perf-summary.js";
 import type { CrawlReport, PerfBudgetRule, PerfSettleRecord, PerfSpanReport } from "./types.js";
@@ -170,7 +170,7 @@ export interface EmitResult {
  * not one CI can hold to — and reported in `skipped`.
  */
 export function emitPerfBudgets(
-  reports: readonly Pick<CrawlReport, "pages" | "actions">[],
+  reports: readonly (Pick<CrawlReport, "pages" | "actions"> & { perf?: Pick<NonNullable<CrawlReport["perf"]>, "keyVersion"> })[],
   { headroom = DEFAULT_BUDGET_HEADROOM, settle }: { headroom?: number; settle?: PerfSettleRecord } = {},
 ): EmitResult {
   const runs = reports.map(keyedRun);
@@ -194,6 +194,9 @@ export function emitPerfBudgets(
       budgets: budgets as PerfBudgetsFile["budgets"],
       // Recorded so `perf gate` can refuse reports settled another way.
       ...(settle ? { settle: { ...settle } } : {}),
+      // The version of the reports' keys (the caller refuses mixed versions),
+      // so gate can refuse reports whose keys mean something else.
+      keyVersion: reports.length === 0 ? PERF_KEY_VERSION : perfKeyVersionOf(reports[0]!.perf?.keyVersion),
     },
     skipped,
     reports: reports.length,
@@ -303,6 +306,72 @@ function settleGate(cmd: string, sources: readonly SettleSource[], allow: boolea
     return undefined;
   }
   return check;
+}
+
+// ── perfKey version ─────────────────────────────────────────────────────────
+
+/** One input of a comparison and the perfKey version it was written with. */
+export interface KeyVersionSource {
+  side: string;
+  source: string;
+  /** as recorded; absent means version 1 */
+  keyVersion: number | undefined;
+}
+
+/**
+ * Why the inputs cannot be joined by key, or undefined. A perfKey's meaning
+ * changed between versions (see `PERF_KEY_VERSION`), so the same key string
+ * in inputs of different versions can name different steps: joined, their
+ * medians differ by which steps were grouped, not by the app. Unlike an
+ * unrecorded settle mode, an absent version is known — every report written
+ * before it was recorded is version 1 — so it is checked, not just warned
+ * about.
+ */
+export function checkKeyVersions(sources: readonly KeyVersionSource[]): string | undefined {
+  const bySide = new Map<string, Map<number, number>>();
+  const versions = new Set<number>();
+  for (const s of sources) {
+    const v = perfKeyVersionOf(s.keyVersion);
+    versions.add(v);
+    const side = bySide.get(s.side) ?? new Map<number, number>();
+    bySide.set(s.side, side);
+    side.set(v, (side.get(v) ?? 0) + 1);
+  }
+  if (versions.size <= 1) return undefined;
+  const sides = [...bySide]
+    .map(([side, m]) => `${side}: ${[...m].map(([v, n]) => `v${v} ×${n}`).join(", ")}`)
+    .join("; ");
+  return (
+    `the inputs use different perfKey versions (${sides}). Version 2 keys an action after a navigating ` +
+    `click by the page it ran on, version 1 by the page the visit began at, so the same key can name ` +
+    `different steps`
+  );
+}
+
+/**
+ * Run the key-version check for a subcommand. Returns false after refusing
+ * (exit 2, the same code as a settle mismatch: nothing was compared). With
+ * `allow` a mismatch is a warning instead.
+ */
+function keyVersionGate(cmd: string, sources: readonly KeyVersionSource[], allow: boolean): boolean {
+  const mismatch = checkKeyVersions(sources);
+  if (!mismatch) return true;
+  if (allow) {
+    console.error(`[perf ${cmd}] WARNING (--allow-key-mismatch): ${mismatch}.`);
+    return true;
+  }
+  console.error(
+    `perf: ${cmd}: refusing to compare: ${mismatch}. Re-record the older side with this chaosbringer ` +
+      `(re-emit budgets, or let the next baseline run replace the baseline), or pass --allow-key-mismatch ` +
+      `to compare anyway.`,
+  );
+  process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+  return false;
+}
+
+/** The key-version sources of a set of report files. */
+function reportKeySources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): KeyVersionSource[] {
+  return reports.map((r, i) => ({ side, source: paths[i]!, keyVersion: r.perf?.keyVersion }));
 }
 
 /**
@@ -727,6 +796,10 @@ Subcommands:
   different --settle modes: the settle mode changes what a span measures.
   --allow-settle-mismatch compares anyway, with a warning. Reports that do
   not record their mode (older chaosbringer) only warn.
+  They also refuse (exit 2) inputs whose perfKeys have different versions
+  (perf.keyVersion; absent means 1): version 2 keys an action after a
+  navigating click by the page it ran on. --allow-key-mismatch compares
+  anyway, with a warning.
 
   drilldown <report.json> <perfKey> [--top 15] [--perf-dir <dir>]
       Where the span's time went, from its page's trace (crawl with
@@ -784,6 +857,7 @@ function runEmit(argv: string[]): void {
       headroom: { type: "string" },
       out: { type: "string" },
       "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -805,6 +879,8 @@ function runEmit(argv: string[]): void {
   // Budgets from mixed modes would be a median of two different measurements.
   const settle = settleGate("emit-budgets", reportSettleSources("reports", paths, reports), values["allow-settle-mismatch"]);
   if (!settle) return;
+  // Mixed key versions would median different steps under one key.
+  if (!keyVersionGate("emit-budgets", reportKeySources("reports", paths, reports), values["allow-key-mismatch"])) return;
   // Only a mode every report recorded is written: a file claiming one mode
   // for budgets measured partly under another would make gate's check lie.
   const recorded = settle.mismatch || settle.unrecorded.length > 0 ? undefined : settle.agreed;
@@ -838,6 +914,7 @@ function runGate(argv: string[]): void {
       budgets: { type: "string" },
       json: { type: "boolean", default: false },
       "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -878,6 +955,17 @@ function runGate(argv: string[]): void {
   if (!settleGate("gate", [...budgetsSources, ...reportSettleSources("reports", paths, reports)], values["allow-settle-mismatch"])) {
     return;
   }
+  // A hand-written rules array has no version: its globs are the author's,
+  // not keys emitted by a crawl, so only an emitted budgets file is checked.
+  const budgetsKeySources: KeyVersionSource[] =
+    budgetsJson !== null && typeof budgetsJson === "object" && !Array.isArray(budgetsJson)
+      ? [{ side: "budgets", source: values.budgets, keyVersion: (budgetsJson as Partial<PerfBudgetsFile>).keyVersion }]
+      : [];
+  if (
+    !keyVersionGate("gate", [...budgetsKeySources, ...reportKeySources("reports", paths, reports)], values["allow-key-mismatch"])
+  ) {
+    return;
+  }
   const result = gatePerf(reports, rules);
   const { lines, failed } = formatPerfGate(result);
   if (values.json) console.log(JSON.stringify({ ...result, passed: !failed }, null, 2));
@@ -916,6 +1004,7 @@ function runRegress(argv: string[]): void {
       threshold: { type: "string" },
       json: { type: "boolean", default: false },
       "allow-settle-mismatch": { type: "boolean", default: false },
+      "allow-key-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -951,6 +1040,11 @@ function runRegress(argv: string[]): void {
     ...reportSettleSources("current", cur.paths, curReports),
   ];
   if (!settleGate("regress", settleSources, values["allow-settle-mismatch"])) return;
+  const keySources = [
+    ...reportKeySources("baseline", base.paths, baseReports),
+    ...reportKeySources("current", cur.paths, curReports),
+  ];
+  if (!keyVersionGate("regress", keySources, values["allow-key-mismatch"])) return;
   const empty = regressNothingMeasured(baseReports, curReports);
   if (empty) {
     fail(`regress: ${empty}`);
