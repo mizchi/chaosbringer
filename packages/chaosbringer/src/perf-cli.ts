@@ -574,8 +574,14 @@ export function regressPerf(
  * longestFrameMs 17, not 16: frame durations come in whole vsync intervals
  * (16.7 ms at 60 Hz), so 16 let a one-frame jitter (16.8 → 33.3, seen on a
  * clean same-seed crawl) fail. 17 is "more than one frame".
+ *
+ * durationMs 17, not 5: an action span's wall time ends on its settle wait
+ * (rAFs, the quiet window), so it moves in frame-sized steps too; a clean
+ * PR run saw a 51.4 → 60.7 ms click median (+18%) from runner noise alone.
+ * A real slowdown in the handler still shows in scriptMs / blockingMs.
  */
 export const CRAWL_REGRESS_FLOORS: Readonly<Record<string, number>> = {
+  durationMs: 17,
   droppedFrames: 4,
   longestFrameMs: 17,
 };

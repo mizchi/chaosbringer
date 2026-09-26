@@ -189,6 +189,15 @@ describe("regressPerf", () => {
     ]);
   });
 
+  it("uses the crawl durationMs floor (17 ms): a sub-frame swing is not a regression", () => {
+    const base = [1, 2, 3].map(() => appRun({ durationMs: 51.4 }));
+    // +18%, past the 15% threshold, but under one frame.
+    expect(regressPerf(base, [1, 2, 3].map(() => appRun({ durationMs: 60.7 }))).regressions).toEqual([]);
+    expect(regressPerf(base, [1, 2, 3].map(() => appRun({ durationMs: 80 }))).regressions.map((f) => f.subject)).toEqual([
+      "/app :: click #go.durationMs",
+    ]);
+  });
+
   it("regressNothingMeasured names the side with no spans; missingKeys lists vanished keys", () => {
     const empty = fakeReport([fakePage("http://x/")], []);
     expect(regressNothingMeasured([appRun({})], [empty])).toMatch(/current report/);
