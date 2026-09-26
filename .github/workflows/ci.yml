@@ -61,6 +61,7 @@ jobs:
           pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" typecheck
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
           pnpm -F "@mizchi/chaosbringer-example-model-faults" typecheck
+          pnpm -F "@mizchi/chaosbringer-example-perf-patterns" typecheck
 
   lightbringer:
     # lightbringer is its own published package with its own toolchain (tsup,
@@ -142,6 +143,7 @@ jobs:
           - cloudflare-worker
           - playwright-test
           - model-faults
+          - perf-patterns
     steps:
       - uses: actions/checkout@v4
 
