@@ -72,14 +72,18 @@ export interface PatternCrawl {
   options?: Partial<CrawlerOptions>;
 }
 
-export interface PatternExpect {
-  /** perfKey glob (`*` = anything) the problem must be measured on, e.g. `"/ :: click *"`. */
-  key: string;
+/** One metric the fix must improve, and by how much. */
+export interface MetricExpect {
   /**
    * Dot path into a span (`"cpu.blockingMs"`, `"render.layoutCount"`,
-   * `"network.requestCount"`, `"network.settledMs"`) or, starting with
+   * `"network.requestCount"`, `"network.settledMs"`); or, starting with
    * `degradation.`, into the crawl's degradation entries for matching keys
-   * (`"degradation.delta.effectiveMs"`, `"degradation.faulted.requestCount"`).
+   * (`"degradation.delta.effectiveMs"`, `"degradation.faulted.requestCount"`);
+   * or, starting with `page.`, into `PageResult.perfPage` of the pages whose
+   * load span's key matches (`"page.vitals.CLS.value"`, `"page.vitals.FCP.value"`,
+   * `"page.media.oversizedCount"`, `"page.renderBlocking.scripts"`,
+   * `"page.network.thirdParty.encodedKB"`): one value per page visit, so the
+   * key must be a load key (`"/ :: load"`).
    * A bare `effectiveMs` is `max(durationMs, network.settledMs)` per span.
    */
   metric: string;
@@ -89,6 +93,26 @@ export interface PatternExpect {
    * `ratio`: slow >= ratio × fixed; `absolute`: slow − fixed >= absolute.
    */
   minImprovement: { ratio?: number; absolute?: number };
+  /**
+   * `page.` metrics only: the value of a measured page that lacks the field.
+   * perfPage leaves a part out rather than write 0 (`network.thirdParty` when
+   * there was no third-party request, `renderBlocking` when nothing blocked),
+   * so a fix that removes the thing entirely needs `absentAs: 0` to be read
+   * as 0. Leave it unset for a field that is a measured 0 when present.
+   */
+  absentAs?: number;
+}
+
+export interface PatternExpect extends MetricExpect {
+  /** perfKey glob (`*` = anything) the problem must be measured on, e.g. `"/ :: click *"`. */
+  key: string;
+  /** More metrics on the same key the fix must also improve (reported, and asserted, beside the main one). */
+  alsoExpect?: MetricExpect[];
+}
+
+export interface RouteContext {
+  /** `http://localhost:<port>` of the pattern's third-party server; empty when it has none. */
+  thirdPartyOrigin: string;
 }
 
 export interface Pattern {
@@ -100,7 +124,15 @@ export interface Pattern {
   description: string;
   /** The fix, one line. */
   fix: string;
-  routes(variant: Variant): Routes;
+  /** The app's routes. `ctx.thirdPartyOrigin` is set when the pattern has `thirdPartyRoutes`. */
+  routes(variant: Variant, ctx: RouteContext): Routes;
+  /**
+   * Routes of a second server on another registrable domain (the app is on
+   * `127.0.0.1`, this one on `localhost`), for scripts, widgets and tags a
+   * real page loads from other companies' hosts. The page reaches it at
+   * `ctx.thirdPartyOrigin`; perfPage counts its traffic as `network.thirdParty`.
+   */
+  thirdPartyRoutes?(variant: Variant): Routes;
   crawl: PatternCrawl;
   expect: PatternExpect;
 }

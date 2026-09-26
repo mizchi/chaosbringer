@@ -28,11 +28,10 @@ import { ACTION_SETTLE_CAP_MS } from "./settle.js";
 import { SpanFaultTags } from "./perf-faults.js";
 import { actionKind, actionRouteUrl, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
 import type { ResolvedPerfOptions } from "./perf-options.js";
-import { toLastActionPerf, toPerfSpanReport } from "./perf-trim.js";
+import { toLastActionPerf, toPagePerfSummary, toPerfSpanReport } from "./perf-trim.js";
 import type {
   ActionResult,
   LastActionPerf,
-  PagePerfSummary,
   PageResult,
   PerfSpanReport,
 } from "./types.js";
@@ -336,7 +335,7 @@ export class PagePerf {
       return { ...span, ...decor };
     });
 
-    const summary = pageSummary(report);
+    const summary = toPagePerfSummary(report);
     if (this.opts.outDir) {
       mkdirSync(this.opts.outDir, { recursive: true });
       const reportPath = `${this.slug}.json`;
@@ -393,29 +392,4 @@ export class PagePerf {
     this.owners.push(faults ? { ...owner, faults } : owner);
     return this.session.controller.spans.length - 1;
   }
-}
-
-/** The page-level slice of a lightbringer report that goes into the crawl report. */
-function pageSummary(report: PerfReport): PagePerfSummary {
-  const net = report.network;
-  const summary: PagePerfSummary = {
-    vitals: report.vitals,
-    network: {
-      totalRequests: net.totalRequests,
-      totalEncodedKB: net.totalEncodedKB,
-      fromCacheCount: net.fromCacheCount,
-      ...(net.thirdParty.requestCount > 0
-        ? {
-            thirdParty: {
-              requestCount: net.thirdParty.requestCount,
-              encodedKB: net.thirdParty.encodedKB,
-            },
-          }
-        : {}),
-    },
-  };
-  if (report.documents) summary.documents = report.documents;
-  if (report.clockPatched) summary.clockPatched = true;
-  if (report.collectorMissing) summary.collectorMissing = true;
-  return summary;
 }

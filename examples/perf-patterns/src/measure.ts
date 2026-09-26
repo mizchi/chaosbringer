@@ -1,6 +1,7 @@
 /**
  * Crawl each variant of a pattern N times at a fixed seed with `perf` on and
- * read the pattern's expected metric off the spans whose perfKey matches.
+ * read the pattern's expected metric off the spans whose perfKey matches (or,
+ * for a `page.` metric, off `perfPage` of the pages whose load key matches).
  */
 
 import {
@@ -11,16 +12,16 @@ import {
   type PerfDegradationEntry,
   type PerfSpanReport,
 } from "chaosbringer";
-import type { Pattern, Variant } from "./pattern.js";
+import type { MetricExpect, Pattern, Variant } from "./pattern.js";
 import { servePattern } from "./server.js";
 
 export interface VariantMeasurement {
   variant: Variant;
-  /** Median of the metric over every matching span (or degradation entry) of every run; null when none matched. */
+  /** Median of the metric over every matching span (degradation entry, page) of every run; null when none matched. */
   median: number | null;
   /** Every value the median was taken over. */
   values: number[];
-  /** How many matching spans (or degradation entries) each run had. */
+  /** How many values each run gave. */
   matchedPerRun: number[];
   /** The distinct perfKeys that matched `expect.key`. */
   matchedKeys: string[];
@@ -28,24 +29,30 @@ export interface VariantMeasurement {
   pagesPerRun: string[][];
   /** Error-cluster keys (URL-free), per run. */
   clustersPerRun: string[][];
+  /** `expect.alsoExpect`, in order: each metric's median and values over the same runs. */
+  also: Array<{ metric: string; median: number | null; values: number[] }>;
   /** From the last run, for the report. */
   slowestActions: CrawlPerfSummary["slowestActions"];
   degradation: PerfDegradationEntry[];
   reports: CrawlReport[];
 }
 
+export interface Improvement {
+  /** slow − fixed. */
+  absolute: number | null;
+  /** slow / fixed (Infinity when fixed is 0 and slow is not). */
+  ratio: number | null;
+  /** Whether every `minImprovement` bound holds. */
+  ok: boolean;
+}
+
 export interface PatternMeasurement {
   pattern: Pattern;
   slow: VariantMeasurement;
   fixed: VariantMeasurement;
-  improvement: {
-    /** slow − fixed. */
-    absolute: number | null;
-    /** slow / fixed (Infinity when fixed is 0 and slow is not). */
-    ratio: number | null;
-    /** Whether every `minImprovement` bound holds. */
-    ok: boolean;
-  };
+  improvement: Improvement;
+  /** `expect.alsoExpect`, in order. */
+  also: Array<{ expect: MetricExpect; slow: number | null; fixed: number | null; improvement: Improvement }>;
 }
 
 export interface MeasureOptions {
@@ -81,12 +88,31 @@ export function spansOf(report: CrawlReport): PerfSpanReport[] {
   return spans;
 }
 
-/** The metric's values in one report: one per matching span, or per matching degradation entry. */
-export function metricValues(report: CrawlReport, keyGlob: string, metric: string): { values: number[]; keys: string[] } {
+/**
+ * The metric's values in one report: one per matching span, per matching
+ * degradation entry, or (`page.` metrics) per page whose load span's key
+ * matches, read off its `perfPage`. `absentAs` stands in for a `page.` field
+ * a measured page left out (not for a page whose collector never ran).
+ */
+export function metricValues(
+  report: CrawlReport,
+  keyGlob: string,
+  metric: string,
+  absentAs?: number,
+): { values: number[]; keys: string[] } {
   const re = compilePerfKeyGlob(keyGlob);
   const values: number[] = [];
   const keys = new Set<string>();
-  if (metric.startsWith("degradation.")) {
+  if (metric.startsWith("page.")) {
+    const path = metric.slice("page.".length);
+    for (const p of report.pages) {
+      const key = p.perf?.key;
+      if (!key || !p.perfPage || !re.test(key)) continue;
+      keys.add(key);
+      const v = readPath(p.perfPage, path) ?? (p.perfPage.collectorMissing ? undefined : absentAs);
+      if (v !== undefined) values.push(v);
+    }
+  } else if (metric.startsWith("degradation.")) {
     const path = metric.slice("degradation.".length);
     for (const entry of report.perf?.degradation ?? []) {
       if (!re.test(entry.key)) continue;
@@ -123,6 +149,7 @@ export async function measureVariant(
   const server = await servePattern(pattern, variant);
   const c = pattern.crawl;
   const values: number[] = [];
+  const also = (pattern.expect.alsoExpect ?? []).map((e) => ({ metric: e.metric, values: [] as number[] }));
   const matchedPerRun: number[] = [];
   const matchedKeys = new Set<string>();
   const pagesPerRun: string[][] = [];
@@ -144,7 +171,10 @@ export async function measureVariant(
         ...c.options,
       });
       reports.push(report);
-      const m = metricValues(report, pattern.expect.key, pattern.expect.metric);
+      const m = metricValues(report, pattern.expect.key, pattern.expect.metric, pattern.expect.absentAs);
+      for (const [i, e] of (pattern.expect.alsoExpect ?? []).entries()) {
+        also[i]!.values.push(...metricValues(report, pattern.expect.key, e.metric, e.absentAs).values);
+      }
       values.push(...m.values);
       matchedPerRun.push(m.values.length);
       for (const k of m.keys) matchedKeys.add(k);
@@ -163,21 +193,18 @@ export async function measureVariant(
     matchedKeys: [...matchedKeys].sort(),
     pagesPerRun,
     clustersPerRun,
+    also: also.map((a) => ({ ...a, median: median(a.values) })),
     slowestActions: last?.perf?.slowestActions ?? [],
     degradation: last?.perf?.degradation ?? [],
     reports,
   };
 }
 
-export function improvementOf(
-  pattern: Pattern,
-  slow: number | null,
-  fixed: number | null,
-): PatternMeasurement["improvement"] {
+export function improvementOf(expect: Pick<MetricExpect, "minImprovement">, slow: number | null, fixed: number | null): Improvement {
   if (slow === null || fixed === null) return { absolute: null, ratio: null, ok: false };
   const absolute = slow - fixed;
   const ratio = fixed === 0 ? (slow === 0 ? 1 : Number.POSITIVE_INFINITY) : slow / fixed;
-  const { ratio: minRatio, absolute: minAbs } = pattern.expect.minImprovement;
+  const { ratio: minRatio, absolute: minAbs } = expect.minImprovement;
   const ok = (minRatio === undefined || ratio >= minRatio) && (minAbs === undefined || absolute >= minAbs);
   return { absolute, ratio, ok };
 }
@@ -185,5 +212,10 @@ export function improvementOf(
 export async function measurePattern(pattern: Pattern, opts: MeasureOptions = {}): Promise<PatternMeasurement> {
   const slow = await measureVariant(pattern, "slow", opts);
   const fixed = await measureVariant(pattern, "fixed", opts);
-  return { pattern, slow, fixed, improvement: improvementOf(pattern, slow.median, fixed.median) };
+  const also = (pattern.expect.alsoExpect ?? []).map((expect, i) => {
+    const s = slow.also[i]!.median;
+    const f = fixed.also[i]!.median;
+    return { expect, slow: s, fixed: f, improvement: improvementOf(expect, s, f) };
+  });
+  return { pattern, slow, fixed, improvement: improvementOf(pattern.expect, slow.median, fixed.median), also };
 }

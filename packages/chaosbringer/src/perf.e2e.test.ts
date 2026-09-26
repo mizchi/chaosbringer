@@ -68,6 +68,32 @@ const chain = (n: number) => `<!doctype html><title>chain ${n}</title><body>
   </script>
 </body>`;
 
+/**
+ * Everything `perfPage` summarises beyond vitals: a classic `<script src>`
+ * in `<head>` (render-blocking), a 1024×1024 image in a 64×64 slot
+ * (oversized), an image from `localhost` while the page is served from
+ * `127.0.0.1` (another registrable domain: third-party), and a banner pushed
+ * in above the text 300 ms after load (a layout shift, so CLS > 0).
+ */
+const pageMetrics = (thirdPartyOrigin: string) => `<!doctype html><html><head><title>page metrics</title>
+  <script src="/blocking.js"></script>
+</head><body style="margin:0">
+  <div id="slot"></div>
+  <img src="/big.svg" width="64" height="64" alt="big">
+  <img src="${thirdPartyOrigin}/pixel.svg" width="8" height="8" alt="">
+  <article style="font-size:24px;line-height:1.6">${"<p>Some text that the banner pushes down.</p>".repeat(20)}</article>
+  <script>
+    addEventListener("load", () => setTimeout(() => {
+      const b = document.createElement("div");
+      b.style.height = "300px";
+      b.textContent = "banner";
+      document.getElementById("slot").appendChild(b);
+    }, 300));
+  </script>
+</body></html>`;
+
+const BIG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"><rect width="1024" height="1024" fill="teal"/></svg>`;
+
 const QUIET = `<!doctype html><title>quiet</title><body>
   <h1>Nothing to see</h1>
   <button id="noop">Noop</button>
@@ -114,6 +140,21 @@ describe("per-step perf spans (perf option)", () => {
       if (chainN) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(chain(Number(chainN[1])));
+        return;
+      }
+      if (path === "/blocking.js" || path === "/big.svg" || path === "/pixel.svg") {
+        const svg = path === "/pixel.svg" ? BIG_SVG.replaceAll("1024", "8") : BIG_SVG;
+        res.writeHead(200, {
+          "content-type": path.endsWith(".js") ? "application/javascript" : "image/svg+xml",
+          "cache-control": "no-store",
+        });
+        res.end(path.endsWith(".js") ? "window.blocked = 1;" : svg);
+        return;
+      }
+      if (path === "/page-metrics") {
+        const port = (server.address() as AddressInfo).port;
+        res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
+        res.end(pageMetrics(`http://localhost:${port}`));
         return;
       }
       const body =
@@ -221,6 +262,36 @@ describe("per-step perf spans (perf option)", () => {
     expect(text).toMatch(/\/perf {2}load \d+ms {2}blocking \d+ms {2}\d+ req/);
     expect(text).toContain("Slowest actions:");
     expect(text).toContain(`/perf :: click ${click.selector}`);
+  });
+
+  it("summarises media, render-blocking, third-party and CLS on perfPage", async () => {
+    const report = await crawl("/page-metrics", { perf: true, maxActionsPerPage: 0 });
+    const pp = report.pages[0]!.perfPage!;
+    expect(pp.collectorMissing).toBeUndefined();
+
+    expect(pp.media).toMatchObject({ imageCount: 2, oversizedCount: 1, uncompressedCount: 0, uncompressed: [] });
+    expect(pp.media!.oversized).toHaveLength(1);
+    expect(pp.media!.oversized[0]!.url).toBe(`${origin}/big.svg`);
+    expect(pp.media!.oversized[0]!.overFetch).toBeGreaterThanOrEqual(64);
+    expect(Object.keys(pp.media!.oversized[0]!).sort()).toEqual(["kb", "overFetch", "url"]);
+
+    expect(pp.renderBlocking).toEqual({ stylesheets: 0, scripts: 1, urls: ["/blocking.js"] });
+
+    expect(pp.network.thirdParty?.requestCount).toBe(1);
+    expect(pp.network.thirdParty!.encodedKB).toBeGreaterThanOrEqual(0);
+
+    // The banner landed 300 ms after load, before the page finished: CLS is final.
+    expect(pp.vitals.CLS?.value).toBeGreaterThan(0.05);
+    expect(pp.vitals.FCP?.value).toBeGreaterThan(0);
+  });
+
+  it("leaves media, renderBlocking and thirdParty absent on a page with none", async () => {
+    const report = await crawl("/quiet", { perf: true, maxActionsPerPage: 0 });
+    const pp = report.pages[0]!.perfPage!;
+    expect(pp).not.toHaveProperty("media");
+    expect(pp).not.toHaveProperty("renderBlocking");
+    expect(pp.network).not.toHaveProperty("thirdParty");
+    expect(pp.vitals.CLS?.value).toBe(0);
   });
 
   it("measures the weighted-random loop's actions, keyed by route pattern", async () => {

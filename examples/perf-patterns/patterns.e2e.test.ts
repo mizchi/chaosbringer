@@ -29,6 +29,7 @@ describe.sequential("perf patterns", () => {
         console.log(
           `[${pattern.id}] ${pattern.expect.key} ${pattern.expect.metric}: slow ${m.slow.median} (${m.slow.values.join(",")}) → fixed ${m.fixed.median} (${m.fixed.values.join(",")})`,
         );
+        for (const a of m.also) console.log(`[${pattern.id}]   also ${a.expect.metric}: slow ${a.slow} → fixed ${a.fixed}`);
       });
 
       it(`slow variant is measured on ${pattern.expect.key}`, () => {
@@ -46,6 +47,16 @@ describe.sequential("perf patterns", () => {
         const detail = `slow ${m.slow.median}, fixed ${m.fixed.median}, need ratio>=${ratio ?? "-"} absolute>=${absolute ?? "-"}`;
         expect(m.improvement.ok, detail).toBe(true);
       });
+
+      for (const [i, also] of (pattern.expect.alsoExpect ?? []).entries()) {
+        it(`fixed variant also improves ${also.metric}`, () => {
+          expect(m, "measurement failed").toBeDefined();
+          const a = m.also[i]!;
+          const { ratio, absolute } = also.minImprovement;
+          const detail = `slow ${a.slow} (${m.slow.also[i]!.values.join(",")}), fixed ${a.fixed} (${m.fixed.also[i]!.values.join(",")}), need ratio>=${ratio ?? "-"} absolute>=${absolute ?? "-"}`;
+          expect(a.improvement.ok, detail).toBe(true);
+        });
+      }
 
       it("fixed variant visits the same pages and adds no error clusters", () => {
         expect(m, "measurement failed").toBeDefined();

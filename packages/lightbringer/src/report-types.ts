@@ -192,6 +192,10 @@ export interface MediaReport {
   }>;
   /** large compressible resources shipped ~uncompressed (decoded ≈ encoded) */
   uncompressed: Array<{ url: string; kb: number; ratio: number; type: string }>;
+  /** how many images were oversized before `oversized` was capped at 10 */
+  oversizedCount?: number;
+  /** how many resources were uncompressed before `uncompressed` was capped at 10 */
+  uncompressedCount?: number;
 }
 
 /**

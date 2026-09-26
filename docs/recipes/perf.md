@@ -60,7 +60,19 @@ Fields that were not measured are **absent, never 0**. A 0 passes every budget a
 
 - `faults` (chaosbringer's addition): the faults active during the span, sorted, absent when none. See [Perf under chaos](#perf-under-chaos-faults-and-degradation).
 
-`PageResult.perfPage` holds page-level extras that do not belong to one span: web-vitals of the final document, per-document vitals when the page went through more than one, network totals, and the `clockPatched` / `collectorMissing` warnings. After a click that navigated away, the "final document" is the next page, not `PageResult.url`: `perfPage.vitals` are that page's, and `perfPage.documents` has each document's vitals under its own URL. The per-page sidecar is lightbringer's report, so its `url` and `vitals` are the final document's too (its file name and `title` are the visited page's).
+`PageResult.perfPage` holds page-level extras that do not belong to one span:
+
+| field | what it is |
+|---|---|
+| `vitals` | web-vitals (LCP, INP, CLS, TTFB, FCP) of the final document, each `{ value, rating }`. CLS is read when the page finishes, so shifts up to then count |
+| `documents` | per-document vitals, present only when the page went through more than one document |
+| `network` | `totalRequests`, `totalEncodedKB`, `fromCacheCount`, and `thirdParty: { requestCount, encodedKB }` (requests to another registrable domain), present only when there was some |
+| `media` | `imageCount`, `imageKB`, `oversizedCount` + `oversized` (top 3 `{ url, overFetch, kb }`: images with ≥ 4× the pixels their slot shows), `uncompressedCount` + `uncompressed` (top 3 `{ url, kb, ratio }`: text resources over 20 KB sent with almost no compression). Absent when the page showed no image and nothing was flagged; with images and nothing flagged the counts are a measured 0 |
+| `renderBlocking` | `stylesheets` and `scripts` (counts of all/screen stylesheets and classic `<script src>` without `async`/`defer` left in `<head>`) and `urls` (the first 3). Absent when there were none |
+| `clockPatched` / `collectorMissing` | warnings, see [Caveats](#caveats) |
+| `reportPath` | the sidecar, with `outDir` |
+
+The lists are cut to three; the counts beside them count everything, and the sidecar has the full entries. After a click that navigated away, the "final document" is the next page, not `PageResult.url`: `perfPage.vitals` are that page's, and `perfPage.documents` has each document's vitals under its own URL. The per-page sidecar is lightbringer's report, so its `url` and `vitals` are the final document's too (its file name and `title` are the visited page's).
 
 ## Settling between steps (`--settle`)
 

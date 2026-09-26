@@ -36,29 +36,33 @@ Each row: which perfKey and metric the crawl flags, the median on each
 variant, and how much the fix gains. "−99% (200×)" means the fixed median is
 1/200th of the slow one. Medians are pooled over every matching span of every
 run: a key that the crawl hits four times per run over three runs is twelve
-values.
+values. A `page.` metric is one value per page visit whose load key matches.
+"also" lines are further metrics the pattern asserts on the same key.
 
 <!-- results:start -->
 Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm report` on 2026-09-26.
 
 | pattern | category | what chaosbringer flags (perfKey · metric) | slow | fixed | improvement | fix |
 |---|---|---|---|---|---|---|
+| [cls-late-content](src/patterns/cls-late-content.ts) | render | `/ :: load`<br>`page.vitals.CLS.value` | 0.2 | 0 | −100% (∞×) | Reserve the slot's space before the content arrives (min-height or aspect-ratio on the container, or a skeleton of the same size). |
 | [duplicate-fetch](src/patterns/duplicate-fetch.ts) | network | `/ :: load`<br>`network.requestCount` | 4 | 2 | −50% (2.0×) | Deduplicate: share one in-flight promise (or a request cache such as SWR / React Query / a DataLoader). |
-| [expensive-selectors](src/patterns/expensive-selectors.ts) | render | `/ :: click button:has-text("Dark toolbar")`<br>`render.recalcStyleMs` | 24.1 | 0.2 | −99.2% (121×) | Toggle the class on the element that changes and scope rules to it (or use CSS custom properties); avoid universal/:has() rules keyed off <body>. |
-| [hang-no-timeout](src/patterns/hang-no-timeout.ts) | chaos | `/ :: load`<br>`effectiveMs`<br>under `slow-6s` | 6135 | 1127 | −82% (5.4×) | Put a deadline on the request (AbortController / AbortSignal.timeout) and show a fallback with a retry. |
+| [expensive-selectors](src/patterns/expensive-selectors.ts) | render | `/ :: click button:has-text("Dark toolbar")`<br>`render.recalcStyleMs` | 28 | 0.1 | −99.6% (280×) | Toggle the class on the element that changes and scope rules to it (or use CSS custom properties); avoid universal/:has() rules keyed off <body>. |
+| [hang-no-timeout](src/patterns/hang-no-timeout.ts) | chaos | `/ :: load`<br>`effectiveMs`<br>under `slow-6s` | 6129 | 1126 | −82% (5.4×) | Put a deadline on the request (AbortController / AbortSignal.timeout) and show a fallback with a retry. |
 | [huge-dom](src/patterns/huge-dom.ts) | render | `/ :: load`<br>`render.nodes` | 60055 | 655 | −99% (92×) | Paginate or virtualise the list: render only the rows in view (here one page of 50). |
 | [input-no-debounce](src/patterns/input-no-debounce.ts) | network | `/ :: click button:has-text("Type a query")`<br>`network.requestCount` | 20 | 2 | −90% (10×) | Debounce the input handler (~150–300 ms; a leading-edge call keeps the first result instant). |
 | [layout-animation](src/patterns/layout-animation.ts) | render | `/ :: click button:has-text("Save")`<br>`render.layoutCount` | 38 | 2 | −95% (19×) | Animate transform (and opacity) only, e.g. translateX(), or use a CSS animation on transform. |
 | [layout-thrash](src/patterns/layout-thrash.ts) | render | `/ :: click button:has-text("Grow rows")`<br>`render.layoutCount` | 200 | 1 | −99.5% (200×) | Batch the reads, then the writes (or use requestAnimationFrame / fastdom). |
 | [listener-leak](src/patterns/listener-leak.ts) | memory | `/ :: click button:has-text("Refresh widget")`<br>`memory.listenersDelta` | 20 | 0 | −100% (∞×) | Return a teardown from mount (removeEventListener, or an AbortController signal) and call it before re-rendering. |
-| [long-task-click](src/patterns/long-task-click.ts) | main-thread | `/ :: click button:has-text("Compute checksum")`<br>`cpu.blockingMs` | 266 | 0 | −100% (∞×) | Split the work into slices under ~50 ms and yield between them (scheduler.yield(), or setTimeout 0). |
+| [long-task-click](src/patterns/long-task-click.ts) | main-thread | `/ :: click button:has-text("Compute checksum")`<br>`cpu.blockingMs` | 272 | 0 | −100% (∞×) | Split the work into slices under ~50 ms and yield between them (scheduler.yield(), or setTimeout 0). |
 | [n-plus-one](src/patterns/n-plus-one.ts) | network | `/ :: load`<br>`network.requestCount` | 22 | 2 | −91% (11×) | Batch the details into the list request (?include=details, a batch endpoint, or GraphQL/DataLoader). |
-| [oversized-image](src/patterns/oversized-image.ts) | network | `/ :: load`<br>`network.encodedKB` | 23387 | 1472 | −94% (16×) | Serve images sized for the slot (a resized rendition, srcset/sizes for density), in a modern format. |
+| [oversized-image](src/patterns/oversized-image.ts) | network | `/ :: load`<br>`page.media.oversizedCount`<br>also `network.encodedKB`: 23387 → 376, −98% (62×) | 8 | 0 | −100% (∞×) | Serve images sized for the slot (a resized rendition, srcset/sizes for density), in a modern format. |
+| [render-blocking-script](src/patterns/render-blocking-script.ts) | network | `/ :: load`<br>`page.vitals.FCP.value`<br>also `page.renderBlocking.scripts`: 1 → 0, −100% (∞×) | 436 | 24 | −94% (18×) | Load scripts with defer (or async, or type=module) and keep only what the first paint needs inline; for CSS, media queries or preload + swap for the non-critical part. |
 | [request-waterfall](src/patterns/request-waterfall.ts) | network | `/ :: load`<br>`network.waves` | 5 | 2 | −60% (2.5×) | Start independent requests together (Promise.all), or have the server return them in one response. |
 | [retry-storm](src/patterns/retry-storm.ts) | chaos | `/ :: load`<br>`network.requestCount`<br>under `api-503` | 22 | 4 | −82% (5.5×) | Cap retries and back off exponentially (with jitter in production). |
+| [third-party-bloat](src/patterns/third-party-bloat.ts) | network | `/ :: load`<br>`page.network.thirdParty.encodedKB`<br>also `page.network.thirdParty.requestCount`: 5 → 0, −100% (∞×) | 502 | 0 | −100% (∞×) | Put a facade in front of widgets (a static button that loads the real one on click) and load the other tags on first interaction or idle; drop the ones nobody reads. |
 | [uncompressed-bundle](src/patterns/uncompressed-bundle.ts) | network | `/ :: load`<br>`network.encodedKB` | 294 | 12.2 | −96% (24×) | Serve text assets compressed (Content-Encoding: gzip or br), at the server, CDN or build step. |
 | [unthrottled-scroll](src/patterns/unthrottled-scroll.ts) | main-thread | `/ :: click button:has-text("Skim the feed")`<br>`render.layoutCount` | 121 | 0 | −100% (∞×) | Use a passive listener that coalesces to one requestAnimationFrame update, and an IntersectionObserver for visibility. |
-| [waterfall-amplifies-delay](src/patterns/waterfall-amplifies-delay.ts) | chaos | `/ :: load`<br>`network.settledMs`<br>under `api-delay-300` | 940 | 328 | −65% (2.9×) | Start independent requests together (Promise.all), and only chain the ones that really need a previous result. |
+| [waterfall-amplifies-delay](src/patterns/waterfall-amplifies-delay.ts) | chaos | `/ :: load`<br>`network.settledMs`<br>under `api-delay-300` | 933 | 328 | −65% (2.8×) | Start independent requests together (Promise.all), and only chain the ones that really need a previous result. |
 <!-- results:end -->
 
 ## Layout
@@ -67,9 +71,9 @@ Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm repor
 |---|---|
 | `src/pattern.ts` | the `Pattern` type and the route helpers (`html`, `json`, `handler`, `page`) |
 | `src/patterns/<id>.ts` | one pattern each; discovered automatically |
-| `src/server.ts` | serves one variant on an ephemeral port (each variant its own server, same paths, so perfKeys match) |
+| `src/server.ts` | serves one variant on an ephemeral port (each variant its own server, same paths, so perfKeys match), plus a `localhost` server for `thirdPartyRoutes` |
 | `src/registry.ts` | `loadPatterns()`: reads `src/patterns/*.ts` and imports each one |
-| `src/measure.ts` | `measurePattern()`: N seeded crawls per variant, metric medians, improvement |
+| `src/measure.ts` | `measurePattern()`: N seeded crawls per variant, metric medians, improvement (unit-tested in `src/measure.test.ts`) |
 | `patterns.e2e.test.ts` | the assertions, per pattern |
 | `scripts/report.ts` | fills the table above |
 
@@ -80,12 +84,33 @@ Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm repor
 2. Write `routes(variant)`: the same paths for both variants, differing only
    in the anti-pattern. Pages are HTML strings (`page(title, body, head)`);
    API routes are `json(body, { delayMs, status })`, or `handler()` for
-   anything else.
+   anything else. For resources from another company's host, put them in
+   `thirdPartyRoutes(variant)`: they are served from `localhost`, a different
+   registrable domain from the app's `127.0.0.1`, and the page gets that
+   origin as `routes(variant, { thirdPartyOrigin })` (see `third-party-bloat`).
 3. Set `crawl` so the crawl reliably reaches the step: a fixed `seed`, small
    `maxPages` / `maxActionsPerPage`, `actionWeights: { scroll: 0 }` for a
    click-only page, and `faults` for a chaos pattern.
 4. Set `expect`: the perfKey glob, the metric path, and a `minImprovement`
-   well inside the effect you built.
+   well inside the effect you built. The metric is one of:
+   - a **span** metric, a dot path into the matching spans:
+     `render.layoutCount`, `cpu.blockingMs`, `network.requestCount`,
+     `network.encodedKB`, `network.settledMs`, or the derived `effectiveMs`;
+   - a **degradation** metric, `degradation.<path>` into
+     `CrawlReport.perf.degradation` entries for matching keys
+     (`degradation.delta.effectiveMs`);
+   - a **page** metric, `page.<path>` into `PageResult.perfPage` of the pages
+     whose load key matches (so `key` is a load key such as `/ :: load`):
+     `page.vitals.CLS.value`, `page.vitals.FCP.value`, `page.vitals.LCP.value`,
+     `page.media.oversizedCount`, `page.media.uncompressedCount`,
+     `page.media.imageKB`, `page.renderBlocking.scripts`,
+     `page.renderBlocking.stylesheets`, `page.network.thirdParty.encodedKB`,
+     `page.network.thirdParty.requestCount`, `page.network.totalEncodedKB`.
+     The field list is in [the perf recipe](../../docs/recipes/perf.md).
+
+   `alsoExpect` adds more metrics on the same key, each with its own
+   `minImprovement` (e.g. `oversized-image` gates the oversized count and also
+   the bytes).
 5. Run `PATTERN=<your-id> pnpm test` twice, then `PATTERN=<your-id> pnpm report`.
 
 No registration step: the registry imports every `.ts` file in
@@ -143,10 +168,18 @@ No registration step: the registry imports every `.ts` file in
 - **Prefer a long `faults.delay` to `faults.hang`.** A hang holds the load span
   until the 30 s page timeout, so every crawl takes 30 s and `effectiveMs` is
   just the cap.
-- **Only span metrics can be gated.** Page-level numbers (CLS in
-  `perfPage.vitals`, and lightbringer's oversized-image and uncompressed flags,
-  which only reach the per-page report on disk) are not readable by
-  `measure.ts` yet. That is why there is no CLS pattern, and why the image and
-  bundle patterns gate on `network.encodedKB`.
+- **Page metrics are absent, not 0, when there is nothing to report.**
+  `perfPage.network.thirdParty` is left out when no request went to another
+  domain, `renderBlocking` when nothing blocks, and `media` when the page
+  showed no image. A fix that removes the thing entirely then has no value to
+  compare, and the pattern fails as unmeasured. Set `absentAs: 0` on that
+  metric (`third-party-bloat`, `render-blocking-script`). `media.oversizedCount`
+  and `uncompressedCount` are a measured 0 once the page shows an image.
+- **Page metrics are read when the page finishes**, from its final document.
+  CLS counts every shift up to then, so late content has to land inside the
+  crawl's visit: `cls-late-content` inserts its banner when a fetch answers,
+  which the load span's settle waits for, rather than on a bare timer.
+  `renderBlocking` is also read then: a stylesheet that the page switched to
+  `media="all"` after loading (the print-media swap trick) reads as blocking.
 - `tsx` is fine for scripts here: chaosbringer is imported from its built
   `dist`, so the functions it passes to `page.evaluate` are plain JS.
