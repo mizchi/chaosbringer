@@ -1360,6 +1360,7 @@ chaosbringer --url http://localhost:3000 \
 | `--trace-replay <path>` | Replay a previously recorded trace | — |
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
+| `--no-http-cache` | Disable the browser HTTP cache on every page (`httpCache: false`), for cold-cache measurement. Otherwise the cache is on, except in runs with fault injection, `traceparent` or HAR replay, which route every request and so run cold | cache on |
 | `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
 | `--shard <i/N>` | Run as shard i of N. See the `shard` subcommand to spawn + merge. | — |
 | `--heatmap` | Print an action-frequency heatmap after the report | false |

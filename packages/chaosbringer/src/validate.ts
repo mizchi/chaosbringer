@@ -44,7 +44,7 @@ export const KNOWN_OPTION_NAMES = [
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
   "initScripts", "perf", "perfBudgets", "perfBudgetsFile", "cdpEndpoint", "cdpTargetId",
-  "terminalBrowser", "settle",
+  "terminalBrowser", "settle", "httpCache",
 ] as const;
 
 /**

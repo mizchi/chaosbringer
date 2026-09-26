@@ -365,7 +365,7 @@ describe("per-step perf spans (perf option)", () => {
   it("opens no CDP session with perf off, and exactly one with perf on (testPage path)", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
-      const count = async (perf: CrawlerOptions["perf"]) => {
+      const count = async (perf: CrawlerOptions["perf"], blockExternalNavigation = false) => {
         const context = await browser.newContext();
         let sessions = 0;
         const original = context.newCDPSession.bind(context);
@@ -381,6 +381,9 @@ describe("per-step perf spans (perf option)", () => {
           timeout: 10_000,
           logLevel: "silent",
           perf,
+          // The default navigation guard runs on the page's CDP session too;
+          // off here so the count is the perf layer's own.
+          blockExternalNavigation,
         });
         const result = await crawler.testPage(page, `${origin}/perf`);
         await context.close();
@@ -397,6 +400,10 @@ describe("per-step perf spans (perf option)", () => {
       // The crawler owns no context on this path, so the session installed
       // the collector on the page itself — it did run.
       expect(on.result.perfPage?.collectorMissing).toBeUndefined();
+
+      // With the default navigation guard, perf shares the guard's session.
+      expect((await count(undefined, true)).sessions).toBe(1);
+      expect((await count(true, true)).sessions).toBe(1);
     } finally {
       await browser.close();
     }

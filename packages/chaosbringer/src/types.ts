@@ -72,8 +72,30 @@ export interface CrawlerOptions {
   viewport?: { width: number; height: number };
   /** Custom user agent */
   userAgent?: string;
-  /** Block navigation to external domains */
+  /**
+   * Block navigation to external domains (default `true`). On its own this
+   * blocks through CDP, on document requests only, so the browser HTTP cache
+   * stays on; see `httpCache`.
+   */
   blockExternalNavigation?: boolean;
+  /**
+   * The browser HTTP cache on crawled pages (default `true`: on).
+   *
+   * With the default, a page reuses what an earlier page of the same crawl
+   * cached, as a real repeat visit would — so perf numbers after the first
+   * page are warm, and a site that sends no caching headers shows up as
+   * repeated downloads. `false` disables the cache on every page
+   * (`Network.setCacheDisabled`), which is how every crawl ran while
+   * external-navigation blocking still went through a route: use it to keep
+   * comparing against perf baselines recorded cold.
+   *
+   * `true` cannot hold where every request must reach a route: fault
+   * injection (`faultInjection`), `traceparent` and HAR replay intercept every
+   * request with a Playwright route, and Playwright turns the cache off on any
+   * page that has one. Pages are measured cold in those runs whatever this
+   * says.
+   */
+  httpCache?: boolean;
   /**
    * Inject a fresh W3C `traceparent` header onto every request the browser
    * sends. Pair with an OTel-instrumented server to correlate browser-driven

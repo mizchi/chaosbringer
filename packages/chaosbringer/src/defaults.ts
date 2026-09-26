@@ -52,6 +52,7 @@ export const DEFAULT_OPTIONS: Required<
   viewport: { width: 1280, height: 720 },
   userAgent: "",
   blockExternalNavigation: true,
+  httpCache: true,
   actionWeights: {},
   logFile: "",
   logLevel: "info",

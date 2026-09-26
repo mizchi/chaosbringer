@@ -132,6 +132,7 @@ import { findFaultRuleShadows } from "./fault-shadow.js";
 import { buildReproCommand } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
+import { installNavigationGuard, type NavigationGuard } from "./navigation-guard.js";
 import { CrawlPerf } from "./crawl-perf.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { tagServerFaults } from "./perf-faults.js";
@@ -236,6 +237,10 @@ export class ChaosCrawler {
   private cdpPage: Page | null = null;
   private readonly initializedPages = new WeakSet<Page>();
   private readonly routeHandlers = new Map<Page, (route: Route) => Promise<void>>();
+  /** The CDP navigation guard on the CDP-attach page, disposed at teardown. */
+  private readonly navigationGuards = new Map<Page, NavigationGuard>();
+  /** Pages that already have the route or the guard, so neither goes on twice. */
+  private readonly interceptedPages = new WeakSet<Page>();
   private visited: Set<string> = new Set();
   private queue: QueueEntry[] = [];
   private results: PageResult[] = [];
@@ -820,11 +825,7 @@ export class ChaosCrawler {
       }
     } finally {
       if (this.cdpPage) {
-        const handler = this.routeHandlers.get(this.cdpPage);
-        if (handler && !this.cdpPage.isClosed()) {
-          await this.cdpPage.unroute("**/*", handler).catch(() => {});
-        }
-        this.routeHandlers.delete(this.cdpPage);
+        await this.releaseCdpPageInterception(this.cdpPage);
         this.cdpPage = null;
       } else {
         await this.context?.close();
@@ -874,9 +875,7 @@ export class ChaosCrawler {
     this.baseOrigin = new URL(url).origin;
 
     // Set up external navigation blocking and/or fault injection routing.
-    if (this.needsRouting()) {
-      await this.setupNavigationBlocking(page);
-    }
+    await this.setupPageInterception(page);
 
     // The page belongs to the caller, so this method never closes it — which
     // is exactly why it has to release what it parked. A `hang` fault holds a
@@ -1390,8 +1389,95 @@ export class ChaosCrawler {
     return !!(this.options.blockExternalNavigation || this.compiledFaultRules.length > 0 || this.options.traceparent);
   }
 
+  /**
+   * Whether the route handler has to see every request. Fault injection and
+   * `traceparent` do by definition; HAR replay keeps the route so the blocking
+   * decision stays ahead of `routeFromHAR` exactly as it was (the HAR's own
+   * context route disables the cache anyway). Everything else — the default,
+   * `blockExternalNavigation` alone — only needs navigations, which the CDP
+   * guard sees without a route and therefore without switching the HTTP cache
+   * off. See `navigation-guard.ts`.
+   */
+  private needsRequestRoute(): boolean {
+    return !!(
+      this.compiledFaultRules.length > 0 ||
+      this.options.traceparent ||
+      this.options.har?.mode === "replay"
+    );
+  }
+
+  /**
+   * Install whatever the page needs to block external navigation and inject
+   * faults / traceparent: the per-request route when {@link needsRequestRoute},
+   * otherwise the document-only CDP guard. A page with no CDP (a non-Chromium
+   * page handed to `testPage`) falls back to the route. Then apply
+   * `httpCache: false`.
+   */
+  private async setupPageInterception(page: Page): Promise<void> {
+    if (this.needsRouting()) {
+      if (this.needsRequestRoute() || !this.options.blockExternalNavigation) {
+        await this.setupNavigationBlocking(page);
+      } else if (!this.interceptedPages.has(page)) {
+        try {
+          const guard = await installNavigationGuard(page, {
+            isExternal: (url) => this.isExternalUrl(url),
+            onBlocked: (url) => this.noteBlockedNavigation(url),
+          });
+          this.interceptedPages.add(page);
+          if (page === this.cdpPage) this.navigationGuards.set(page, guard);
+        } catch (err) {
+          this.logger.debug("navigation_guard_unavailable", { reason: errorMessage(err) });
+          await this.setupNavigationBlocking(page);
+        }
+      }
+    }
+    if (this.options.httpCache === false) {
+      try {
+        const cdp = pageCdp(page);
+        await cdp.enable("Network");
+        await (await cdp.session()).send("Network.setCacheDisabled", { cacheDisabled: true });
+      } catch (err) {
+        this.logger.warn("http_cache_disable_failed", { reason: errorMessage(err) });
+      }
+    }
+  }
+
+  /** Bookkeeping for one blocked external navigation, whichever layer blocked it. */
+  private noteBlockedNavigation(url: string): void {
+    this.blockedExternalCount++;
+    this.events.onBlockedNavigation?.(url);
+    this.logger.logBlockedNavigation(url);
+  }
+
+  /**
+   * Undo what {@link setupPageInterception} installed on a page that outlives
+   * the crawl — the CDP-attach page, which belongs to the user's browser.
+   */
+  private async releaseCdpPageInterception(page: Page): Promise<void> {
+    const handler = this.routeHandlers.get(page);
+    const guard = this.navigationGuards.get(page);
+    this.routeHandlers.delete(page);
+    this.navigationGuards.delete(page);
+    this.interceptedPages.delete(page);
+    if (page.isClosed()) return;
+    if (handler) await page.unroute("**/*", handler).catch(() => {});
+    if (guard) await guard.dispose();
+    if (this.options.httpCache === false) {
+      await pageCdp(page)
+        .session()
+        .then((client) => client.send("Network.setCacheDisabled", { cacheDisabled: false }))
+        .catch(() => {});
+    }
+  }
+
+  /**
+   * The per-request route. Every request on a routed page goes through it,
+   * and Playwright disables the browser HTTP cache while a page has a route,
+   * so a page that gets this is measured cold. Only installed when
+   * {@link needsRequestRoute} (or when the CDP guard is unavailable).
+   */
   private async setupNavigationBlocking(page: Page): Promise<void> {
-    if (this.routeHandlers.has(page)) return;
+    if (this.interceptedPages.has(page)) return;
     const blockExternal = this.options.blockExternalNavigation;
     const rules = this.compiledFaultRules;
     const traceparentEnabled = this.options.traceparent !== undefined && this.options.traceparent !== false;
@@ -1462,9 +1548,7 @@ export class ChaosCrawler {
       // 2. Block external navigation if requested.
       if (blockExternal && this.isExternalUrl(url)) {
         if (request.isNavigationRequest()) {
-          this.blockedExternalCount++;
-          this.events.onBlockedNavigation?.(url);
-          this.logger.logBlockedNavigation(url);
+          this.noteBlockedNavigation(url);
           await route.abort("blockedbyclient");
           return;
         }
@@ -1482,6 +1566,7 @@ export class ChaosCrawler {
       }
     };
     await page.route("**/*", handler);
+    this.interceptedPages.add(page);
     if (page === this.cdpPage) this.routeHandlers.set(page, handler);
   }
 
@@ -1571,9 +1656,7 @@ export class ChaosCrawler {
       }
     }
 
-    if (this.needsRouting()) {
-      await this.setupNavigationBlocking(page);
-    }
+    await this.setupPageInterception(page);
 
     try {
       const result = await this.crawlPageWithExistingPage(page, url);
