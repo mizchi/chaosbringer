@@ -1,0 +1,19 @@
+{
+  "name": "@mizchi/chaosbringer-example-perf-patterns",
+  "private": true,
+  "type": "module",
+  "description": "A catalog of improvable sample apps: each pattern is a tiny page with a known performance anti-pattern and its fix, and a --perf crawl must localise the problem to the right step and metric and show the fix improving it.",
+  "scripts": {
+    "test": "vitest run",
+    "report": "tsx scripts/report.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.52.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.0.7"
+  }
+}
