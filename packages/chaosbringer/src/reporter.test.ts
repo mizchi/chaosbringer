@@ -352,6 +352,14 @@ describe("formatReport perf-under-chaos lines", () => {
       /\+290ms {2}\/items\/:id :: click Reload {2}under api-delay-300 {2}\(310ms n=1 vs 20ms n=1\) {2}span -15ms/,
     );
 
+    // A span delta that rounds to zero from below still carries a sign.
+    const nearZeroPages = [
+      fakePage("http://x/items/1", fakeSpan(clickKey, { durationMs: 19.6, settledMs: 310, faults: ["api-delay-300"] })),
+      fakePage("http://x/items/2", fakeSpan(clickKey, { durationMs: 20, settledMs: 12 })),
+    ];
+    const nearZeroText = formatReport(makeReport({ pages: nearZeroPages, perf: buildCrawlPerfSummary(nearZeroPages, []) }));
+    expect(nearZeroText).toMatch(/under api-delay-300 .*span \+0ms/);
+
     const plain = formatReport(makeReport({ pages: [pages[1]!], perf: buildCrawlPerfSummary([pages[1]!], []) }));
     expect(plain).not.toContain("Degradation under faults");
     expect(plain).not.toContain("coverage (union");

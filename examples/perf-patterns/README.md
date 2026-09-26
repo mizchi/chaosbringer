@@ -46,30 +46,31 @@ Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm repor
 |---|---|---|---|---|---|---|
 | [cls-late-content](src/patterns/cls-late-content.ts) | render | `/ :: load`<br>`page.vitals.CLS.value` | 0.2 | 0 | −100% (∞×) | Reserve the slot's space before the content arrives (min-height or aspect-ratio on the container, or a skeleton of the same size). |
 | [duplicate-fetch](src/patterns/duplicate-fetch.ts) | network | `/ :: load`<br>`network.requestCount` | 4 | 2 | −50% (2.0×) | Deduplicate: share one in-flight promise (or a request cache such as SWR / React Query / a DataLoader). |
-| [expensive-selectors](src/patterns/expensive-selectors.ts) | render | `/ :: click button:has-text("Dark toolbar")`<br>`render.recalcStyleMs` | 25.3 | 0.2 | −99.4% (168×) | Toggle the class on the element that changes and scope rules to it (or use CSS custom properties); avoid universal/:has() rules keyed off <body>. |
-| [full-rerender-list](src/patterns/full-rerender-list.ts) | render | `/ :: click button:has-text("Complete next task")`<br>`render.layoutMs`<br>also `render.scriptMs`: 28.8 → 1.1, −96% (26×) | 51.4 | 1.4 | −97% (37×) | Update only what changed: touch the one row's DOM, or render through a keyed diff (React/Vue/lit keys, a virtual list) so unchanged rows are kept. |
-| [hang-no-timeout](src/patterns/hang-no-timeout.ts) | chaos | `/ :: load`<br>`effectiveMs`<br>under `slow-6s` | 6128 | 1123 | −82% (5.5×) | Put a deadline on the request (AbortController / AbortSignal.timeout) and show a fallback with a retry. |
+| [expensive-selectors](src/patterns/expensive-selectors.ts) | render | `/ :: click button:has-text("Dark toolbar")`<br>`render.recalcStyleMs` | 23.8 | 0.2 | −99.2% (119×) | Toggle the class on the element that changes and scope rules to it (or use CSS custom properties); avoid universal/:has() rules keyed off <body>. |
+| [full-rerender-list](src/patterns/full-rerender-list.ts) | render | `/ :: click button:has-text("Complete next task")`<br>`render.layoutMs`<br>also `render.scriptMs`: 29 → 1.3, −96% (22×) | 62.6 | 1.9 | −97% (33×) | Update only what changed: touch the one row's DOM, or render through a keyed diff (React/Vue/lit keys, a virtual list) so unchanged rows are kept. |
+| [hang-no-timeout](src/patterns/hang-no-timeout.ts) | chaos | `/ :: load`<br>`effectiveMs`<br>under `slow-6s` | 6135 | 1129 | −82% (5.4×) | Put a deadline on the request (AbortController / AbortSignal.timeout) and show a fallback with a retry. |
 | [huge-dom](src/patterns/huge-dom.ts) | render | `/ :: load`<br>`render.nodes` | 60055 | 655 | −99% (92×) | Paginate or virtualise the list: render only the rows in view (here one page of 50). |
 | [input-no-debounce](src/patterns/input-no-debounce.ts) | network | `/ :: click button:has-text("Type a query")`<br>`network.requestCount` | 20 | 2 | −90% (10×) | Debounce the input handler (~150–300 ms; a leading-edge call keeps the first result instant). |
-| [late-discovered-lcp](src/patterns/late-discovered-lcp.ts) | network | `/ :: load`<br>`page.vitals.LCP.value` | 760 | 140 | −82% (5.4×) | Make the LCP image discoverable from the HTML: an <img> (with fetchpriority="high"), or <link rel="preload" as="image"> plus the background rule inline in the critical CSS. |
+| [late-discovered-lcp](src/patterns/late-discovered-lcp.ts) | network | `/ :: load`<br>`page.vitals.LCP.value` | 756 | 148 | −80% (5.1×) | Make the LCP image discoverable from the HTML: an <img> (with fetchpriority="high"), or <link rel="preload" as="image"> plus the background rule inline in the critical CSS. |
 | [layout-animation](src/patterns/layout-animation.ts) | render | `/ :: click button:has-text("Save")`<br>`render.layoutCount` | 38 | 2 | −95% (19×) | Animate transform (and opacity) only, e.g. translateX(), or use a CSS animation on transform. |
 | [layout-thrash](src/patterns/layout-thrash.ts) | render | `/ :: click button:has-text("Grow rows")`<br>`render.layoutCount` | 200 | 1 | −99.5% (200×) | Batch the reads, then the writes (or use requestAnimationFrame / fastdom). |
-| [lcp-lazy-hero](src/patterns/lcp-lazy-hero.ts) | network | `/ :: load`<br>`page.vitals.LCP.value` | 876 | 44 | −95% (20×) | Never lazy-load the LCP image: load it eagerly with fetchpriority="high" (or preload it), and put loading="lazy" on the below-the-fold images instead. |
+| [lcp-lazy-hero](src/patterns/lcp-lazy-hero.ts) | network | `/ :: load`<br>`page.vitals.LCP.value` | 860 | 48 | −94% (18×) | Never lazy-load the LCP image: load it eagerly with fetchpriority="high" (or preload it), and put loading="lazy" on the below-the-fold images instead. |
 | [listener-leak](src/patterns/listener-leak.ts) | memory | `/ :: click button:has-text("Refresh widget")`<br>`memory.listenersDelta` | 20 | 0 | −100% (∞×) | Return a teardown from mount (removeEventListener, or an AbortController signal) and call it before re-rendering. |
-| [long-task-click](src/patterns/long-task-click.ts) | main-thread | `/ :: click button:has-text("Compute checksum")`<br>`cpu.blockingMs` | 265 | 0 | −100% (∞×) | Split the work into slices under ~50 ms and yield between them (scheduler.yield(), or setTimeout 0). |
+| [long-task-click](src/patterns/long-task-click.ts) | main-thread | `/ :: click button:has-text("Compute checksum")`<br>`cpu.blockingMs` | 267 | 0 | −100% (∞×) | Split the work into slices under ~50 ms and yield between them (scheduler.yield(), or setTimeout 0). |
 | [n-plus-one](src/patterns/n-plus-one.ts) | network | `/ :: load`<br>`network.requestCount` | 22 | 2 | −91% (11×) | Batch the details into the list request (?include=details, a batch endpoint, or GraphQL/DataLoader). |
-| [no-early-flush](src/patterns/no-early-flush.ts) | network | `/ :: load`<br>`page.vitals.FCP.value` | 536 | 36 | −93% (15×) | Flush the <head> and the page shell before the slow work (stream the HTML), and send the data-dependent part when it is ready, or render it client-side behind a skeleton. |
+| [no-cache-headers](src/patterns/no-cache-headers.ts) | network | `/docs/config :: load`<br>`/docs/deploy :: load`<br>`/docs/install :: load`<br>`page.network.totalEncodedKB` | 301 | 0.7 | −99.8% (430×) | Serve static assets under fingerprinted names (app.3f9c1a.js) with Cache-Control: public, max-age=31536000, immutable, and keep no-cache / short max-age for the HTML only. |
+| [no-early-flush](src/patterns/no-early-flush.ts) | network | `/ :: load`<br>`page.vitals.FCP.value` | 536 | 28 | −95% (19×) | Flush the <head> and the page shell before the slow work (stream the HTML), and send the data-dependent part when it is ready, or render it client-side behind a skeleton. |
 | [over-fetching-api](src/patterns/over-fetching-api.ts) | network | `/ :: click button:has-text("Show summary")`<br>`network.encodedKB` | 1384 | 10 | −99.3% (138×) | Ask for what the view needs: a sparse fieldset (?fields=id,total), a summary endpoint, or a GraphQL query; paginate long lists. |
-| [oversized-image](src/patterns/oversized-image.ts) | network | `/ :: load`<br>`page.media.oversizedCount`<br>also `network.encodedKB`: 23387 → 376, −98% (62×) | 8 | 0 | −100% (∞×) | Serve images sized for the slot (a resized rendition, srcset/sizes for density), in a modern format. |
-| [polling-spam](src/patterns/polling-spam.ts) | network | `/ :: click button:has-text("Track order")`<br>`network.requestCount` | 61.5 | 0.5 | −99.2% (123×) | Poll at the pace the data changes (seconds, not milliseconds), back off while nothing changes, pause while the tab is hidden, keep one timer; or let the server push (SSE, WebSocket, long poll). |
-| [redirect-chain](src/patterns/redirect-chain.ts) | network | `/app :: load`<br>`page.vitals.TTFB.value` | 616 | 4.1 | −99.3% (150×) | Resolve defaults on the server (session, cookie, Accept-Language) and serve the page on the first request; link to the final URL; collapse unavoidable redirects into one hop. |
-| [render-blocking-script](src/patterns/render-blocking-script.ts) | network | `/ :: load`<br>`page.vitals.FCP.value`<br>also `page.renderBlocking.scripts`: 1 → 0, −100% (∞×) | 432 | 36 | −92% (12×) | Load scripts with defer (or async, or type=module) and keep only what the first paint needs inline; for CSS, media queries or preload + swap for the non-critical part. |
+| [oversized-image](src/patterns/oversized-image.ts) | network | `/ :: load`<br>`page.media.oversizedCount`<br>also `network.encodedKB`: 23387 → 422, −98% (55×) | 8 | 0 | −100% (∞×) | Serve images sized for the slot (a resized rendition, srcset/sizes for density), in a modern format. |
+| [polling-spam](src/patterns/polling-spam.ts) | network | `/ :: click button:has-text("Track order")`<br>`network.requestCount` | 61 | 0.5 | −99.2% (122×) | Poll at the pace the data changes (seconds, not milliseconds), back off while nothing changes, pause while the tab is hidden, keep one timer; or let the server push (SSE, WebSocket, long poll). |
+| [redirect-chain](src/patterns/redirect-chain.ts) | network | `/app :: load`<br>`page.vitals.TTFB.value` | 616 | 3.5 | −99.4% (176×) | Resolve defaults on the server (session, cookie, Accept-Language) and serve the page on the first request; link to the final URL; collapse unavoidable redirects into one hop. |
+| [render-blocking-script](src/patterns/render-blocking-script.ts) | network | `/ :: load`<br>`page.vitals.FCP.value`<br>also `page.renderBlocking.scripts`: 1 → 0, −100% (∞×) | 432 | 28 | −94% (15×) | Load scripts with defer (or async, or type=module) and keep only what the first paint needs inline; for CSS, media queries or preload + swap for the non-critical part. |
 | [request-waterfall](src/patterns/request-waterfall.ts) | network | `/ :: load`<br>`network.waves` | 5 | 2 | −60% (2.5×) | Start independent requests together (Promise.all), or have the server return them in one response. |
 | [retry-storm](src/patterns/retry-storm.ts) | chaos | `/ :: load`<br>`network.requestCount`<br>under `api-503` | 22 | 4 | −82% (5.5×) | Cap retries and back off exponentially (with jitter in production). |
 | [third-party-bloat](src/patterns/third-party-bloat.ts) | network | `/ :: load`<br>`page.network.thirdParty.encodedKB`<br>also `page.network.thirdParty.requestCount`: 5 → 0, −100% (∞×) | 502 | 0 | −100% (∞×) | Put a facade in front of widgets (a static button that loads the real one on click) and load the other tags on first interaction or idle; drop the ones nobody reads. |
 | [uncompressed-bundle](src/patterns/uncompressed-bundle.ts) | network | `/ :: load`<br>`network.encodedKB` | 294 | 12.2 | −96% (24×) | Serve text assets compressed (Content-Encoding: gzip or br), at the server, CDN or build step. |
 | [unthrottled-scroll](src/patterns/unthrottled-scroll.ts) | main-thread | `/ :: click button:has-text("Skim the feed")`<br>`render.layoutCount` | 121 | 0 | −100% (∞×) | Use a passive listener that coalesces to one requestAnimationFrame update, and an IntersectionObserver for visibility. |
-| [waterfall-amplifies-delay](src/patterns/waterfall-amplifies-delay.ts) | chaos | `/ :: load`<br>`network.settledMs`<br>under `api-delay-300` | 936 | 328 | −65% (2.9×) | Start independent requests together (Promise.all), and only chain the ones that really need a previous result. |
+| [waterfall-amplifies-delay](src/patterns/waterfall-amplifies-delay.ts) | chaos | `/ :: load`<br>`network.settledMs`<br>under `api-delay-300` | 936 | 330 | −65% (2.8×) | Start independent requests together (Promise.all), and only chain the ones that really need a previous result. |
 <!-- results:end -->
 
 ## Layout
@@ -190,14 +191,16 @@ No registration step: the registry imports every `.ts` file in
   which the load span's settle waits for, rather than on a bare timer.
   `renderBlocking` is also read then: a stylesheet that the page switched to
   `media="all"` after loading (the print-media swap trick) reads as blocking.
-- **The HTTP cache is off during a crawl.** The crawler routes every request
-  through `page.route("**/*")` (fault injection, `traceparent`, the external
-  navigation block), and Playwright disables the browser's HTTP cache on a
-  page with a route. A second page load downloads an `immutable` asset again,
-  exactly like a `no-store` one, so a "missing Cache-Control" pattern cannot be
-  measured: both variants read the same bytes on a repeat visit, and
-  `perfPage.network.fromCacheCount` stays 0. Such a pattern was tried and
-  dropped.
+- **The HTTP cache is on, and shared by the pages of one crawl** (each
+  crawl is a fresh browser, so runs do not share it). A page after the first
+  gets a cacheable asset from cache, so measure caching on a later page's
+  load key, not on the first (`no-cache-headers` gates `/docs/* :: load`, not
+  `/ :: load`). Fault injection (`crawl.faults`), `traceparent` and HAR replay
+  route every request through `page.route`, and Playwright disables the cache
+  on a page with a route: in those crawls every page is cold, and an
+  `immutable` asset is downloaded again exactly like a `no-store` one.
+  External-navigation blocking, on by default, does not route and keeps the
+  cache. `options: { httpCache: false }` turns it off on purpose.
 - **`render.recalcStyleCount` counts style recalc passes, not elements.** A
   click that replaces 3000 rows reads 2–3, the same as one that changes a
   class. `full-rerender-list` gates on `render.layoutMs` and `render.scriptMs`,

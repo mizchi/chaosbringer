@@ -420,7 +420,12 @@ function formatCrawlPerfSummary(report: CrawlReport): string[] {
  */
 function formatDegradation(rows: readonly PerfDegradationEntry[]): string[] {
   if (rows.length === 0) return [];
-  const signed = (n: number, unit = "") => `${n >= 0 ? "+" : ""}${Math.round(n)}${unit}`;
+  // Round before choosing the sign: -0.4 must print "+0", not a bare "0"
+  // (Math.round(-0.4) is -0, which prints as "0" but is not >= 0's branch).
+  const signed = (n: number, unit = "") => {
+    const r = Math.round(n) || 0;
+    return `${r >= 0 ? "+" : ""}${r}${unit}`;
+  };
   const out = ["", "Degradation under faults (median with vs without):"];
   for (const r of rows.slice(0, 5)) {
     // The lead number is the effective delta (wall time stretched to when the

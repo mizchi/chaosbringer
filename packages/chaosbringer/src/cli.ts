@@ -124,6 +124,7 @@ const { values, positionals } = parseArgs({
     "cluster-min-count": { type: "string" },
     "failure-max": { type: "string" },
     "trace-out": { type: "string" },
+    "no-http-cache": { type: "boolean", default: false },
     "trace-replay": { type: "string" },
     device: { type: "string" },
     network: { type: "string" },
@@ -206,6 +207,7 @@ OPTIONS:
   --trace-replay <path> Replay a previously recorded trace instead of random actions
   --device <name>       Emulate a Playwright device descriptor (e.g. "iPhone 14", "Pixel 7")
   --network <profile>   Throttle with a CDP preset: slow-3g, fast-3g, offline
+  --no-http-cache       Disable the browser HTTP cache on every page (cold-cache measurement)
   --seed-from-sitemap <url|path>  Prepend URLs listed in a sitemap.xml (or sitemap index)
   --shard <i/N>         Run as shard i of N (filter URLs by hash). Merge with the shard subcommand.
   --heatmap             Print an action-frequency heatmap after the report
@@ -496,6 +498,7 @@ const options: CrawlerOptions = {
   storageState: values["storage-state"],
   performanceBudget,
   traceOut: values["trace-out"],
+  httpCache: values["no-http-cache"] ? false : undefined,
   traceReplay: values["trace-replay"],
   device: values.device,
   network: values.network as CrawlerOptions["network"],
