@@ -587,6 +587,31 @@ export interface PagePerfSummary {
     /** Present only when some request went to another registrable domain. */
     thirdParty?: { requestCount: number; encodedKB: number };
   };
+  /**
+   * Image weight and lightbringer's media flags, read from the final document
+   * when the page finished. `oversized`: images whose intrinsic pixels are at
+   * least 4× what their slot shows (CSS px × DPR); `uncompressed`: text
+   * resources over 20 KB served with (almost) no compression. The counts count
+   * every flagged resource; the lists keep the top `PERF_PAGE_LIST_CAP` by KB,
+   * and the sidecar has the full entries. Absent when the page showed no image
+   * and nothing was flagged, or when the media read failed; with images but
+   * nothing flagged, the counts are a measured 0.
+   */
+  media?: {
+    imageCount: number;
+    imageKB: number;
+    oversizedCount: number;
+    oversized: Array<{ url: string; overFetch: number; kb: number }>;
+    uncompressedCount: number;
+    uncompressed: Array<{ url: string; kb: number; ratio: number }>;
+  };
+  /**
+   * Render-blocking resources left in the final document's `<head>`:
+   * stylesheets for all/screen media and classic `<script src>` without
+   * `async` / `defer`. `urls` is the first `PERF_PAGE_LIST_CAP`, stylesheets
+   * first. Absent when there were none (or the read failed).
+   */
+  renderBlocking?: { stylesheets: number; scripts: number; urls: string[] };
   /** True when page JS had already patched `performance.now` before the collector ran. */
   clockPatched?: boolean;
   /** True when the in-page collector never ran; in-page fields are then absent. */

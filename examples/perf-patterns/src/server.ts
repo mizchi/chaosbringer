@@ -15,7 +15,11 @@ export interface PatternServer {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function serveRoutes(routes: Routes): Promise<PatternServer> {
+/**
+ * `host` is the host name in the returned origin; the server always listens
+ * on 127.0.0.1, which `localhost` also reaches.
+ */
+export async function serveRoutes(routes: Routes, host = "127.0.0.1"): Promise<PatternServer> {
   const server: Server = createServer(async (req, res) => {
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const route = routes[path];
@@ -47,7 +51,7 @@ export async function serveRoutes(routes: Routes): Promise<PatternServer> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
-    origin: `http://127.0.0.1:${port}`,
+    origin: `http://${host}:${port}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -56,6 +60,24 @@ export async function serveRoutes(routes: Routes): Promise<PatternServer> {
   };
 }
 
-export function servePattern(pattern: Pattern, variant: Variant): Promise<PatternServer> {
-  return serveRoutes(pattern.routes(variant));
+/**
+ * Serve one variant. With `thirdPartyRoutes`, those go on a second server
+ * reached as `localhost`: a different registrable domain from the app's
+ * `127.0.0.1`, so the browser and lightbringer treat it as third-party.
+ */
+export async function servePattern(pattern: Pattern, variant: Variant): Promise<PatternServer> {
+  const third = pattern.thirdPartyRoutes ? await serveRoutes(pattern.thirdPartyRoutes(variant), "localhost") : null;
+  try {
+    const app = await serveRoutes(pattern.routes(variant, { thirdPartyOrigin: third?.origin ?? "" }));
+    return {
+      origin: app.origin,
+      close: async () => {
+        await app.close();
+        await third?.close();
+      },
+    };
+  } catch (err) {
+    await third?.close();
+    throw err;
+  }
 }

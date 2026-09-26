@@ -225,6 +225,8 @@ function readMedia(): MediaReport {
     imageKB: Math.round(imageBytes / 102.4) / 10,
     oversized: oversized.slice(0, 10),
     uncompressed: uncompressed.slice(0, 10),
+    oversizedCount: oversized.length,
+    uncompressedCount: uncompressed.length,
   };
 }
 function readRenderBlocking(): RenderBlocking {

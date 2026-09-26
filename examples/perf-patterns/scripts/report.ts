@@ -25,10 +25,10 @@ const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 const fmt = (n: number | null) =>
   n === null ? "–" : Number.isInteger(n) ? String(n) : n.toFixed(Math.abs(n) >= 100 ? 0 : 1);
 
-function improvement(m: PatternMeasurement): string {
+function improvement(m: Pick<PatternMeasurement, "improvement">, slow: number | null): string {
   const { absolute, ratio, ok } = m.improvement;
-  if (absolute === null || ratio === null || m.slow.median === null) return "–";
-  const pct = m.slow.median === 0 ? 0 : (absolute / m.slow.median) * 100;
+  if (absolute === null || ratio === null || slow === null) return "–";
+  const pct = slow === 0 ? 0 : (absolute / slow) * 100;
   const times = Number.isFinite(ratio) ? `${ratio.toFixed(ratio >= 10 ? 0 : 1)}×` : "∞×";
   return `${pct >= 0 ? "−" : "+"}${Math.abs(pct).toFixed(Math.abs(pct) > 99 && Math.abs(pct) < 100 ? 1 : 0)}% (${times})${ok ? "" : " **below threshold**"}`;
 }
@@ -41,7 +41,11 @@ function row(m: PatternMeasurement): string {
   const faults = p.crawl.faults?.length
     ? `<br>under ${p.crawl.faults.map((f) => `\`${f.name ?? f.fault.kind}\``).join(", ")}`
     : "";
-  return `| [${p.id}](src/patterns/${p.id}.ts) | ${p.category} | ${keys}<br>\`${p.expect.metric}\`${faults} | ${fmt(m.slow.median)} | ${fmt(m.fixed.median)} | ${improvement(m)} | ${cell(p.fix)} |`;
+  // Metrics the pattern also asserts go under the main one, with their own numbers.
+  const also = m.also
+    .map((a) => `<br>also \`${a.expect.metric}\`: ${fmt(a.slow)} → ${fmt(a.fixed)}, ${improvement(a, a.slow)}`)
+    .join("");
+  return `| [${p.id}](src/patterns/${p.id}.ts) | ${p.category} | ${keys}<br>\`${p.expect.metric}\`${faults}${also} | ${fmt(m.slow.median)} | ${fmt(m.fixed.median)} | ${improvement(m, m.slow.median)} | ${cell(p.fix)} |`;
 }
 
 function parseRows(table: string): Map<string, string> {
@@ -65,7 +69,10 @@ for (const pattern of patterns) {
   process.stdout.write(`measuring ${pattern.id} (${runs} runs per variant)… `);
   const m = await measurePattern(pattern, { runs });
   rows.set(pattern.id, row(m));
-  console.log(`slow ${fmt(m.slow.median)} → fixed ${fmt(m.fixed.median)} ${improvement(m)}`);
+  console.log(`slow ${fmt(m.slow.median)} → fixed ${fmt(m.fixed.median)} ${improvement(m, m.slow.median)}`);
+  for (const a of m.also) {
+    console.log(`  also ${a.expect.metric}: slow ${fmt(a.slow)} → fixed ${fmt(a.fixed)} ${improvement(a, a.slow)}`);
+  }
   const top = m.slow.slowestActions[0];
   if (top) console.log(`  slow variant's slowest action: ${top.key} ${fmt(top.durationMs)} ms, blocking ${fmt(top.blockingMs)} ms`);
   for (const d of m.slow.degradation.slice(0, 3)) {

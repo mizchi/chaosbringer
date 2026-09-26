@@ -4,8 +4,8 @@
  * unit-testable without a browser.
  */
 
-import type { SpanReport } from "lightbringer/core";
-import type { LastActionPerf, PerfSpanReport } from "./types.js";
+import type { PerfReport, SpanReport } from "lightbringer/core";
+import type { LastActionPerf, PagePerfSummary, PerfSpanReport } from "./types.js";
 
 /**
  * The three numbers a span's cost is compared by: wall time, main-thread
@@ -82,4 +82,61 @@ export function formatLastActionPerf(p: Omit<LastActionPerf, "key">): string {
   if (p.interaction) parts.push(`${p.interaction.maxDurationMs}ms interaction latency`);
   parts.push(`${p.network.requestCount} request${p.network.requestCount === 1 ? "" : "s"} (${p.network.encodedKB} KB)`);
   return `Previous action cost: ${parts.join(", ")}`;
+}
+
+/** How many entries each `PagePerfSummary` list (`media.oversized`, `renderBlocking.urls`, ...) keeps. */
+export const PERF_PAGE_LIST_CAP = 3;
+
+/**
+ * The page-level slice of a lightbringer report that goes into the crawl
+ * report (`PageResult.perfPage`). Lists are cut to `PERF_PAGE_LIST_CAP`; the
+ * counts beside them count everything. A part lightbringer did not report —
+ * no third-party request, no image, nothing render-blocking — stays absent
+ * rather than reading 0.
+ */
+export function toPagePerfSummary(report: PerfReport): PagePerfSummary {
+  const net = report.network;
+  const summary: PagePerfSummary = {
+    vitals: report.vitals,
+    network: {
+      totalRequests: net.totalRequests,
+      totalEncodedKB: net.totalEncodedKB,
+      fromCacheCount: net.fromCacheCount,
+      ...(net.thirdParty.requestCount > 0
+        ? {
+            thirdParty: {
+              requestCount: net.thirdParty.requestCount,
+              encodedKB: net.thirdParty.encodedKB,
+            },
+          }
+        : {}),
+    },
+  };
+  if (report.documents) summary.documents = report.documents;
+  const media = report.media;
+  if (media && (media.imageCount > 0 || media.oversized.length > 0 || media.uncompressed.length > 0)) {
+    summary.media = {
+      imageCount: media.imageCount,
+      imageKB: media.imageKB,
+      oversizedCount: media.oversizedCount ?? media.oversized.length,
+      oversized: media.oversized
+        .slice(0, PERF_PAGE_LIST_CAP)
+        .map(({ url, overFetch, kb }) => ({ url, overFetch, kb })),
+      uncompressedCount: media.uncompressedCount ?? media.uncompressed.length,
+      uncompressed: media.uncompressed
+        .slice(0, PERF_PAGE_LIST_CAP)
+        .map(({ url, kb, ratio }) => ({ url, kb, ratio })),
+    };
+  }
+  const rb = report.renderBlocking;
+  if (rb && (rb.stylesheets.length > 0 || rb.scripts.length > 0)) {
+    summary.renderBlocking = {
+      stylesheets: rb.stylesheets.length,
+      scripts: rb.scripts.length,
+      urls: [...rb.stylesheets, ...rb.scripts].slice(0, PERF_PAGE_LIST_CAP),
+    };
+  }
+  if (report.clockPatched) summary.clockPatched = true;
+  if (report.collectorMissing) summary.collectorMissing = true;
+  return summary;
 }
