@@ -5,14 +5,16 @@
  *   fixed → the expected metric improves by at least `minImprovement`,
  *           and the crawl still reaches the same pages with no new error clusters
  *
- * Patterns run one after another (see vitest.config.ts). `PATTERN=<id>` runs one.
+ * Patterns run one after another (see vitest.config.ts). `PATTERN=<id>` runs one;
+ * `PATTERN_SHARD=<i>/<n>` runs the i-th of n round-robin shards (CI splits the
+ * catalog over parallel jobs this way).
  */
 
 import { describe, expect, it } from "vitest";
 import { measurePattern, type PatternMeasurement } from "./src/measure.js";
-import { loadPatterns } from "./src/registry.js";
+import { loadPatterns, shardPatterns } from "./src/registry.js";
 
-const patterns = await loadPatterns();
+const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 
 describe.sequential("perf patterns", () => {

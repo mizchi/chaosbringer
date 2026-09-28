@@ -23,6 +23,7 @@ pnpm install                       # builds chaosbringer's dist via `prepare`
 
 pnpm test                          # every pattern, both variants, as assertions
 PATTERN=layout-thrash pnpm test    # one pattern (comma-separate several)
+PATTERN_SHARD=2/3 pnpm test        # the 2nd of 3 round-robin shards (as CI runs it)
 pnpm report                        # measure all and rewrite the table below
 pnpm typecheck
 ```
