@@ -94,11 +94,14 @@ export interface MetricExpect {
    */
   minImprovement: { ratio?: number; absolute?: number };
   /**
-   * `page.` metrics only: the value of a measured page that lacks the field.
-   * perfPage leaves a part out rather than write 0 (`network.thirdParty` when
-   * there was no third-party request, `renderBlocking` when nothing blocked),
-   * so a fix that removes the thing entirely needs `absentAs: 0` to be read
-   * as 0. Leave it unset for a field that is a measured 0 when present.
+   * The value of a measured page (`page.` metrics) or a matching span (span
+   * metrics) that lacks the field. perfPage leaves a part out rather than
+   * write 0 (`network.thirdParty` when there was no third-party request,
+   * `renderBlocking` when nothing blocked), and a span has no `interaction`
+   * when no event of it reached the 16 ms Event Timing threshold, so a fix
+   * that removes the thing entirely needs `absentAs: 0` to be read as 0.
+   * Leave it unset for a field that is a measured 0 when present. Ignored for
+   * `degradation.` metrics.
    */
   absentAs?: number;
 }

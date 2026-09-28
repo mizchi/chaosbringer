@@ -31,6 +31,17 @@ describe("metricValues", () => {
     expect(metricValues(r, "/ :: load", "page.network.thirdParty.encodedKB", 0).values).toEqual([500, 0]);
   });
 
+  it("uses absentAs for a span metric a matching span left out", () => {
+    const click = (interaction?: { maxDurationMs: number }) => ({ key: "/ :: click #go", durationMs: 5, network: {}, ...(interaction ? { interaction } : {}) });
+    const r = {
+      pages: [{ perf: load("/", 10) }],
+      actions: [{ perf: click({ maxDurationMs: 200 }) }, { perf: click() }, {}],
+      perf: { degradation: [] },
+    } as unknown as CrawlReport;
+    expect(metricValues(r, "/ :: click *", "interaction.maxDurationMs").values).toEqual([200]);
+    expect(metricValues(r, "/ :: click *", "interaction.maxDurationMs", 0)).toEqual({ values: [200, 0], keys: ["/ :: click #go"] });
+  });
+
   it("keeps reading span metrics off the spans", () => {
     const r = report([{ perf: load("/", 42) as never, perfPage: { vitals: {}, network: {} } as never }]);
     expect(metricValues(r, "/ :: load", "durationMs").values).toEqual([42]);

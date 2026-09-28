@@ -91,8 +91,10 @@ export function spansOf(report: CrawlReport): PerfSpanReport[] {
 /**
  * The metric's values in one report: one per matching span, per matching
  * degradation entry, or (`page.` metrics) per page whose load span's key
- * matches, read off its `perfPage`. `absentAs` stands in for a `page.` field
- * a measured page left out (not for a page whose collector never ran).
+ * matches, read off its `perfPage`. `absentAs` stands in for a field a
+ * measured page left out (not for a page whose collector never ran) or a
+ * matching span left out (`interaction` when no event passed the 16 ms
+ * Event Timing threshold); degradation entries ignore it.
  */
 export function metricValues(
   report: CrawlReport,
@@ -126,7 +128,7 @@ export function metricValues(
     for (const span of spansOf(report)) {
       if (!re.test(span.key)) continue;
       keys.add(span.key);
-      const v = readPath(span, metric);
+      const v = readPath(span, metric) ?? absentAs;
       if (v !== undefined) values.push(v);
     }
   }
