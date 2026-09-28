@@ -35,7 +35,9 @@ export interface CrawlerOptions {
    * test-only, never ship it. The README documented this before the option
    * existed, so anyone who followed it was passing a field nothing read.
    */
-  launchOptions?: Omit<Parameters<typeof import("playwright").chromium.launch>[0], "headless"> & {
+  // NonNullable: launch()'s parameter is optional, and `Omit` over
+  // `LaunchOptions | undefined` has no keys, which rejected every field.
+  launchOptions?: Omit<NonNullable<Parameters<typeof import("playwright").chromium.launch>[0]>, "headless"> & {
     headless?: boolean;
   };
   cdpEndpoint?: string;
