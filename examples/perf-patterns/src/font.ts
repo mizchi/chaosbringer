@@ -5,7 +5,8 @@
  * same filled box, so text set in it is visibly not the fallback font.
  * `extraGlyphs` adds that many more glyphs, mapped from U+4E00 on (the CJK
  * block), each a distinct many-point outline, to make a font as heavy as an
- * unsubsetted one (~200 bytes a glyph).
+ * unsubsetted one (~200 bytes a glyph). `ascent` / `descent` set its
+ * vertical metrics, and so its `line-height: normal`, for layout-shift patterns.
  */
 
 const EM = 1000;
@@ -126,12 +127,22 @@ function checksum(b: Buffer): number {
 export interface BoxFontOptions {
   /** Glyphs beyond printable ASCII, mapped from U+4E00 on (default 0). */
   extraGlyphs?: number;
+  /**
+   * Vertical metrics in font units of the 1000-unit em (defaults 800 and
+   * 200), written to hhea, OS/2 typo and OS/2 win alike. Their sum is the
+   * font's `line-height: normal`, in em thousandths.
+   */
+  ascent?: number;
+  descent?: number;
 }
 
 /** A valid TrueType font named `family`: box glyphs for printable ASCII (plus `extraGlyphs`). */
-export function boxFont(family = "Box Sans", { extraGlyphs = 0 }: BoxFontOptions = {}): Buffer {
+export function boxFont(family = "Box Sans", { extraGlyphs = 0, ascent = 800, descent = 200 }: BoxFontOptions = {}): Buffer {
   if (!Number.isInteger(extraGlyphs) || extraGlyphs < 0 || NUM_ASCII_GLYPHS + extraGlyphs > 0xffff || EXTRA_FIRST + extraGlyphs > 0xfffe) {
     throw new RangeError(`extraGlyphs must be an integer from 0 to ${0xfffe - EXTRA_FIRST}`);
+  }
+  for (const [name, v] of [["ascent", ascent], ["descent", descent]] as const) {
+    if (!Number.isInteger(v) || v < 0 || v > 0x7fff) throw new RangeError(`${name} must be an integer from 0 to 32767`);
   }
   const NUM_GLYPHS = NUM_ASCII_GLYPHS + extraGlyphs;
   const glyph = boxGlyph();
@@ -170,8 +181,8 @@ export function boxFont(family = "Box Sans", { extraGlyphs = 0 }: BoxFontOptions
 
   const hhea = new Writer()
     .u32(0x00010000)
-    .i16(800) // ascender
-    .i16(-200) // descender
+    .i16(ascent) // ascender
+    .i16(-descent) // descender
     .i16(0) // lineGap
     .u16(ADVANCE) // advanceWidthMax
     .i16(0) // minLeftSideBearing
@@ -261,11 +272,11 @@ export function boxFont(family = "Box Sans", { extraGlyphs = 0 }: BoxFontOptions
     .u16(0x0040) // fsSelection: REGULAR
     .u16(FIRST) // usFirstCharIndex
     .u16(extraGlyphs ? EXTRA_FIRST + extraGlyphs - 1 : LAST) // usLastCharIndex
-    .i16(800)
-    .i16(-200)
+    .i16(ascent)
+    .i16(-descent)
     .i16(0) // sTypo*
-    .u16(800)
-    .u16(200) // usWin*
+    .u16(ascent)
+    .u16(descent) // usWin*
     .u32(1)
     .u32(0) // ulCodePageRange: Latin 1
     .i16(500) // sxHeight

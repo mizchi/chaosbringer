@@ -1,15 +1,15 @@
 import { definePattern, handler, html, json, page, type Variant } from "../pattern.js";
 
-const CONTACTS = 1000;
+const CONTACTS = 2000;
 
-// "Sync contacts" downloads the address book (1,000 contacts), stores it in
+// "Sync contacts" downloads the address book (2,000 contacts), stores it in
 // IndexedDB for offline use, and when the local copy is written tells the
 // server it can mark the sync done (POST /api/sync/ack). Both pages store
 // the same records in the same object store.
 //
-// The slow page opens one readwrite transaction per contact: 1,000
+// The slow page opens one readwrite transaction per contact: 2,000
 // transactions, each scheduled, committed and reported back on its own, and
-// on one store they run one after another. The fixed page puts all 1,000 in
+// on one store they run one after another. The fixed page puts all 2,000 in
 // one transaction and waits for its single complete event.
 //
 // IndexedDB work is asynchronous and happens off the page's main thread,
@@ -93,8 +93,8 @@ export default definePattern({
     maxActionsPerPage: 1,
     seed: 1,
     // A 1.2 s quiet window: the settle waits for no IndexedDB work, so the
-    // window after the contacts download must outlast the slow write (~350 ms
-    // here) for its ack to land inside the span.
+    // window after the contacts download must outlast the slow write (~650-800
+    // ms locally, less on CI runners) for its ack to land inside the span.
     settle: 1200,
     actionWeights: { scroll: 0 },
   },
@@ -102,9 +102,12 @@ export default definePattern({
     key: "/ :: click *",
     metric: "network.settledMs",
     direction: "lower",
-    // slow: the ack ends ~450 ms into the span (1,000 commits in a row);
-    // fixed: ~145 ms (the download, one commit, the ack, and the crawl's
-    // own overhead, which both variants pay).
+    // slow: the ack ends ~800 ms into the span locally (2,000 commits in a
+    // row); fixed: ~165 ms (the download, one commit, the ack, and the
+    // crawl's own overhead, which both variants pay). 2,000 records, not
+    // 1,000: a CI runner with fast storage read 240 → 98 ms at 1,000, under
+    // the 150 ms absolute floor; the per-commit cost scales with the count,
+    // the single commit barely does.
     minImprovement: { ratio: 1.8, absolute: 150 },
   },
 });
