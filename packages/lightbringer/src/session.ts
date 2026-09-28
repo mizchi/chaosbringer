@@ -65,6 +65,17 @@ export interface SessionOptions {
    * clock (e.g. ahead of a clock-skew runtime fault).
    */
   installCollector?: boolean;
+  /**
+   * Count out-of-process iframes' network traffic (default true). Under site
+   * isolation (headed Chromium, a real Chrome over CDP, `--site-per-process`)
+   * a cross-site iframe runs on its own CDP target, and the page's session
+   * sees only its document request. On, the session auto-attaches to those
+   * targets (nested ones too), holding each new one until its Network domain
+   * is on, so its requests join the page's under the same span ownership
+   * rule; the CPU / network throttling the session applies is applied to them
+   * too. Their long tasks, render metrics and web-vitals are not collected.
+   */
+  oopif?: boolean;
 }
 
 /** Name of the CDP binding the collector pushes an unloading document's data through. */
@@ -292,12 +303,23 @@ export async function startSession(
   await client.send("Performance.enable");
   if (cpuRate > 1)
     await client.send("Emulation.setCPUThrottlingRate", { rate: cpuRate });
-  const finishNetwork = await startNetworkCapture(client);
-  if (opts.netProfile) {
-    await client.send("Network.emulateNetworkConditions", {
-      offline: false,
-      ...opts.netProfile,
-    });
+  const netConditions = opts.netProfile
+    ? { offline: false, ...opts.netProfile }
+    : undefined;
+  const network = await startNetworkCapture(client, {
+    childTargets: opts.oopif !== false,
+    // An OOPIF runs in its own renderer and its requests on its own target:
+    // throttling set on the page's session does not reach it.
+    onChild: async (child) => {
+      if (cpuRate > 1)
+        await child.send("Emulation.setCPUThrottlingRate", { rate: cpuRate }).catch(() => {});
+      if (netConditions)
+        await child.send("Network.emulateNetworkConditions", netConditions).catch(() => {});
+    },
+  });
+  const finishNetwork = network.requests;
+  if (netConditions) {
+    await client.send("Network.emulateNetworkConditions", netConditions);
   }
   const finishTrace =
     opts.trace && opts.tracePath
@@ -361,6 +383,9 @@ export async function startSession(
 
     const url = page.url();
     const reqs = finishNetwork();
+    // Leave the OOPIF targets: a page that outlives the session (CDP attach)
+    // must not keep its new iframes waiting on a client that stopped reading.
+    await network.stop();
     const renderEvents = finishTrace
       ? (await finishTrace()).renderEvents
       : undefined;
