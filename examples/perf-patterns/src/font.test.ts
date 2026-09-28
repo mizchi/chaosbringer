@@ -75,4 +75,24 @@ describe("boxFont", () => {
     expect(boxFont("Test Sans", { extraGlyphs: 0 }).equals(small)).toBe(true);
     expect(() => boxFont("Test Sans", { extraGlyphs: -1 })).toThrow(RangeError);
   });
+
+  it("writes ascent and descent to hhea, OS/2 typo and OS/2 win", () => {
+    const read = (font: Buffer) => {
+      const t = tables(font);
+      const hhea = t.hhea![0];
+      const os2 = t["OS/2"]![0];
+      return {
+        hhea: [font.readInt16BE(hhea + 4), font.readInt16BE(hhea + 6)],
+        typo: [font.readInt16BE(os2 + 68), font.readInt16BE(os2 + 70)],
+        win: [font.readUInt16BE(os2 + 74), font.readUInt16BE(os2 + 76)],
+      };
+    };
+    expect(read(boxFont("Test Sans"))).toEqual({ hhea: [800, -200], typo: [800, -200], win: [800, 200] });
+    const tall = boxFont("Test Sans", { ascent: 1600, descent: 600 });
+    expect(read(tall)).toEqual({ hhea: [1600, -600], typo: [1600, -600], win: [1600, 600] });
+    expect(wholeFileSum(tall)).toBe(0xb1b0afba);
+    expect(boxFont("Test Sans", { ascent: 800, descent: 200 }).equals(boxFont("Test Sans"))).toBe(true);
+    expect(() => boxFont("Test Sans", { ascent: -1 })).toThrow(RangeError);
+    expect(() => boxFont("Test Sans", { descent: 1.5 })).toThrow(RangeError);
+  });
 });
