@@ -44,9 +44,11 @@ export async function loadPatterns(filter = process.env.PATTERN): Promise<Patter
  * The `index`-th of `count` shards of `patterns` (1-based, `"2/3"`), dealt
  * round-robin over the sorted list so every shard gets a similar mix. An
  * empty or missing spec is the whole list. Every pattern lands in exactly one
- * shard, so the shards of one `count` together run the full catalog.
+ * shard, so the shards of one `count` together run the full catalog. The spec
+ * is a required argument, not an env default, so a caller never shards by
+ * accident (the test suite reads `PATTERN_SHARD` itself).
  */
-export function shardPatterns<T>(patterns: readonly T[], spec = process.env.PATTERN_SHARD): T[] {
+export function shardPatterns<T>(patterns: readonly T[], spec: string | undefined): T[] {
   if (!spec?.trim()) return [...patterns];
   const m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(spec);
   const index = m ? Number(m[1]) : NaN;

@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import { measurePattern, type PatternMeasurement } from "./src/measure.js";
 import { loadPatterns, shardPatterns } from "./src/registry.js";
 
-const patterns = shardPatterns(await loadPatterns());
+const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 
 describe.sequential("perf patterns", () => {
