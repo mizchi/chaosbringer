@@ -4,6 +4,7 @@
  * pattern is adding one file.
  *
  * `PATTERN=<id>[,<id>...]` narrows the list (for the test and the report).
+ * `PATTERN_SHARD=<i>/<n>` splits it across CI jobs (see {@link shardPatterns}).
  */
 
 import { readdirSync } from "node:fs";
@@ -37,4 +38,21 @@ export async function loadPatterns(filter = process.env.PATTERN): Promise<Patter
     if (missing.length) throw new Error(`PATTERN names unknown pattern(s): ${missing.join(", ")}`);
   }
   return patterns;
+}
+
+/**
+ * The `index`-th of `count` shards of `patterns` (1-based, `"2/3"`), dealt
+ * round-robin over the sorted list so every shard gets a similar mix. An
+ * empty or missing spec is the whole list. Every pattern lands in exactly one
+ * shard, so the shards of one `count` together run the full catalog.
+ */
+export function shardPatterns<T>(patterns: readonly T[], spec = process.env.PATTERN_SHARD): T[] {
+  if (!spec?.trim()) return [...patterns];
+  const m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(spec);
+  const index = m ? Number(m[1]) : NaN;
+  const count = m ? Number(m[2]) : NaN;
+  if (!(count >= 1 && index >= 1 && index <= count)) {
+    throw new Error(`PATTERN_SHARD must be <index>/<count> with 1 <= index <= count, got "${spec}"`);
+  }
+  return patterns.filter((_, i) => i % count === index - 1);
 }

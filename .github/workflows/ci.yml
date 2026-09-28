@@ -143,7 +143,18 @@ jobs:
           - cloudflare-worker
           - playwright-test
           - model-faults
-          - perf-patterns
+        # perf-patterns measures every pattern one after another (parallel
+        # browsers on one runner would blur the numbers being compared), so a
+        # single job grew to ~7 minutes. It is split over runners instead:
+        # PATTERN_SHARD=<i>/<n> deals the catalog round-robin, and the n
+        # shards together run every pattern exactly once.
+        include:
+          - example: perf-patterns
+            shard: 1/3
+          - example: perf-patterns
+            shard: 2/3
+          - example: perf-patterns
+            shard: 3/3
     steps:
       - uses: actions/checkout@v4
 
@@ -176,6 +187,8 @@ jobs:
         run: pnpm -F "@mizchi/chaosbringer-example-${{ matrix.example }}" test
         env:
           WRANGLER_SEND_METRICS: "false"
+          # Empty outside the perf-patterns shards: the whole catalog.
+          PATTERN_SHARD: ${{ matrix.shard }}
 
   adversarial:
     # The red-team suites: each one is an app built to walk past the oracle, in
