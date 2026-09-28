@@ -1,8 +1,11 @@
 /**
  * A tiny TrueType encoder, so font patterns serve a real web font the browser
  * accepts (Chrome runs every downloaded font through its sanitizer, OTS, and
- * drops an invalid one). Printable ASCII only; every glyph but the space is
- * the same filled box, so text set in it is visibly not the fallback font.
+ * drops an invalid one). Printable ASCII; every glyph but the space is the
+ * same filled box, so text set in it is visibly not the fallback font.
+ * `extraGlyphs` adds that many more glyphs, mapped from U+4E00 on (the CJK
+ * block), each a distinct many-point outline, to make a font as heavy as an
+ * unsubsetted one (~200 bytes a glyph).
  */
 
 const EM = 1000;
@@ -10,7 +13,11 @@ const ADVANCE = 600;
 const FIRST = 32; // space
 const LAST = 126; // ~
 /** glyph 0 = .notdef, then one glyph per code point FIRST..LAST. */
-const NUM_GLYPHS = 1 + (LAST - FIRST + 1);
+const NUM_ASCII_GLYPHS = 1 + (LAST - FIRST + 1);
+/** First code point of the `extraGlyphs`. */
+export const EXTRA_FIRST = 0x4e00;
+/** Points in each extra glyph's one contour. */
+const EXTRA_POINTS = 40;
 // The box: 100..500 × 0..700 font units.
 const BOX = { xMin: 100, yMin: 0, xMax: 500, yMax: 700 };
 
@@ -58,6 +65,37 @@ function boxGlyph(): Buffer {
   return w.buffer();
 }
 
+/**
+ * Extra glyph `k`: one closed contour of EXTRA_POINTS on-curve points on a
+ * seeded wobbly ring inside the box, so no two glyphs are alike.
+ */
+function detailedGlyph(k: number): Buffer {
+  let seed = (k + 1) * 2654435761;
+  const rand = () => {
+    seed = (seed ^ (seed << 13)) >>> 0;
+    seed = (seed ^ (seed >>> 17)) >>> 0;
+    seed = (seed ^ (seed << 5)) >>> 0;
+    return seed / 0x100000000;
+  };
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i < EXTRA_POINTS; i++) {
+    const a = (i / EXTRA_POINTS) * Math.PI * 2;
+    const r = 120 + rand() * 180;
+    xs.push(Math.round(300 + r * Math.cos(-a)));
+    ys.push(Math.round(350 + r * Math.sin(-a)));
+  }
+  const w = new Writer();
+  w.i16(1).i16(Math.min(...xs)).i16(Math.min(...ys)).i16(Math.max(...xs)).i16(Math.max(...ys));
+  w.u16(EXTRA_POINTS - 1);
+  w.u16(0);
+  for (let i = 0; i < EXTRA_POINTS; i++) w.u8(0x01);
+  xs.forEach((x, i) => w.i16(x - (i ? xs[i - 1]! : 0)));
+  ys.forEach((y, i) => w.i16(y - (i ? ys[i - 1]! : 0)));
+  if (w.length % 2) w.u8(0);
+  return w.buffer();
+}
+
 function nameTable(family: string): Buffer {
   const names: Array<[number, string]> = [
     [1, family],
@@ -85,18 +123,32 @@ function checksum(b: Buffer): number {
   return sum;
 }
 
-/** A valid TrueType font named `family`: box glyphs for printable ASCII. */
-export function boxFont(family = "Box Sans"): Buffer {
-  const glyph = boxGlyph();
-  // glyf/loca: .notdef and space are empty, the rest are boxes.
-  const glyf = new Writer();
-  const loca = new Writer();
-  for (let g = 0; g < NUM_GLYPHS; g++) {
-    loca.u16(glyf.length / 2);
-    const code = FIRST + g - 1;
-    if (g > 0 && code !== FIRST) glyf.raw(glyph);
+export interface BoxFontOptions {
+  /** Glyphs beyond printable ASCII, mapped from U+4E00 on (default 0). */
+  extraGlyphs?: number;
+}
+
+/** A valid TrueType font named `family`: box glyphs for printable ASCII (plus `extraGlyphs`). */
+export function boxFont(family = "Box Sans", { extraGlyphs = 0 }: BoxFontOptions = {}): Buffer {
+  if (!Number.isInteger(extraGlyphs) || extraGlyphs < 0 || NUM_ASCII_GLYPHS + extraGlyphs > 0xffff || EXTRA_FIRST + extraGlyphs > 0xfffe) {
+    throw new RangeError(`extraGlyphs must be an integer from 0 to ${0xfffe - EXTRA_FIRST}`);
   }
-  loca.u16(glyf.length / 2);
+  const NUM_GLYPHS = NUM_ASCII_GLYPHS + extraGlyphs;
+  const glyph = boxGlyph();
+  // glyf: .notdef and space are empty, the rest are boxes, then the extras.
+  const glyf = new Writer();
+  const offsets: number[] = [];
+  for (let g = 0; g < NUM_GLYPHS; g++) {
+    offsets.push(glyf.length);
+    const code = FIRST + g - 1;
+    if (g >= NUM_ASCII_GLYPHS) glyf.raw(detailedGlyph(g - NUM_ASCII_GLYPHS));
+    else if (g > 0 && code !== FIRST) glyf.raw(glyph);
+  }
+  offsets.push(glyf.length);
+  // loca: short (offset / 2 in a u16) while it fits, long (u32) past 128 KB.
+  const longLoca = glyf.length / 2 > 0xffff;
+  const loca = new Writer();
+  for (const o of offsets) longLoca ? loca.u32(o) : loca.u16(o / 2);
 
   const head = new Writer()
     .u32(0x00010000) // version
@@ -113,7 +165,7 @@ export function boxFont(family = "Box Sans"): Buffer {
     .u16(0) // macStyle
     .u16(8) // lowestRecPPEM
     .i16(2) // fontDirectionHint
-    .i16(0) // indexToLocFormat: short
+    .i16(longLoca ? 1 : 0) // indexToLocFormat: short / long
     .i16(0); // glyphDataFormat
 
   const hhea = new Writer()
@@ -135,43 +187,51 @@ export function boxFont(family = "Box Sans"): Buffer {
   const maxp = new Writer()
     .u32(0x00010000)
     .u16(NUM_GLYPHS)
-    .u16(4) // maxPoints
+    .u16(extraGlyphs ? EXTRA_POINTS : 4) // maxPoints
     .u16(1) // maxContours
     .u16(0)
     .u16(0)
     .u16(2) // maxZones
     .zeros(18);
 
+  const glyfBytes = glyf.buffer();
   const hmtx = new Writer();
   for (let g = 0; g < NUM_GLYPHS; g++) {
     const empty = g === 0 || FIRST + g - 1 === FIRST;
-    hmtx.u16(ADVANCE).i16(empty ? 0 : BOX.xMin);
+    // lsb = the glyph's xMin (bytes 2-3 of its header in glyf).
+    const lsb = g >= NUM_ASCII_GLYPHS ? glyfBytes.readInt16BE(offsets[g]! + 2) : empty ? 0 : BOX.xMin;
+    hmtx.u16(ADVANCE).i16(lsb);
   }
 
-  // cmap: one format-4 subtable, code point c → glyph c - FIRST + 1.
+  // cmap: one format-4 subtable. Segments: FIRST..LAST → glyph c - FIRST + 1,
+  // then (with extras) EXTRA_FIRST.. → the extra glyphs, then the 0xFFFF terminator.
+  const segments: Array<{ start: number; end: number; delta: number }> = [
+    { start: FIRST, end: LAST, delta: 1 - FIRST },
+    ...(extraGlyphs
+      ? [{ start: EXTRA_FIRST, end: EXTRA_FIRST + extraGlyphs - 1, delta: NUM_ASCII_GLYPHS - EXTRA_FIRST }]
+      : []),
+    { start: 0xffff, end: 0xffff, delta: 1 },
+  ];
+  const segCount = segments.length;
+  const searchRange = 2 * 2 ** Math.floor(Math.log2(segCount));
   const cmap = new Writer()
     .u16(0)
     .u16(1)
     .u16(3)
     .u16(1)
     .u32(12)
-    // format 4, two segments (FIRST..LAST and the 0xFFFF terminator)
     .u16(4)
-    .u16(32) // length
+    .u16(16 + 8 * segCount) // length
     .u16(0) // language
-    .u16(4) // segCountX2
-    .u16(4) // searchRange
-    .u16(1) // entrySelector
-    .u16(0) // rangeShift
-    .u16(LAST)
-    .u16(0xffff) // endCode
-    .u16(0) // reservedPad
-    .u16(FIRST)
-    .u16(0xffff) // startCode
-    .i16(1 - FIRST)
-    .i16(1) // idDelta
-    .u16(0)
-    .u16(0); // idRangeOffset
+    .u16(segCount * 2)
+    .u16(searchRange)
+    .u16(Math.log2(searchRange / 2)) // entrySelector
+    .u16(segCount * 2 - searchRange); // rangeShift
+  for (const seg of segments) cmap.u16(seg.end);
+  cmap.u16(0); // reservedPad
+  for (const seg of segments) cmap.u16(seg.start);
+  for (const seg of segments) cmap.u16((seg.delta + 0x10000) % 0x10000);
+  for (const _ of segments) cmap.u16(0); // idRangeOffset
 
   const post = new Writer().u32(0x00030000).u32(0).i16(-100).i16(50).zeros(20);
 
@@ -199,8 +259,8 @@ export function boxFont(family = "Box Sans"): Buffer {
     .u32(0) // ulUnicodeRange: Basic Latin
     .raw(Buffer.from("NONE", "ascii"))
     .u16(0x0040) // fsSelection: REGULAR
-    .u16(FIRST)
-    .u16(LAST)
+    .u16(FIRST) // usFirstCharIndex
+    .u16(extraGlyphs ? EXTRA_FIRST + extraGlyphs - 1 : LAST) // usLastCharIndex
     .i16(800)
     .i16(-200)
     .i16(0) // sTypo*
@@ -217,7 +277,7 @@ export function boxFont(family = "Box Sans"): Buffer {
   const tables: Record<string, Buffer> = {
     "OS/2": os2.buffer(),
     cmap: cmap.buffer(),
-    glyf: glyf.buffer(),
+    glyf: glyfBytes,
     head: head.buffer(),
     hhea: hhea.buffer(),
     hmtx: hmtx.buffer(),
