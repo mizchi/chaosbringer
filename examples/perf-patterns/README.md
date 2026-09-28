@@ -268,12 +268,17 @@ No registration step: the registry imports every `.ts` file in
   origin, so an embed from `thirdPartyOrigin` never loads (its request shows
   with 0 bytes). `eager-iframes` sets `options: { blockExternalNavigation:
   false }`; the crawl has no links to follow off-site anyway.
-- **Out-of-process iframes' requests are not counted.** Headless Chromium
-  runs cross-site iframes in the page's process, and lightbringer's CDP
-  session sees their requests. Under site isolation (headed Chrome, or
-  `--site-per-process`) each iframe is its own target: the page's session
-  sees only the iframe's document request, with 0 bytes, and none of its
-  subresources, so `eager-iframes` reads ~0 KB on both variants there.
+- **Out-of-process iframes: only their network is measured.** Headless
+  Chromium runs cross-site iframes in the page's process; under site isolation
+  (headed Chrome, or `--site-per-process`) each is its own CDP target, and
+  lightbringer attaches to those targets to count their requests (the page's
+  own session sees only the iframe's document request, with 0 bytes).
+  `eager-iframes` runs with `--site-per-process` so the pattern covers that
+  path; it reads the same ~1,480 KB either way. An out-of-process iframe's
+  long tasks, render metrics and vitals are still not measured, and the
+  crawler's `network` throttling and `httpCache: false` do not reach it, so
+  a CPU- or render-bound pattern must keep its work in the page's own
+  document.
 - **A declared web font costs nothing until text uses it.** The browser
   downloads a `@font-face` only when some text on the page is set in that
   family, weight and style, so eight declared weights of which two are used

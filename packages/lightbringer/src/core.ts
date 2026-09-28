@@ -16,6 +16,7 @@
 //   - accumulator.ts .... node-side store of drained entries (pure)
 //   - controller.ts ..... PerfController (begin/end/measure, settle, GC, drain)
 //   - capture.ts ........ CDP network + Chrome trace capture
+//   - targets.ts ........ auto-attach to out-of-process iframes' CDP targets
 //   - report.ts ......... buildReport + logSummary (report assembly / output)
 //   - session.ts ........ startSession (orchestration) + the browser readers
 export {
@@ -27,6 +28,10 @@ export type { SessionOptions, PerfSession } from "./session";
 export { PerfController, defaultSettle } from "./controller";
 export type { PerfControllerOptions, SpanHandle, RawSpan } from "./controller";
 export { buildReport, logSummary } from "./report";
+// The page's out-of-process iframe targets, for a driver that sets its own CDP
+// state (throttling, cache) on the page session and wants it on those too.
+export { childTargets, ChildTargets, ATTACH_SETUP_TIMEOUT_MS } from "./targets";
+export type { CdpEndpoint, ChildTarget, ChildTargetSubscriber } from "./targets";
 export { checkBudgets, BUDGET_METRIC } from "./report-types";
 export type {
   Budget,

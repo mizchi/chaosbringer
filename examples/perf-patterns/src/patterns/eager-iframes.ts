@@ -60,8 +60,10 @@ ${Array.from({ length: EMBEDS }, (_, i) => `<iframe src="${thirdPartyOrigin}/emb
     seed: 1,
     // External-navigation blocking (on by default) fails every document
     // request to another origin, iframes included: the embeds would never
-    // load on either variant.
-    options: { blockExternalNavigation: false },
+    // load on either variant. Site isolation puts each embed out of process,
+    // on its own CDP target, as headed Chrome does: the measurement must count
+    // the embeds' traffic from those targets too.
+    options: { blockExternalNavigation: false, launchOptions: { args: ["--site-per-process"] } },
   },
   expect: {
     key: "/ :: load",

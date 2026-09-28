@@ -67,7 +67,11 @@ Per **span** (one `perf.measure(name, action)` region):
   Absent when the span started no request. A request still running when the
   report is built is left out rather than given an invented end, and
   `settledUnfinished: true` says so (`settledMs` is then a lower bound, or
-  absent).
+  absent). Cross-site iframes count too when they run **out of process** (site
+  isolation: headed Chromium, a real Chrome over CDP, `--site-per-process`):
+  the session attaches to each iframe's own CDP target, nested ones included,
+  and holds it until its Network domain is on, so an iframe's requests read
+  the same as when it shares the page's process (see [Caveats](#caveats)).
   Each request also carries its
   **initiator** (the code or parser that issued it); `network.byInitiator` rolls
   them up so a deep waterfall points straight at the responsible function
@@ -619,7 +623,8 @@ logSummary(report);
 
 `SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
 `coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`,
-`evaluateTimeoutMs`. The fixture and CLI map the `PERF_*` env vars onto these
+`evaluateTimeoutMs`, `oopif` (count out-of-process iframes' network, default
+`true`). The fixture and CLI map the `PERF_*` env vars onto these
 with `sessionOptionsFromEnv(env)` — the only place the environment is read.
 
 **Hung pages.** Every in-page read at a span boundary (`begin` / `end` / `drain`)
@@ -817,6 +822,19 @@ Things that bite, learned from the accuracy probe:
   leak signals. `JSHeapUsedSize` excludes off-heap buffer bytes (typed arrays /
   wasm / GPU staging), which is why a leaked 8 MB `Float64Array` shows only as the
   ArrayBuffer count going up, not as heap MB.
+- **Out-of-process iframes: network only.** Under site isolation a cross-site
+  iframe is its own CDP target. `startSession` auto-attaches to those targets
+  from the page's session (`Target.setAutoAttach`, `waitForDebuggerOnStart`,
+  non-flattened so it works through Playwright's public `CDPSession`; nested
+  iframes through their parent's target) and enables `Network` before each one
+  runs, so their requests count under the same span rule, the iframe
+  document's bytes included (they arrive on the iframe's target). `cpuRate` and
+  `netProfile` are applied to them too. Their long tasks, LoAF, render metrics,
+  web-vitals, memory, coverage and trace are **not** collected: those are read
+  from the page's own target and document only. Workers are not counted in any
+  mode (a dedicated worker's requests are on its own target, which was not
+  reliable to read under site isolation). `finish()` turns auto-attach off
+  again; `oopif: false` skips all of it.
 - **Request initiators are best-effort.** They come from CDP
   `Network.requestWillBeSent.initiator`: a `script` initiator carries a JS call
   stack (lightbringer keeps the topmost frame with a URL), a `parser` initiator
