@@ -41,7 +41,7 @@ values. A `page.` metric is one value per page visit whose load key matches.
 "also" lines are further metrics the pattern asserts on the same key.
 
 <!-- results:start -->
-Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm report` on 2026-09-28.
+Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm report` on 2026-09-30.
 
 | pattern | category | what chaosbringer flags (perfKey · metric) | slow | fixed | improvement | fix |
 |---|---|---|---|---|---|---|
@@ -101,7 +101,7 @@ Medians over 3 crawls per variant at the pattern's seed; measured by `pnpm repor
 | [retry-storm](src/patterns/retry-storm.ts) | chaos | `/ :: load`<br>`network.requestCount`<br>under `api-503` | 22 | 4 | −82% (5.5×) | Cap retries and back off exponentially (with jitter in production). |
 | [revalidate-every-load](src/patterns/revalidate-every-load.ts) | network | `/docs/config :: load`<br>`/docs/deploy :: load`<br>`/docs/install :: load`<br>`page.vitals.FCP.value` | 332 | 28 | −92% (12×) | Give fingerprinted static assets Cache-Control: public, max-age=31536000, immutable, so repeat views use the cached copy without asking; keep no-cache for the HTML. |
 | [runtime-style-injection](src/patterns/runtime-style-injection.ts) | render | `/ :: click button:has-text("Show invoices")`<br>`render.recalcStyleMs` | 187 | 19.5 | −90% (9.6×) | Extract the styles at build time (static CSS, CSS Modules, a zero-runtime CSS-in-JS such as vanilla-extract or Linaria); express per-item values as CSS custom properties or a few variant classes, not one generated rule per value. |
-| [structured-clone-transfer](src/patterns/structured-clone-transfer.ts) | main-thread | `/ :: click button:has-text("Apply filter")`<br>`render.scriptMs` | 98.5 | 2.6 | −97% (38×) | Transfer large buffers instead of copying them: postMessage(msg, [buffer]) (and the same on the reply), or structuredClone(value, { transfer }); share a SharedArrayBuffer when both sides must see the data at once (needs cross-origin isolation). |
+| [structured-clone-transfer](src/patterns/structured-clone-transfer.ts) | main-thread | `/ :: click button:has-text("Apply filter")`<br>`render.scriptMs` | 1332 | 4.3 | −99.7% (310×) | Transfer large buffers instead of copying them: postMessage(msg, [buffer]) (and the same on the reply), or structuredClone(value, { transfer }); share a SharedArrayBuffer when both sides must see the data at once (needs cross-origin isolation). |
 | [sync-storage-on-input](src/patterns/sync-storage-on-input.ts) | main-thread | `/ :: click button:has-text("Type a note")`<br>`render.scriptMs` | 103 | 2 | −98% (52×) | Persist only what changed, under its own key (the draft alone), and write the rest when it changes; debounce or move large writes to idle time, or use IndexedDB (asynchronous) for big state. |
 | [sync-storage-read-on-load](src/patterns/sync-storage-read-on-load.ts) | main-thread | `/app :: load`<br>`render.scriptMs` | 49.2 | 3.6 | −93% (14×) | Keep localStorage for small values: store the first screen's data (or nothing) there, put large caches in IndexedDB (asynchronous, structured, no JSON round trip) or the Cache API, and read the rest after the first render or on demand. |
 | [sync-xhr-click](src/patterns/sync-xhr-click.ts) | main-thread | `/ :: click button:has-text("Check stock")`<br>`cpu.blockingMs` | 309 | 0 | −100% (∞×) | Use an asynchronous request (fetch, or XMLHttpRequest without the false flag) and render when it resolves; show a pending state meanwhile. |
