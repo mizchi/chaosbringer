@@ -83,7 +83,12 @@ chaosbringer --url http://localhost:3000 --strict --compact --ignore-analytics
 
 # Reproduce a failing run by pasting its Repro: line
 chaosbringer --url http://localhost:3000 --seed 1234567 --max-pages 20
+
+# Sweep an unknown site: clean crawl + API-failure crawls + ranked findings
+chaosbringer scan --url http://localhost:3000 --max-pages 30   # → chaosbringer-scan/scan-report.md
 ```
+
+`scan` is described in [`docs/recipes/scan.md`](../../docs/recipes/scan.md).
 
 ### Preview a crawl in an existing Chromium tab
 

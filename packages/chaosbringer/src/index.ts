@@ -602,3 +602,26 @@ export {
   parseSitemap,
   type FetchSitemapOptions,
 } from "./sitemap.js";
+// `chaosbringer scan`: clean crawl + fault-injected crawl + triage into findings.
+export {
+  runScan,
+  DEFAULT_SCAN_DIR,
+  type ScanOptions,
+  type ScanResult,
+  type ScanReportFile,
+} from "./scan/run.js";
+export {
+  analyzeScan,
+  RULE_PATTERNS,
+  SCAN_FAULT_KINDS,
+  SCAN_THRESHOLDS,
+  type AnalyzeScanOptions,
+  type ScanChaosRun,
+  type ScanFaultKind,
+  type ScanAnalysis,
+  type ScanCategory,
+  type ScanFinding,
+  type ScanSeverity,
+} from "./scan/analyze.js";
+export { deriveScanEndpoints, type ScanEndpoint } from "./scan/endpoints.js";
+export { formatScanMarkdown, formatScanSummary } from "./scan/format.js";

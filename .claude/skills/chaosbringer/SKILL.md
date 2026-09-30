@@ -7,7 +7,8 @@ description: >-
   test how their app behaves when the network or an API misbehaves — flaky requests, slow or
   hanging endpoints, retries that double-write, error states that leave stale data on screen,
   unhandled promise rejections, "it works locally but breaks in production", or a post-
-  incident regression test for an async bug. Also use it for anything mentioning chaosbringer,
+  incident regression test for an async bug. Also use it to sweep an unfamiliar site for bugs
+  and slow spots (`chaosbringer scan`), and for anything mentioning chaosbringer,
   ChaosCrawler, fault injection, faults.delay, faults.status, model-driven faults, or Quint
   plans.
 ---
@@ -218,6 +219,27 @@ back green with a full fault-firing log behind it — proving nothing, and looki
 exactly like proof. Have the child report the port it actually bound, refuse a
 port already in use, and if you can, check that something you served matches
 what is on disk.
+
+## When you don't know the site yet
+
+Before writing any targeted test, `chaosbringer scan --url <url>` sweeps the
+site. It runs a clean crawl with perf measurement, then one crawl for each
+way an API call can fail (HTTP 500, network error, no response), with every
+same-site fetch / XHR failing. Findings are ranked in
+`chaosbringer-scan/scan-report.md`:
+
+- bugs: failed and 4xx/5xx pages, exceptions, rejections;
+- resilience: errors or broken pages that appear only when an API call
+  fails, and steps with no request timeout;
+- perf: vitals, blocking, layout, DOM size, request fan-out, leaks, unused JS.
+  Each perf finding links to perf-patterns catalog entries with the same
+  signal.
+
+Treat it as a map, not an oracle. Each resilience finding is a place to
+write a real test (the fault it names, plus an invariant for the error
+state). A perf finding is a threshold crossed once. `--exclude` destructive
+URLs, and scan only what you may test. Details:
+`docs/recipes/scan.md`.
 
 ## Verifying your work
 

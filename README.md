@@ -36,6 +36,12 @@ npx playwright install chromium
 chaosbringer --url http://localhost:3000 --max-pages 20 --strict
 ```
 
+Pointing it at a site you know nothing about? `chaosbringer scan` sweeps it in one command: a clean crawl with perf measurement, the same crawl with the site's API calls failing (500 / network error / no response), and a ranked report of bugs, fragile error handling and slow spots, each perf finding linked to the [perf-patterns catalog](examples/perf-patterns/README.md) entries with the same signal. See [`docs/recipes/scan.md`](docs/recipes/scan.md).
+
+```bash
+chaosbringer scan --url https://staging.example.com --exclude /logout   # → chaosbringer-scan/scan-report.md
+```
+
 To watch a crawl in an existing terminal-browser tab, run `terminal-browser open http://localhost:3000`, then `chaosbringer --url http://localhost:3000 --terminal-browser`. See the [package guide](packages/chaosbringer/README.md#preview-a-crawl-in-an-existing-chromium-tab).
 
 ```ts
@@ -88,6 +94,7 @@ Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
 
 Longer-form "what does this feature do and why" docs:
 
+- [`docs/recipes/scan.md`](docs/recipes/scan.md) — `chaosbringer scan`: sweep an unknown site for bugs, missing API-failure handling and slow spots in one command, with a ranked, catalog-linked report.
 - [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
 - [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
