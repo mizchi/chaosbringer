@@ -6,6 +6,7 @@ import {
   escapeSelector,
   summarizePages,
   normalizeUrl,
+  visitUrl,
 } from "./filters.js";
 import type { PageResult } from "./types.js";
 
@@ -76,6 +77,16 @@ describe("isExternalUrl", () => {
 
   it("returns false for invalid URLs", () => {
     expect(isExternalUrl("not a url", base)).toBe(false);
+  });
+});
+
+describe("visitUrl", () => {
+  it("keeps the trailing slash the link wrote, drops the fragment, lowercases the host", () => {
+    expect(visitUrl("https://X.test/docs/#intro")).toBe("https://x.test/docs/");
+    expect(visitUrl("https://x.test/docs?q=1")).toBe("https://x.test/docs?q=1");
+    // Two URLs to visit, one page to the dedupe key.
+    expect(normalizeUrl(visitUrl("https://x.test/docs/"))).toBe(normalizeUrl("https://x.test/docs"));
+    expect(visitUrl("not a url")).toBe("not a url");
   });
 });
 

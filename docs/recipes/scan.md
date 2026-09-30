@@ -133,6 +133,35 @@ records whether the slow one is flagged with its own pattern, and whether
 the fix makes that finding go away. The latest result is in that
 [README](../../examples/perf-patterns/README.md#what-chaosbringer-scan-finds-without-being-told).
 
+## Scanning from behind a proxy
+
+Some failures come from the machine running the scan, not from the site.
+The report leaves them out of the findings and lists them once, under
+"Not counted":
+
+- `net::ERR_TUNNEL_CONNECTION_FAILED` / `ERR_PROXY_CONNECTION_FAILED`: a
+  corporate or sandbox proxy refused the host (often analytics and ad
+  domains).
+- `net::ERR_BLOCKED_BY_CLIENT`: the crawler's own external-navigation
+  guard, which also stops cross-origin iframe documents such as video
+  embeds.
+- `net::ERR_ABORTED`: a request cancelled in flight, mostly beacons and
+  prefetches cut off when the crawl navigated on.
+
+If every page fails with `net::ERR_CERT_AUTHORITY_INVALID`, the proxy
+intercepts TLS and Chromium does not trust its CA. Playwright's Chromium
+reads the NSS store in `~/.pki/nssdb`, so add the proxy's CA there
+(`certutil` is in `libnss3-tools`):
+
+```bash
+certutil -A -d sql:$HOME/.pki/nssdb -n corp-proxy -t "C,," -i /path/to/proxy-ca.crt
+```
+
+Do not use `--ignore-certificate-errors` or a SPKI allow-list for the
+proxy's key instead. Chromium applies either one to every connection that
+goes through the proxy, so it stops verifying the real sites' certificates
+as well.
+
 ## What it does not see
 
 - Bugs that show no error: wrong totals, a button that does nothing.

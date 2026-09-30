@@ -82,6 +82,7 @@ import {
   isExternalUrl as isExternalUrlPure,
   summarizePages,
   normalizeUrl,
+  visitUrl,
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
@@ -587,7 +588,7 @@ export class ChaosCrawler {
     this.startTime = Date.now();
     this.visited.clear();
     this.queue = [{
-      url: normalizeUrl(this.options.baseUrl),
+      url: visitUrl(this.options.baseUrl),
       sourceUrl: "",
       method: "initial",
     }];
@@ -789,13 +790,13 @@ export class ChaosCrawler {
       } else {
         while (this.queue.length > 0 && this.visited.size < this.options.maxPages) {
           const entry = this.queue.shift()!;
-          if (this.visited.has(entry.url)) continue;
+          if (this.visited.has(normalizeUrl(entry.url))) continue;
           if (this.shouldExclude(entry.url)) {
             this.logger.debug("page_excluded", { url: entry.url });
             continue;
           }
 
-          this.visited.add(entry.url);
+          this.visited.add(normalizeUrl(entry.url));
           this.currentEntry = entry;
           this.discoveryMetrics.uniquePages++;
           this.events.onProgress?.(this.visited.size, this.options.maxPages);
@@ -810,9 +811,11 @@ export class ChaosCrawler {
 
           // Add discovered links to queue with source tracking
           for (const rawLink of result.links) {
-            const link = normalizeUrl(rawLink);
-            const alreadyQueued = this.queue.some((e) => e.url === link);
-            if (!this.visited.has(link) && !alreadyQueued && this.ownsUrl(link)) {
+            // Visit the URL the link names; dedupe on its normalized form.
+            const link = visitUrl(rawLink);
+            const key = normalizeUrl(link);
+            const alreadyQueued = this.queue.some((e) => normalizeUrl(e.url) === key);
+            if (!this.visited.has(key) && !alreadyQueued && this.ownsUrl(link)) {
               this.queue.push({
                 url: link,
                 sourceUrl: entry.url,
@@ -1042,8 +1045,9 @@ export class ChaosCrawler {
   private ownsUrl(url: string): boolean {
     const count = this.options.shardCount;
     if (count === undefined || count <= 1) return true;
-    if (url === normalizeUrl(this.options.baseUrl)) return true;
-    return shardOwns(url, this.options.shardIndex ?? 0, count);
+    const key = normalizeUrl(url);
+    if (key === normalizeUrl(this.options.baseUrl)) return true;
+    return shardOwns(key, this.options.shardIndex ?? 0, count);
   }
 
   /** Check if URL matches SPA patterns */
@@ -1077,13 +1081,13 @@ export class ChaosCrawler {
       return;
     }
     const baseOrigin = this.baseOrigin;
-    const queuedUrls = new Set(this.queue.map((q) => q.url));
+    const queuedUrls = new Set(this.queue.map((q) => normalizeUrl(q.url)));
     let added = 0;
     let skippedExternal = 0;
     for (const raw of urls) {
       let normalized: string;
       try {
-        normalized = normalizeUrl(new URL(raw, this.options.baseUrl).toString());
+        normalized = visitUrl(new URL(raw, this.options.baseUrl).toString());
       } catch {
         continue;
       }
@@ -1095,9 +1099,9 @@ export class ChaosCrawler {
       } catch {
         continue;
       }
-      if (queuedUrls.has(normalized)) continue;
+      if (queuedUrls.has(normalizeUrl(normalized))) continue;
       if (!this.ownsUrl(normalized)) continue;
-      queuedUrls.add(normalized);
+      queuedUrls.add(normalizeUrl(normalized));
       this.queue.push({ url: normalized, sourceUrl: source, method: "extracted" });
       added++;
     }
@@ -2041,11 +2045,15 @@ export class ChaosCrawler {
     page: Page,
     span: SpanHandle | null,
     result: ActionResult | null,
+    urlBefore: string,
   ): Promise<void> {
     const settleCapped =
       result !== null && this.settle.mode === "adaptive"
         ? await this.settleAdaptively(page, ACTION_SETTLE_CAP_MS, "action")
         : false;
+    // A new document, a History API route change, or a hash change: the step
+    // took the user somewhere else, so what it cost is that view's load.
+    if (result !== null && page.url() !== urlBefore) result.urlChanged = true;
     if (result === null) this.perf.cancelAction(span);
     else await this.perf.endAction(span, result, { settleCapped });
   }
@@ -2074,9 +2082,10 @@ export class ChaosCrawler {
       timestamp: Date.now(),
     };
     this.currentAction = placeholder;
+    const urlBefore = page.url();
     const span = await this.beginActionSpan();
     const result = await perform();
-    await this.endActionSpan(page, span, result);
+    await this.endActionSpan(page, span, result, urlBefore);
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
@@ -2246,7 +2255,7 @@ export class ChaosCrawler {
       baseOrigin: this.baseOrigin,
       familiarity: (url) => {
         if (this.visited.has(url)) return "visited";
-        return this.queue.some((e) => e.url === url) ? "queued" : "new";
+        return this.queue.some((e) => normalizeUrl(e.url) === url) ? "queued" : "new";
       },
     });
   }
@@ -2523,6 +2532,7 @@ export class ChaosCrawler {
     for (const action of actions) {
       const timestamp = Date.now();
       let result: ActionResult;
+      const urlBefore = page.url();
       const span = await this.beginActionSpan();
       try {
         if (action.blockedExternal) {
@@ -2592,7 +2602,7 @@ export class ChaosCrawler {
           timestamp,
         };
       }
-      await this.endActionSpan(page, span, result);
+      await this.endActionSpan(page, span, result, urlBefore);
       this.recordAction(result, url, undefined);
       this.recordReplayOutcome(action, result);
       await this.pauseBetweenActions(page);
@@ -2708,7 +2718,8 @@ export class ChaosCrawler {
         // of executing it — the owning shard crawls that URL itself.
         if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
           try {
-            const absoluteUrl = normalizeUrl(new URL(href, url).toString());
+            const absoluteUrl = visitUrl(new URL(href, url).toString());
+            const key = normalizeUrl(absoluteUrl);
             if (!this.ownsUrl(absoluteUrl)) {
               return {
                 type: "click",
@@ -2719,8 +2730,8 @@ export class ChaosCrawler {
                 timestamp,
               };
             }
-            const alreadyQueued = this.queue.some((e) => e.url === absoluteUrl);
-            if (!this.visited.has(absoluteUrl) && !alreadyQueued) {
+            const alreadyQueued = this.queue.some((e) => normalizeUrl(e.url) === key);
+            if (!this.visited.has(key) && !alreadyQueued) {
               this.queue.push({
                 url: absoluteUrl,
                 sourceUrl: url,

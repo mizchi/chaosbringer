@@ -215,8 +215,17 @@ function readMedia(): MediaReport {
     "other",
   ]);
   const uncompressed: MediaReport["uncompressed"] = [];
+  // initiatorType says who asked, not what came back: a font or an image
+  // fetched from CSS (`css`) or a preload (`link`) is already compressed, and
+  // decoded ≈ encoded is expected for it. Skip those by content type (Chrome
+  // reports it on the entry) or, failing that, by extension. SVG, TTF / OTF
+  // and ICO are left in: they compress well.
+  const alreadyCompressedType = /^(image\/(?!svg)|font\/woff|video\/|audio\/|application\/(zip|gzip|x-brotli))/i;
+  const alreadyCompressedExt = /\.(woff2?|png|jpe?g|gif|webp|avif|mp4|webm|mp3|ogg|zip|gz|br)(?:[?#]|$)/i;
   for (const r of res) {
     if (!textType.has(r.initiatorType)) continue;
+    const contentType = (r as PerformanceResourceTiming & { contentType?: string }).contentType ?? "";
+    if (alreadyCompressedType.test(contentType) || alreadyCompressedExt.test(r.name)) continue;
     const enc = r.encodedBodySize;
     const dec = r.decodedBodySize;
     if (!enc || !dec || enc < 20_000) continue; // skip tiny / cross-origin (no TAO)

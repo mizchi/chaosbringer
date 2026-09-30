@@ -97,13 +97,23 @@ export interface SpanNetwork {
     type: string;
     /** start offset relative to the span start (ms); never negative */
     startOffsetMs: number;
-    /** start to response end (ms), even past the span's end; 0 when `unfinished` */
+    /**
+     * start to response end (ms), even past the span's end; for a `failed`
+     * request, start to the failure; 0 when `unfinished`
+     */
     durationMs: number;
     /**
-     * true when no response was recorded by the time the report was built
-     * (still in flight, or failed / aborted), so `durationMs` 0 is unknown.
+     * true when the request was still in flight when the report was built:
+     * no response and no failure recorded, so `durationMs` 0 is unknown.
      */
     unfinished?: true;
+    /**
+     * true when the request failed or was aborted (CDP `loadingFailed`)
+     * instead of completing; `durationMs` runs to the failure. A request held
+     * open until a timeout fails it is the slowest of its span, and keeping it
+     * at 0 put it at the bottom of the slowest-first list, past the cap.
+     */
+    failed?: true;
     kb: number;
     /** true if served from a registrable domain other than the page's */
     thirdParty: boolean;
@@ -458,12 +468,13 @@ export function buildSpanNetwork(
       url: r.url,
       type: r.type,
       startOffsetMs: round(r.startEpochMs - span.startEpochMs),
-      durationMs: round(end - r.startEpochMs),
+      durationMs: round((r.endEpochMs ?? r.failedEpochMs ?? r.startEpochMs) - r.startEpochMs),
       kb: round((r.encoded ?? 0) / 1024),
       thirdParty: tp,
       initiator: r.initiator,
       // durationMs 0 here is "no response recorded", not "instant".
-      ...(r.endEpochMs == null ? { unfinished: true as const } : {}),
+      ...(r.endEpochMs == null && r.failedEpochMs == null ? { unfinished: true as const } : {}),
+      ...(r.endEpochMs == null && r.failedEpochMs != null ? { failed: true as const } : {}),
     });
     tpRecords.push({
       url: r.url,

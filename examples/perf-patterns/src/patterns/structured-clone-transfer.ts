@@ -1,6 +1,10 @@
 import { definePattern, handler, html, page, type Variant } from "../pattern.js";
 
-const SIZE_MB = 64;
+// 256 MB, not a more photo-like 64: on a CI runner's fast memory a 64 MB
+// copy took ~12–33 ms of main-thread script, too close to the 20 ms floor
+// the fix has to beat, and a 12.5 ms median failed it. Four times the bytes
+// is four times the copy; the transferred buffer stays ~free at any size.
+const SIZE_MB = 256;
 
 // An image editor keeps the decoded picture in one ArrayBuffer (RGBA
 // pixels) and hands it to a Web Worker for each filter pass; the worker
@@ -86,8 +90,9 @@ export default definePattern({
     // none); the send's copy is always in the click's own span. cpu.blockingMs would read 0 for a copy that stays under 50 ms.
     metric: "render.scriptMs",
     direction: "lower",
-    // slow: two 64 MB copies a click, ~50 ms (45–340 ms: fresh pages and GC
-    // of the dropped copies vary it); fixed: ~3 ms.
+    // slow: at least one 256 MB copy a click (the send's; the reply's
+    // when it lands in the span), fresh pages and GC of the dropped copies
+    // vary it widely; fixed: ~3 ms.
     minImprovement: { ratio: 4, absolute: 20 },
   },
 });

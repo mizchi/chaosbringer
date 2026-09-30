@@ -51,6 +51,8 @@ export interface ScanFinding {
 export interface ScanAnalysis {
   findings: ScanFinding[];
   counts: Record<ScanSeverity, number>;
+  /** Failures caused by the scan's environment, left out of `findings` (see `ENVIRONMENT_ERROR`). */
+  environment: ScanEnvironmentNote[];
 }
 
 /** How many locations a finding lists. */
@@ -160,6 +162,40 @@ export interface ScanChaosRun {
 export interface AnalyzeScanOptions {
   /** `releaseAfterMs` of the hang crawl's fault; enables the no-timeout rule. */
   hangReleaseMs?: number;
+  /**
+   * Regex source matching the endpoints the chaos crawls failed
+   * (`endpointsPattern`). The retry-storm and no-timeout rules count only
+   * requests to them; without it they count every request.
+   */
+  endpointPattern?: string;
+}
+
+/**
+ * Request failures the scan itself causes, not the site: a proxy on the
+ * scanning machine that refused the host, the crawler's own external-
+ * navigation guard (which also stops cross-origin iframe documents), and
+ * requests cancelled when the crawl navigated on (`ERR_ABORTED`: beacons and
+ * prefetches cut off mid-flight; an app's own AbortController shows the same
+ * way, and is deliberate). Reported once as a note, never as a finding.
+ */
+export const ENVIRONMENT_ERROR = /net::ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH_UNSUPPORTED|BLOCKED_BY_CLIENT|ABORTED)\b/;
+
+/** Why each `ENVIRONMENT_ERROR` code is not the site's, for the report. */
+export const ENVIRONMENT_REASONS: Record<string, string> = {
+  "net::ERR_TUNNEL_CONNECTION_FAILED": "a proxy on the scanning machine refused the host",
+  "net::ERR_PROXY_CONNECTION_FAILED": "the scanning machine's proxy could not be reached",
+  "net::ERR_PROXY_AUTH_UNSUPPORTED": "the scanning machine's proxy wants authentication",
+  "net::ERR_BLOCKED_BY_CLIENT": "the crawler's external-navigation guard (it also stops cross-origin iframe documents)",
+  "net::ERR_ABORTED": "cancelled in flight, mostly by the crawl navigating on",
+};
+
+export interface ScanEnvironmentNote {
+  /** The `net::ERR_*` code. */
+  code: string;
+  /** Errors carrying it (console echoes and request failures both count). */
+  count: number;
+  /** Hosts whose requests failed with it, up to `SCAN_WHERE_CAP`. */
+  hosts: string[];
 }
 
 /**
@@ -266,6 +302,9 @@ export function analyzeScan(
   chaos: readonly ScanChaosRun[] = [],
   options: AnalyzeScanOptions = {},
 ): ScanAnalysis {
+  const environment = environmentNotes([baseline, ...chaos.map((r) => r.report)]);
+  baseline = withoutEnvironmentErrors(baseline);
+  chaos = chaos.map((r) => ({ ...r, report: withoutEnvironmentErrors(r.report) }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
     ...errorFindings(baseline),
@@ -284,7 +323,39 @@ export function analyzeScan(
   );
   const counts: Record<ScanSeverity, number> = { high: 0, medium: 0, low: 0 };
   for (const f of findings) counts[f.severity]++;
-  return { findings, counts };
+  return { findings, counts, environment };
+}
+
+function withoutEnvironmentErrors(report: CrawlReport): CrawlReport {
+  const clusters = report.errorClusters ?? [];
+  if (!clusters.some((c) => ENVIRONMENT_ERROR.test(c.sample.message))) return report;
+  return { ...report, errorClusters: clusters.filter((c) => !ENVIRONMENT_ERROR.test(c.sample.message)) };
+}
+
+function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[] {
+  const byCode = new Map<string, { count: number; hosts: Set<string> }>();
+  // The clean crawl alone: the chaos crawls repeat the same pages, and
+  // counting them too would multiply one blocked host by four.
+  const report = reports[0];
+  for (const c of report?.errorClusters ?? []) {
+    const code = ENVIRONMENT_ERROR.exec(c.sample.message)?.[1];
+    if (!code) continue;
+    const entry = byCode.get(code) ?? { count: 0, hosts: new Set<string>() };
+    entry.count += c.count;
+    // A request failure reads "<url> - net::ERR_…"; a console echo names no URL.
+    const url = /^(https?:\/\/\S+) - /.exec(c.sample.message)?.[1];
+    if (url) {
+      try {
+        entry.hosts.add(new URL(url).host);
+      } catch {
+        // not a URL after all
+      }
+    }
+    byCode.set(code, entry);
+  }
+  return [...byCode.entries()]
+    .map(([code, e]) => ({ code: `net::ERR_${code}`, count: e.count, hosts: [...e.hosts].slice(0, SCAN_WHERE_CAP) }))
+    .sort((a, b) => b.count - a.count);
 }
 
 // ---------------------------------------------------------------- bugs
@@ -377,7 +448,7 @@ const ERROR_RULES: Record<
     severity: "low",
     category: "bug",
     title: "Request failed",
-    hint: "A request failed at the transport level (DNS, connection, CORS, blocked, or aborted). net::ERR_ABORTED is often a navigation cancelling in-flight requests and harmless.",
+    hint: "A request failed at the transport level: DNS, connection refused, TLS, or a CORS or mixed-content block. (Cancelled and proxy-refused requests are not counted; see the report's notes.)",
   },
   "invariant-violation": {
     rule: "invariant-violation",
@@ -489,18 +560,25 @@ function resilienceFindings(
   }
 
   // Steps that fire far more requests when their API fails: unbounded retries.
+  // Only requests to the failed endpoints count: a retry goes back to the
+  // endpoint that failed, whereas a fallback (a router that reloads the whole
+  // page when its data request fails) fetches the page's other resources.
+  const endpoint = options.endpointPattern ? new RegExp(options.endpointPattern) : null;
+  const apiRequests = (s: PerfSpanReport) =>
+    endpoint ? s.network.requests.filter((q) => endpoint.test(q.url)).length : s.network.requestCount;
   const cleanRequests = new Map<string, number>();
-  for (const s of reportSpans(baseline)) cleanRequests.set(s.key, Math.max(cleanRequests.get(s.key) ?? 0, s.network.requestCount));
+  for (const s of reportSpans(baseline)) cleanRequests.set(s.key, Math.max(cleanRequests.get(s.key) ?? 0, apiRequests(s)));
   const storms = new Map<string, Located & { fault: ScanFaultKind }>();
   for (const { fault, report } of runs) {
     for (const s of reportSpans(report)) {
       const clean = cleanRequests.get(s.key);
       if (clean === undefined) continue;
-      const n = s.network.requestCount;
+      const n = apiRequests(s);
       if (n < clean * SCAN_THRESHOLDS.stormRatio || n < clean + SCAN_THRESHOLDS.stormMinExtra) continue;
       const prev = storms.get(s.key);
       if (prev && prev.value >= n) continue;
-      storms.set(s.key, { where: s.key, value: n, fault, line: `${s.key}: ${n} requests under ${SCAN_FAULT_LABELS[fault]} (clean ${clean})` });
+      const what = endpoint ? "requests to the failing endpoints" : "requests";
+      storms.set(s.key, { where: s.key, value: n, fault, line: `${s.key}: ${n} ${what} under ${SCAN_FAULT_LABELS[fault]} (clean ${clean})` });
     }
   }
   if (storms.size > 0) {
@@ -525,9 +603,28 @@ function resilienceFindings(
       const eff = effectiveMs(s);
       cleanWorst.set(s.key, { effectiveMs: Math.max(prev?.effectiveMs ?? 0, eff), capped: (prev?.capped ?? false) || s.capped });
     }
+    // A load whose hung requests all started after the page had painted its
+    // largest content was not waiting on them: prefetches and beacons a page
+    // fires once it is up. The crawl's settle waits for them, the user does not.
+    // LCP when the page reported one, else its first paint: Chromium reports
+    // no LCP for a page whose largest paint was never finalised.
+    const lcpOfLoad = new Map<PerfSpanReport, number>();
+    for (const p of hang.report.pages) {
+      const painted = p.perfPage?.vitals.LCP?.value ?? p.perfPage?.vitals.FCP?.value;
+      if (p.perf && painted !== undefined) lcpOfLoad.set(p.perf, painted);
+    }
+    const background = (s: PerfSpanReport): boolean => {
+      const lcp = lcpOfLoad.get(s);
+      if (lcp === undefined) return false;
+      const hung = s.network.requests.filter(
+        (q) => (!endpoint || endpoint.test(q.url)) && (q.unfinished === true || q.durationMs >= release * SCAN_THRESHOLDS.hangWaitShare),
+      );
+      return hung.length > 0 && hung.every((q) => q.startOffsetMs > lcp);
+    };
     const waited = new Map<string, Located>();
     for (const s of reportSpans(hang.report)) {
       if (!(s.faults ?? []).includes(SCAN_FAULT_NAMES.hang)) continue;
+      if (background(s)) continue;
       const clean = cleanWorst.get(s.key);
       if (!clean || clean.capped || clean.effectiveMs >= release * SCAN_THRESHOLDS.hangCleanShare) continue;
       const eff = effectiveMs(s);
@@ -700,7 +797,10 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
   }
 
   // Per step.
-  out.push(...spanFindings(reportSpans(report)));
+  // Actions after which the page's URL was different: route changes the
+  // History API made count as moving too, though they create no document.
+  const moved = new Set(report.actions.filter((a) => a.urlChanged && a.perf).map((a) => a.perf!));
+  out.push(...spanFindings(reportSpans(report), moved));
 
   // Pages that never went quiet.
   const restless: Located[] = report.pages
@@ -767,8 +867,13 @@ interface SpanRule {
   thresholds: { warn: number; poor: number };
   /** Severity when only `warn` is crossed (`poor` is always high). */
   warnSeverity: ScanSeverity;
-  value: (s: PerfSpanReport) => number | undefined;
+  value: (s: PerfSpanReport, ctx: SpanContext) => number | undefined;
   line: (s: PerfSpanReport, v: number) => string;
+}
+
+interface SpanContext {
+  /** The step took the user to another view (see `navigated`). */
+  navigated: (s: PerfSpanReport) => boolean;
 }
 
 const SPAN_RULES: SpanRule[] = [
@@ -851,7 +956,8 @@ const SPAN_RULES: SpanRule[] = [
     hint: "The step left that much more JS memory in use. If it keeps growing across repeats, something is retained: a cache with no bound, closures over large data, or removed DOM held in JS.",
     thresholds: SCAN_THRESHOLDS.heapDeltaMB,
     warnSeverity: "medium",
-    value: (s) => s.memory.jsHeapDeltaMB,
+    // Not a step that moved to another view: that is the new view's heap.
+    value: (s, ctx) => (ctx.navigated(s) ? undefined : s.memory.jsHeapDeltaMB),
     line: (s, v) => `${s.key}: +${fmt(v)} MB heap (${fmt(s.memory.jsHeapUsedMB)} MB in use)`,
   },
   {
@@ -860,7 +966,8 @@ const SPAN_RULES: SpanRule[] = [
     hint: "One user action started many requests: per-keystroke requests without a debounce, one analytics beacon per event, or polling that started with it.",
     thresholds: SCAN_THRESHOLDS.actionRequests,
     warnSeverity: "medium",
-    value: (s) => (isLoad(s) ? undefined : s.network.requestCount),
+    // A click that navigated loaded a page: its requests are that page's.
+    value: (s, ctx) => (isLoad(s) || ctx.navigated(s) ? undefined : s.network.requestCount),
     line: (s, v) => `${s.key}: ${fmt(v)} requests, ${fmt(s.network.encodedKB)} KB`,
   },
   {
@@ -869,7 +976,9 @@ const SPAN_RULES: SpanRule[] = [
     hint: "The action's own work (its requests included) ran this long after the input. Long waits with a fast server usually mean serial work: one request, transaction or await per item, where one batched call would do.",
     thresholds: SCAN_THRESHOLDS.actionEffectiveMs,
     warnSeverity: "medium",
-    value: (s) => (isLoad(s) ? undefined : effectiveMs(s)),
+    // Not a click that navigated (that is a page load, graded by the vitals),
+    // and not a step whose settle hit its cap (that is `never-idle`).
+    value: (s, ctx) => (isLoad(s) || ctx.navigated(s) || s.capped ? undefined : effectiveMs(s)),
     line: (s, v) => `${s.key}: ${fmt(v)}ms until its work finished (span ${fmt(s.durationMs)}ms)`,
   },
   {
@@ -897,13 +1006,14 @@ const API_TYPES = new Set(["Fetch", "XHR"]);
 /** CDP resource types a browser should be able to cache across pages. */
 const STATIC_TYPES = new Set(["Script", "Stylesheet", "Image", "Font", "Media"]);
 
-function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
+function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfSpanReport>): ScanFinding[] {
   const out: ScanFinding[] = [];
+  const ctx: SpanContext = { navigated: (s) => navigated(s) || moved.has(s) };
   for (const r of SPAN_RULES) {
     // Worst value per perfKey: a key the crawl hit several times is one place.
     const byKey = new Map<string, Located>();
     for (const s of spans) {
-      const v = r.value(s);
+      const v = r.value(s, ctx);
       if (v === undefined || v < r.thresholds.warn) continue;
       const prev = byKey.get(s.key);
       if (!prev || v > prev.value) byKey.set(s.key, { where: s.key, value: v, line: r.line(s, v) });
@@ -929,7 +1039,7 @@ function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
   const heavy = new Map<string, Located>();
   const dup = new Map<string, Located>();
   const perItem = new Map<string, Located>();
-  const downloads = new Map<string, { loads: Set<string>; kb: number }>();
+  const downloads = new Map<string, { path: string; loads: Set<string>; kb: number }>();
   for (const s of spans) {
     const exact = new Map<string, number>();
     const byEndpoint = new Map<string, Set<string>>();
@@ -941,16 +1051,25 @@ function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
       if (q.kb >= SCAN_THRESHOLDS.resourceKB.warn) {
         worstPerKey(heavy, { where: path, value: q.kb, line: `${path}: ${fmt(q.kb)} KB (${q.type}${q.thirdParty ? ", third-party" : ""})` });
       }
-      if (API_TYPES.has(q.type)) {
-        exact.set(q.url, (exact.get(q.url) ?? 0) + 1);
+      // The site's own API only (a third-party beacon repeating is the tag's
+      // business), and only responses that were transferred: a second request
+      // answered from cache costs nothing.
+      if (API_TYPES.has(q.type) && !q.thirdParty) {
+        if (q.kb > 0) exact.set(q.url, (exact.get(q.url) ?? 0) + 1);
         const label = endpointLabel(q.url);
         if (label?.includes(":id")) byEndpoint.set(label, (byEndpoint.get(label) ?? new Set()).add(q.url));
       }
       if (isLoad(s) && STATIC_TYPES.has(q.type) && q.kb > 0 && !q.url.startsWith("data:")) {
-        const d = downloads.get(path) ?? { loads: new Set<string>(), kb: 0 };
+        // The same file: a full download is matched by path and size, so a
+        // cache-busting query that changes on every load still matches; a
+        // revalidation (a few hundred bytes of 304) by its whole URL, since an
+        // image service serves many files from one path (`/_next/image?url=`).
+        const revalidation = q.kb < 1;
+        const id = revalidation ? q.url : `${path} ${Math.round(q.kb)}`;
+        const d = downloads.get(id) ?? { path: revalidation ? q.url : path, loads: new Set<string>(), kb: 0 };
         d.loads.add(`${s.key}#${d.loads.size}`);
         d.kb = Math.max(d.kb, q.kb);
-        downloads.set(path, d);
+        downloads.set(id, d);
       }
     }
     for (const [url, n] of exact) {
@@ -1012,9 +1131,10 @@ function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
     "medium",
   );
   const repeated: Located[] = [];
-  for (const [path, d] of downloads) {
+  for (const d of downloads.values()) {
     if (d.loads.size < SCAN_THRESHOLDS.repeatDownloads.warn) continue;
-    repeated.push({ where: path, value: d.loads.size, line: `${path}: downloaded again on ${d.loads.size} page loads (${fmt(d.kb)} KB)` });
+    const how = d.kb < 1 ? "revalidated (not reused from cache)" : "downloaded again";
+    repeated.push({ where: d.path, value: d.loads.size, line: `${d.path}: ${how} on ${d.loads.size} page loads (${fmt(d.kb)} KB)` });
   }
   if (repeated.length > 0) {
     out.push(
@@ -1031,6 +1151,11 @@ function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
 }
 
 // -------------------------------------------------------------- helpers
+
+/** A step that created a document: a click that followed a link, a submit that reloaded. */
+function navigated(s: PerfSpanReport): boolean {
+  return (s.navigations ?? 0) > 0;
+}
 
 function isLoad(s: PerfSpanReport): boolean {
   return s.key.endsWith(" :: load");

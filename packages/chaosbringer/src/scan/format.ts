@@ -3,7 +3,7 @@
  * the JSON, and the short terminal summary.
  */
 
-import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
+import { ENVIRONMENT_REASONS, SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
 import type { ScanEndpoint } from "./endpoints.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
@@ -43,6 +43,13 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   lines.push("");
   const { high, medium, low } = analysis.counts;
   lines.push(`**${analysis.findings.length} finding${analysis.findings.length === 1 ? "" : "s"}**: ${ICON.high} ${high} high · ${ICON.medium} ${medium} medium · ${ICON.low} ${low} low`, "");
+  for (const e of analysis.environment) {
+    const hosts = e.hosts.length > 0 ? ` (${e.hosts.join(", ")})` : "";
+    lines.push(
+      `> Not counted: ${e.count} request failure${e.count === 1 ? "" : "s"} with \`${e.code}\`${hosts}: ${ENVIRONMENT_REASONS[e.code] ?? "caused by the scan, not the site"}.`,
+      "",
+    );
+  }
   lines.push(
     "Findings are signals to look at, not verdicts: the perf rules are thresholds (Web Vitals' own bounds where one exists), measured once on this machine. Re-run to see what is stable.",
     "",

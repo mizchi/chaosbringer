@@ -64,7 +64,7 @@ describe("analyzeScan: bugs", () => {
         errorClusters: [
           cluster("console", "something logged"),
           cluster("exception", "TypeError: x is undefined", [`${U}/`, `${U}/a`], 3),
-          cluster("network", "net::ERR_ABORTED"),
+          cluster("network", "https://api.test/x - net::ERR_NAME_NOT_RESOLVED"),
         ],
       }),
     );
@@ -382,6 +382,121 @@ describe("analyzeScan: perf", () => {
       fakeReport([fakePage(`${U}/`, fakeSpan("/ :: load"), { perfPage: perfPage({ vitals: { LCP: vital(800) } }) })], [fakeAction(fakeSpan("/ :: click #a"))]),
     );
     expect(r.findings).toEqual([]);
+  });
+});
+
+describe("analyzeScan: false positives seen on real sites", () => {
+  it("leaves the scan's own network failures out of findings and notes them once", () => {
+    const report = fakeReport([fakePage(`${U}/`)], [], {
+      errorClusters: [
+        cluster("network", "https://logx.optimizely.com/v1/events - net::ERR_TUNNEL_CONNECTION_FAILED", [`${U}/`], 40),
+        cluster("console", "Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED", [`${U}/`], 40),
+        cluster("network", "https://www.youtube.com/embed/x - net::ERR_BLOCKED_BY_CLIENT", [`${U}/`], 2),
+        cluster("network", "https://www.google-analytics.com/g/collect?v=2 - net::ERR_ABORTED", [`${U}/`], 1),
+        cluster("exception", "TypeError: real bug"),
+      ],
+    });
+    const r = analyzeScan(report, [{ fault: "status", report }]);
+    expect(rules(r)).toEqual(["js-exception"]);
+    expect(r.environment).toEqual([
+      { code: "net::ERR_TUNNEL_CONNECTION_FAILED", count: 80, hosts: ["logx.optimizely.com"] },
+      { code: "net::ERR_BLOCKED_BY_CLIENT", count: 2, hosts: ["www.youtube.com"] },
+      { code: "net::ERR_ABORTED", count: 1, hosts: ["www.google-analytics.com"] },
+    ]);
+  });
+
+  it("counts only requests to the failing endpoints as a retry storm, not a full-page fallback", () => {
+    const withRequests = (urls: string[]) =>
+      span("/a :: click #nav", (s) => {
+        s.network.requestCount = urls.length;
+        s.network.requests = urls.map((url) => ({ url, type: "Fetch", startOffsetMs: 0, durationMs: 1, kb: 1, thirdParty: false }));
+      });
+    const api = `${U}/api/data.json`;
+    const cleanRun = fakeReport([], [fakeAction(withRequests([api]))]);
+    // The router gave up on the data request and loaded the page in full.
+    const fallback = fakeReport([], [fakeAction(withRequests([api, ...Array.from({ length: 19 }, (_, i) => `${U}/chunk${i}.js`)]))]);
+    const storm = fakeReport([], [fakeAction(withRequests(Array.from({ length: 15 }, () => api)))]);
+    const endpointPattern = "^http://localhost:3000/api/data\\.json$";
+    expect(analyzeScan(cleanRun, [{ fault: "status", report: fallback }], { endpointPattern }).findings).toEqual([]);
+    const f = analyzeScan(cleanRun, [{ fault: "status", report: storm }], { endpointPattern }).findings[0]!;
+    expect([f.rule, f.evidence]).toEqual(["fault-request-storm", ["/a :: click #nav: 15 requests to the failing endpoints under HTTP 500 (clean 1)"]]);
+  });
+
+  it("does not count a load waiting on a request it started after its content painted", () => {
+    const hungLoad = (startOffsetMs: number) =>
+      span("/ :: load", (s) => {
+        s.durationMs = 8100;
+        s.faults = [SCAN_FAULT_NAMES.hang];
+        s.network.requests = [{ url: `${U}/api/prefetch`, type: "Fetch", startOffsetMs, durationMs: 8000, kb: 0, thirdParty: false }];
+      });
+    const cleanRun = fakeReport([fakePage(`${U}/`, span("/ :: load", (s) => (s.durationMs = 900)))], []);
+    const hangRun = (startOffsetMs: number) =>
+      fakeReport([fakePage(`${U}/`, hungLoad(startOffsetMs), { perfPage: perfPage({ vitals: { LCP: vital(700) } }) })], []);
+    const opts = { hangReleaseMs: 8000, endpointPattern: "/api/" };
+    // Started at 1.5 s, after the 0.7 s LCP: a prefetch; the page was up.
+    expect(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(1500) }], opts).findings).toEqual([]);
+    // Started at 50 ms, before anything painted: the page was waiting on it.
+    expect(rules(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(50) }], opts))).toEqual(["no-request-timeout"]);
+    // No LCP reported: the first paint stands in for it.
+    const fcpOnly = fakeReport([fakePage(`${U}/`, hungLoad(1500), { perfPage: perfPage({ vitals: { FCP: vital(600) } }) })], []);
+    expect(analyzeScan(cleanRun, [{ fault: "hang", report: fcpOnly }], opts).findings).toEqual([]);
+  });
+
+  it("does not grade a client-side route change as a chatty action or its heap as growth", () => {
+    const route = span("/ :: click a#docs", (s) => {
+      s.network.requestCount = 30;
+      s.memory = { ...s.memory, jsHeapDeltaMB: 20 };
+    });
+    const stay = span("/ :: click #more", (s) => (s.network.requestCount = 30));
+    const r = analyzeScan(fakeReport([], [{ ...fakeAction(route), urlChanged: true }, fakeAction(stay)]));
+    expect(r.findings.map((f) => [f.rule, f.where])).toEqual([["chatty-action", ["/ :: click #more"]]]);
+  });
+
+  it("does not grade a click that navigated as a chatty or slow action", () => {
+    const nav = span("/ :: click a#next", (s) => {
+      s.navigations = 1;
+      s.durationMs = 2600;
+      s.network.requestCount = 40;
+    });
+    const capped = span("/ :: scroll", (s) => {
+      s.capped = true;
+      s.durationMs = 2000;
+    });
+    expect(analyzeScan(fakeReport([], [fakeAction(nav), fakeAction(capped)])).findings).toEqual([]);
+  });
+
+  it("ignores repeated third-party beacons and cache hits as duplicates", () => {
+    const req = (url: string, o: { kb?: number; thirdParty?: boolean } = {}) => ({
+      url,
+      type: "XHR",
+      startOffsetMs: 0,
+      durationMs: 1,
+      kb: o.kb ?? 1,
+      thirdParty: o.thirdParty ?? false,
+    });
+    const s = span("/ :: click #go", (x) => {
+      x.network.requests = [
+        req("https://log.tracker.example/event?a=1", { thirdParty: true }),
+        req("https://log.tracker.example/event?a=1", { thirdParty: true }),
+        req(`${U}/api/me`),
+        req(`${U}/api/me`, { kb: 0 }),
+      ];
+    });
+    expect(analyzeScan(fakeReport([], [fakeAction(s)])).findings).toEqual([]);
+  });
+
+  it("tells files on one image-service path apart when they are revalidated", () => {
+    const load = (path: string, img: string) =>
+      span(`${path} :: load`, (s) => {
+        s.network.requests = [
+          { url: `${U}/_next/image?url=${img}`, type: "Image", startOffsetMs: 0, durationMs: 5, kb: 0.2, thirdParty: false },
+        ];
+      });
+    const distinct = ["/a", "/b", "/c"].map((p, i) => fakePage(`${U}${p}`, load(p, `img${i}.png`)));
+    expect(analyzeScan(fakeReport(distinct, [])).findings).toEqual([]);
+    const same = ["/a", "/b", "/c"].map((p) => fakePage(`${U}${p}`, load(p, "logo.png")));
+    const f = analyzeScan(fakeReport(same, [])).findings[0]!;
+    expect(f.evidence).toEqual([`${U}/_next/image?url=logo.png: revalidated (not reused from cache) on 3 page loads (0.2 KB)`]);
   });
 });
 
