@@ -6,7 +6,8 @@
   "scripts": {
     "test": "vitest run",
     "report": "tsx scripts/report.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "scan-check": "tsx scripts/scan-check.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

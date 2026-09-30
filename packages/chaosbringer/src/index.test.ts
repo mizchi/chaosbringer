@@ -22,6 +22,12 @@ describe("public package exports (this branch's additions)", () => {
     expect(typeof api.writeClusterArtifacts).toBe("function");
   });
 
+  it("re-exports the scan surface", () => {
+    expect(typeof api.runScan).toBe("function");
+    expect(typeof api.analyzeScan).toBe("function");
+    expect(api.SCAN_FAULT_KINDS).toEqual(["status", "abort", "hang"]);
+  });
+
   it("re-exports parity surface", () => {
     expect(typeof api.runParity).toBe("function");
   });

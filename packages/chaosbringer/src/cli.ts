@@ -66,6 +66,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
   journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
   model: () => import("./model/cli.js").then((m) => m.runModelCli),
   perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
+  scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
 };
 
 const rawSub = process.argv[2];
@@ -237,6 +238,10 @@ PERF SUBCOMMANDS (read crawl reports written with --perf):
   chaosbringer perf regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15]
   chaosbringer perf drilldown <report.json> <perfKey> [--top N]
   (chaosbringer perf --help for details)
+
+SCAN (bugs + slow spots of an unknown site, one command):
+  chaosbringer scan --url <url> [--max-pages 20] [--out chaosbringer-scan] [--no-chaos]
+  (chaosbringer scan --help for details)
 
 EXAMPLES:
   # Basic crawl
