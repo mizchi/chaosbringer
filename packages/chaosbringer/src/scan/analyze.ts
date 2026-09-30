@@ -606,10 +606,12 @@ function resilienceFindings(
     // A load whose hung requests all started after the page had painted its
     // largest content was not waiting on them: prefetches and beacons a page
     // fires once it is up. The crawl's settle waits for them, the user does not.
+    // LCP when the page reported one, else its first paint: Chromium reports
+    // no LCP for a page whose largest paint was never finalised.
     const lcpOfLoad = new Map<PerfSpanReport, number>();
     for (const p of hang.report.pages) {
-      const lcp = p.perfPage?.vitals.LCP?.value;
-      if (p.perf && lcp !== undefined) lcpOfLoad.set(p.perf, lcp);
+      const painted = p.perfPage?.vitals.LCP?.value ?? p.perfPage?.vitals.FCP?.value;
+      if (p.perf && painted !== undefined) lcpOfLoad.set(p.perf, painted);
     }
     const background = (s: PerfSpanReport): boolean => {
       const lcp = lcpOfLoad.get(s);

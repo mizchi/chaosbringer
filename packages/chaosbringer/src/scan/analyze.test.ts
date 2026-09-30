@@ -437,6 +437,9 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(1500) }], opts).findings).toEqual([]);
     // Started at 50 ms, before anything painted: the page was waiting on it.
     expect(rules(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(50) }], opts))).toEqual(["no-request-timeout"]);
+    // No LCP reported: the first paint stands in for it.
+    const fcpOnly = fakeReport([fakePage(`${U}/`, hungLoad(1500), { perfPage: perfPage({ vitals: { FCP: vital(600) } }) })], []);
+    expect(analyzeScan(cleanRun, [{ fault: "hang", report: fcpOnly }], opts).findings).toEqual([]);
   });
 
   it("does not grade a client-side route change as a chatty action or its heap as growth", () => {
