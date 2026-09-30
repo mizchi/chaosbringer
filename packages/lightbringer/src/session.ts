@@ -221,7 +221,8 @@ function readMedia(): MediaReport {
   // reports it on the entry) or, failing that, by extension. SVG, TTF / OTF
   // and ICO are left in: they compress well.
   const alreadyCompressedType = /^(image\/(?!svg)|font\/woff|video\/|audio\/|application\/(zip|gzip|x-brotli))/i;
-  const alreadyCompressedExt = /\.(woff2?|png|jpe?g|gif|webp|avif|mp4|webm|mp3|ogg|zip|gz|br)(?:[?#]|$)/i;
+  // `%3F`: a query written into the path escaped (fontawesome-webfont.woff%3Fv=3.2.1).
+  const alreadyCompressedExt = /\.(woff2?|png|jpe?g|gif|webp|avif|mp4|webm|mp3|ogg|zip|gz|br)(?:[?#]|%3F|$)/i;
   for (const r of res) {
     if (!textType.has(r.initiatorType)) continue;
     const contentType = (r as PerformanceResourceTiming & { contentType?: string }).contentType ?? "";

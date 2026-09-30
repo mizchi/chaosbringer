@@ -147,6 +147,16 @@ The report leaves them out of the findings and lists them once, under
   embeds.
 - `net::ERR_ABORTED`: a request cancelled in flight, mostly beacons and
   prefetches cut off when the crawl navigated on.
+- `net::ERR_CERT_AUTHORITY_INVALID`: the scanning browser does not trust the
+  issuer of a subresource's certificate, usually a proxy's. A page whose own
+  certificate is bad still fails to load, and that is still reported.
+- "no supported source" media errors: Playwright's Chromium ships without
+  the H.264 / AAC codecs that Chrome has.
+
+An exception such as "Failed to fetch" on a page where one of these broke a
+request stays in the findings, but its evidence says it may be the knock-on
+effect. Paths a CDN or host injects (`/cdn-cgi/`, `/_vercel/`,
+`/.well-known/`) are not treated as the site's API.
 
 If every page fails with `net::ERR_CERT_AUTHORITY_INVALID`, the proxy
 intercepts TLS and Chromium does not trust its CA. Playwright's Chromium
@@ -161,6 +171,19 @@ Do not use `--ignore-certificate-errors` or a SPKI allow-list for the
 proxy's key instead. Chromium applies either one to every connection that
 goes through the proxy, so it stops verifying the real sites' certificates
 as well.
+
+If the crawl barely reached the site (one page with no links, or a nearly
+empty start page), the report opens with a warning instead of reading as a
+clean site. That happens with a bot check, a rate limit, a consent wall, or a
+site that needs `--storage-state`. The crawler's own navigation errors
+(`page.goto: Timeout …`) are not reported as the site's exceptions; the page
+that failed to load is. A page that fails in a chaos crawl counts against the
+fault only if the fault hit that page's load.
+
+A same-site URL that redirects to another origin (a `/chat` that 302s to a
+Discord invite) is recorded with the page's `redirectedTo` and counted as a
+blocked external navigation; nothing of the other site is crawled or
+reported.
 
 ## What it does not see
 

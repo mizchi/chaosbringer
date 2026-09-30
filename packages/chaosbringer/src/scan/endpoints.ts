@@ -11,6 +11,13 @@ import type { CrawlReport } from "../types.js";
 /** CDP resource types that are the app's own data requests. */
 const API_TYPES = new Set(["Fetch", "XHR"]);
 
+/**
+ * Same-origin paths a CDN or host injects, not the app's API: Cloudflare's
+ * RUM beacon and challenge scripts (`/cdn-cgi/`), Vercel's analytics
+ * (`/_vercel/`), and `/.well-known/`. Failing them tests the host's script.
+ */
+const INFRASTRUCTURE_PATH = /^https?:\/\/[^/]+\/(?:cdn-cgi|_vercel|\.well-known)\//;
+
 /** How many endpoints the chaos crawl targets at most. */
 export const SCAN_ENDPOINT_CAP = 40;
 
@@ -37,7 +44,7 @@ export function deriveScanEndpoints(report: Pick<CrawlReport, "pages" | "actions
   for (const s of reportSpans(report)) requests.push(...s.network.requests);
   const byLabel = new Map<string, ScanEndpoint>();
   for (const r of requests) {
-    if (!API_TYPES.has(r.type) || r.thirdParty) continue;
+    if (!API_TYPES.has(r.type) || r.thirdParty || INFRASTRUCTURE_PATH.test(r.url)) continue;
     let u: URL;
     try {
       u = new URL(r.url);

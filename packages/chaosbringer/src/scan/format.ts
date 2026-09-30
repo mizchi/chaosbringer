@@ -3,7 +3,7 @@
  * the JSON, and the short terminal summary.
  */
 
-import { ENVIRONMENT_REASONS, SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
+import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
 import type { ScanEndpoint } from "./endpoints.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
@@ -43,10 +43,11 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   lines.push("");
   const { high, medium, low } = analysis.counts;
   lines.push(`**${analysis.findings.length} finding${analysis.findings.length === 1 ? "" : "s"}**: ${ICON.high} ${high} high · ${ICON.medium} ${medium} medium · ${ICON.low} ${low} low`, "");
+  for (const w of analysis.coverageWarnings) lines.push(`> ⚠️ ${w}`, "");
   for (const e of analysis.environment) {
     const hosts = e.hosts.length > 0 ? ` (${e.hosts.join(", ")})` : "";
     lines.push(
-      `> Not counted: ${e.count} request failure${e.count === 1 ? "" : "s"} with \`${e.code}\`${hosts}: ${ENVIRONMENT_REASONS[e.code] ?? "caused by the scan, not the site"}.`,
+      `> Not counted: ${e.count} error${e.count === 1 ? "" : "s"} with \`${e.code}\`${hosts}: ${e.reason}.`,
       "",
     );
   }
@@ -100,6 +101,7 @@ function findingSection(f: ScanFinding, i: number): string[] {
 export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
   const { high, medium, low } = analysis.counts;
   const lines = [`scan: ${analysis.findings.length} findings (${high} high, ${medium} medium, ${low} low)`];
+  for (const w of analysis.coverageWarnings) lines.push(`  ⚠️  ${w}`);
   for (const f of analysis.findings.slice(0, max)) {
     lines.push(`  ${ICON[f.severity]} [${f.category}] ${f.title} — ${shortWhere(f)}`);
   }

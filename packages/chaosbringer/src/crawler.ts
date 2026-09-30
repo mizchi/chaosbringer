@@ -1887,6 +1887,19 @@ export class ChaosCrawler {
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
       navigated = true;
 
+      // A same-site URL that redirected off-site (a /chat that 302s to a
+      // Discord invite). The guard lets redirect hops through, deciding on
+      // the URL the navigation started for, so the page now showing is
+      // another site's: its errors, links and measurements are not this
+      // site's. Record it as a blocked external navigation and stop here.
+      const landed = page.url();
+      if (this.isExternalUrl(landed)) {
+        // Close the load span as a normal load would, so the page's perf
+        // session finishes cleanly; its report is dropped below.
+        await this.perf.endLoad({ settleCapped: loadCapped });
+        throw new RedirectedOffSite(landed, response?.status());
+      }
+
       // Drain any unhandled rejections captured during load.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
 
@@ -1959,6 +1972,22 @@ export class ChaosCrawler {
       };
     } catch (err) {
       const loadTime = Date.now() - startTime;
+      if (err instanceof RedirectedOffSite) {
+        this.noteBlockedNavigation(err.to);
+        blockedNavigations.push(err.to);
+        result = {
+          url,
+          status: "success",
+          ...(err.statusCode !== undefined ? { statusCode: err.statusCode } : {}),
+          loadTime,
+          errors: [],
+          hasErrors: false,
+          warnings: [...warnings, `redirected off-site to ${err.to}; not crawled`],
+          links: [],
+          redirectedTo: err.to,
+          blockedNavigations,
+        };
+      } else {
       const isTimeout = err instanceof Error && err.message.includes("Timeout");
 
       const combinedErrors: PageError[] = [
@@ -1980,6 +2009,7 @@ export class ChaosCrawler {
         warnings,
         links: [],
       };
+      }
     }
 
     // Stop collecting before the caller closes the page — any ERR_ABORTED
@@ -1997,6 +2027,13 @@ export class ChaosCrawler {
     // page: a `goto` that timed out still yields a load span that says what
     // the attempt cost.
     await this.finishPagePerf(result, url, { navigationFailed: !navigated });
+    // What was measured was the other site's page.
+    if (result.redirectedTo) {
+      delete result.perf;
+      delete result.perfPage;
+      result.errors = [];
+      result.hasErrors = false;
+    }
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
@@ -2896,5 +2933,15 @@ export class ChaosCrawler {
 
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
+  }
+}
+
+/** Thrown inside `crawlPageWithExistingPage` when the load ended on another origin. */
+class RedirectedOffSite extends Error {
+  constructor(
+    readonly to: string,
+    readonly statusCode: number | undefined,
+  ) {
+    super(`redirected off-site to ${to}`);
   }
 }
