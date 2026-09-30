@@ -943,6 +943,13 @@ export interface PageResult {
   blockedNavigations?: string[];
   /** Recovery info if page was recovered from error */
   recovery?: RecoveryInfo;
+  /**
+   * Where the page's URL redirected to when that was another origin. The
+   * crawler stops there: the page showing is another site's, so the result
+   * carries no errors, links, actions or perf, and the redirect counts as a
+   * blocked external navigation.
+   */
+  redirectedTo?: string;
   /** How this page was discovered */
   discoveryMethod?: DiscoveryMethod;
   /** URL of the page that linked to this page */

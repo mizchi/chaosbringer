@@ -51,7 +51,7 @@ export interface ScanFinding {
 export interface ScanAnalysis {
   findings: ScanFinding[];
   counts: Record<ScanSeverity, number>;
-  /** Failures caused by the scan's environment, left out of `findings` (see `ENVIRONMENT_ERROR`). */
+  /** Failures caused by the scan's environment, left out of `findings` (see `ENVIRONMENT_CAUSES`). */
   environment: ScanEnvironmentNote[];
 }
 
@@ -171,27 +171,52 @@ export interface AnalyzeScanOptions {
 }
 
 /**
- * Request failures the scan itself causes, not the site: a proxy on the
- * scanning machine that refused the host, the crawler's own external-
- * navigation guard (which also stops cross-origin iframe documents), and
- * requests cancelled when the crawl navigated on (`ERR_ABORTED`: beacons and
- * prefetches cut off mid-flight; an app's own AbortController shows the same
- * way, and is deliberate). Reported once as a note, never as a finding.
+ * Failures the scan itself causes, not the site. Reported once each as a
+ * note, never as a finding:
+ * - a proxy on the scanning machine that refused the host, could not be
+ *   reached, or wants authentication;
+ * - a certificate issuer the scanning machine does not trust: a TLS-
+ *   intercepting proxy whose CA the browser lacks (a site whose own page has
+ *   a bad certificate still fails to load, and that is still reported);
+ * - the crawler's own external-navigation guard, which also stops cross-
+ *   origin iframe documents;
+ * - requests cancelled in flight as the crawl navigates on (`ERR_ABORTED`:
+ *   beacons and prefetches; an app's own AbortController shows the same way,
+ *   and is deliberate);
+ * - media the scanning browser cannot decode: Playwright's Chromium ships
+ *   without the H.264 / AAC codecs that Chrome has.
  */
-export const ENVIRONMENT_ERROR = /net::ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH_UNSUPPORTED|BLOCKED_BY_CLIENT|ABORTED)\b/;
+export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; reason: string }> = [
+  { code: "net::ERR_TUNNEL_CONNECTION_FAILED", pattern: /net::ERR_TUNNEL_CONNECTION_FAILED\b/, reason: "a proxy on the scanning machine refused the host" },
+  { code: "net::ERR_PROXY_CONNECTION_FAILED", pattern: /net::ERR_PROXY_CONNECTION_FAILED\b/, reason: "the scanning machine's proxy could not be reached" },
+  { code: "net::ERR_PROXY_AUTH_UNSUPPORTED", pattern: /net::ERR_PROXY_AUTH_UNSUPPORTED\b/, reason: "the scanning machine's proxy wants authentication" },
+  {
+    code: "net::ERR_CERT_AUTHORITY_INVALID",
+    pattern: /net::ERR_CERT_AUTHORITY_INVALID\b/,
+    reason: "the scanning browser does not trust the certificate's issuer (a TLS-intercepting proxy?); check the URL in a normal browser",
+  },
+  {
+    code: "net::ERR_BLOCKED_BY_CLIENT",
+    pattern: /net::ERR_BLOCKED_BY_CLIENT\b/,
+    reason: "the crawler's external-navigation guard (it also stops cross-origin iframe documents)",
+  },
+  { code: "net::ERR_ABORTED", pattern: /net::ERR_ABORTED\b/, reason: "cancelled in flight, mostly by the crawl navigating on" },
+  {
+    code: "media: no supported source",
+    pattern: /The element has no supported sources|no supported source was found/i,
+    reason: "Playwright's Chromium has no H.264 / AAC codecs, which Chrome has; the same media plays there",
+  },
+];
 
-/** Why each `ENVIRONMENT_ERROR` code is not the site's, for the report. */
-export const ENVIRONMENT_REASONS: Record<string, string> = {
-  "net::ERR_TUNNEL_CONNECTION_FAILED": "a proxy on the scanning machine refused the host",
-  "net::ERR_PROXY_CONNECTION_FAILED": "the scanning machine's proxy could not be reached",
-  "net::ERR_PROXY_AUTH_UNSUPPORTED": "the scanning machine's proxy wants authentication",
-  "net::ERR_BLOCKED_BY_CLIENT": "the crawler's external-navigation guard (it also stops cross-origin iframe documents)",
-  "net::ERR_ABORTED": "cancelled in flight, mostly by the crawl navigating on",
-};
+function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
+  return ENVIRONMENT_CAUSES.find((c) => c.pattern.test(message));
+}
 
 export interface ScanEnvironmentNote {
-  /** The `net::ERR_*` code. */
+  /** The `net::ERR_*` code, or a short name for a non-network cause. */
   code: string;
+  /** Why it is the scan's, not the site's. */
+  reason: string;
   /** Errors carrying it (console echoes and request failures both count). */
   count: number;
   /** Hosts whose requests failed with it, up to `SCAN_WHERE_CAP`. */
@@ -303,11 +328,12 @@ export function analyzeScan(
   options: AnalyzeScanOptions = {},
 ): ScanAnalysis {
   const environment = environmentNotes([baseline, ...chaos.map((r) => r.report)]);
+  const envPages = environmentPages(baseline);
   baseline = withoutEnvironmentErrors(baseline);
   chaos = chaos.map((r) => ({ ...r, report: withoutEnvironmentErrors(r.report) }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
-    ...errorFindings(baseline),
+    ...errorFindings(baseline, envPages),
     ...perfFindings(baseline),
     ...resilienceFindings(baseline, chaos, options),
   ].map((f) => {
@@ -328,9 +354,24 @@ export function analyzeScan(
 
 function withoutEnvironmentErrors(report: CrawlReport): CrawlReport {
   const clusters = report.errorClusters ?? [];
-  if (!clusters.some((c) => ENVIRONMENT_ERROR.test(c.sample.message))) return report;
-  return { ...report, errorClusters: clusters.filter((c) => !ENVIRONMENT_ERROR.test(c.sample.message)) };
+  if (!clusters.some((c) => environmentCause(c.sample.message))) return report;
+  return { ...report, errorClusters: clusters.filter((c) => !environmentCause(c.sample.message)) };
 }
+
+/**
+ * Pages on which some request failed for an environment reason. A "Failed
+ * to fetch" exception on one of them may be that failure's knock-on effect;
+ * the finding says so rather than being dropped, since it cannot be proved.
+ */
+function environmentPages(report: CrawlReport): Set<string> {
+  const pages = new Set<string>();
+  for (const c of report.errorClusters ?? []) {
+    if (c.type === "network" && environmentCause(c.sample.message)) for (const u of c.urls) pages.add(u);
+  }
+  return pages;
+}
+
+const NETWORK_EXCEPTION = /Failed to fetch|NetworkError|Load failed|network error/i;
 
 function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[] {
   const byCode = new Map<string, { count: number; hosts: Set<string> }>();
@@ -338,8 +379,9 @@ function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[
   // counting them too would multiply one blocked host by four.
   const report = reports[0];
   for (const c of report?.errorClusters ?? []) {
-    const code = ENVIRONMENT_ERROR.exec(c.sample.message)?.[1];
-    if (!code) continue;
+    const cause = environmentCause(c.sample.message);
+    if (!cause) continue;
+    const code = cause.code;
     const entry = byCode.get(code) ?? { count: 0, hosts: new Set<string>() };
     entry.count += c.count;
     // A request failure reads "<url> - net::ERR_…"; a console echo names no URL.
@@ -354,7 +396,12 @@ function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[
     byCode.set(code, entry);
   }
   return [...byCode.entries()]
-    .map(([code, e]) => ({ code: `net::ERR_${code}`, count: e.count, hosts: [...e.hosts].slice(0, SCAN_WHERE_CAP) }))
+    .map(([code, e]) => ({
+      code,
+      reason: ENVIRONMENT_CAUSES.find((c) => c.code === code)!.reason,
+      count: e.count,
+      hosts: [...e.hosts].slice(0, SCAN_WHERE_CAP),
+    }))
     .sort((a, b) => b.count - a.count);
 }
 
@@ -459,7 +506,7 @@ const ERROR_RULES: Record<
   },
 };
 
-function errorFindings(report: CrawlReport): ScanFinding[] {
+function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new Set()): ScanFinding[] {
   const out: ScanFinding[] = [];
   // Documents that answered 4xx/5xx: the browser logs each as "Failed to load
   // resource", which `pageFailures` already reports as the page's own finding.
@@ -471,6 +518,11 @@ function errorFindings(report: CrawlReport): ScanFinding[] {
       continue;
     }
     const isAxe = c.type === "invariant-violation" && (c.invariantNames ?? []).some((n) => n.startsWith("a11y"));
+    const knockOn =
+      (c.type === "exception" || c.type === "unhandled-rejection") &&
+      NETWORK_EXCEPTION.test(c.sample.message) &&
+      c.urls.length > 0 &&
+      c.urls.every((u) => envPages.has(u));
     out.push({
       rule: isAxe ? "a11y-violation" : r.rule,
       severity: r.severity,
@@ -481,6 +533,9 @@ function errorFindings(report: CrawlReport): ScanFinding[] {
       evidence: [
         `${c.count}× on ${c.urls.length} page${c.urls.length === 1 ? "" : "s"}`,
         ...(c.sample.stack ? [truncate(firstStackFrame(c.sample.stack), 160)] : []),
+        ...(knockOn
+          ? ["Every page it fired on also had a request fail for a reason of the scan's own (see the notes): it may be that failure's knock-on effect. Check in a normal browser."]
+          : []),
       ],
       hint: r.hint,
     });
@@ -519,7 +574,9 @@ function resilienceFindings(
     const severe = c.type === "exception" || c.type === "unhandled-rejection" || c.type === "crash";
     out.push({
       rule: "fault-new-error",
-      severity: severe ? "high" : "medium",
+      // A console.error is the app catching the failure and logging it: worth
+      // a look at what the UI showed, not a crash.
+      severity: severe ? "high" : "low",
       category: "resilience",
       title: `Only when an API request fails: ${ERROR_RULES[c.type]?.title ?? c.type}: ${truncate(c.sample.message, 100)}`,
       where: capWhere([...urls]),
@@ -572,7 +629,8 @@ function resilienceFindings(
   for (const { fault, report } of runs) {
     for (const s of reportSpans(report)) {
       const clean = cleanRequests.get(s.key);
-      if (clean === undefined) continue;
+      // A step that did not call the endpoint when it worked is not retrying it.
+      if (clean === undefined || clean === 0) continue;
       const n = apiRequests(s);
       if (n < clean * SCAN_THRESHOLDS.stormRatio || n < clean + SCAN_THRESHOLDS.stormMinExtra) continue;
       const prev = storms.get(s.key);
@@ -1059,7 +1117,8 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
         const label = endpointLabel(q.url);
         if (label?.includes(":id")) byEndpoint.set(label, (byEndpoint.get(label) ?? new Set()).add(q.url));
       }
-      if (isLoad(s) && STATIC_TYPES.has(q.type) && q.kb > 0 && !q.url.startsWith("data:")) {
+      // The site's own files: a third party's cache headers are not the site's to set.
+      if (isLoad(s) && STATIC_TYPES.has(q.type) && q.kb > 0 && !q.thirdParty && !q.url.startsWith("data:")) {
         // The same file: a full download is matched by path and size, so a
         // cache-busting query that changes on every load still matches; a
         // revalidation (a few hundred bytes of 304) by its whole URL, since an
@@ -1131,16 +1190,20 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
     "medium",
   );
   const repeated: Located[] = [];
+  let fullDownloads = false;
   for (const d of downloads.values()) {
     if (d.loads.size < SCAN_THRESHOLDS.repeatDownloads.warn) continue;
-    const how = d.kb < 1 ? "revalidated (not reused from cache)" : "downloaded again";
+    const revalidated = d.kb < 1;
+    if (!revalidated) fullDownloads = true;
+    const how = revalidated ? "revalidated (not reused from cache)" : "downloaded again";
     repeated.push({ where: d.path, value: d.loads.size, line: `${d.path}: ${how} on ${d.loads.size} page loads (${fmt(d.kb)} KB)` });
   }
   if (repeated.length > 0) {
     out.push(
       located(repeated, {
         rule: "repeat-download",
-        severity: severityOf(repeated, SCAN_THRESHOLDS.repeatDownloads, "medium"),
+        // A revalidation costs a round trip, not the bytes: medium at most.
+        severity: fullDownloads ? severityOf(repeated, SCAN_THRESHOLDS.repeatDownloads, "medium") : "medium",
         category: "perf",
         title: "Static files downloaded again on every page",
         hint: "The browser did not reuse its cached copy: no Cache-Control (or no-cache / must-revalidate on a file that never changes), or a URL that changes on every load. Fingerprint file names and serve them immutable.",

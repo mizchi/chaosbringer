@@ -124,7 +124,8 @@ describe("analyzeScan: resilience", () => {
     expect(r.findings.map((f) => [f.rule, f.severity, f.category])).toEqual([
       ["fault-new-error", "high", "resilience"],
       ["console-error", "medium", "bug"],
-      ["fault-new-error", "medium", "resilience"],
+      // A console.error: the app caught the failure and logged it.
+      ["fault-new-error", "low", "resilience"],
     ]);
     const merged = r.findings[0]!;
     expect(merged.occurrences).toBe(3);
@@ -399,10 +400,56 @@ describe("analyzeScan: false positives seen on real sites", () => {
     const r = analyzeScan(report, [{ fault: "status", report }]);
     expect(rules(r)).toEqual(["js-exception"]);
     expect(r.environment).toEqual([
-      { code: "net::ERR_TUNNEL_CONNECTION_FAILED", count: 80, hosts: ["logx.optimizely.com"] },
-      { code: "net::ERR_BLOCKED_BY_CLIENT", count: 2, hosts: ["www.youtube.com"] },
-      { code: "net::ERR_ABORTED", count: 1, hosts: ["www.google-analytics.com"] },
+      { code: "net::ERR_TUNNEL_CONNECTION_FAILED", reason: expect.stringContaining("proxy"), count: 80, hosts: ["logx.optimizely.com"] },
+      { code: "net::ERR_BLOCKED_BY_CLIENT", reason: expect.stringContaining("guard"), count: 2, hosts: ["www.youtube.com"] },
+      { code: "net::ERR_ABORTED", reason: expect.stringContaining("cancelled"), count: 1, hosts: ["www.google-analytics.com"] },
     ]);
+  });
+
+  it("notes an untrusted certificate issuer and undecodable media, and flags knock-on fetch errors", () => {
+    const pg = `${U}/playground`;
+    const report = fakeReport([fakePage(pg), fakePage(`${U}/`)], [], {
+      errorClusters: [
+        cluster("network", "https://registry.npmjs.org/svelte.tgz - net::ERR_CERT_AUTHORITY_INVALID", [pg], 4),
+        cluster("unhandled-rejection", "NotSupportedError: The element has no supported sources.", [`${U}/`]),
+        cluster("exception", "TypeError: Failed to fetch", [pg], 10),
+        cluster("exception", "TypeError: Failed to fetch", [`${U}/`], 1),
+      ].map((c, i) => (i === 3 ? { ...c, key: "exception|other" } : c)),
+    });
+    const r = analyzeScan(report);
+    expect(r.environment.map((e) => [e.code, e.count])).toEqual([
+      ["net::ERR_CERT_AUTHORITY_INVALID", 4],
+      ["media: no supported source", 1],
+    ]);
+    const [onEnvPage, elsewhere] = r.findings;
+    expect([onEnvPage!.rule, onEnvPage!.where]).toEqual(["js-exception", [pg]]);
+    expect(onEnvPage!.evidence.at(-1)).toMatch(/knock-on effect/);
+    expect(elsewhere!.evidence.some((e) => /knock-on/.test(e))).toBe(false);
+  });
+
+  it("does not call a step that never requested the endpoint when it worked a retry storm", () => {
+    const withRequests = (n: number) =>
+      span("/ :: load", (s) => {
+        s.network.requestCount = n;
+        s.network.requests = Array.from({ length: n }, () => ({ url: `${U}/api/x`, type: "Fetch", startOffsetMs: 0, durationMs: 1, kb: 1, thirdParty: false }));
+      });
+    const cleanRun = fakeReport([fakePage(`${U}/`, withRequests(0))], []);
+    const hangRun = fakeReport([fakePage(`${U}/`, withRequests(12))], []);
+    expect(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun }], { endpointPattern: "/api/x" }).findings).toEqual([]);
+  });
+
+  it("caps revalidation-only repeat downloads at medium and leaves third-party files out", () => {
+    const load = (path: string, q: { url: string; kb: number; thirdParty?: boolean }) =>
+      span(`${path} :: load`, (s) => {
+        s.network.requests = [{ url: q.url, type: "Stylesheet", startOffsetMs: 0, durationMs: 5, kb: q.kb, thirdParty: q.thirdParty ?? false }];
+      });
+    const paths = Array.from({ length: 12 }, (_, i) => `/p${i}`);
+    const reval = analyzeScan(fakeReport(paths.map((p) => fakePage(`${U}${p}`, load(p, { url: `${U}/main.css`, kb: 0.3 }))), []));
+    expect(reval.findings.map((f) => [f.rule, f.severity])).toEqual([["repeat-download", "medium"]]);
+    const full = analyzeScan(fakeReport(paths.map((p) => fakePage(`${U}${p}`, load(p, { url: `${U}/main.css`, kb: 40 }))), []));
+    expect(full.findings.map((f) => [f.rule, f.severity])).toEqual([["repeat-download", "high"]]);
+    const ads = paths.map((p) => fakePage(`${U}${p}`, load(p, { url: "https://ads.example/consent.js", kb: 70, thirdParty: true })));
+    expect(analyzeScan(fakeReport(ads, [])).findings).toEqual([]);
   });
 
   it("counts only requests to the failing endpoints as a retry storm, not a full-page fallback", () => {
@@ -555,6 +602,12 @@ describe("deriveScanEndpoints", () => {
     expect(re.test(`${U}/api/items/999/comments`)).toBe(false);
     expect(re.test(`${U}/api/itemsX`)).toBe(false);
     expect(re.test(`${U}/`)).toBe(false);
+  });
+
+  it("leaves out paths a CDN or host injects", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [req(`${U}/cdn-cgi/rum?x=1`), req(`${U}/_vercel/insights/view`), req(`${U}/api/me`)];
+    expect(deriveScanEndpoints(fakeReport([fakePage(`${U}/`, load)], [])).map((e) => e.label)).toEqual([`${U}/api/me`]);
   });
 
   it("returns no pattern when there is no endpoint", () => {

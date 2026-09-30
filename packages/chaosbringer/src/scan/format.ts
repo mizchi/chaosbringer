@@ -3,7 +3,7 @@
  * the JSON, and the short terminal summary.
  */
 
-import { ENVIRONMENT_REASONS, SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
+import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
 import type { ScanEndpoint } from "./endpoints.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
@@ -46,7 +46,7 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   for (const e of analysis.environment) {
     const hosts = e.hosts.length > 0 ? ` (${e.hosts.join(", ")})` : "";
     lines.push(
-      `> Not counted: ${e.count} request failure${e.count === 1 ? "" : "s"} with \`${e.code}\`${hosts}: ${ENVIRONMENT_REASONS[e.code] ?? "caused by the scan, not the site"}.`,
+      `> Not counted: ${e.count} error${e.count === 1 ? "" : "s"} with \`${e.code}\`${hosts}: ${e.reason}.`,
       "",
     );
   }

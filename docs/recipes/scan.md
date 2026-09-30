@@ -147,6 +147,16 @@ The report leaves them out of the findings and lists them once, under
   embeds.
 - `net::ERR_ABORTED`: a request cancelled in flight, mostly beacons and
   prefetches cut off when the crawl navigated on.
+- `net::ERR_CERT_AUTHORITY_INVALID`: the scanning browser does not trust the
+  issuer of a subresource's certificate, usually a proxy's. A page whose own
+  certificate is bad still fails to load, and that is still reported.
+- "no supported source" media errors: Playwright's Chromium ships without
+  the H.264 / AAC codecs that Chrome has.
+
+An exception such as "Failed to fetch" on a page where one of these broke a
+request stays in the findings, but its evidence says it may be the knock-on
+effect. Paths a CDN or host injects (`/cdn-cgi/`, `/_vercel/`,
+`/.well-known/`) are not treated as the site's API.
 
 If every page fails with `net::ERR_CERT_AUTHORITY_INVALID`, the proxy
 intercepts TLS and Chromium does not trust its CA. Playwright's Chromium
@@ -161,6 +171,11 @@ Do not use `--ignore-certificate-errors` or a SPKI allow-list for the
 proxy's key instead. Chromium applies either one to every connection that
 goes through the proxy, so it stops verifying the real sites' certificates
 as well.
+
+A same-site URL that redirects to another origin (a `/chat` that 302s to a
+Discord invite) is recorded with the page's `redirectedTo` and counted as a
+blocked external navigation; nothing of the other site is crawled or
+reported.
 
 ## What it does not see
 
