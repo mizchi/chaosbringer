@@ -125,81 +125,94 @@ match each signal. `pnpm scan-check` runs it on both variants of every
 pattern and records whether the slow one is flagged with its own pattern,
 and whether the fix makes the finding go away.
 
+Two kinds of gap are expected:
+
+- **Load-timing patterns** (`font-block-foit`, `lcp-lazy-hero`,
+  `no-early-flush`, `redirect-chain`, …) are measured here on localhost,
+  where LCP / FCP / TTFB never get near Web Vitals' real-world bounds. The
+  catalog's own test sees them by comparing slow with fixed. A scan
+  sees them on a real network, or with `--network slow-3g`.
+- **A fixed variant still flagged** is a fix that improves the metric
+  without getting under the threshold. For example, `inline-svg-icons`
+  still has over 1,500 DOM nodes after its fix, and `full-rerender-list`
+  still lays out a whole list, just once. The thresholds are for unknown
+  sites, not tuned to this catalog.
+
 <!-- scan-check:start -->
 Measured by `pnpm scan-check` on 2026-09-30: one scan per variant at the pattern's seed.
 
-**39 of 68** slow variants are flagged with their own pattern; on **34** of those, the fixed variant is not.
+**56 of 68** slow variants are flagged with their own pattern; on **46** of those, the fixed variant is not.
 
 | pattern | slow: flagged by | fixed: still flagged by | slow: every rule that fired |
 |---|---|---|---|
-| [analytics-per-event](src/patterns/analytics-per-event.ts) | `chatty-action` | – | `chatty-action`, `request-failed` |
-| [base64-inlined-assets](src/patterns/base64-inlined-assets.ts) | – | – | `request-waterfall` |
-| [broad-mutation-observer](src/patterns/broad-mutation-observer.ts) | `span-script` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [cache-busting-query](src/patterns/cache-busting-query.ts) | – | – | `render-blocking`, `uncompressed-text` |
-| [canvas-to-dataurl-sync](src/patterns/canvas-to-dataurl-sync.ts) | – | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [cls-image-no-dimensions](src/patterns/cls-image-no-dimensions.ts) | `vital-cls` | – | `vital-cls` |
+| [analytics-per-event](src/patterns/analytics-per-event.ts) | `chatty-action` | – | `chatty-action`, `duplicate-request`, `request-failed` |
+| [base64-inlined-assets](src/patterns/base64-inlined-assets.ts) | – | – | `request-waterfall`, `span-layout-time` |
+| [broad-mutation-observer](src/patterns/broad-mutation-observer.ts) | `span-blocking`, `span-interaction`, `span-script` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [cache-busting-query](src/patterns/cache-busting-query.ts) | `repeat-download` | – | `render-blocking`, `repeat-download`, `uncompressed-text` |
+| [canvas-to-dataurl-sync](src/patterns/canvas-to-dataurl-sync.ts) | `span-blocking`, `span-interaction`, `vital-inp` | `span-blocking` | `dropped-frames`, `slow-action`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [cls-image-no-dimensions](src/patterns/cls-image-no-dimensions.ts) | `vital-cls` | – | `heavy-resource`, `vital-cls` |
 | [cls-late-content](src/patterns/cls-late-content.ts) | `vital-cls` | – | `vital-cls` |
-| [console-log-heavy](src/patterns/console-log-heavy.ts) | – | – | `span-blocking` |
+| [console-log-heavy](src/patterns/console-log-heavy.ts) | – | – | – |
 | [cors-preflight-per-request](src/patterns/cors-preflight-per-request.ts) | – | – | – |
-| [css-import-chain](src/patterns/css-import-chain.ts) | `render-blocking`, `request-waterfall` | `render-blocking` | `render-blocking`, `request-waterfall` |
-| [detached-dom-leak](src/patterns/detached-dom-leak.ts) | `memory-leak` | – | `dom-size`, `memory-leak` |
-| [duplicate-fetch](src/patterns/duplicate-fetch.ts) | – | – | – |
-| [eager-heavy-bundle](src/patterns/eager-heavy-bundle.ts) | – | – | – |
-| [eager-iframes](src/patterns/eager-iframes.ts) | – | – | `page-weight`, `request-waterfall` |
-| [expensive-selectors](src/patterns/expensive-selectors.ts) | – | – | `dom-size`, `span-blocking` |
+| [css-import-chain](src/patterns/css-import-chain.ts) | `request-waterfall` | `render-blocking` | `request-waterfall` |
+| [detached-dom-leak](src/patterns/detached-dom-leak.ts) | `dom-size`, `memory-leak` | `dom-size` | `dom-size`, `memory-leak` |
+| [duplicate-fetch](src/patterns/duplicate-fetch.ts) | `duplicate-request` | – | `duplicate-request` |
+| [eager-heavy-bundle](src/patterns/eager-heavy-bundle.ts) | `span-blocking`, `span-script` | – | `span-blocking`, `span-script` |
+| [eager-iframes](src/patterns/eager-iframes.ts) | `page-weight`, `third-party-heavy` | – | `page-weight`, `repeat-download`, `request-waterfall`, `span-blocking`, `span-layout-time`, `third-party-heavy` |
+| [expensive-selectors](src/patterns/expensive-selectors.ts) | `span-style` | `span-style` | `dom-size`, `span-layout-time`, `span-style` |
 | [font-block-foit](src/patterns/font-block-foit.ts) | – | – | – |
-| [font-no-subset](src/patterns/font-no-subset.ts) | – | – | `uncompressed-text` |
+| [font-no-subset](src/patterns/font-no-subset.ts) | `heavy-resource` | – | `heavy-resource`, `uncompressed-text` |
 | [font-swap-cls](src/patterns/font-swap-cls.ts) | `vital-cls` | – | `vital-cls` |
-| [full-rerender-list](src/patterns/full-rerender-list.ts) | – | – | `dom-size`, `span-blocking` |
+| [full-rerender-list](src/patterns/full-rerender-list.ts) | `span-blocking`, `span-layout-time` | `span-blocking`, `span-layout-time` | `dom-size`, `span-blocking`, `span-layout-time`, `span-style` |
 | [hang-no-timeout](src/patterns/hang-no-timeout.ts) | `no-request-timeout` | – | `fault-new-error`, `no-request-timeout` |
-| [huge-dom](src/patterns/huge-dom.ts) | `dom-size`, `span-style` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-style` |
-| [idb-transaction-per-item](src/patterns/idb-transaction-per-item.ts) | – | – | `never-idle`, `request-failed`, `uncompressed-text` |
-| [idle-raf-loop](src/patterns/idle-raf-loop.ts) | – | – | – |
-| [inline-state-bloat](src/patterns/inline-state-bloat.ts) | `page-weight` | – | `page-weight` |
-| [inline-svg-icons](src/patterns/inline-svg-icons.ts) | `dom-size` | `dom-size` | `dom-size` |
-| [innerhtml-append-loop](src/patterns/innerhtml-append-loop.ts) | `span-script` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [input-no-debounce](src/patterns/input-no-debounce.ts) | `chatty-action` | – | `chatty-action`, `memory-leak` |
-| [intl-formatter-per-row](src/patterns/intl-formatter-per-row.ts) | `span-script` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [json-deep-clone-per-click](src/patterns/json-deep-clone-per-click.ts) | `span-blocking` | – | `span-blocking` |
-| [late-discovered-lcp](src/patterns/late-discovered-lcp.ts) | `request-waterfall` | – | `render-blocking`, `request-waterfall`, `uncompressed-text` |
-| [late-font-discovery](src/patterns/late-font-discovery.ts) | – | – | `render-blocking` |
-| [layout-animation](src/patterns/layout-animation.ts) | `span-layout` | – | `never-idle`, `span-layout` |
-| [layout-thrash](src/patterns/layout-thrash.ts) | `span-layout` | – | `span-layout` |
-| [lcp-lazy-hero](src/patterns/lcp-lazy-hero.ts) | – | – | `page-weight` |
+| [huge-dom](src/patterns/huge-dom.ts) | `dom-size`, `span-layout-time`, `span-style` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-layout-time`, `span-script`, `span-style` |
+| [idb-transaction-per-item](src/patterns/idb-transaction-per-item.ts) | `slow-action` | `slow-action` | `many-listeners`, `never-idle`, `request-failed`, `slow-action`, `uncompressed-text` |
+| [idle-raf-loop](src/patterns/idle-raf-loop.ts) | `span-script` | – | `span-script` |
+| [inline-state-bloat](src/patterns/inline-state-bloat.ts) | `heavy-resource`, `page-weight` | – | `heavy-resource`, `page-weight` |
+| [inline-svg-icons](src/patterns/inline-svg-icons.ts) | `dom-size` | `dom-size` | `dom-size`, `span-layout-time` |
+| [innerhtml-append-loop](src/patterns/innerhtml-append-loop.ts) | `span-blocking`, `span-interaction`, `span-script` | – | `dom-size`, `dropped-frames`, `slow-action`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [input-no-debounce](src/patterns/input-no-debounce.ts) | `chatty-action` | – | `chatty-action`, `memory-leak`, `slow-action` |
+| [intl-formatter-per-row](src/patterns/intl-formatter-per-row.ts) | `span-blocking`, `span-interaction`, `span-script` | `span-blocking` | `dom-size`, `dropped-frames`, `slow-action`, `span-blocking`, `span-interaction`, `span-layout-time`, `span-script`, `span-style`, `vital-inp` |
+| [json-deep-clone-per-click](src/patterns/json-deep-clone-per-click.ts) | `span-blocking`, `span-script` | – | `heap-growth`, `span-blocking`, `span-script` |
+| [late-discovered-lcp](src/patterns/late-discovered-lcp.ts) | `request-waterfall` | – | `heavy-resource`, `request-waterfall`, `uncompressed-text` |
+| [late-font-discovery](src/patterns/late-font-discovery.ts) | – | – | – |
+| [layout-animation](src/patterns/layout-animation.ts) | `span-layout` | – | `never-idle`, `slow-action`, `span-layout` |
+| [layout-thrash](src/patterns/layout-thrash.ts) | `span-layout`, `span-layout-time` | – | `span-layout`, `span-layout-time` |
+| [lcp-lazy-hero](src/patterns/lcp-lazy-hero.ts) | – | – | `heavy-resource`, `page-weight`, `repeat-download` |
 | [listener-leak](src/patterns/listener-leak.ts) | `memory-leak` | – | `memory-leak` |
 | [long-task-click](src/patterns/long-task-click.ts) | `dropped-frames`, `span-blocking`, `span-interaction`, `vital-inp` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
 | [module-import-chain](src/patterns/module-import-chain.ts) | `request-waterfall` | – | `request-waterfall` |
-| [n-plus-one](src/patterns/n-plus-one.ts) | – | – | – |
-| [no-cache-headers](src/patterns/no-cache-headers.ts) | – | – | `render-blocking`, `uncompressed-text` |
+| [n-plus-one](src/patterns/n-plus-one.ts) | `per-item-requests` | – | `per-item-requests` |
+| [no-cache-headers](src/patterns/no-cache-headers.ts) | `repeat-download` | – | `render-blocking`, `repeat-download`, `uncompressed-text` |
 | [no-early-flush](src/patterns/no-early-flush.ts) | – | – | – |
-| [no-event-delegation](src/patterns/no-event-delegation.ts) | – | – | `dom-size`, `span-blocking` |
-| [no-yield-before-work](src/patterns/no-yield-before-work.ts) | `span-blocking` | `span-blocking` | `span-blocking`, `span-script` |
-| [offscreen-render-cost](src/patterns/offscreen-render-cost.ts) | `dom-size` | `dom-size` | `dom-size`, `dropped-frames`, `span-blocking`, `span-style` |
-| [over-fetching-api](src/patterns/over-fetching-api.ts) | `page-weight` | – | `page-weight`, `uncompressed-text` |
-| [oversized-image](src/patterns/oversized-image.ts) | `oversized-image`, `page-weight` | – | `oversized-image`, `page-weight`, `slow-request` |
-| [polling-spam](src/patterns/polling-spam.ts) | `chatty-action`, `never-idle` | – | `chatty-action`, `never-idle`, `span-layout` |
-| [print-stylesheet-blocking](src/patterns/print-stylesheet-blocking.ts) | `render-blocking` | – | `render-blocking` |
-| [quadratic-dedupe](src/patterns/quadratic-dedupe.ts) | `span-blocking` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [no-event-delegation](src/patterns/no-event-delegation.ts) | `many-listeners` | – | `dom-size`, `many-listeners`, `span-blocking`, `span-layout-time`, `span-style` |
+| [no-yield-before-work](src/patterns/no-yield-before-work.ts) | – | – | `span-blocking`, `span-script` |
+| [offscreen-render-cost](src/patterns/offscreen-render-cost.ts) | `span-layout-time` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-layout-time`, `span-style` |
+| [over-fetching-api](src/patterns/over-fetching-api.ts) | `heavy-resource`, `page-weight` | – | `heavy-resource`, `page-weight`, `uncompressed-text` |
+| [oversized-image](src/patterns/oversized-image.ts) | `heavy-resource`, `oversized-image`, `page-weight` | – | `heavy-resource`, `oversized-image`, `page-weight`, `repeat-download`, `slow-request` |
+| [polling-spam](src/patterns/polling-spam.ts) | `chatty-action`, `never-idle` | – | `chatty-action`, `duplicate-request`, `never-idle`, `slow-action`, `span-layout` |
+| [print-stylesheet-blocking](src/patterns/print-stylesheet-blocking.ts) | – | – | – |
+| [quadratic-dedupe](src/patterns/quadratic-dedupe.ts) | `span-blocking`, `span-script` | – | `dropped-frames`, `slow-action`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
 | [redirect-chain](src/patterns/redirect-chain.ts) | – | – | – |
-| [regex-backtracking](src/patterns/regex-backtracking.ts) | `span-blocking` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [regex-backtracking](src/patterns/regex-backtracking.ts) | `span-blocking` | – | `dropped-frames`, `slow-action`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
 | [render-blocking-script](src/patterns/render-blocking-script.ts) | `render-blocking` | – | `render-blocking` |
-| [render-hidden-tabs](src/patterns/render-hidden-tabs.ts) | `dom-size` | `dom-size` | `dom-size` |
+| [render-hidden-tabs](src/patterns/render-hidden-tabs.ts) | `dom-size` | `dom-size` | `dom-size`, `span-layout-time` |
 | [request-waterfall](src/patterns/request-waterfall.ts) | `request-waterfall` | – | `request-waterfall` |
-| [retry-storm](src/patterns/retry-storm.ts) | – | – | `no-request-timeout` |
-| [revalidate-every-load](src/patterns/revalidate-every-load.ts) | – | – | `render-blocking` |
-| [runtime-style-injection](src/patterns/runtime-style-injection.ts) | `span-style` | – | `dom-size`, `dropped-frames`, `memory-leak`, `span-blocking`, `span-interaction`, `span-style`, `vital-inp` |
-| [structured-clone-transfer](src/patterns/structured-clone-transfer.ts) | – | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [sync-storage-on-input](src/patterns/sync-storage-on-input.ts) | – | – | `span-blocking`, `span-script` |
-| [sync-storage-read-on-load](src/patterns/sync-storage-read-on-load.ts) | – | – | `span-blocking` |
-| [sync-xhr-click](src/patterns/sync-xhr-click.ts) | `span-interaction`, `vital-inp` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
-| [third-party-bloat](src/patterns/third-party-bloat.ts) | – | – | – |
+| [retry-storm](src/patterns/retry-storm.ts) | `fault-request-storm` | – | `fault-request-storm`, `no-request-timeout` |
+| [revalidate-every-load](src/patterns/revalidate-every-load.ts) | `repeat-download` | – | `repeat-download` |
+| [runtime-style-injection](src/patterns/runtime-style-injection.ts) | `span-style` | `span-style` | `dom-size`, `dropped-frames`, `memory-leak`, `span-blocking`, `span-interaction`, `span-layout-time`, `span-style`, `vital-inp` |
+| [structured-clone-transfer](src/patterns/structured-clone-transfer.ts) | `span-blocking`, `span-script` | – | `span-blocking`, `span-script` |
+| [sync-storage-on-input](src/patterns/sync-storage-on-input.ts) | `span-script` | – | `span-blocking`, `span-script` |
+| [sync-storage-read-on-load](src/patterns/sync-storage-read-on-load.ts) | – | – | `span-layout-time` |
+| [sync-xhr-click](src/patterns/sync-xhr-click.ts) | `span-blocking`, `span-interaction`, `vital-inp` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [third-party-bloat](src/patterns/third-party-bloat.ts) | `third-party-heavy` | – | `third-party-heavy` |
 | [unbounded-memo-cache](src/patterns/unbounded-memo-cache.ts) | `memory-leak` | – | `memory-leak` |
 | [unbundled-modules](src/patterns/unbundled-modules.ts) | – | – | – |
 | [uncompressed-bundle](src/patterns/uncompressed-bundle.ts) | `uncompressed-text` | – | `render-blocking`, `uncompressed-text` |
-| [unthrottled-scroll](src/patterns/unthrottled-scroll.ts) | `span-layout` | – | `span-blocking`, `span-layout` |
-| [unused-preload](src/patterns/unused-preload.ts) | – | – | `page-weight`, `uncompressed-text` |
+| [unthrottled-scroll](src/patterns/unthrottled-scroll.ts) | `span-layout` | – | `span-blocking`, `span-layout`, `span-script` |
+| [unused-preload](src/patterns/unused-preload.ts) | `page-weight` | – | `heavy-resource`, `page-weight`, `uncompressed-text` |
 | [waterfall-amplifies-delay](src/patterns/waterfall-amplifies-delay.ts) | `request-waterfall` | – | `fault-new-error`, `no-request-timeout`, `request-waterfall` |
-| [worker-offload](src/patterns/worker-offload.ts) | `span-blocking` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
+| [worker-offload](src/patterns/worker-offload.ts) | `span-blocking`, `span-script` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
 <!-- scan-check:end -->
 
 ## Layout
