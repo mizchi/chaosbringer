@@ -29,7 +29,10 @@ describe("runScan", () => {
         return;
       }
       const html: Record<string, string> = {
-        "/": page(`<a href="/list">list</a> <a href="/thrash">thrash</a> <a href="/missing">missing</a>`),
+        // /docs/ exists and /docs does not, as on many servers: the link must
+        // be followed as written, not with its trailing slash stripped.
+        "/": page(`<a href="/list">list</a> <a href="/thrash">thrash</a> <a href="/missing">missing</a> <a href="/docs/">docs</a>`),
+        "/docs/": page("<p>docs</p>"),
         // No catch, no response.ok check: a 500's JSON has no `items`.
         "/list": page(`<ul id="l"></ul><script>
           fetch("/api/items").then((r) => r.json()).then((d) => {

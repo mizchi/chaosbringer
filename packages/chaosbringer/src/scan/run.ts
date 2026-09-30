@@ -174,7 +174,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     log("[scan] chaos crawls skipped: no same-site fetch / XHR request seen");
   }
 
-  const analysis = analyzeScan(cleanFull, chaos, { hangReleaseMs });
+  const analysis = analyzeScan(cleanFull, chaos, { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) });
   const files: ScanFiles = {
     json: join(outDir, "scan-report.json"),
     markdown: join(outDir, "scan-report.md"),

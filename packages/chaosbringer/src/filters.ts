@@ -58,6 +58,25 @@ export function escapeRegExp(s: string): string {
 }
 
 /**
+ * The URL to navigate to for a link: `raw` without its fragment and with the
+ * host lowercased, and otherwise as the site wrote it. Unlike `normalizeUrl`
+ * a trailing slash is kept: `/docs/` and `/docs` are two resources to many
+ * servers (one of them often a 404 or a redirect), so the crawler visits the
+ * one the link names and uses `normalizeUrl` only to tell whether it has
+ * seen the page. Invalid input round-trips unchanged.
+ */
+export function visitUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.hash = "";
+    u.hostname = u.hostname.toLowerCase();
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Canonical form used for queue dedupe. Drops the fragment, lowercases the
  * host, and treats `http://x` and `http://x/` as the same URL. Trailing
  * slashes on non-root paths are stripped so `/about` and `/about/` don't
