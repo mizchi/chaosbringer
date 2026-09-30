@@ -1,13 +1,17 @@
 import { definePattern, html, json, page, type Variant } from "../pattern.js";
 
-const PRODUCTS = 4000;
+// 12,000, not 4,000: on a CI runner the parse of a 4,000-product blob came
+// to ~6 ms of script against ~2 for the fixed page, under the 5 ms the
+// script-time check asks the fix to save. Three times the products is three
+// times the parse; the fixed page still inlines 24.
+const PRODUCTS = 12000;
 const FIRST_VIEW = 24;
 
 // A catalogue page rendered on the server and hydrated on the client. The
 // server serialises the client's initial state into the HTML (a
 // <script type="application/json"> blob that the client JSON.parse()s). The
 // slow page's server puts the whole catalogue in it, every product with its
-// description, specs and reviews (~1.5 MB), although the first view shows
+// description, specs and reviews (~4.5 MB), although the first view shows
 // 24 cards. The fixed page's server inlines those 24 only; the rest comes
 // from /api/products when the reader asks for more.
 const products = Array.from({ length: PRODUCTS }, (_, i) => ({
@@ -74,10 +78,11 @@ export default definePattern({
     metric: "page.network.totalEncodedKB",
     direction: "lower",
     minImprovement: { ratio: 10, absolute: 500 },
-    // slow: ~1.5 MB of HTML; fixed: ~10 KB.
+    // slow: ~4.5 MB of HTML; fixed: ~10 KB.
     alsoExpect: [
       {
-        // JSON.parse of the blob (and the HTML parser's pass over it): ~12 ms against ~3 ms.
+        // JSON.parse of the blob (and the HTML parser's pass over it): ~20–35 ms
+        // against ~2–3 ms.
         metric: "render.scriptMs",
         direction: "lower",
         minImprovement: { ratio: 2, absolute: 5 },
