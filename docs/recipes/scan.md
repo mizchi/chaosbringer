@@ -172,6 +172,14 @@ proxy's key instead. Chromium applies either one to every connection that
 goes through the proxy, so it stops verifying the real sites' certificates
 as well.
 
+If the crawl barely reached the site (one page with no links, or a nearly
+empty start page), the report opens with a warning instead of reading as a
+clean site. That happens with a bot check, a rate limit, a consent wall, or a
+site that needs `--storage-state`. The crawler's own navigation errors
+(`page.goto: Timeout …`) are not reported as the site's exceptions; the page
+that failed to load is. A page that fails in a chaos crawl counts against the
+fault only if the fault hit that page's load.
+
 A same-site URL that redirects to another origin (a `/chat` that 302s to a
 Discord invite) is recorded with the page's `redirectedTo` and counted as a
 blocked external navigation; nothing of the other site is crawled or

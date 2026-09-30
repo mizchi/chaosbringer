@@ -452,6 +452,24 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(analyzeScan(fakeReport(ads, [])).findings).toEqual([]);
   });
 
+  it("leaves the crawler's own navigation errors to the page rules", () => {
+    const goto = cluster("exception", "page.goto: Timeout 30000ms exceeded.\nCall log: navigating to ...", [`${U}/slow`]);
+    const clean = fakeReport([fakePage(`${U}/slow`)], []);
+    const chaos = fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] });
+    expect(rules(analyzeScan(fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] })))).toEqual([
+      "page-load-failed",
+    ]);
+    expect(rules(analyzeScan(clean, [{ fault: "hang", report: chaos }]))).toEqual(["fault-page-broken"]);
+  });
+
+  it("does not blame a fault for a page whose measured load it never touched", () => {
+    const clean = fakeReport([fakePage(`${U}/doc`)], []);
+    const untouched = fakeReport([fakePage(`${U}/doc`, fakeSpan("/doc :: load"), { status: "timeout" })], []);
+    expect(analyzeScan(clean, [{ fault: "hang", report: untouched }]).findings).toEqual([]);
+    const hit = fakeReport([fakePage(`${U}/doc`, fakeSpan("/doc :: load", { faults: [SCAN_FAULT_NAMES.hang] }), { status: "timeout" })], []);
+    expect(rules(analyzeScan(clean, [{ fault: "hang", report: hit }]))).toEqual(["fault-page-broken"]);
+  });
+
   it("counts only requests to the failing endpoints as a retry storm, not a full-page fallback", () => {
     const withRequests = (urls: string[]) =>
       span("/a :: click #nav", (s) => {
@@ -547,6 +565,25 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 });
 
+describe("analyzeScan: coverage warnings", () => {
+  it("says so when the crawl barely reached the site, and not otherwise", () => {
+    const tiny = fakePage(`${U}/`, undefined, {
+      perfPage: perfPage({ network: { totalRequests: 3, totalEncodedKB: 15, fromCacheCount: 0 } }),
+    });
+    const w = analyzeScan(fakeReport([tiny], [])).coverageWarnings;
+    expect(w).toHaveLength(2);
+    expect(w[0]).toMatch(/only the start page/);
+    expect(w[1]).toMatch(/nearly empty \(3 requests, 15 KB\)/);
+
+    const normal = fakePage(`${U}/`, undefined, {
+      links: [`${U}/a`],
+      perfPage: perfPage({ network: { totalRequests: 40, totalEncodedKB: 900, fromCacheCount: 0 } }),
+    });
+    expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
+    expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
+  });
+});
+
 describe("RULE_PATTERNS", () => {
   it("names only patterns that exist in the catalog", () => {
     const dir = join(__dirname, "..", "..", "..", "..", "examples", "perf-patterns", "src", "patterns");
@@ -617,7 +654,7 @@ describe("deriveScanEndpoints", () => {
 
 describe("format", () => {
   it("writes a table, a section per finding and catalog links", () => {
-    const report = fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom | pipe")] });
+    const report = fakeReport([fakePage(`${U}/`, undefined, { links: [`${U}/a`] })], [], { errorClusters: [cluster("exception", "boom | pipe")] });
     const analysis = analyzeScan(report);
     const md = formatScanMarkdown(analysis, {
       url: U,

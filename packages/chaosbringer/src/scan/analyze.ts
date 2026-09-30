@@ -53,6 +53,13 @@ export interface ScanAnalysis {
   counts: Record<ScanSeverity, number>;
   /** Failures caused by the scan's environment, left out of `findings` (see `ENVIRONMENT_CAUSES`). */
   environment: ScanEnvironmentNote[];
+  /**
+   * Why the findings may not cover the site: the clean crawl barely reached
+   * it (one page, no links, a near-empty start page). A bot check, a rate
+   * limit or an error page reads as a clean site with few findings; this says
+   * so instead. Empty when the crawl looked normal.
+   */
+  coverageWarnings: string[];
 }
 
 /** How many locations a finding lists. */
@@ -349,7 +356,28 @@ export function analyzeScan(
   );
   const counts: Record<ScanSeverity, number> = { high: 0, medium: 0, low: 0 };
   for (const f of findings) counts[f.severity]++;
-  return { findings, counts, environment };
+  return { findings, counts, environment, coverageWarnings: coverageWarnings(baseline) };
+}
+
+/** Requests / KB under which a start page is suspiciously empty for a real site. */
+const NEAR_EMPTY_START = { requests: 5, kb: 50 };
+
+function coverageWarnings(report: CrawlReport): string[] {
+  const out: string[] = [];
+  const start = report.pages[0];
+  if (!start) return ["The crawl visited no page."];
+  const net = start.perfPage?.network;
+  if (report.pages.length <= 1 && start.links.length === 0) {
+    out.push(
+      "The crawl reached only the start page, and it had no links to follow. The site may have served a bot check, a rate limit or an error page, or it needs a login (--storage-state) or links the crawler cannot see. The findings cover that one page.",
+    );
+  }
+  if (net && net.totalRequests <= NEAR_EMPTY_START.requests && net.totalEncodedKB < NEAR_EMPTY_START.kb) {
+    out.push(
+      `The start page was nearly empty (${net.totalRequests} requests, ${fmt(net.totalEncodedKB)} KB). If the site normally shows more, it served the crawler something else (a bot check, a consent wall); re-run later or from another network.`,
+    );
+  }
+  return out;
 }
 
 function withoutEnvironmentErrors(report: CrawlReport): CrawlReport {
@@ -372,6 +400,17 @@ function environmentPages(report: CrawlReport): Set<string> {
 }
 
 const NETWORK_EXCEPTION = /Failed to fetch|NetworkError|Load failed|network error/i;
+
+/**
+ * The crawler's own navigation failing (`page.goto: Timeout 30000ms
+ * exceeded`), recorded as an exception on the page. Not the site's script:
+ * the page's failed or timed-out load is reported by the page rules.
+ */
+const CRAWLER_NAVIGATION_ERROR = /^(?:page\.(?:goto|reload|goBack|goForward|waitForNavigation|waitForLoadState):|Navigation to .* is interrupted)/;
+
+function isCrawlerError(c: ErrorCluster): boolean {
+  return c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(c.sample.message);
+}
 
 function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[] {
   const byCode = new Map<string, { count: number; hosts: Set<string> }>();
@@ -514,6 +553,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new 
   for (const c of report.errorClusters ?? []) {
     const r = ERROR_RULES[c.type];
     if (!r) continue;
+    if (isCrawlerError(c)) continue;
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;
     }
@@ -563,6 +603,7 @@ function resilienceFindings(
       if (known.has(c.key)) continue;
       if (c.type === "network" || c.type === "invariant-violation") continue;
       if (c.type === "console" && FAULT_ECHO.test(c.sample.message)) continue;
+      if (isCrawlerError(c)) continue;
       const entry = fresh.get(c.key) ?? { c, count: 0, urls: new Set<string>(), faults: [] };
       entry.count += c.count;
       for (const u of c.urls) entry.urls.add(u);
@@ -595,6 +636,9 @@ function resilienceFindings(
   for (const { fault, report } of runs) {
     for (const p of report.pages) {
       if (!cleanOk.has(p.url) || (p.status !== "error" && p.status !== "timeout")) continue;
+      // A measured load that the fault never touched failed for another
+      // reason (a slow server at that moment): not this fault's doing.
+      if (p.perf && !(p.perf.faults ?? []).includes(SCAN_FAULT_NAMES[fault])) continue;
       const entry = broke.get(p.url) ?? { status: p.status, faults: [] };
       entry.faults.push(fault);
       broke.set(p.url, entry);
