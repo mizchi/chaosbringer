@@ -64,7 +64,7 @@ describe("analyzeScan: bugs", () => {
         errorClusters: [
           cluster("console", "something logged"),
           cluster("exception", "TypeError: x is undefined", [`${U}/`, `${U}/a`], 3),
-          cluster("network", "net::ERR_ABORTED"),
+          cluster("network", "https://api.test/x - net::ERR_NAME_NOT_RESOLVED"),
         ],
       }),
     );
@@ -392,6 +392,7 @@ describe("analyzeScan: false positives seen on real sites", () => {
         cluster("network", "https://logx.optimizely.com/v1/events - net::ERR_TUNNEL_CONNECTION_FAILED", [`${U}/`], 40),
         cluster("console", "Failed to load resource: net::ERR_TUNNEL_CONNECTION_FAILED", [`${U}/`], 40),
         cluster("network", "https://www.youtube.com/embed/x - net::ERR_BLOCKED_BY_CLIENT", [`${U}/`], 2),
+        cluster("network", "https://www.google-analytics.com/g/collect?v=2 - net::ERR_ABORTED", [`${U}/`], 1),
         cluster("exception", "TypeError: real bug"),
       ],
     });
@@ -400,6 +401,7 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(r.environment).toEqual([
       { code: "net::ERR_TUNNEL_CONNECTION_FAILED", count: 80, hosts: ["logx.optimizely.com"] },
       { code: "net::ERR_BLOCKED_BY_CLIENT", count: 2, hosts: ["www.youtube.com"] },
+      { code: "net::ERR_ABORTED", count: 1, hosts: ["www.google-analytics.com"] },
     ]);
   });
 
@@ -435,6 +437,16 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(1500) }], opts).findings).toEqual([]);
     // Started at 50 ms, before anything painted: the page was waiting on it.
     expect(rules(analyzeScan(cleanRun, [{ fault: "hang", report: hangRun(50) }], opts))).toEqual(["no-request-timeout"]);
+  });
+
+  it("does not grade a client-side route change as a chatty action or its heap as growth", () => {
+    const route = span("/ :: click a#docs", (s) => {
+      s.network.requestCount = 30;
+      s.memory = { ...s.memory, jsHeapDeltaMB: 20 };
+    });
+    const stay = span("/ :: click #more", (s) => (s.network.requestCount = 30));
+    const r = analyzeScan(fakeReport([], [{ ...fakeAction(route), urlChanged: true }, fakeAction(stay)]));
+    expect(r.findings.map((f) => [f.rule, f.where])).toEqual([["chatty-action", ["/ :: click #more"]]]);
   });
 
   it("does not grade a click that navigated as a chatty or slow action", () => {

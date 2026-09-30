@@ -1131,6 +1131,12 @@ export interface ActionResult {
    * `perf.actions` not false; a skipped action records no span.
    */
   perf?: PerfSpanReport;
+  /**
+   * True when the page's URL was different after the action: it followed a
+   * link, changed route through the History API, or changed the hash. The
+   * action's span then measured loading that view. Absent when it stayed put.
+   */
+  urlChanged?: true;
 }
 
 /**

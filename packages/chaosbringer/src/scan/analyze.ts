@@ -171,12 +171,23 @@ export interface AnalyzeScanOptions {
 }
 
 /**
- * Request failures that come from where the scan runs, not from the site: a
- * proxy that refused the host, or the crawler's own external-navigation
- * guard (which also stops cross-origin iframe documents). Reported once as a
- * note, never as a finding about the site.
+ * Request failures the scan itself causes, not the site: a proxy on the
+ * scanning machine that refused the host, the crawler's own external-
+ * navigation guard (which also stops cross-origin iframe documents), and
+ * requests cancelled when the crawl navigated on (`ERR_ABORTED`: beacons and
+ * prefetches cut off mid-flight; an app's own AbortController shows the same
+ * way, and is deliberate). Reported once as a note, never as a finding.
  */
-export const ENVIRONMENT_ERROR = /net::ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH_UNSUPPORTED|BLOCKED_BY_CLIENT)\b/;
+export const ENVIRONMENT_ERROR = /net::ERR_(TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH_UNSUPPORTED|BLOCKED_BY_CLIENT|ABORTED)\b/;
+
+/** Why each `ENVIRONMENT_ERROR` code is not the site's, for the report. */
+export const ENVIRONMENT_REASONS: Record<string, string> = {
+  "net::ERR_TUNNEL_CONNECTION_FAILED": "a proxy on the scanning machine refused the host",
+  "net::ERR_PROXY_CONNECTION_FAILED": "the scanning machine's proxy could not be reached",
+  "net::ERR_PROXY_AUTH_UNSUPPORTED": "the scanning machine's proxy wants authentication",
+  "net::ERR_BLOCKED_BY_CLIENT": "the crawler's external-navigation guard (it also stops cross-origin iframe documents)",
+  "net::ERR_ABORTED": "cancelled in flight, mostly by the crawl navigating on",
+};
 
 export interface ScanEnvironmentNote {
   /** The `net::ERR_*` code. */
@@ -437,7 +448,7 @@ const ERROR_RULES: Record<
     severity: "low",
     category: "bug",
     title: "Request failed",
-    hint: "A request failed at the transport level (DNS, connection, CORS, blocked, or aborted). net::ERR_ABORTED is often a navigation cancelling in-flight requests and harmless.",
+    hint: "A request failed at the transport level: DNS, connection refused, TLS, or a CORS or mixed-content block. (Cancelled and proxy-refused requests are not counted; see the report's notes.)",
   },
   "invariant-violation": {
     rule: "invariant-violation",
@@ -784,7 +795,10 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
   }
 
   // Per step.
-  out.push(...spanFindings(reportSpans(report)));
+  // Actions after which the page's URL was different: route changes the
+  // History API made count as moving too, though they create no document.
+  const moved = new Set(report.actions.filter((a) => a.urlChanged && a.perf).map((a) => a.perf!));
+  out.push(...spanFindings(reportSpans(report), moved));
 
   // Pages that never went quiet.
   const restless: Located[] = report.pages
@@ -851,8 +865,13 @@ interface SpanRule {
   thresholds: { warn: number; poor: number };
   /** Severity when only `warn` is crossed (`poor` is always high). */
   warnSeverity: ScanSeverity;
-  value: (s: PerfSpanReport) => number | undefined;
+  value: (s: PerfSpanReport, ctx: SpanContext) => number | undefined;
   line: (s: PerfSpanReport, v: number) => string;
+}
+
+interface SpanContext {
+  /** The step took the user to another view (see `navigated`). */
+  navigated: (s: PerfSpanReport) => boolean;
 }
 
 const SPAN_RULES: SpanRule[] = [
@@ -935,7 +954,8 @@ const SPAN_RULES: SpanRule[] = [
     hint: "The step left that much more JS memory in use. If it keeps growing across repeats, something is retained: a cache with no bound, closures over large data, or removed DOM held in JS.",
     thresholds: SCAN_THRESHOLDS.heapDeltaMB,
     warnSeverity: "medium",
-    value: (s) => s.memory.jsHeapDeltaMB,
+    // Not a step that moved to another view: that is the new view's heap.
+    value: (s, ctx) => (ctx.navigated(s) ? undefined : s.memory.jsHeapDeltaMB),
     line: (s, v) => `${s.key}: +${fmt(v)} MB heap (${fmt(s.memory.jsHeapUsedMB)} MB in use)`,
   },
   {
@@ -945,7 +965,7 @@ const SPAN_RULES: SpanRule[] = [
     thresholds: SCAN_THRESHOLDS.actionRequests,
     warnSeverity: "medium",
     // A click that navigated loaded a page: its requests are that page's.
-    value: (s) => (isLoad(s) || navigated(s) ? undefined : s.network.requestCount),
+    value: (s, ctx) => (isLoad(s) || ctx.navigated(s) ? undefined : s.network.requestCount),
     line: (s, v) => `${s.key}: ${fmt(v)} requests, ${fmt(s.network.encodedKB)} KB`,
   },
   {
@@ -956,7 +976,7 @@ const SPAN_RULES: SpanRule[] = [
     warnSeverity: "medium",
     // Not a click that navigated (that is a page load, graded by the vitals),
     // and not a step whose settle hit its cap (that is `never-idle`).
-    value: (s) => (isLoad(s) || navigated(s) || s.capped ? undefined : effectiveMs(s)),
+    value: (s, ctx) => (isLoad(s) || ctx.navigated(s) || s.capped ? undefined : effectiveMs(s)),
     line: (s, v) => `${s.key}: ${fmt(v)}ms until its work finished (span ${fmt(s.durationMs)}ms)`,
   },
   {
@@ -984,13 +1004,14 @@ const API_TYPES = new Set(["Fetch", "XHR"]);
 /** CDP resource types a browser should be able to cache across pages. */
 const STATIC_TYPES = new Set(["Script", "Stylesheet", "Image", "Font", "Media"]);
 
-function spanFindings(spans: readonly PerfSpanReport[]): ScanFinding[] {
+function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfSpanReport>): ScanFinding[] {
   const out: ScanFinding[] = [];
+  const ctx: SpanContext = { navigated: (s) => navigated(s) || moved.has(s) };
   for (const r of SPAN_RULES) {
     // Worst value per perfKey: a key the crawl hit several times is one place.
     const byKey = new Map<string, Located>();
     for (const s of spans) {
-      const v = r.value(s);
+      const v = r.value(s, ctx);
       if (v === undefined || v < r.thresholds.warn) continue;
       const prev = byKey.get(s.key);
       if (!prev || v > prev.value) byKey.set(s.key, { where: s.key, value: v, line: r.line(s, v) });

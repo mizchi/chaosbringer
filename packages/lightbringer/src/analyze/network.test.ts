@@ -146,11 +146,22 @@ describe("buildSpanNetwork settledMs", () => {
     expect(none).not.toHaveProperty("settledMs");
     expect(none.settledUnfinished).toBe(true);
   });
-  it("counts a failed / aborted request at the time it failed, keeping its detail entry unfinished", () => {
+  it("counts a failed / aborted request at the time it failed, and lists it as failed with that duration", () => {
     const aborted: NetReq = { ...req(1003, undefined), failedEpochMs: 1150 };
     const net = buildSpanNetwork(click, [req(1002, 1040), aborted], "example.com");
     expect(net.settledMs).toBe(150);
     expect(net).not.toHaveProperty("settledUnfinished");
-    expect(net.requests.find((r) => r.durationMs === 0)).toMatchObject({ unfinished: true });
+    const entry = net.requests.find((r) => r.failed);
+    expect(entry).toMatchObject({ durationMs: 147, failed: true });
+    expect(entry).not.toHaveProperty("unfinished");
+  });
+  it("keeps a request that failed late in the capped slowest-first list", () => {
+    const span = { startEpochMs: 0, endEpochMs: 10_000 };
+    // A request held open until a timeout failed it, among 20 finished ones.
+    const finished = Array.from({ length: 20 }, (_, i) => req(0, 100 + i, `https://example.com/s${i}`));
+    const hung: NetReq = { ...req(10, undefined, "https://example.com/api/hung"), failedEpochMs: 8010 };
+    const net = buildSpanNetwork(span, [...finished, hung], "example.com");
+    expect(net.requests).toHaveLength(20);
+    expect(net.requests[0]).toMatchObject({ url: "https://example.com/api/hung", durationMs: 8000, failed: true });
   });
 });

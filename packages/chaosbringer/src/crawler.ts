@@ -2045,11 +2045,15 @@ export class ChaosCrawler {
     page: Page,
     span: SpanHandle | null,
     result: ActionResult | null,
+    urlBefore: string,
   ): Promise<void> {
     const settleCapped =
       result !== null && this.settle.mode === "adaptive"
         ? await this.settleAdaptively(page, ACTION_SETTLE_CAP_MS, "action")
         : false;
+    // A new document, a History API route change, or a hash change: the step
+    // took the user somewhere else, so what it cost is that view's load.
+    if (result !== null && page.url() !== urlBefore) result.urlChanged = true;
     if (result === null) this.perf.cancelAction(span);
     else await this.perf.endAction(span, result, { settleCapped });
   }
@@ -2078,9 +2082,10 @@ export class ChaosCrawler {
       timestamp: Date.now(),
     };
     this.currentAction = placeholder;
+    const urlBefore = page.url();
     const span = await this.beginActionSpan();
     const result = await perform();
-    await this.endActionSpan(page, span, result);
+    await this.endActionSpan(page, span, result, urlBefore);
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
@@ -2527,6 +2532,7 @@ export class ChaosCrawler {
     for (const action of actions) {
       const timestamp = Date.now();
       let result: ActionResult;
+      const urlBefore = page.url();
       const span = await this.beginActionSpan();
       try {
         if (action.blockedExternal) {
@@ -2596,7 +2602,7 @@ export class ChaosCrawler {
           timestamp,
         };
       }
-      await this.endActionSpan(page, span, result);
+      await this.endActionSpan(page, span, result, urlBefore);
       this.recordAction(result, url, undefined);
       this.recordReplayOutcome(action, result);
       await this.pauseBetweenActions(page);

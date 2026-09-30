@@ -145,6 +145,8 @@ The report leaves them out of the findings and lists them once, under
 - `net::ERR_BLOCKED_BY_CLIENT`: the crawler's own external-navigation
   guard, which also stops cross-origin iframe documents such as video
   embeds.
+- `net::ERR_ABORTED`: a request cancelled in flight, mostly beacons and
+  prefetches cut off when the crawl navigated on.
 
 If every page fails with `net::ERR_CERT_AUTHORITY_INVALID`, the proxy
 intercepts TLS and Chromium does not trust its CA. Playwright's Chromium
