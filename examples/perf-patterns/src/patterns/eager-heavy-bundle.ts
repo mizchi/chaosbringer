@@ -7,7 +7,7 @@ import { definePattern, handler, html, page, type Variant } from "../pattern.js"
 // for it before the page is interactive. The fixed page import()s it on the
 // first click, so the load does not run it at all.
 const CHART_JS = `
-const TABLE_SIZE = 400000;
+const TABLE_SIZE = 1200000;
 const sin = new Float64Array(TABLE_SIZE);
 const palette = [];
 for (let i = 0; i < TABLE_SIZE; i++) {
@@ -15,7 +15,7 @@ for (let i = 0; i < TABLE_SIZE; i++) {
   if (i % 50 === 0) palette.push("hsl(" + (i % 360) + ", 60%, " + (40 + (i % 20)) + "%)");
 }
 const glyphs = new Map();
-for (let i = 0; i < 60000; i++) glyphs.set("g" + i, { w: (i * 7) % 13, h: (i * 11) % 17, path: "M0 0L" + i + " " + (i % 97) });
+for (let i = 0; i < 180000; i++) glyphs.set("g" + i, { w: (i * 7) % 13, h: (i * 11) % 17, path: "M0 0L" + i + " " + (i % 97) });
 export function drawChart(el, values) {
   el.innerHTML = values
     .map((v, i) => '<div class="bar" style="width:' + Math.round(v * 3) + 'px;background:' + palette[i % palette.length] + '"></div>')
@@ -76,7 +76,9 @@ export default definePattern({
     // whole task depending on which side of 50 ms the setup lands).
     metric: "render.scriptMs",
     direction: "lower",
-    // slow: ~60 ms running the library's setup; fixed: ~3 ms (the app module alone).
+    // slow: ~240 ms running the library's setup on a dev machine. A CI runner
+    // measured 23 ms for a setup a third this size, so it is sized to stay
+    // past 25 ms there. fixed: ~3-6 ms (the app module alone).
     minImprovement: { ratio: 4, absolute: 25 },
   },
 });

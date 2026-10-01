@@ -9,11 +9,30 @@ This monorepo ships **four** npm packages from one git repo. Each has its own ve
 | V8 coverage primitives | `@mizchi/playwright-v8-coverage` | `packages/playwright-v8-coverage/` | Awaiting first publish (manual OIDC bootstrap) |
 | Network/lifecycle/runtime fault primitives | `@mizchi/playwright-faults` | `packages/playwright-faults/` | Awaiting first publish (manual OIDC bootstrap) |
 
-## TL;DR — releasing chaosbringer 0.8.0+ requires deps on npm first
+## TL;DR — release the dependencies first
 
-`packages/chaosbringer/package.json` declares `workspace:^` deps on `@mizchi/playwright-faults` and `@mizchi/playwright-v8-coverage`. At publish time pnpm rewrites `workspace:^` to the **published** version of each dep. If the dep is not on npm yet, the chaosbringer tarball will fail to install for any consumer fetching it from npm.
+`chaosbringer` declares `workspace:^` dependencies on `@mizchi/playwright-faults`, `@mizchi/playwright-v8-coverage` and `lightbringer`. At publish time pnpm rewrites each one to the version **in that package's package.json**, and a consumer then gets that version **from npm**. In the workspace the dependency is the source tree, so local CI cannot tell when the two differ.
 
-Therefore: **before triggering chaosbringer 0.8.0**, `@mizchi/playwright-faults@0.1.0` and `@mizchi/playwright-v8-coverage@0.1.0` MUST be on npm.
+They differed in chaosbringer@0.10.0. It imported `buildDecisionHelperSource`, which playwright-faults gained after 0.2.0. playwright-faults was never released again, so 0.10.0 depended on `^0.2.0` and failed at `import "chaosbringer"` with "does not provide an export named …". Downstream users had to pin 0.9.0.
+
+So a release goes in dependency order:
+
+1. `@mizchi/playwright-faults`, `@mizchi/playwright-v8-coverage`, `lightbringer`: merge their release PRs first. Each one needs a release whenever its shipped source changed since its last tag, even if only chaosbringer uses the change.
+2. `chaosbringer`, after those versions are on npm.
+
+`publish.yml` enforces this. Before publishing it runs `scripts/check-publish-deps.mjs <package dir>`, which refuses the publish when:
+
+- a workspace dependency's current version is not on npm. It waits up to 10 minutes first, for a dependency released in the same batch.
+- a workspace dependency's shipped files changed since the tag of its current version (`<dir>-v<version>`). For a version with no tag in this repo (lightbringer 0.3.1 was released from its old repository), it compares the tarball npm serves with what the tree packs instead.
+- the package, packed as `pnpm publish` packs it and installed into an empty directory from npm, fails to import any of its `exports` entries.
+
+Run it locally before cutting a release (after `pnpm -r build`):
+
+```bash
+pnpm check:publish packages/chaosbringer
+```
+
+A refused publish is recovered by releasing the dependency it names, then re-running publish.yml with `workflow_dispatch` and `package_dir: chaosbringer`.
 
 ## Step 1 — bootstrap OIDC trusted publishing for new packages (one-time, mizchi)
 
@@ -119,7 +138,7 @@ Reference `publish.yml` skeleton (see this PR for the actual implementation):
 
 ## Anti-checklist (mistakes from this repo's history)
 
-- **Don't bump `chaosbringer` to a version whose deps aren't yet on npm.** The published tarball will be broken even though local CI passes.
+- **Don't release `chaosbringer` while a dependency has unreleased changes.** The published tarball will be broken even though local CI passes (chaosbringer@0.10.0). `check-publish-deps.mjs` refuses it; don't work around it with a manual `npm publish`.
 - **Don't trigger `release-please.yml` immediately after a workspace-path migration.** Path-based commit matching may skip in-flight `feat:` commits. Either wait for a clean post-migration cycle or do a manual release for the transitional version (chaosbringer's 0.6.0 in this repo).
 - **Don't add `--provenance` to local manual publishes.** It requires CI OIDC and fails locally with `Automatic provenance generation not supported for provider: null`.
 - **Don't forget to add `prepare: tsc` to a new workspace package** that other workspace packages depend on. Without it, the dependent's prepare runs on fresh install before the dep is built and tsc fails with `Cannot find module @mizchi/<x>`.
