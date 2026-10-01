@@ -25,7 +25,7 @@ import {
 } from "./perf-session.js";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import { ACTION_SETTLE_CAP_MS } from "./settle.js";
-import { SpanFaultTags } from "./perf-faults.js";
+import { attributeRequestFaults, type RequestFaultNote, SpanFaultTags } from "./perf-faults.js";
 import { actionKind, actionRouteUrl, loadSpanName, perfKey, perfSlug } from "./perf-key.js";
 import type { ResolvedPerfOptions } from "./perf-options.js";
 import { toLastActionPerf, toPagePerfSummary, toPerfSpanReport } from "./perf-trim.js";
@@ -68,7 +68,15 @@ export class PagePerf {
   private loadHandle: SpanHandle | null = null;
   private readonly openActions = new Set<SpanHandle>();
   private readonly owners: SpanOwner[] = [];
+  /** Each owner's span index in `controller.spans`, for its window. */
+  private readonly ownerSpans: number[] = [];
+  /** The owner index each recorded span's handle got. */
+  private readonly ownerOf = new Map<SpanHandle, number>();
   private readonly faultTags: SpanFaultTags<SpanHandle>;
+  /** Requests the route handler saw on this visit, per URL. */
+  private readonly routedByUrl = new Map<string, number>();
+  /** Faults injected on a request, placed on their spans at `finish()`. */
+  private readonly requestFaults: RequestFaultNote<SpanHandle>[] = [];
   /**
    * Trace ids of the requests made while the load span was open. An action's
    * requests go onto its `ActionResult.traceIds`; a load has no such field,
@@ -168,6 +176,27 @@ export class PagePerf {
    */
   noteFault(name: string, opts: { persistent?: boolean } = {}): void {
     this.faultTags.note(name, opts);
+  }
+
+  /**
+   * The route handler saw a request to `url`: its number among this visit's
+   * requests to that URL, for `noteRequestFault`. Count every one, faulted or
+   * not, so the numbers line up with the requests the capture saw.
+   */
+  routed(url: string): number {
+    const seq = this.routedByUrl.get(url) ?? 0;
+    this.routedByUrl.set(url, seq + 1);
+    return seq;
+  }
+
+  /**
+   * A fault was injected on the `seq`-th request to `url` (see `routed`). It
+   * is placed at `finish()` on the span that request started in, not on
+   * whichever spans are open now: see `attributeRequestFaults`.
+   */
+  noteRequestFault(name: string, url: string, seq: number): void {
+    const open = [...(this.loadHandle ? [this.loadHandle] : []), ...this.openActions];
+    this.requestFaults.push({ name, url, seq, open });
   }
 
   /** A request made during the load carried this trace id. */
@@ -303,6 +332,7 @@ export class PagePerf {
     this.openActions.clear();
     if (drain) await this.drainActionRequests(ACTION_REQUEST_DRAIN_MS);
 
+    this.placeRequestFaults();
     const { report, covArtifact } = await this.session.finish(loadSpanName(this.url));
     this.coverage = covArtifact;
 
@@ -355,6 +385,28 @@ export class PagePerf {
     return attached;
   }
 
+  /** Add each request fault to the owner of the span its request started in. */
+  private placeRequestFaults(): void {
+    if (this.requestFaults.length === 0) return;
+    const windows = this.ownerSpans.map((i) => this.session.controller.spans[i]);
+    for (const t of attributeRequestFaults(this.requestFaults, this.session.requests?.(), windows)) {
+      const targets =
+        "span" in t
+          ? t.span === null
+            ? []
+            : [t.span]
+          : t.fallback.flatMap((h) => {
+              const i = this.ownerOf.get(h);
+              return i === undefined ? [] : [i];
+            });
+      for (const i of targets) {
+        const owner = this.owners[i]!;
+        owner.faults = [...new Set([...(owner.faults ?? []), t.name])].sort();
+      }
+    }
+    this.requestFaults.length = 0;
+  }
+
   /**
    * Wait, up to `capMs`, until no request an action span of this page
    * started is still running (lightbringer's `settledUnfinished`), so the
@@ -390,6 +442,9 @@ export class PagePerf {
     const faults = this.faultTags.end(handle);
     if (!(await endIfRecorded(this.session.controller, handle))) return null;
     this.owners.push(faults ? { ...owner, faults } : owner);
-    return this.session.controller.spans.length - 1;
+    const spanIndex = this.session.controller.spans.length - 1;
+    this.ownerSpans.push(spanIndex);
+    this.ownerOf.set(handle, this.owners.length - 1);
+    return spanIndex;
   }
 }

@@ -260,7 +260,7 @@ A span's `faults` names every fault that took effect in its window:
 
 | Layer | Tagged onto | Name |
 |---|---|---|
-| network (`faultInjection`) | the spans open when the rule fired on a request (a delay tags the span that made the request) | the rule's `name`, or its pattern: the `faultInjections[].rule` label |
+| network (`faultInjection`) | the span the faulted request started in, matched against the requests the capture saw (a delay tags the span that made the request, even when that step closed before the delay began) | the rule's `name`, or its pattern: the `faultInjections[].rule` label |
 | lifecycle (`lifecycleFaults`) | the span open when it fired and every later span of the same page visit: a CPU throttle or wiped storage lasts the visit. `beforeNavigation` faults tag the load span | the lifecycle stats name (`cpu-throttle:4x`, or `name`) |
 | runtime (`runtimeFaults`) | every span: the fault script is on every page | the runtime stats name |
 | server (`server-faults` + `traceparent`) | the span whose requests carried the event's trace id | `server:<kind>` (`server:5xx`, `server:latency`) |

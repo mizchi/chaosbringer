@@ -130,6 +130,23 @@ export class CrawlPerf {
     else if (persistent && this.perfOptions) this.pendingFaults.push(name);
   }
 
+  /**
+   * The route handler saw a request to `url`; pass the number to
+   * `noteRequestFault` if it injects a fault on it. -1 with no page open.
+   */
+  routed(url: string): number {
+    return this.page ? this.page.routed(url) : -1;
+  }
+
+  /**
+   * A fault was injected on a request (see `routed`): it goes on the span the
+   * request started in. Momentary, so with no page open it is dropped, as
+   * `noteFault` drops a momentary fault.
+   */
+  noteRequestFault(name: string, url: string, seq: number): void {
+    if (this.page && seq >= 0) this.page.noteRequestFault(name, url, seq);
+  }
+
   /** A request of the page load carried this trace id (no-op unless the load span is open). */
   noteLoadTraceId(traceId: string): void {
     this.page?.noteLoadTraceId(traceId);

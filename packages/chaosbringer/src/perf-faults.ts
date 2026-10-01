@@ -53,6 +53,57 @@ export class SpanFaultTags<H> {
 }
 
 /**
+ * A fault the route handler injected on one request: the `seq`-th request to
+ * `url` it saw on this page (counting the ones it let through), and the spans
+ * open when it saw it.
+ */
+export interface RequestFaultNote<H> {
+  name: string;
+  url: string;
+  seq: number;
+  open: readonly H[];
+}
+
+/** Where a request fault goes: one recorded span, none, or the open spans. */
+export type RequestFaultTarget<H> =
+  | { name: string; span: number | null }
+  | { name: string; fallback: readonly H[] };
+
+/**
+ * The span each request fault belongs to: the one its request started in.
+ *
+ * Tagging the spans open when the route handler ran was a race. The handler
+ * hears of a request as a separate message, and on a loaded machine a click
+ * that does not wait for its fetch can close before that message arrives:
+ * the delay ran and no span carried it, or the next click's span did. The
+ * capture saw the request start, so the `seq`-th captured request to `url`
+ * (cache hits, which never reach a route handler, skipped) is the one, and
+ * the span whose window holds its start, by the rule lightbringer uses to
+ * give a span its own requests, is its span. `span: null` is a request no
+ * span started. Without a captured request to match (no capture, or the two
+ * counts disagree) the note keeps the spans open when it was made.
+ */
+export function attributeRequestFaults<H>(
+  notes: readonly RequestFaultNote<H>[],
+  requests: ReadonlyArray<{ url: string; startEpochMs: number; fromCache?: boolean }> | undefined,
+  spans: ReadonlyArray<{ startEpochMs: number; endEpochMs: number } | undefined>,
+): RequestFaultTarget<H>[] {
+  const byUrl = new Map<string, number[]>();
+  for (const r of requests ?? []) {
+    if (r.fromCache) continue;
+    const starts = byUrl.get(r.url);
+    if (starts) starts.push(r.startEpochMs);
+    else byUrl.set(r.url, [r.startEpochMs]);
+  }
+  return notes.map((n) => {
+    const start = byUrl.get(n.url)?.[n.seq];
+    if (start === undefined) return { name: n.name, fallback: n.open };
+    const span = spans.findIndex((w) => w !== undefined && start >= w.startEpochMs && start <= w.endEpochMs);
+    return { name: n.name, span: span === -1 ? null : span };
+  });
+}
+
+/**
  * The fault name a server-side fault event contributes to a span. By kind
  * only — `server:5xx`, `server:latency` — so every span the same kind of
  * server fault hit groups under one name in `degradation`.
