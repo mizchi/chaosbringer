@@ -26,7 +26,7 @@ for (const d of readdirSync(join(root, "packages")).sort()) {
 
 const onNpm = (name, version) => {
   try {
-    return execFileSync("npm", ["view", `${name}@${version}`, "version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === version;
+    return execFileSync("npm", ["view", "--prefer-online", `${name}@${version}`, "version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === version;
   } catch {
     return false;
   }

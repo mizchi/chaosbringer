@@ -53,6 +53,25 @@ for (const d of readdirSync(join(root, "packages"))) {
 const run = (cmd, argv, opts = {}) => execFileSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts });
 const problems = [];
 
+/**
+ * publish.yml checks a package right after publishing its dependencies, and
+ * the registry can take a little while to serve a version it just accepted.
+ * Retry a call that fails or returns something else before believing it.
+ * (`--prefer-online` on the npm calls keeps npm's own cache, which holds a
+ * package's metadata for minutes, from answering for the registry.)
+ */
+async function settle(fn, ok = () => true, attempts = 6) {
+  for (let i = 1; ; i++) {
+    try {
+      const value = fn();
+      if (ok(value) || i === attempts) return value;
+    } catch (e) {
+      if (i === attempts) throw e;
+    }
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+}
+
 /** Files under a package that do not end up in what it ships. */
 const NOT_SHIPPED = /(?:^|\/)(?:CHANGELOG\.md|README\.md|tests?\/.*|[^/]*\.(?:test|spec|e2e\.test)\.[cm]?[jt]sx?|vitest\.config\.[cm]?[jt]s|tsconfig[^/]*\.json)$/;
 
@@ -66,7 +85,7 @@ for (const [name, range] of Object.entries(deps)) {
   }
   let published = "";
   try {
-    published = run("npm", ["view", `${name}@${dep.version}`, "version"]).trim();
+    published = await settle(() => run("npm", ["view", "--prefer-online", `${name}@${dep.version}`, "version"]).trim(), (v) => v === dep.version);
   } catch {}
   if (published !== dep.version) {
     problems.push(`${name}@${dep.version} is not on npm. Publish it before ${pkg.name}.`);
@@ -133,7 +152,7 @@ if (problems.length === 0 && smoke) {
     // Peers too, optional ones included: `lightbringer`'s `.` entry needs the
     // optional `@playwright/test`, and a consumer importing it has it.
     const peers = Object.entries(pkg.peerDependencies ?? {}).map(([n, r]) => `${n}@${r}`);
-    run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(work, tarball), ...peers], { cwd: consumer });
+    await settle(() => run("npm", ["install", "--prefer-online", "--ignore-scripts", "--no-audit", "--no-fund", join(work, tarball), ...peers], { cwd: consumer }));
   } catch (e) {
     problems.push(`installing the packed ${pkg.name} from npm failed:\n${e.stderr || e.message}`);
   }
