@@ -189,7 +189,11 @@ fault only if the fault hit that page's load.
 A same-site URL that redirects to another origin (a `/chat` that 302s to a
 Discord invite) is recorded with the page's `redirectedTo` and counted as a
 blocked external navigation; nothing of the other site is crawled or
-reported.
+reported. The same goes for a click that ends up off-site (Wikipedia's
+"Create account" redirects to auth.wikimedia.org): the step records
+`leftSiteTo`, carries no measurement, and the crawler goes back to the page.
+Static files a page fetches with `fetch()` (CSS chunks, WebAssembly, 3D
+models) are not treated as API endpoints either.
 
 ## What it does not see
 

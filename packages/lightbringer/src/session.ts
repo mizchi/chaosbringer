@@ -222,11 +222,17 @@ function readMedia(): MediaReport {
   // and ICO are left in: they compress well.
   const alreadyCompressedType = /^(image\/(?!svg)|font\/woff|video\/|audio\/|application\/(zip|gzip|x-brotli))/i;
   // `%3F`: a query written into the path escaped (fontawesome-webfont.woff%3Fv=3.2.1).
+  const textualType = /^(?:text\/|image\/svg|application\/(?:javascript|x-javascript|ecmascript|json|[\w.+-]*\+json|xml|[\w.+-]*\+xml|wasm|x-www-form-urlencoded|graphql))/i;
+  const textualExt = /\.(?:m?js|cjs|css|json|map|html?|xml|svg|txt|md|csv|wasm|graphql)(?:[?#]|%3F|$)/i;
   const alreadyCompressedExt = /\.(woff2?|png|jpe?g|gif|webp|avif|mp4|webm|mp3|ogg|zip|gz|br)(?:[?#]|%3F|$)/i;
   for (const r of res) {
     if (!textType.has(r.initiatorType)) continue;
     const contentType = (r as PerformanceResourceTiming & { contentType?: string }).contentType ?? "";
     if (alreadyCompressedType.test(contentType) || alreadyCompressedExt.test(r.name)) continue;
+    // Text only: a response typed as something else is binary data (a 3D
+    // model, an archive), and one with no type counts only when its name says
+    // text. Fetched binary (remix.run's .pts point clouds) read as uncompressed.
+    if (contentType ? !textualType.test(contentType) : !textualExt.test(r.name)) continue;
     const enc = r.encodedBodySize;
     const dec = r.decodedBodySize;
     if (!enc || !dec || enc < 20_000) continue; // skip tiny / cross-origin (no TAO)

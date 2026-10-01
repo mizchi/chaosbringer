@@ -608,6 +608,30 @@ describe("analyzeScan: false positives seen on a third round of sites", () => {
   });
 });
 
+describe("analyzeScan: false positives seen on a fourth round of sites", () => {
+  it("ignores the vitals of a document on another origin", () => {
+    const page = fakePage(`${U}/wiki/A`, undefined, {
+      perfPage: perfPage({
+        documents: [
+          { url: `${U}/wiki/A`, timeOrigin: 0, vitals: { TTFB: vital(100) } },
+          { url: "https://auth.example.org/CreateAccount", timeOrigin: 1, vitals: { TTFB: vital(2500), CLS: vital(0.4) } },
+        ],
+      }),
+    });
+    expect(analyzeScan(fakeReport([page, fakePage(`${U}/wiki/B`)], [])).findings).toEqual([]);
+  });
+
+  it("warns about a one-page crawl whose only links are to itself or other sites", () => {
+    const start = fakePage(`${U}/`, undefined, {
+      links: [`${U}/`, `${U}/#canvas`, "https://github.com/x/y"],
+      perfPage: perfPage({ network: { totalRequests: 40, totalEncodedKB: 3000, fromCacheCount: 0 } }),
+    });
+    const w = analyzeScan(fakeReport([start], [])).coverageWarnings;
+    expect(w).toHaveLength(1);
+    expect(w[0]).toMatch(/single-page app/);
+  });
+});
+
 describe("analyzeScan: coverage warnings", () => {
   it("says so when the crawl barely reached the site, and not otherwise", () => {
     const tiny = fakePage(`${U}/`, undefined, {
@@ -689,6 +713,17 @@ describe("deriveScanEndpoints", () => {
     load.network.requests = [req(`${U}/blog?_rsc=abc`), req(`${U}/?_rsc=def`), req(`${U}/api/session`)];
     const report = fakeReport([fakePage(`${U}/`, load), fakePage(`${U}/blog`)], []);
     expect(deriveScanEndpoints(report).map((e) => e.label)).toEqual([`${U}/api/session`]);
+  });
+
+  it("leaves out static files a page fetches (CSS chunks, WebAssembly, models)", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [
+      req(`${U}/_next/static/css/3a23b2.css`),
+      req(`${U}/_nuxt/onig.wasm`),
+      req(`${U}/models/car.glb`),
+      req(`${U}/api/items.json`),
+    ];
+    expect(deriveScanEndpoints(fakeReport([fakePage(`${U}/`, load)], [])).map((e) => e.label)).toEqual([`${U}/api/items.json`]);
   });
 
   it("leaves out paths a CDN or host injects", () => {

@@ -1139,6 +1139,13 @@ export interface ActionResult {
    */
   perf?: PerfSpanReport;
   /**
+   * Where the action took the page when that was another origin (a same-site
+   * link that redirected off-site). The crawler went back; the step carries
+   * no perf (it measured the other site), and the redirect counts as a
+   * blocked external navigation.
+   */
+  leftSiteTo?: string;
+  /**
    * True when the page's URL was different after the action: it followed a
    * link, changed route through the History API, or changed the hash. The
    * action's span then measured loading that view. Absent when it stayed put.
