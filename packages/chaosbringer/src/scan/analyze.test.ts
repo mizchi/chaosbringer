@@ -4,7 +4,7 @@ import { fakeAction, fakePage, fakeReport, fakeSpan } from "../perf-fixtures.tes
 import type { PagePerfSummary, PerfSpanReport } from "../types.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { analyzeScan, RULE_PATTERNS, SCAN_FAULT_NAMES, SCAN_THRESHOLDS, SCAN_WHERE_CAP } from "./analyze.js";
+import { analyzeScan, assetIdentity, RULE_PATTERNS, SCAN_FAULT_NAMES, SCAN_THRESHOLDS, SCAN_WHERE_CAP } from "./analyze.js";
 import { withSidecarRequests } from "./sidecars.js";
 import { deriveScanEndpoints, endpointsPattern } from "./endpoints.js";
 import { formatScanMarkdown, formatScanSummary } from "./format.js";
@@ -565,6 +565,49 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 });
 
+describe("analyzeScan: false positives seen on a third round of sites", () => {
+  it("rates a 401 / 403 resource error low, and a third-party script's rejection medium", () => {
+    const ad = {
+      ...cluster("unhandled-rejection", "No ad placements found.", [`${U}/`, `${U}/jobs`], 22),
+      sample: {
+        type: "unhandled-rejection" as const,
+        message: "No ad placements found.",
+        timestamp: 0,
+        stack: "Error: No ad placements found.\n    at w (https://media.ethicalads.io/media/client/v1.4.0/ethicalads.min.js:1:11867)",
+      },
+    };
+    const own = cluster("unhandled-rejection", "TypeError: x is undefined");
+    const r = analyzeScan(
+      fakeReport([fakePage(`${U}/`, undefined, { links: [`${U}/jobs`] }), fakePage(`${U}/jobs`)], [], {
+        errorClusters: [cluster("console", "Failed to load resource: the server responded with a status of 401 (Unauthorized)"), ad, own],
+      }),
+    );
+    expect(r.findings.map((f) => [f.title.slice(0, 40), f.severity])).toEqual([
+      ["Unhandled promise rejection: TypeError: ", "high"],
+      ["Unhandled promise rejection: No ad place", "medium"],
+      ["console.error: Failed to load resource: ", "low"],
+    ]);
+    expect(r.findings[1]!.evidence.at(-1)).toMatch(/third-party script \(media\.ethicalads\.io\)/);
+  });
+
+  it("keys repeat downloads by URL without cache-busting parameters", () => {
+    expect(assetIdentity("https://x.test/app.js?v=1727712000000")).toBe("https://x.test/app.js");
+    expect(assetIdentity("https://x.test/app.js?_=abc&cb=1#h")).toBe("https://x.test/app.js");
+    expect(assetIdentity("https://x.test/_next/image?url=%2Fa.png&w=64&q=75")).toBe("https://x.test/_next/image?url=%2Fa.png&w=64&q=75");
+    // Twelve thumbnails of the same size from one image service are twelve files.
+    const paths = Array.from({ length: 12 }, (_, i) => `/p${i}`);
+    const pages = paths.map((p, i) =>
+      fakePage(
+        `${U}${p}`,
+        span(`${p} :: load`, (s) => {
+          s.network.requests = [{ url: `${U}/_next/image?url=%2Fimg${i}.png&w=64`, type: "Image", startOffsetMs: 0, durationMs: 5, kb: 1.4, thirdParty: false }];
+        }),
+      ),
+    );
+    expect(analyzeScan(fakeReport(pages, [])).findings).toEqual([]);
+  });
+});
+
 describe("analyzeScan: coverage warnings", () => {
   it("says so when the crawl barely reached the site, and not otherwise", () => {
     const tiny = fakePage(`${U}/`, undefined, {
@@ -639,6 +682,13 @@ describe("deriveScanEndpoints", () => {
     expect(re.test(`${U}/api/items/999/comments`)).toBe(false);
     expect(re.test(`${U}/api/itemsX`)).toBe(false);
     expect(re.test(`${U}/`)).toBe(false);
+  });
+
+  it("leaves out the site's own page URLs (data fetched from the route's URL)", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [req(`${U}/blog?_rsc=abc`), req(`${U}/?_rsc=def`), req(`${U}/api/session`)];
+    const report = fakeReport([fakePage(`${U}/`, load), fakePage(`${U}/blog`)], []);
+    expect(deriveScanEndpoints(report).map((e) => e.label)).toEqual([`${U}/api/session`]);
   });
 
   it("leaves out paths a CDN or host injects", () => {

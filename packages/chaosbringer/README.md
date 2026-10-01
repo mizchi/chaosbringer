@@ -212,6 +212,8 @@ await chaos({
 
 `probability` is evaluated against the seeded RNG — same seed, same pattern of injections.
 
+`resourceTypes` limits a rule to Playwright resource types (`request.resourceType()`): `faults.abort({ urlPattern: /\/docs/, resourceTypes: ["fetch", "xhr"] })` fails what the page's code requests and never a document the browser navigates to. That matters when a framework fetches a route's data from the route's own URL (Next.js App Router's `/docs?_rsc=…`): a URL pattern alone cannot tell the two apart. Without it, a rule matches every type.
+
 > **Behaviour change:** `probability: 0` no longer draws from the RNG. It is a
 > rule that can never fire, so rolling for it was a wasted draw — but the draw
 > was part of the sequence, so **any existing seeded config containing a

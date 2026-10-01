@@ -59,6 +59,7 @@ export type CompiledFaultRule = {
   rule: FaultRule;
   pattern: RegExp;
   methods?: string[];
+  resourceTypes?: string[];
   matched: number;
   injected: number;
   /**
@@ -104,6 +105,7 @@ export function compileFaultRules(rules: FaultRule[] | undefined): CompiledFault
       rule,
       pattern,
       methods: rule.methods?.map((m) => m.toUpperCase()),
+      ...(rule.resourceTypes ? { resourceTypes: rule.resourceTypes.map((t) => t.toLowerCase()) } : {}),
       matched: 0,
       injected: 0,
       suppressed: 0,
@@ -225,11 +227,15 @@ export function pickFaultRule<T extends CompiledFaultRule>(
   // concurrently — can pass `{ next: Math.random }` and still share this
   // function instead of keeping a second copy of the decision.
   rng: Pick<Rng, "next">,
+  // Playwright's `request.resourceType()`; a rule with `resourceTypes` does
+  // not match a request whose type is unknown.
+  resourceType?: string,
 ): T | null {
   let winner: T | null = null;
   for (const compiled of rules) {
     if (!compiled.pattern.test(url)) continue;
     if (compiled.methods && !compiled.methods.includes(method)) continue;
+    if (compiled.resourceTypes && (resourceType === undefined || !compiled.resourceTypes.includes(resourceType.toLowerCase()))) continue;
 
     if (compiled.rule.schedule) {
       const occurrence = compiled.matched;
@@ -402,7 +408,7 @@ export async function applyFaults(
 
   const handler = async (route: Route): Promise<void> => {
     const request = route.request();
-    const winner = pickFaultRule(compiled, request.url(), request.method().toUpperCase(), rng);
+    const winner = pickFaultRule(compiled, request.url(), request.method().toUpperCase(), rng, request.resourceType());
     if (!winner) {
       // `fallback()` rather than `continue()` so a context-level route the
       // caller installed (routeFromHAR, say) still gets its turn.

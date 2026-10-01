@@ -22,6 +22,7 @@
 import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
 import type { ErrorCluster } from "../clusters.js";
+import { registrableDomain } from "lightbringer/analyze";
 import { endpointLabel } from "./endpoints.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
@@ -402,6 +403,24 @@ function environmentPages(report: CrawlReport): Set<string> {
 const NETWORK_EXCEPTION = /Failed to fetch|NetworkError|Load failed|network error/i;
 
 /**
+ * The host of the script an exception or rejection was thrown in, when that
+ * is another registrable domain than the site's (an ad or analytics embed);
+ * `undefined` for the site's own code or a stack that names no script.
+ */
+function thirdPartyScript(c: ErrorCluster, baseUrl: string): string | undefined {
+  if (c.type !== "exception" && c.type !== "unhandled-rejection") return undefined;
+  const frame = /\b(https?:\/\/[^\s)]+?):\d+:\d+/.exec(c.sample.stack ?? "")?.[1];
+  if (!frame) return undefined;
+  try {
+    const host = new URL(frame).hostname;
+    const site = new URL(baseUrl).hostname;
+    return registrableDomain(host) === registrableDomain(site) ? undefined : host;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The crawler's own navigation failing (`page.goto: Timeout 30000ms
  * exceeded`), recorded as an exception on the page. Not the site's script:
  * the page's failed or timed-out load is reported by the page rules.
@@ -558,6 +577,8 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new 
       continue;
     }
     const isAxe = c.type === "invariant-violation" && (c.invariantNames ?? []).some((n) => n.startsWith("a11y"));
+    const auth = c.type === "console" && /Failed to load resource: the server responded with a status of 40[13]\b/.test(c.sample.message);
+    const thirdParty = thirdPartyScript(c, report.baseUrl);
     const knockOn =
       (c.type === "exception" || c.type === "unhandled-rejection") &&
       NETWORK_EXCEPTION.test(c.sample.message) &&
@@ -565,7 +586,9 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new 
       c.urls.every((u) => envPages.has(u));
     out.push({
       rule: isAxe ? "a11y-violation" : r.rule,
-      severity: r.severity,
+      // A 401 / 403 is usually an auth check answering a logged-out visitor;
+      // a third-party script's error is the embed's, though the site chose it.
+      severity: auth ? "low" : thirdParty && r.severity === "high" ? "medium" : r.severity,
       category: isAxe ? "a11y" : r.category,
       title: `${isAxe ? "Accessibility violation" : r.title}: ${truncate(c.sample.message, 120)}`,
       where: capWhere(c.urls),
@@ -573,6 +596,8 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new 
       evidence: [
         `${c.count}× on ${c.urls.length} page${c.urls.length === 1 ? "" : "s"}`,
         ...(c.sample.stack ? [truncate(firstStackFrame(c.sample.stack), 160)] : []),
+        ...(auth ? ["A 401 / 403 is often an auth or session check answering a logged-out visitor; check that the page does not depend on it."] : []),
+        ...(thirdParty ? [`Thrown by a third-party script (${thirdParty}), not the site's own code; the site embeds it.`] : []),
         ...(knockOn
           ? ["Every page it fired on also had a request fail for a reason of the scan's own (see the notes): it may be that failure's knock-on effect. Check in a normal browser."]
           : []),
@@ -1168,8 +1193,11 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
         // revalidation (a few hundred bytes of 304) by its whole URL, since an
         // image service serves many files from one path (`/_next/image?url=`).
         const revalidation = q.kb < 1;
-        const id = revalidation ? q.url : `${path} ${Math.round(q.kb)}`;
-        const d = downloads.get(id) ?? { path: revalidation ? q.url : path, loads: new Set<string>(), kb: 0 };
+        // The file, by its URL with cache-busting parameters dropped: a query
+        // that changes on every load (`?v=<Date.now()>`) still names the same
+        // file, while an image service's `?url=…&w=…` names different ones.
+        const id = assetIdentity(q.url);
+        const d = downloads.get(id) ?? { path: id, loads: new Set<string>(), kb: 0 };
         d.loads.add(`${s.key}#${d.loads.size}`);
         d.kb = Math.max(d.kb, q.kb);
         downloads.set(id, d);
@@ -1258,6 +1286,23 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
 }
 
 // -------------------------------------------------------------- helpers
+
+/** Query keys whose value changes per render to defeat the cache, not to pick a file. */
+const CACHE_BUST_KEYS = new Set(["v", "ver", "version", "t", "ts", "time", "timestamp", "_", "cb", "cachebust", "cachebuster", "bust", "nocache", "rand", "r"]);
+
+/** `url` without its fragment and its cache-busting query parameters. */
+export function assetIdentity(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    for (const [k, v] of [...u.searchParams]) {
+      if (CACHE_BUST_KEYS.has(k.toLowerCase()) || /^\d{8,}$/.test(v) || /^[0-9a-f]{16,}$/i.test(v)) u.searchParams.delete(k);
+    }
+    return u.toString().replace(/\?$/, "");
+  } catch {
+    return url;
+  }
+}
 
 /** A step that created a document: a click that followed a link, a submit that reloaded. */
 function navigated(s: PerfSpanReport): boolean {

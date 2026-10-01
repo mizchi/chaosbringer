@@ -24,6 +24,8 @@ import type {
 export interface FaultHelperOptions {
   urlPattern: UrlMatcher;
   methods?: string[];
+  /** Playwright resource types to match (see `FaultRule.resourceTypes`). */
+  resourceTypes?: string[];
   probability?: number;
   /** Deterministic per-occurrence decisions. Mutually exclusive with `probability`. */
   schedule?: FaultSchedule;
@@ -33,6 +35,7 @@ export interface FaultHelperOptions {
 function applyCommon(rule: FaultRule, opts: FaultHelperOptions): FaultRule {
   rule.urlPattern = opts.urlPattern;
   if (opts.methods !== undefined) rule.methods = opts.methods;
+  if (opts.resourceTypes !== undefined) rule.resourceTypes = opts.resourceTypes;
   if (opts.probability !== undefined) rule.probability = opts.probability;
   if (opts.schedule !== undefined) rule.schedule = opts.schedule;
   if (opts.name !== undefined) rule.name = opts.name;

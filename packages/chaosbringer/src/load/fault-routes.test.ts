@@ -125,7 +125,7 @@ describe("the load path shares the crawler's fault decision", () => {
         abort: async () => void served.push("aborted"),
         fallback: async () => void served.push("fallback"),
       };
-      await handler?.(route, { url: () => url, method: () => method });
+      await handler?.(route, { url: () => url, method: () => method, resourceType: () => "fetch" });
     };
     return { context, send, served };
   }

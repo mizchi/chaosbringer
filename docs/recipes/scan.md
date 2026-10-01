@@ -156,7 +156,13 @@ The report leaves them out of the findings and lists them once, under
 An exception such as "Failed to fetch" on a page where one of these broke a
 request stays in the findings, but its evidence says it may be the knock-on
 effect. Paths a CDN or host injects (`/cdn-cgi/`, `/_vercel/`,
-`/.well-known/`) are not treated as the site's API.
+`/.well-known/`) are not treated as the site's API, and neither are the site's
+own page URLs: a framework that fetches a route's data from the route's URL
+(Next.js App Router's `/docs?_rsc=…`) would otherwise have the chaos crawls
+fail the page's document itself. An error thrown by a third-party script (an
+ad or analytics embed) is labelled as such and rated at most medium, and a
+"Failed to load resource" 401 / 403 (usually a logged-out session check) is
+low.
 
 If every page fails with `net::ERR_CERT_AUTHORITY_INVALID`, the proxy
 intercepts TLS and Chromium does not trust its CA. Playwright's Chromium

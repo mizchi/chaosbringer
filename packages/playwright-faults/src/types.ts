@@ -77,6 +77,14 @@ export interface FaultRule {
   urlPattern: UrlMatcher;
   /** HTTP methods to match (case-insensitive). Empty = all methods. */
   methods?: string[];
+  /**
+   * Playwright resource types to match (`request.resourceType()`: "fetch",
+   * "xhr", "document", "script", …), case-insensitive. Absent = every type.
+   * `["fetch", "xhr"]` faults what the page's code requests and never a
+   * document the browser navigates to, even when both share a URL (a
+   * framework that fetches a route's data from the route's own URL).
+   */
+  resourceTypes?: string[];
   /** Action taken on a match. */
   fault: Fault;
   /** 0..1, default 1.0. Uses the caller-provided RNG. */
