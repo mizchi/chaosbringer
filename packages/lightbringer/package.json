@@ -1,6 +1,6 @@
 {
   "name": "lightbringer",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Per-step web performance measurement for Playwright: network / CPU / render / INP / memory / coverage at initialization and between steps. Use the test fixture, or the zero-config CLI that runs a JSON scenario and emits budgets. Median regression gate and trace drilldown.",
   "type": "module",
   "license": "MIT",
