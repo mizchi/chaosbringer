@@ -28,6 +28,16 @@ describe("a page that redirects off-site", () => {
     });
     otherOrigin = await listen(other, "localhost");
     site = http.createServer((req, res) => {
+      if (req.url === "/join") {
+        res.writeHead(302, { location: `${otherOrigin}/signup` });
+        res.end();
+        return;
+      }
+      if (req.url === "/clicky") {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<!doctype html><title>clicky</title><a href="/join">Create account</a>`);
+        return;
+      }
       if (req.url === "/chat") {
         res.writeHead(302, { location: `${otherOrigin}/invite` });
         res.end();
@@ -43,6 +53,26 @@ describe("a page that redirects off-site", () => {
     await new Promise<void>((r) => site.close(() => r()));
     await new Promise<void>((r) => other.close(() => r()));
   });
+
+  it("goes back when a clicked same-site link redirects off-site, and keeps nothing of that site", async () => {
+    const report = await new ChaosCrawler({
+      baseUrl: `${base}/clicky`,
+      maxPages: 1,
+      maxActionsPerPage: 2,
+      headless: true,
+      perf: true,
+      // Clicks only, so the link is acted on rather than scrolled past.
+      actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 },
+    }).start();
+    const left = report.actions.filter((a) => a.leftSiteTo);
+    expect(left.length).toBeGreaterThan(0);
+    expect(left[0]!.leftSiteTo).toBe(`${otherOrigin}/signup`);
+    expect(left.every((a) => a.perf === undefined)).toBe(true);
+    expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(1);
+    expect(report.errorClusters.some((c) => c.sample.message.includes("the other site's error"))).toBe(false);
+    // Each step started back on the site's page.
+    expect(report.actions.length).toBe(2);
+  }, 120_000);
 
   it("records the redirect, and crawls, measures and reports nothing of the other site", async () => {
     const report = await new ChaosCrawler({

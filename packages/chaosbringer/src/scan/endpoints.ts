@@ -18,6 +18,14 @@ const API_TYPES = new Set(["Fetch", "XHR"]);
  */
 const INFRASTRUCTURE_PATH = /^https?:\/\/[^/]+\/(?:cdn-cgi|_vercel|\.well-known)\//;
 
+/**
+ * Static files a page fetches with fetch() (a framework's CSS chunks on a
+ * client-side navigation, a WebAssembly runtime, a 3D model): failing them
+ * is a CDN outage, not the app's API failing, and the chaos crawls are
+ * about the API.
+ */
+const STATIC_FILE = /\.(?:css|m?js|cjs|map|wasm|woff2?|ttf|otf|eot|png|jpe?g|gif|webp|avif|svg|ico|mp4|webm|mp3|ogg|glb|gltf|bin)$/i;
+
 /** How many endpoints the chaos crawl targets at most. */
 export const SCAN_ENDPOINT_CAP = 40;
 
@@ -57,6 +65,7 @@ export function deriveScanEndpoints(report: Pick<CrawlReport, "pages" | "actions
       continue;
     }
     if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if (STATIC_FILE.test(u.pathname)) continue;
     const segments = u.pathname.split("/").map((seg) => (isIdLike(seg) ? ":id" : seg));
     const label = `${u.origin}${segments.join("/")}`;
     if (pages.has(label) || pages.has(label.replace(/\/$/, "")) || pages.has(`${label}/`)) continue;

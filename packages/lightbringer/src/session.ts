@@ -171,6 +171,33 @@ function readCssProfile(): CssProfile {
     domNodes: document.getElementsByTagName("*").length,
   };
 }
+const TEXTUAL_MIME =
+  /^(?:text\/|image\/(?:svg|x-icon|vnd\.microsoft\.icon)|font\/(?:ttf|otf|sfnt)|application\/(?:javascript|x-javascript|ecmascript|json|[\w.+-]*\+json|xml|[\w.+-]*\+xml|wasm|graphql|x-font-ttf|font-sfnt|vnd\.ms-fontobject))/i;
+const TEXTUAL_NAME = /\.(?:m?js|cjs|css|json|map|html?|xml|svg|txt|md|csv|wasm|graphql|ttf|otf|eot|ico)(?:[?#]|%3F|$)/i;
+
+/**
+ * Keep only compressible responses among the page's "uncompressed" ones, by
+ * the MIME type CDP recorded (the page's resource timing has no reliable
+ * type: Chromium leaves `contentType` undefined). A declared non-text type
+ * is binary data (a 3D model, an archive); a response with no type counts
+ * only when its name says text — remix.run's untyped binary .pts point
+ * clouds read as uncompressed text. A response the capture did not see keeps
+ * its entry, as before. Exported for tests.
+ */
+export function keepTextualUncompressed(media: MediaReport, reqs: ReadonlyArray<{ url: string; mimeType?: string }>): void {
+  const mime = new Map<string, string>();
+  for (const r of reqs) if (r.mimeType !== undefined) mime.set(r.url, r.mimeType);
+  const textual = (url: string) => {
+    const m = mime.get(url);
+    if (m === undefined) return true;
+    return m ? TEXTUAL_MIME.test(m) : TEXTUAL_NAME.test(url);
+  };
+  const before = media.uncompressed.length;
+  media.uncompressed = media.uncompressed.filter((u) => textual(u.url));
+  const dropped = before - media.uncompressed.length;
+  if (dropped > 0 && media.uncompressedCount !== undefined) media.uncompressedCount -= dropped;
+}
+
 function readMedia(): MediaReport {
   const res = performance.getEntriesByType(
     "resource",
@@ -415,6 +442,7 @@ export async function startSession(
       (renderBlocking.stylesheets.length || renderBlocking.scripts.length)
     )
       report.renderBlocking = renderBlocking;
+    if (media) keepTextualUncompressed(media, reqs);
     if (
       media &&
       (media.oversized.length || media.uncompressed.length || media.imageCount)

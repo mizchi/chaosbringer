@@ -368,9 +368,11 @@ function coverageWarnings(report: CrawlReport): string[] {
   const start = report.pages[0];
   if (!start) return ["The crawl visited no page."];
   const net = start.perfPage?.network;
-  if (report.pages.length <= 1 && start.links.length === 0) {
+  // Links the crawl could follow: same-site, and not back to the page itself.
+  const onward = start.links.filter((l) => sameOrigin(l, start.url) && l.replace(/[#?].*$/, "").replace(/\/$/, "") !== start.url.replace(/[#?].*$/, "").replace(/\/$/, ""));
+  if (report.pages.length <= 1 && onward.length === 0) {
     out.push(
-      "The crawl reached only the start page, and it had no links to follow. The site may have served a bot check, a rate limit or an error page, or it needs a login (--storage-state) or links the crawler cannot see. The findings cover that one page.",
+      "The crawl reached only the start page, and it had no same-site links to follow. It may be a single-page app with no URL per view, or the site served a bot check, a rate limit or an error page, or it needs a login (--storage-state). The findings cover that one page.",
     );
   }
   if (net && net.totalRequests <= NEAR_EMPTY_START.requests && net.totalEncodedKB < NEAR_EMPTY_START.kb) {
@@ -1315,8 +1317,18 @@ function isLoad(s: PerfSpanReport): boolean {
 
 function documentsOf(p: PageResult): Array<{ url: string; vitals: Record<string, { value: number }> }> {
   const s = p.perfPage!;
-  if (s.documents && s.documents.length > 0) return s.documents;
+  // A document on another origin is another site's page: a click that went
+  // there before the crawler came back.
+  if (s.documents && s.documents.length > 0) return s.documents.filter((d) => sameOrigin(d.url, p.url));
   return [{ url: p.url, vitals: s.vitals }];
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
 }
 
 function severityOf(hits: readonly Located[], t: { poor: number }, warnSeverity: ScanSeverity): ScanSeverity {

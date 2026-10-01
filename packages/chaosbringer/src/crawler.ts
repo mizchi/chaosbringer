@@ -247,6 +247,8 @@ export class ChaosCrawler {
   private results: PageResult[] = [];
   private actions: ActionResult[] = [];
   private blockedExternalCount = 0;
+  /** This page's steps that left the site; their perf is dropped when the page finishes. */
+  private offSiteActions: ActionResult[] = [];
   private startTime = 0;
   private baseOrigin: string;
   /** Actions performed on the page currently being crawled. Reset on
@@ -1855,6 +1857,7 @@ export class ChaosCrawler {
 
     // Track blocked external navigations
     const originalBlockedCount = this.blockedExternalCount;
+    this.offSiteActions = [];
 
     let result: PageResult;
     // Whether `page.goto` returned. Only a navigation that never did leaves a
@@ -2034,6 +2037,14 @@ export class ChaosCrawler {
       result.errors = [];
       result.hasErrors = false;
     }
+    // Steps that left the site measured the other site's page; errors raised
+    // while the page showed it are that site's.
+    for (const a of this.offSiteActions) delete a.perf;
+    this.offSiteActions = [];
+    if (result.errors.some((e) => e.url !== undefined && this.isExternalUrl(e.url))) {
+      result.errors = result.errors.filter((e) => e.url === undefined || !this.isExternalUrl(e.url));
+      result.hasErrors = result.errors.length > 0;
+    }
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
@@ -2126,7 +2137,34 @@ export class ChaosCrawler {
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
+    await this.returnFromOffSite(page, urlBefore, result);
     return result;
+  }
+
+  /**
+   * A step that left the site: a same-site link that redirected to another
+   * origin (Wikipedia's "Create account" to auth.wikimedia.org). The guard
+   * lets redirect hops through, so the page is now another site's. Record it
+   * as a blocked external navigation, drop the step's measurement (it
+   * measured the other site), and go back so the remaining steps act on
+   * this page again.
+   */
+  private async returnFromOffSite(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
+    const landed = page.url();
+    if (!this.isExternalUrl(landed)) return;
+    this.noteBlockedNavigation(landed);
+    // Not `blockedExternal`: replay reads that as "never clicked", and this
+    // click did happen.
+    result.leftSiteTo = landed;
+    this.offSiteActions.push(result);
+    try {
+      await page.goBack({ timeout: this.options.timeout, waitUntil: "load" });
+    } catch {
+      // No history entry to go back to (a redirect replaced it): load it again.
+    }
+    if (this.isExternalUrl(page.url())) {
+      await page.goto(urlBefore, { timeout: this.options.timeout, waitUntil: "load" }).catch(() => {});
+    }
   }
 
   /** Record a performed action everywhere a performed action is reported. */
