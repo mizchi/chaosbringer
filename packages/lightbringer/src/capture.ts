@@ -78,6 +78,7 @@ export class NetworkRecorder {
           requestId: string;
           type?: string;
           response?: {
+            mimeType?: string;
             fromDiskCache?: boolean;
             fromPrefetchCache?: boolean;
             fromServiceWorker?: boolean;
@@ -86,6 +87,7 @@ export class NetworkRecorder {
         const r = this.find(scope, p.requestId);
         if (!r) return;
         if (p.type) r.type = p.type;
+        if (p.response?.mimeType !== undefined) r.mimeType = p.response.mimeType;
         if (
           p.response?.fromDiskCache ||
           p.response?.fromPrefetchCache ||

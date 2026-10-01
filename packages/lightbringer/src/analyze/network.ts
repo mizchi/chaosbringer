@@ -154,6 +154,8 @@ export interface NetReq {
    */
   failedEpochMs?: number;
   encoded?: number;
+  /** The response's MIME type (CDP `Response.mimeType`); "" when the server sent none. */
+  mimeType?: string;
   initiator?: Initiator;
   /** served from disk / memory / prefetch / service-worker cache (no network fetch) */
   fromCache?: boolean;

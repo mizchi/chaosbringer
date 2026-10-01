@@ -171,6 +171,33 @@ function readCssProfile(): CssProfile {
     domNodes: document.getElementsByTagName("*").length,
   };
 }
+const TEXTUAL_MIME =
+  /^(?:text\/|image\/(?:svg|x-icon|vnd\.microsoft\.icon)|font\/(?:ttf|otf|sfnt)|application\/(?:javascript|x-javascript|ecmascript|json|[\w.+-]*\+json|xml|[\w.+-]*\+xml|wasm|graphql|x-font-ttf|font-sfnt|vnd\.ms-fontobject))/i;
+const TEXTUAL_NAME = /\.(?:m?js|cjs|css|json|map|html?|xml|svg|txt|md|csv|wasm|graphql|ttf|otf|eot|ico)(?:[?#]|%3F|$)/i;
+
+/**
+ * Keep only compressible responses among the page's "uncompressed" ones, by
+ * the MIME type CDP recorded (the page's resource timing has no reliable
+ * type: Chromium leaves `contentType` undefined). A declared non-text type
+ * is binary data (a 3D model, an archive); a response with no type counts
+ * only when its name says text — remix.run's untyped binary .pts point
+ * clouds read as uncompressed text. A response the capture did not see keeps
+ * its entry, as before. Exported for tests.
+ */
+export function keepTextualUncompressed(media: MediaReport, reqs: ReadonlyArray<{ url: string; mimeType?: string }>): void {
+  const mime = new Map<string, string>();
+  for (const r of reqs) if (r.mimeType !== undefined) mime.set(r.url, r.mimeType);
+  const textual = (url: string) => {
+    const m = mime.get(url);
+    if (m === undefined) return true;
+    return m ? TEXTUAL_MIME.test(m) : TEXTUAL_NAME.test(url);
+  };
+  const before = media.uncompressed.length;
+  media.uncompressed = media.uncompressed.filter((u) => textual(u.url));
+  const dropped = before - media.uncompressed.length;
+  if (dropped > 0 && media.uncompressedCount !== undefined) media.uncompressedCount -= dropped;
+}
+
 function readMedia(): MediaReport {
   const res = performance.getEntriesByType(
     "resource",
@@ -222,17 +249,11 @@ function readMedia(): MediaReport {
   // and ICO are left in: they compress well.
   const alreadyCompressedType = /^(image\/(?!svg)|font\/woff|video\/|audio\/|application\/(zip|gzip|x-brotli))/i;
   // `%3F`: a query written into the path escaped (fontawesome-webfont.woff%3Fv=3.2.1).
-  const textualType = /^(?:text\/|image\/svg|application\/(?:javascript|x-javascript|ecmascript|json|[\w.+-]*\+json|xml|[\w.+-]*\+xml|wasm|x-www-form-urlencoded|graphql))/i;
-  const textualExt = /\.(?:m?js|cjs|css|json|map|html?|xml|svg|txt|md|csv|wasm|graphql)(?:[?#]|%3F|$)/i;
   const alreadyCompressedExt = /\.(woff2?|png|jpe?g|gif|webp|avif|mp4|webm|mp3|ogg|zip|gz|br)(?:[?#]|%3F|$)/i;
   for (const r of res) {
     if (!textType.has(r.initiatorType)) continue;
     const contentType = (r as PerformanceResourceTiming & { contentType?: string }).contentType ?? "";
     if (alreadyCompressedType.test(contentType) || alreadyCompressedExt.test(r.name)) continue;
-    // Text only: a response typed as something else is binary data (a 3D
-    // model, an archive), and one with no type counts only when its name says
-    // text. Fetched binary (remix.run's .pts point clouds) read as uncompressed.
-    if (contentType ? !textualType.test(contentType) : !textualExt.test(r.name)) continue;
     const enc = r.encodedBodySize;
     const dec = r.decodedBodySize;
     if (!enc || !dec || enc < 20_000) continue; // skip tiny / cross-origin (no TAO)
@@ -421,6 +442,7 @@ export async function startSession(
       (renderBlocking.stylesheets.length || renderBlocking.scripts.length)
     )
       report.renderBlocking = renderBlocking;
+    if (media) keepTextualUncompressed(media, reqs);
     if (
       media &&
       (media.oversized.length || media.uncompressed.length || media.imageCount)
