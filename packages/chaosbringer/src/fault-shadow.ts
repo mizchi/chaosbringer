@@ -59,6 +59,7 @@ export function findFaultRuleShadows(
     rule: FaultRule;
     pattern: RegExp;
     methods?: string[];
+    resourceTypes?: string[];
   }>,
 ): Array<{
   earlierIndex: number;
@@ -100,6 +101,14 @@ export function findFaultRuleShadows(
         if (later.methods === undefined) continue; // later: all methods
         const earlierSet = new Set(earlier.methods);
         if (!later.methods.every((m) => earlierSet.has(m))) continue;
+      }
+
+      // Resource-type overlap, the same way: an earlier rule limited to some
+      // types lets the others through to `later`.
+      if (earlier.resourceTypes !== undefined) {
+        if (later.resourceTypes === undefined) continue; // later: all types
+        const earlierTypes = new Set(earlier.resourceTypes);
+        if (!later.resourceTypes.every((t) => earlierTypes.has(t))) continue;
       }
 
       const sample = sampleUrlFromRegex(later.pattern);

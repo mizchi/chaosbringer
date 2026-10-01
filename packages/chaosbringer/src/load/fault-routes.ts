@@ -71,6 +71,7 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
       rule: r,
       pattern,
       methods: r.methods?.map((m) => m.toUpperCase()),
+      ...(r.resourceTypes ? { resourceTypes: r.resourceTypes.map((t) => t.toLowerCase()) } : {}),
       matched: 0,
       injected: 0,
       suppressed: 0,
@@ -144,7 +145,7 @@ export async function installFaultRoutes(
     // Load runs are unseeded by design (workers run concurrently), so the
     // probability path draws from `Math.random`; a `schedule` ignores the RNG
     // entirely and reads its decision table by occurrence.
-    const winner = pickFaultRule(compiled, url, method, { next: Math.random });
+    const winner = pickFaultRule(compiled, url, method, { next: Math.random }, request.resourceType());
     if (!winner) {
       await route.fallback();
       return;

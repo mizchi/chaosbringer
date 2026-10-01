@@ -103,18 +103,22 @@ export const DEFAULT_HANG_RELEASE_MS = 8000;
 /** The one rule of the chaos crawl for `kind`: every API request gets the fault. */
 export function scanFaultRule(kind: ScanFaultKind, urlPattern: string, hangReleaseMs: number): FaultRule {
   const name = SCAN_FAULT_NAMES[kind];
+  // What the page's code requests, never a document it navigates to: a route
+  // whose data is fetched from its own URL shares that URL with its page.
+  const resourceTypes = ["fetch", "xhr"];
   switch (kind) {
     case "status":
       return faults.status(500, {
         urlPattern,
         name,
+        resourceTypes,
         body: '{"error":"injected by chaosbringer scan"}',
         contentType: "application/json",
       });
     case "abort":
-      return faults.abort({ urlPattern, name });
+      return faults.abort({ urlPattern, name, resourceTypes });
     case "hang":
-      return faults.hang({ urlPattern, name, releaseAfterMs: hangReleaseMs });
+      return faults.hang({ urlPattern, name, resourceTypes, releaseAfterMs: hangReleaseMs });
   }
 }
 

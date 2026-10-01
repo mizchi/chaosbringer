@@ -227,6 +227,13 @@ export function validateOptions(options: CrawlerOptions): void {
       : `faultInjection rule #${ruleIndex} (${String(rule.urlPattern)})`;
     assertMatcher(`${label} urlPattern`, rule.urlPattern);
     validateFaultSchedule(label, rule, "chaosbringer");
+    if (rule.resourceTypes !== undefined) {
+      if (!Array.isArray(rule.resourceTypes) || rule.resourceTypes.length === 0 || rule.resourceTypes.some((t) => typeof t !== "string" || t.length === 0)) {
+        throw new Error(
+          `chaosbringer: ${label} resourceTypes must be a non-empty array of Playwright resource types ("fetch", "xhr", "document", …) (got ${JSON.stringify(rule.resourceTypes)})`
+        );
+      }
+    }
     if (rule.probability !== undefined) {
       const p = rule.probability;
       if (!Number.isFinite(p) || p < 0 || p > 1) {

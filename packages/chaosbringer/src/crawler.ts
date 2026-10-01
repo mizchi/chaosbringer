@@ -1539,7 +1539,7 @@ export class ChaosCrawler {
       // `pickFaultRule` so that this handler and the public
       // `applyFaultRules` cannot drift: a rule encoded twice is the defect
       // this file has produced more than any other.
-      const winner = pickFaultRule(rules, url, method, this.rng);
+      const winner = pickFaultRule(rules, url, method, this.rng, request.resourceType());
       if (winner) {
         // Before the fault runs: a delay's span is the one open when the
         // request was made, not the one open when the delay ends. The label
