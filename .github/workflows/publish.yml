@@ -18,6 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The dependency check compares each workspace dependency with the
+          # tag of its released version, so it needs the history and tags.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -56,6 +60,14 @@ jobs:
 
       - name: Build (recursive — workspace deps must be built before any single package publishes)
         run: pnpm -r build
+
+      - name: Check that npm has the workspace dependencies this package was built against
+        # chaosbringer@0.10.0 shipped importing an export that playwright-faults
+        # had gained after its last release, so it could not be imported from
+        # npm. This refuses the publish until each dependency is released, then
+        # installs the packed package from npm and imports every entry. Wait up
+        # to 10 minutes for a dependency released in the same batch.
+        run: node scripts/check-publish-deps.mjs "${{ steps.pkg.outputs.dir }}" --wait=600
 
       - name: Publish to npm (OIDC Trusted Publishing)
         working-directory: ${{ steps.pkg.outputs.dir }}

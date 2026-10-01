@@ -15,7 +15,8 @@
     "lint": "pnpm -r lint",
     "lint:nul": "pnpm -r lint:nul",
     "check:skill-docs": "pnpm -F chaosbringer exec tsx ../../scripts/check-skill-docs.mjs",
-    "check:workflow-shell": "node scripts/check-workflow-shell.mjs"
+    "check:workflow-shell": "node scripts/check-workflow-shell.mjs",
+    "check:publish": "node scripts/check-publish-deps.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
