@@ -1496,6 +1496,9 @@ export class ChaosCrawler {
       const request = route.request();
       const url = request.url();
       const method = request.method().toUpperCase();
+      // Numbered before any await, in the order the browser handed requests
+      // over, so a fault below can be matched to the request the capture saw.
+      const seq = this.perf.routed(url);
 
       // Decide on the traceparent header up front so it's attached to every
       // path through this handler (fault response, blocked, fallback).
@@ -1543,10 +1546,11 @@ export class ChaosCrawler {
       // this file has produced more than any other.
       const winner = pickFaultRule(rules, url, method, this.rng, request.resourceType());
       if (winner) {
-        // Before the fault runs: a delay's span is the one open when the
-        // request was made, not the one open when the delay ends. The label
-        // is `faultInjections[].rule`'s, so the two join by name.
-        this.perf.noteFault(winner.rule.name ?? winner.pattern.toString());
+        // On the span the request started in, not the one open when the
+        // delay ends (or when this handler heard of the request: on a loaded
+        // machine a click can close before that). The label is
+        // `faultInjections[].rule`'s, so the two join by name.
+        this.perf.noteRequestFault(winner.rule.name ?? winner.pattern.toString(), url, seq);
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }

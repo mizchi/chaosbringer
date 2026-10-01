@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fakeSpan } from "./perf-fixtures.test-helpers.js";
 import {
+  attributeRequestFaults,
   addSpanFaults,
   buildDegradation,
   DEGRADATION_TOP_N,
@@ -37,6 +38,56 @@ describe("SpanFaultTags", () => {
     expect(t.end("a")).toBeUndefined();
     t.note("late");
     expect(t.end("a")).toBeUndefined();
+  });
+});
+
+describe("attributeRequestFaults", () => {
+  // Two clicks, 100 ms apart, each fetching /api/x; a cache hit between them.
+  const spans = [
+    { startEpochMs: 1000, endEpochMs: 1010 },
+    { startEpochMs: 1100, endEpochMs: 1110 },
+  ];
+  const requests = [
+    { url: "/api/x", startEpochMs: 1002 },
+    { url: "/api/x", startEpochMs: 1050, fromCache: true },
+    { url: "/api/x", startEpochMs: 1103 },
+    { url: "/api/y", startEpochMs: 1500 },
+  ];
+
+  it("puts the fault on the span its request started in, whatever was open when it was noted", () => {
+    // The route handler heard of the first request after its click closed and
+    // the second click opened: the open spans at that moment are the wrong one.
+    const out = attributeRequestFaults(
+      [
+        { name: "delay", url: "/api/x", seq: 0, open: ["click-2"] },
+        { name: "delay", url: "/api/x", seq: 1, open: [] },
+      ],
+      requests,
+      spans,
+    );
+    expect(out).toEqual([
+      { name: "delay", span: 0 },
+      { name: "delay", span: 1 },
+    ]);
+  });
+
+  it("skips cache hits, which never reach a route handler", () => {
+    const out = attributeRequestFaults([{ name: "d", url: "/api/x", seq: 1, open: [] }], requests, spans);
+    expect(out).toEqual([{ name: "d", span: 1 }]);
+  });
+
+  it("puts a request no span started on none", () => {
+    const out = attributeRequestFaults([{ name: "d", url: "/api/y", seq: 0, open: ["x"] }], requests, spans);
+    expect(out).toEqual([{ name: "d", span: null }]);
+  });
+
+  it("keeps the spans open at the time when no captured request matches", () => {
+    expect(attributeRequestFaults([{ name: "d", url: "/api/x", seq: 2, open: ["a"] }], requests, spans)).toEqual([
+      { name: "d", fallback: ["a"] },
+    ]);
+    expect(attributeRequestFaults([{ name: "d", url: "/api/x", seq: 0, open: ["a"] }], undefined, spans)).toEqual([
+      { name: "d", fallback: ["a"] },
+    ]);
   });
 });
 

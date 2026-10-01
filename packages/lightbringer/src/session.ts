@@ -18,6 +18,7 @@ import {
   type JSCoverageEntry,
   type CSSCoverageEntry,
 } from "./analyze/coverage";
+import type { NetReq } from "./analyze/network";
 import type {
   CssProfile,
   MediaReport,
@@ -121,6 +122,14 @@ export interface PerfSession {
    * no page or CDP call. Undefined for an index with no recorded span.
    */
   peekSpan: (index: number) => SpanReport | undefined;
+  /**
+   * Every request the capture has seen so far, in the order they started,
+   * with their wall-clock start (`startEpochMs`, the clock the span windows in
+   * `controller.spans` use). A caller that learns about a request some other
+   * way (a route handler) can find which span it started in. A snapshot: no
+   * page or CDP call.
+   */
+  requests: () => NetReq[];
   /** finalize: gather everything and build the report (`title` labels it) */
   finish: (title: string) => Promise<{
     report: PerfReport;
@@ -473,5 +482,5 @@ export async function startSession(
     return buildSpanReport(raw, accumulator, finishNetwork(), firstPartyDomainOf(url));
   };
 
-  return { controller, pageErrors, peekSpan, finish };
+  return { controller, pageErrors, peekSpan, requests: () => finishNetwork(), finish };
 }
