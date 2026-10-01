@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.11.0](https://github.com/mizchi/chaosbringer/compare/96ba95d...chaosbringer-v0.11.0) (2026-10-01)
+
+0.10.0 cannot be imported from npm: it needs exports of `@mizchi/playwright-faults` that were never released. This release depends on `@mizchi/playwright-faults@^0.3.0` and `lightbringer@^0.4.0`, which have them. Upgrade from 0.9.0 straight to 0.11.0.
+
+### Features
+
+* `chaosbringer scan`: sweep an unknown site for bugs, fragile error handling and slow spots, with a ranked report. See [docs/recipes/scan.md](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/scan.md). ([#169](https://github.com/mizchi/chaosbringer/pull/169))
+* Per-step perf measurement: every page load and action is a lightbringer span. ([#150](https://github.com/mizchi/chaosbringer/pull/150))
+* Per-step perf budgets for CI, adaptive settle, perf under chaos, and a perf-seeking driver. ([#151](https://github.com/mizchi/chaosbringer/pull/151), [#152](https://github.com/mizchi/chaosbringer/pull/152))
+* Page-level perf metrics and the perf-patterns catalog. ([#158](https://github.com/mizchi/chaosbringer/pull/158), [#159](https://github.com/mizchi/chaosbringer/pull/159))
+* Preview crawls in terminal-browser tabs. ([#149](https://github.com/mizchi/chaosbringer/pull/149))
+
+### Bug Fixes
+
+* The crawler keeps trailing slashes when it visits a URL. ([#170](https://github.com/mizchi/chaosbringer/pull/170))
+* A page or a click that redirects off-site is recorded (`redirectedTo`, `leftSiteTo`), and nothing of the other site is reported. ([#171](https://github.com/mizchi/chaosbringer/pull/171), [#173](https://github.com/mizchi/chaosbringer/pull/173))
+* A network fault is tagged on the span its request started in, not on whatever span was open when the route handler heard of it; a click that closed before then lost the tag. ([#175](https://github.com/mizchi/chaosbringer/pull/175))
+* The HTTP cache stays on while external navigations are blocked. ([#161](https://github.com/mizchi/chaosbringer/pull/161))
+* The same seed gives the same picks in `perfSeekingDriver`, and a fault's cost is measured on steps the settle did not wait for. ([#156](https://github.com/mizchi/chaosbringer/pull/156), [#157](https://github.com/mizchi/chaosbringer/pull/157))
+
 ## [0.10.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.9.0...chaosbringer-v0.10.0) (2026-09-23)
 
 ### Breaking Changes
