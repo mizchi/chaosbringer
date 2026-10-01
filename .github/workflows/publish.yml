@@ -1,17 +1,29 @@
 name: publish
 
+# Releases are version bumps. Raise `version` in a package's package.json
+# (and its CHANGELOG.md), merge to main, and this workflow publishes every
+# package whose version is not on npm yet, dependencies first, with npm OIDC
+# Trusted Publishing. Each published version is tagged `<dir>-v<version>`.
+# workflow_dispatch re-runs it, e.g. after a refused publish was fixed.
+#
+# The npm Trusted Publisher of every package points at this file
+# (mizchi/chaosbringer, `publish.yml`), so keep its name.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "packages/*/package.json"
   workflow_dispatch:
-    inputs:
-      package_dir:
-        description: "Package dir under packages/ (e.g. chaosbringer, playwright-faults). Required for workflow_dispatch."
-        required: false
 
 permissions:
-  contents: read
+  # Pushes the release tags.
+  contents: write
+  # npm OIDC Trusted Publishing and provenance.
   id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -19,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The dependency check compares each workspace dependency with the
+          # check-publish-deps.mjs compares each workspace dependency with the
           # tag of its released version, so it needs the history and tags.
           fetch-depth: 0
 
@@ -27,55 +39,44 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # npm >= 11.5 for OIDC Trusted Publishing.
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      - name: Determine target package directory
-        id: pkg
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          INPUT_DIR: ${{ inputs.package_dir }}
-        run: |
-          # Tag formats handled:
-          #   <short-name>-v<ver>  (release-please monorepo style)
-          #   v<ver>               (legacy chaosbringer-only, through 0.6.0)
-          # workflow_dispatch overrides via the package_dir input.
-          if [[ -n "$INPUT_DIR" ]]; then
-            dir="packages/${INPUT_DIR}"
-          elif [[ "$TAG" =~ ^([a-z0-9-]+)-v[0-9] ]]; then
-            dir="packages/${BASH_REMATCH[1]}"
-          else
-            dir="packages/chaosbringer"
-          fi
-          if [[ ! -f "${dir}/package.json" ]]; then
-            echo "::error::No package.json at ${dir} (resolved from tag '${TAG}' / input '${INPUT_DIR}')"
-            exit 1
-          fi
-          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
-          echo "Publishing from ${dir}"
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build (recursive — workspace deps must be built before any single package publishes)
+      - name: Build (recursive — workspace deps must be built before any package publishes)
         run: pnpm -r build
 
-      - name: Check that npm has the workspace dependencies this package was built against
-        # chaosbringer@0.10.0 shipped importing an export that playwright-faults
-        # had gained after its last release, so it could not be imported from
-        # npm. This refuses the publish until each dependency is released, then
-        # installs the packed package from npm and imports every entry. Wait up
-        # to 10 minutes for a dependency released in the same batch.
-        run: node scripts/check-publish-deps.mjs "${{ steps.pkg.outputs.dir }}" --wait=600
-
-      - name: Publish to npm (OIDC Trusted Publishing)
-        working-directory: ${{ steps.pkg.outputs.dir }}
-        # pnpm publish (NOT npm publish): rewrites `workspace:^` / `workspace:*`
-        # refs in dependencies to actual workspace package versions before
-        # packing. `npm publish` leaves them as literal strings, which break
-        # installs at consume time. (chaosbringer@0.8.0 shipped to npm with
-        # `@mizchi/playwright-faults: workspace:^` because of this.)
-        # `--no-git-checks` is required because the workflow runs on a release
-        # tag (detached HEAD) which pnpm publish would otherwise refuse.
-        run: pnpm publish --access public --provenance --no-git-checks
+      - name: Publish the versions npm does not have yet, dependencies first
+        run: |
+          set -euo pipefail
+          pending="$(node scripts/pending-publishes.mjs)"
+          if [[ -z "$pending" ]]; then
+            echo "Every package's version is already on npm; nothing to publish."
+            exit 0
+          fi
+          echo "Publishing, in this order:"
+          echo "$pending"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for dir in $pending; do
+            # Refuses when a workspace dependency is not on npm as this package
+            # was built against it (chaosbringer@0.10.0 shipped importing an
+            # export playwright-faults had not released), and imports every
+            # entry of the packed package installed from npm.
+            node scripts/check-publish-deps.mjs "$dir"
+            # pnpm publish (NOT npm publish): rewrites `workspace:^` refs to
+            # the workspace packages' versions. `npm publish` leaves them as
+            # literal strings (chaosbringer@0.8.0 shipped that way).
+            (cd "$dir" && pnpm publish --access public --provenance --no-git-checks)
+            tag="$(basename "$dir")-v$(node -p "require('./$dir/package.json').version")"
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              echo "::warning::tag $tag already exists; left as is"
+            else
+              git tag -a "$tag" -m "$tag"
+              git push origin "refs/tags/$tag"
+            fi
+          done

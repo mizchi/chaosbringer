@@ -21,9 +21,8 @@
  *    imported. This is the consumer's `import "chaosbringer"`.
  *
  * Usage: `node scripts/check-publish-deps.mjs packages/<dir>` after
- * `pnpm -r build`. `--no-smoke` skips the install (offline); `--wait=<s>`
- * polls npm that long for a dependency released in the same batch.
- * publish.yml runs it before every publish.
+ * `pnpm -r build`. `--no-smoke` skips the install (offline). publish.yml
+ * runs it before every publish, after the dependencies it publishes first.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,12 +32,9 @@ import { join, resolve } from "node:path";
 const root = resolve(new URL("..", import.meta.url).pathname);
 const args = process.argv.slice(2);
 const smoke = !args.includes("--no-smoke");
-// Releases cut together publish in parallel runs: wait this long for a
-// dependency's version to appear on npm before calling it missing.
-const waitSeconds = Number(args.find((a) => a.startsWith("--wait="))?.slice("--wait=".length) ?? 0);
 const target = args.find((a) => !a.startsWith("--"));
 if (!target) {
-  console.error("usage: check-publish-deps.mjs packages/<dir> [--no-smoke] [--wait=<seconds>]");
+  console.error("usage: check-publish-deps.mjs packages/<dir> [--no-smoke]");
   process.exit(2);
 }
 const targetDir = resolve(root, target);
@@ -68,18 +64,10 @@ for (const [name, range] of Object.entries(deps)) {
     problems.push(`${name}: declared as ${range} but is not a package under packages/`);
     continue;
   }
-  const view = () => {
-    try {
-      return run("npm", ["view", `${name}@${dep.version}`, "version"]).trim();
-    } catch {
-      return "";
-    }
-  };
-  let published = view();
-  for (const until = Date.now() + waitSeconds * 1000; published !== dep.version && Date.now() < until; published = view()) {
-    console.log(`waiting for ${name}@${dep.version} to appear on npm…`);
-    await new Promise((r) => setTimeout(r, 20_000));
-  }
+  let published = "";
+  try {
+    published = run("npm", ["view", `${name}@${dep.version}`, "version"]).trim();
+  } catch {}
   if (published !== dep.version) {
     problems.push(`${name}@${dep.version} is not on npm. Publish it before ${pkg.name}.`);
     continue;
