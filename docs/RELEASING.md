@@ -82,8 +82,8 @@ environment. A new package has to exist on npm before it can be configured,
 so publish its first version by hand (`npm publish --access public`, without
 `--provenance`, which needs CI), then configure it.
 
-`lightbringer` was published from `mizchi/lightbringer` until it moved here.
-Point its Trusted Publisher at this repository before its next release.
+`lightbringer` was published from `mizchi/lightbringer` until it moved here;
+its Trusted Publisher now names this repository too.
 
 ## Anti-checklist (mistakes from this repo's history)
 
