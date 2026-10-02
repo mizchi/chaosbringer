@@ -60,7 +60,11 @@ const problems = [];
  * (`--prefer-online` on the npm calls keeps npm's own cache, which holds a
  * package's metadata for minutes, from answering for the registry.)
  */
-async function settle(fn, ok = () => true, attempts = 6) {
+// npm says a new version "may take a few minutes to become available". Ten
+// minutes, then: chaosbringer 0.11.0's first publish gave up after one minute
+// per dependency, with both dependencies already published.
+const SETTLE_ATTEMPTS = 60;
+async function settle(fn, ok = () => true, attempts = SETTLE_ATTEMPTS) {
   for (let i = 1; ; i++) {
     try {
       const value = fn();
