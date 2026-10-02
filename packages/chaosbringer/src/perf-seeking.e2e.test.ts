@@ -1,5 +1,3 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { perfSeekingDriver } from "./drivers/perf-seeking.js";
@@ -7,6 +5,7 @@ import { candidatePerfKey } from "./perf-key.js";
 import type { Driver, DriverStep } from "./drivers/types.js";
 import { weightedRandomDriver } from "./drivers/weighted-random.js";
 import type { CrawlerOptions, CrawlReport, LastActionPerf } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * The model-seam perf facts and the perf-seeking driver, end to end: a page
@@ -58,21 +57,19 @@ function recording(inner: Driver): {
 }
 
 describe("perf facts at the driver seam, and perfSeekingDriver", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(BUTTONS);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   const crawl = (extra: Partial<CrawlerOptions>): Promise<CrawlReport> =>
@@ -82,7 +79,7 @@ describe("perf facts at the driver seam, and perfSeekingDriver", () => {
       maxActionsPerPage: 24,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 7,
       ...extra,
     }).start();
@@ -159,21 +156,19 @@ describe("perf keys after a click that navigates", () => {
   const HOME = `<!doctype html><title>home</title><body><a href="/second">Go second</a></body>`;
   const SECOND = `<!doctype html><title>second</title><body>
     <button id="a">Button A</button><button id="b">Button B</button></body>`;
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(req.url?.startsWith("/second") ? SECOND : HOME);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   it("keys the steps after it by the page they ran on, as candidatePerfKey predicts", async () => {
@@ -197,7 +192,7 @@ describe("perf keys after a click that navigates", () => {
       maxActionsPerPage: 4,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 3,
       perf: true,
       driver,

@@ -1,9 +1,8 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { CrawlerOptions, CrawlReport, PageResult } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * LCP and TBT used to be declared, budgetable and advertised, and never
@@ -44,11 +43,11 @@ const PAGES: Record<string, string> = { "/busy": BUSY, "/quiet": QUIET };
 const SKEW_MS = 60 * 60 * 1000;
 
 describe("page-load LCP / TBT from the always-on collector", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const body = PAGES[req.url ?? ""];
       if (!body) {
         res.writeHead(404, { "content-type": "text/plain" });
@@ -58,12 +57,11 @@ describe("page-load LCP / TBT from the always-on collector", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(body);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   /** Crawl exactly one page with no chaos actions, so only the load is measured. */
@@ -74,7 +72,7 @@ describe("page-load LCP / TBT from the always-on collector", () => {
       maxActionsPerPage: 0,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       ...extra,
     }).start();
   }
@@ -155,7 +153,7 @@ describe("page-load LCP / TBT from the always-on collector", () => {
         maxActionsPerPage: 0,
         headless: true,
         timeout: 10_000,
-        logLevel: "silent",
+        logLevel: "error",
         performanceBudget: { lcp: 1, tbt: 1 },
       });
       const result = await crawler.testPage(page, `${origin}/busy`);

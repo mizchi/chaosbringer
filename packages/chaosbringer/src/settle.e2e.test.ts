@@ -1,11 +1,10 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startFixtureServer } from "../fixtures/site/server.js";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { faults } from "./faults.js";
 import type { CrawlerOptions, CrawlReport } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Adaptive settle against a real browser.
@@ -61,13 +60,13 @@ function clickInOrder(texts: string[], seen: string[][]): Driver {
 }
 
 describe("adaptive settle (e2e)", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
   /** When `/api/slow` answered, by wall clock. */
   let slowAnsweredAt: number[] = [];
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
       if (url.pathname === "/xhr" || url.pathname === "/hang") {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
@@ -87,13 +86,11 @@ describe("adaptive settle (e2e)", () => {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   function crawl(path: string, extra: Partial<CrawlerOptions>): Promise<CrawlReport> {
@@ -103,7 +100,7 @@ describe("adaptive settle (e2e)", () => {
       maxActionsPerPage: 3,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 1,
       ...extra,
     }).start();
@@ -209,7 +206,7 @@ describe("adaptive settle parity with networkidle (fixture site)", () => {
       baseUrl: site.url,
       maxPages: 10,
       headless: true,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 42,
       settle,
     }).start();

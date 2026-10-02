@@ -14,16 +14,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { serve } from "@hono/node-server";
+import { startApp, type StartedServer } from "../serve.js";
 import { Hono } from "hono";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, "public");
 
-export interface StartedServer {
-  url: string;
-  close: () => Promise<void>;
-}
+export type { StartedServer };
 
 /** Server-side effects, per session. This is the ground truth the page cannot lie about. */
 export interface Effects {
@@ -234,14 +231,7 @@ export function createApp(fixed: boolean): Hono {
 }
 
 export function startServer(port = 0, fixed = process.env.FIXED === "1"): Promise<StartedServer> {
-  return new Promise((resolve) => {
-    const server = serve({ fetch: createApp(fixed).fetch, port }, (info) => {
-      resolve({
-        url: `http://127.0.0.1:${info.port}`,
-        close: () => new Promise((done) => server.close(() => done())),
-      });
-    });
-  });
+  return startApp(createApp(fixed), port);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

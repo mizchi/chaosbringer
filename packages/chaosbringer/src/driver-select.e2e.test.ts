@@ -1,9 +1,8 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { ActionResult } from "./types.js";
 import type { Driver, DriverCandidate, DriverStep } from "./drivers/types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * A dropdown has to survive the whole trip: scraped as a candidate,
@@ -55,19 +54,18 @@ function capturing(sink: { candidates: DriverCandidate[][] }): Driver {
 }
 
 describe("a dropdown is a candidate the crawler can set", () => {
-  let server: http.Server;
+  let server: TestServer;
   const sink: { candidates: DriverCandidate[][] } = { candidates: [] };
   let report: Awaited<ReturnType<ChaosCrawler["start"]>>;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(DROPDOWN);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 
     report = await new ChaosCrawler({
-      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      baseUrl: server.url,
       maxPages: 1,
       maxActionsPerPage: 1,
       headless: true,
@@ -78,7 +76,7 @@ describe("a dropdown is a candidate the crawler can set", () => {
   }, 120_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server?.close(() => r()));
+    await server?.close();
   });
 
   const first = (): DriverCandidate[] => sink.candidates[0] ?? [];

@@ -1,4 +1,3 @@
-import http from "node:http";
 import net from "node:net";
 import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,20 +8,20 @@ import { promisify } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 describe("crawl through an existing CDP browser", () => {
-  let server: http.Server;
+  let server: TestServer;
   let browser: Browser;
   let baseUrl: string;
   let cdpEndpoint: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       res.setHeader("content-type", "text/html");
       res.end(req.url === "/one" ? '<a href="/two">next</a>' : "<p>done</p>");
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    baseUrl = server.url;
 
     const probe = net.createServer();
     await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
@@ -39,7 +38,7 @@ describe("crawl through an existing CDP browser", () => {
 
   afterAll(async () => {
     await browser?.close();
-    await new Promise<void>((resolve) => server?.close(() => resolve()));
+    await server?.close();
   });
 
   it("reuses the selected tab for every URL and leaves the browser running", async () => {

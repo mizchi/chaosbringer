@@ -1,8 +1,7 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { watchUnhandledRejections } from "./rejections.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * "The spinner stopped" and "the spinner stopped and nothing escaped" are
@@ -12,11 +11,11 @@ import { watchUnhandledRejections } from "./rejections.js";
  */
 describe("watchUnhandledRejections", () => {
   let browser: Browser;
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(`<!doctype html><title>r</title><body><script>
         window.escapeOne = (msg) => { Promise.reject(new Error(msg)); };
@@ -24,14 +23,13 @@ describe("watchUnhandledRejections", () => {
         window.handled = () => { Promise.reject(new Error("caught")).catch(() => {}); };
       </script></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     browser = await chromium.launch();
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   /**

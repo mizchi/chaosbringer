@@ -1,8 +1,7 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chaos } from "./chaos.js";
 import { validateOptions } from "./validate.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * `initScripts` exists because "before the page's own scripts" is not a nicety
@@ -15,11 +14,11 @@ import { validateOptions } from "./validate.js";
  * So what has to be pinned is the ordering, not merely that the script ran.
  */
 describe("initScripts run before the page's own scripts", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       // The page reads the flag the init script sets and records the answer
       // where an invariant can see it. If the init script ran second, `saw` is
@@ -29,12 +28,11 @@ describe("initScripts run before the page's own scripts", () => {
         window.__sawInitScript = window.__installedEarly === true;
       </script></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   it("is a real option, and a typo of it is caught", () => {

@@ -1,11 +1,10 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { faults } from "@mizchi/playwright-faults";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { formatReport } from "./reporter.js";
 import type { CrawlerOptions, CrawlReport } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Perf under chaos, end to end: spans tagged with the faults active in their
@@ -106,11 +105,11 @@ function repeatDriver(label: string, times: number): Driver {
 }
 
 describe("perf under chaos", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "").split("?")[0];
       if (path === "/api/item" || path === "/api/x") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -127,13 +126,11 @@ describe("perf under chaos", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(body);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   function crawl(path: string, extra: Partial<CrawlerOptions>): Promise<CrawlReport> {
@@ -141,7 +138,7 @@ describe("perf under chaos", () => {
       baseUrl: `${origin}${path}`,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 7,
       perf: true,
       ...extra,

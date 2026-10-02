@@ -1,9 +1,8 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { faults } from "@mizchi/playwright-faults";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { applyFault, applyFaultRules, applyFaults } from "./fault-router.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * `applyFaultRules` exists because every other way into the fault layers runs
@@ -13,12 +12,12 @@ import { applyFault, applyFaultRules, applyFaults } from "./fault-router.js";
  */
 describe("applyFaultRules on a page you drive yourself", () => {
   let browser: Browser;
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   let posts = 0;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/api/save") {
         if (req.method === "POST") posts++;
@@ -63,14 +62,13 @@ describe("applyFaultRules on a page you drive yourself", () => {
   };
 </script></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     browser = await chromium.launch();
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   it("fires on the request the app makes, and says so in the counters", async () => {

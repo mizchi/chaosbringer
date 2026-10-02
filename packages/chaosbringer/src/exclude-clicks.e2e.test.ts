@@ -60,7 +60,7 @@ describe("excluded URLs and clicks", () => {
       headless: true,
       perf: true,
       excludePatterns: ["/logout", "/login"],
-      actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 },
+      actionWeights: { scroll: 0 },
       // Fixed picks: this seed clicks both "Plus" and "Stay" in six steps.
       seed: 1,
     }).start();
@@ -101,7 +101,7 @@ describe("excluded URLs and clicks", () => {
       maxActionsPerPage: 2,
       headless: true,
       perf: true,
-      actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 },
+      actionWeights: { scroll: 0 },
     }).start();
     const feed = report.pages.find((p) => p.url.endsWith("/feed.xml"))!;
     expect(feed.contentType).toBe("application/atom+xml");

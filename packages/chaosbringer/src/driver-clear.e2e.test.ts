@@ -1,9 +1,8 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { ActionResult } from "./types.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Emptying one field is a state, not a value.
@@ -106,20 +105,19 @@ async function crawlWith(driver: Driver, port: number) {
 }
 
 describe("a driver can empty a field it picked", () => {
-  let server: http.Server;
+  let server: TestServer;
   let port: number;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(STALE_VALIDITY);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    port = (server.address() as AddressInfo).port;
+    port = server.port;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server?.close(() => r()));
+    await server?.close();
   });
 
   it("records the clear apart from the fill", async () => {

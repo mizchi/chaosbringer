@@ -1,11 +1,10 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { faults } from "../faults.js";
 import { defineScenario } from "./scenario.js";
 import { scenarioLoad } from "./scenario-load.js";
 import { formatLoadReport } from "./report.js";
 import { assertSlo } from "./slo.js";
+import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
 
 /**
  * `scenarioLoad({ perf })` end to end: a sampled worker measures each step as
@@ -26,20 +25,19 @@ const BUSY = `<!doctype html><title>busy</title><body>
   </script>
 </body>`;
 
-let server: http.Server;
+let server: TestServer;
 let baseUrl: string;
 
 beforeAll(async () => {
-  server = http.createServer((_req, res) => {
+  server = await startTestServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/html" });
     res.end(BUSY);
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  baseUrl = server.url;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await server.close();
 });
 
 describe("scenarioLoad with perf", () => {

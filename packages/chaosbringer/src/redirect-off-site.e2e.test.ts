@@ -58,8 +58,8 @@ describe("a page that redirects off-site", () => {
       maxActionsPerPage: 2,
       headless: true,
       perf: true,
-      // Clicks only, so the link is acted on rather than scrolled past.
-      actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 },
+      // No scroll target: the link is the only thing to act on.
+      actionWeights: { scroll: 0 },
     }).start();
     const left = report.actions.filter((a) => a.leftSiteTo);
     expect(left.length).toBeGreaterThan(0);

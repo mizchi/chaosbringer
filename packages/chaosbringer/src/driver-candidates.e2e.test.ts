@@ -1,8 +1,7 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverStep } from "./drivers/types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * What a per-step driver is offered has to be what the page currently has.
@@ -63,17 +62,16 @@ function recordingDriver(seen: SeenStep[]): Driver {
 }
 
 describe("a per-step driver sees the page as it currently is", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   const seen: SeenStep[] = [];
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(SPA);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
 
     await new ChaosCrawler({
       baseUrl: base,
@@ -81,13 +79,13 @@ describe("a per-step driver sees the page as it currently is", () => {
       maxActionsPerPage: 2,
       headless: true,
       timeout: 5000,
-      logLevel: "silent",
+      logLevel: "error",
       driver: recordingDriver(seen),
     }).start();
   }, 120_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server?.close(() => r()));
+    await server?.close();
   });
 
   it("offers the control the previous step created", () => {

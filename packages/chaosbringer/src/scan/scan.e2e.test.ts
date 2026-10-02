@@ -67,7 +67,7 @@ describe("runScan", () => {
       outDir,
       coverage: false,
       hangReleaseMs: 1500,
-      crawler: { headless: true, actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 } },
+      crawler: { headless: true, actionWeights: { scroll: 0 } },
     });
 
     expect(result.endpoints.map((e) => e.label)).toEqual([`${base}/api/items`]);
