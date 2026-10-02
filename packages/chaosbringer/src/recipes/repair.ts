@@ -36,6 +36,7 @@ import type {
   RecipePrecondition,
   RecipeStep,
 } from "./types.js";
+import { hostLocale } from "../browser-locale.js";
 
 export interface RepairOptions {
   /** Verified recipe whose replay is failing. */
@@ -83,7 +84,7 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     : () => {};
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
-  const context = await browser.newContext();
+  const context = await browser.newContext({ locale: hostLocale() });
   const page = await context.newPage();
   const startUrl = opts.startUrl ?? deriveStartUrl(opts.recipe, opts.baseUrl);
 

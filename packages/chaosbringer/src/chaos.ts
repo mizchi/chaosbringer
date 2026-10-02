@@ -14,6 +14,7 @@ import type {
   CrawlReport,
   ChaosRemoteServer,
 } from "./types.js";
+import { hostLocale } from "./browser-locale.js";
 
 export interface ChaosResult {
   report: CrawlReport;
@@ -68,7 +69,7 @@ export interface ChaosRunOptions extends CrawlerOptions {
 async function runSetup(hook: ChaosSetupHook, baseUrl: string): Promise<void> {
   const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ locale: hostLocale() });
     const page = await context.newPage();
     try {
       await hook({ page, baseUrl });

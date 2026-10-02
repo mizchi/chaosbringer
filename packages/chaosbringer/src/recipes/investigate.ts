@@ -30,6 +30,7 @@ import { minimizeRecipeTrace } from "./minimize.js";
 import type { RecipeStore } from "./store.js";
 import { tracingDriver, type TracingDriver } from "./tracing-driver.js";
 import type { ActionRecipe, ActionTrace, Goal } from "./types.js";
+import { hostLocale } from "../browser-locale.js";
 
 export interface InvestigateOptions {
   /** The failure to reproduce. Its `url` is where we start. */
@@ -101,7 +102,7 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
   const rng = createRng(seed);
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
-  const context = await browser.newContext();
+  const context = await browser.newContext({ locale: hostLocale() });
   const page = await context.newPage();
 
   const tracing = tracingDriver({ inner: opts.driver, goal });
@@ -221,7 +222,7 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
       let recipeSteps = trace.steps;
       if (opts.minimize && trace.steps.length > 1) {
         const setupPage = async (): Promise<{ page: Page; cleanup: () => Promise<void> }> => {
-          const ctx = await browser.newContext();
+          const ctx = await browser.newContext({ locale: hostLocale() });
           const pg = await ctx.newPage();
           await pg.goto(opts.failure.url, { waitUntil: "domcontentloaded" });
           return { page: pg, cleanup: () => ctx.close() };

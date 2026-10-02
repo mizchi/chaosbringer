@@ -35,6 +35,7 @@ import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
 import { verifyAndPromote } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
+import { hostLocale } from "../browser-locale.js";
 
 const HELP = `chaosbringer recipes <subcommand> [options]
 
@@ -350,7 +351,7 @@ async function harvestCmd(argv: string[]): Promise<void> {
   const store = openStore(values);
   const browser = await chromium.launch({ headless: values.headless !== false });
   try {
-    const ctx = await browser.newContext();
+    const ctx = await browser.newContext({ locale: hostLocale() });
     const page = await ctx.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded" });
     const harvested = await loadPageScenarios(page, { trustPublisher: values.trust });
@@ -411,7 +412,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
       minSuccessRate,
       verbose: !values.quiet,
       setupPage: async () => {
-        const ctx = await browser.newContext();
+        const ctx = await browser.newContext({ locale: hostLocale() });
         const page = await ctx.newPage();
         // verifyAndPromote does NOT navigate for you — caller's setupPage
         // owns the start state. The recipe's first step (if it's a

@@ -69,9 +69,12 @@ describe("a page that redirects off-site", () => {
     expect(left[0]!.leftSiteTo).toBe(`${otherOrigin}/signup`);
     expect(left.every((a) => a.perf === undefined)).toBe(true);
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(1);
+    expect(report.pages[0]!.blockedNavigations).toContain(`${otherOrigin}/signup`);
     expect(report.errorClusters.some((c) => c.sample.message.includes("the other site's error"))).toBe(false);
-    // Each step started back on the site's page.
-    expect(report.actions.length).toBe(2);
+    // /clicky has one link: the second step clicking it too proves it ran
+    // back on /clicky, not on the other site's page.
+    expect(left).toHaveLength(2);
+    expect(left.every((a) => a.leftSiteTo === `${otherOrigin}/signup`)).toBe(true);
   }, 120_000);
 
   it("records the redirect, and crawls, measures and reports nothing of the other site", async () => {
@@ -89,6 +92,7 @@ describe("a page that redirects off-site", () => {
     expect(chat.links).toEqual([]);
     expect(chat.perf).toBeUndefined();
     expect(chat.warnings.some((w) => w.includes("redirected off-site"))).toBe(true);
+    expect(chat.blockedNavigations).toEqual([`${otherOrigin}/invite`]);
     expect(report.blockedExternalNavigations).toBeGreaterThanOrEqual(1);
     expect(report.errorClusters.some((c) => c.sample.message.includes("the other site's error"))).toBe(false);
     expect(report.pages.some((p) => p.url.startsWith(otherOrigin))).toBe(false);

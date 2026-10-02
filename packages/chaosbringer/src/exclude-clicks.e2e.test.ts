@@ -43,7 +43,8 @@ describe("excluded URLs and clicks", () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/html" });
-      res.end(`<!doctype html><title>home</title><a href="/logout">Log out</a><a href="/plus">Plus</a>`);
+      // A button that stays on the page, so some steps are measured here.
+      res.end(`<!doctype html><title>home</title><a href="/logout">Log out</a><a href="/plus">Plus</a><button type="button">Stay</button>`);
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -69,10 +70,10 @@ describe("excluded URLs and clicks", () => {
     expect(excluded.length).toBeGreaterThan(0);
     expect(excluded[0]!.excludedTo).toBe(`${base}/plus/login`);
     expect(excluded.every((a) => a.perf === undefined)).toBe(true);
-    // Every step started back on the home page, none on the login page.
-    for (const a of report.actions) {
-      if (a.perf) expect(a.perf.key.startsWith("/ ::")).toBe(true);
-    }
+    // Every measured step ran on the home page, none on the login page.
+    const measured = report.actions.filter((a) => a.perf);
+    expect(measured.length).toBeGreaterThan(0);
+    expect(measured.every((a) => a.perf!.key.startsWith("/ ::"))).toBe(true);
     expect(hits).not.toContain("/plus/login?again");
     expect(report.errorClusters.some((c) => c.sample.message.includes("login page error"))).toBe(false);
   }, 120_000);

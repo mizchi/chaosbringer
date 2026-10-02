@@ -18,6 +18,7 @@ import { StepPerf } from "./step-perf.js";
 import { pickThinkTimeMs } from "./scenario.js";
 import type { Scenario, ScenarioContext, ThinkTime } from "./types.js";
 import type { Invariant } from "../types.js";
+import { hostLocale } from "../browser-locale.js";
 
 export interface WorkerStepSample {
   scenarioName: string;
@@ -117,7 +118,7 @@ export class ScenarioWorker {
   }
 
   async run(browser: Browser): Promise<WorkerSamples> {
-    const contextOptions: Parameters<Browser["newContext"]>[0] = {};
+    const contextOptions: Parameters<Browser["newContext"]>[0] = { locale: hostLocale() };
     if (this.opts.viewport) contextOptions.viewport = this.opts.viewport;
     if (this.opts.storageState) contextOptions.storageState = this.opts.storageState;
     this.context = await browser.newContext(contextOptions);
