@@ -16,6 +16,19 @@ describe("fingerprintError", () => {
     expect(a).toBe(b);
   });
 
+  it("strips CSP nonces and hashes, which change per response and per inline block", () => {
+    const csp = (nonce: string, hash: string) =>
+      fingerprintError(
+        err({
+          type: "console",
+          message: `Refused to apply inline style because it violates the following Content Security Policy directive: "style-src 'self' 'nonce-${nonce}' code.jquery.com". Either the 'unsafe-inline' keyword, a hash ('sha256-${hash}'), or a nonce ('nonce-...') is required to enable inline execution.`,
+        }),
+      );
+    expect(csp("4e64c7e8ebdc2af2", "ta3qgOjChbk6bJJNgxodW06Z1H3/IcWm7fWRIsN0WkA=")).toBe(
+      csp("9bb094f6d60ac381", "hZhXKqL3V9mpohqAHCc0GmfFPvqrhP8tP/zBKtvjXmg="),
+    );
+  });
+
   it("strips source locations", () => {
     const a = fingerprintError(err({ type: "exception", message: "boom at a.js:12:5" }));
     const b = fingerprintError(err({ type: "exception", message: "boom at a.js:99:7" }));

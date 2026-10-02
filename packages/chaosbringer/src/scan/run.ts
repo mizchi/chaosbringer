@@ -32,6 +32,7 @@ import {
 } from "./analyze.js";
 import { deriveScanEndpoints, endpointsPattern, type ScanEndpoint } from "./endpoints.js";
 import { formatScanMarkdown, type ScanSummaryInput } from "./format.js";
+import { markServedOrb, orbBlockedUrls, probeServedUrls } from "./orb.js";
 import { readSidecarSpans, withSidecarRequests } from "./sidecars.js";
 
 export interface ScanOptions {
@@ -178,7 +179,15 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     log("[scan] chaos crawls skipped: no same-site fetch / XHR request seen");
   }
 
-  const analysis = analyzeScan(cleanFull, chaos, { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) });
+  // Files the browser's ORB blocked while the crawler intercepted requests,
+  // that are fine when fetched directly: see `orb.ts`.
+  const blocked = orbBlockedUrls([cleanFull, ...chaos.map((c) => c.report)]);
+  const served = blocked.length > 0 ? await probeServedUrls(blocked) : new Set<string>();
+  const analysis = analyzeScan(
+    markServedOrb(cleanFull, served),
+    chaos.map((c) => ({ ...c, report: markServedOrb(c.report, served) })),
+    { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) },
+  );
   const files: ScanFiles = {
     json: join(outDir, "scan-report.json"),
     markdown: join(outDir, "scan-report.md"),

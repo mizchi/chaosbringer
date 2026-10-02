@@ -210,6 +210,12 @@ export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; 
   },
   { code: "net::ERR_ABORTED", pattern: /net::ERR_ABORTED\b/, reason: "cancelled in flight, mostly by the crawl navigating on" },
   {
+    code: "net::ERR_BLOCKED_BY_ORB (served fine)",
+    // `markServedOrb` appends this to an ORB error whose URL answered with an image when fetched.
+    pattern: /net::ERR_BLOCKED_BY_ORB \(served fine when fetched directly\)/,
+    reason: "the browser's opaque-response blocking stopped a file that serves fine when fetched directly; Chromium does that now and then while a page's requests are intercepted, as the crawler's are",
+  },
+  {
     code: "media: no supported source",
     pattern: /The element has no supported sources|no supported source was found/i,
     reason: "Playwright's Chromium has no H.264 / AAC codecs, which Chrome has; the same media plays there",

@@ -39,6 +39,11 @@ export function fingerprintError(err: PageError): string {
   msg = msg
     // URLs in message bodies vary per run — collapse them.
     .replace(/https?:\/\/[^\s"'()<>]+/g, "<url>")
+    // A CSP nonce is new on every response, and a hash names the inline
+    // block, not the violation: jquery.com's "Refused to apply inline style"
+    // was 8 clusters (one per page) instead of 1.
+    .replace(/'nonce-[^']*'/g, "'nonce-<n>'")
+    .replace(/'sha(256|384|512)-[^']*'/g, "'sha$1-<hash>'")
     // Source locations like `foo.js:123:45`
     .replace(/:\d+:\d+/g, ":<loc>")
     // Ephemeral ports (4-5 digits). Keep 6+ digit numbers; they're rarely a port.
