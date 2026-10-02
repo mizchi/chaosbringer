@@ -7,9 +7,10 @@
  * - `baseline`: a crawl of the site as it is, with `perf` on. Bugs (errors,
  *   broken pages) and slow spots (vitals, main-thread blocking, layout work,
  *   heavy pages, leaks) are read off it.
- * - `chaos` (optional): the same crawl with faults injected on the site's
- *   API requests. What breaks only there — an exception, a rejection, a
- *   page that no longer loads, a step that waits out a hung request — is a
+ * - `chaos` (optional): one crawl per fault kind (500, abort, hang), the same
+ *   crawl with every request to the site's API failing that way. What
+ *   breaks only there (an exception, a rejection, a page that no longer
+ *   loads, a step that waits out a hung request, a retry storm) is a
  *   resilience finding: the app has no path for that failure.
  *
  * Findings are signals, not verdicts: an unknown site has no fixed variant
@@ -19,11 +20,14 @@
  * point for what the cause may be.
  */
 
+import { isLoadKey } from "../perf-key.js";
 import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
 import type { ErrorCluster } from "../clusters.js";
 import { registrableDomain } from "lightbringer/analyze";
-import { endpointLabel } from "./endpoints.js";
+import { escapeRegExp } from "../filters.js";
+import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
+import { ORB_SERVED_NOTE } from "./orb.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
 export type ScanCategory = "bug" | "resilience" | "perf" | "a11y";
@@ -103,6 +107,8 @@ export const SCAN_THRESHOLDS = {
   actionEffectiveMs: { warn: 500, poor: 2000 },
   /** Requests to one endpoint (ids folded) with distinct URLs inside one step. */
   perItemRequests: { warn: 5, poor: 20 },
+  /** The same API URL requested, with a response transferred, inside one step. */
+  duplicateRequests: { warn: 2, poor: 5 },
   /** A single response's transfer size (KB). */
   resourceKB: { warn: 500, poor: 2000 },
   /** Page loads that downloaded the same static file again (not from cache). */
@@ -123,6 +129,8 @@ export const SCAN_THRESHOLDS = {
   slowRequestMs: { warn: 1000, poor: 3000 },
   /** Share of shipped JS the whole crawl never ran (%). */
   unusedJsPct: { warn: 50, poor: 75 },
+  /** Shipped JS (KB) under which unused code is not worth a finding. */
+  unusedJsMinKB: 100,
   /**
    * A step under the scan's hang fault that took at least this share of the
    * hang's release time waited the hang out: no client-side timeout.
@@ -192,27 +200,24 @@ export interface AnalyzeScanOptions {
  *   beacons and prefetches; an app's own AbortController shows the same way,
  *   and is deliberate);
  * - media the scanning browser cannot decode: Playwright's Chromium ships
- *   without the H.264 / AAC codecs that Chrome has.
+ *   without the H.264 / AAC codecs that Chrome has;
+ * - a file the browser's opaque-response blocking stopped while the crawler
+ *   intercepted requests, that serves fine when fetched (`orb.ts` relabels
+ *   those errors after the crawls).
  */
 export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; reason: string }> = [
-  { code: "net::ERR_TUNNEL_CONNECTION_FAILED", pattern: /net::ERR_TUNNEL_CONNECTION_FAILED\b/, reason: "a proxy on the scanning machine refused the host" },
-  { code: "net::ERR_PROXY_CONNECTION_FAILED", pattern: /net::ERR_PROXY_CONNECTION_FAILED\b/, reason: "the scanning machine's proxy could not be reached" },
-  { code: "net::ERR_PROXY_AUTH_UNSUPPORTED", pattern: /net::ERR_PROXY_AUTH_UNSUPPORTED\b/, reason: "the scanning machine's proxy wants authentication" },
-  {
-    code: "net::ERR_CERT_AUTHORITY_INVALID",
-    pattern: /net::ERR_CERT_AUTHORITY_INVALID\b/,
-    reason: "the scanning browser does not trust the certificate's issuer (a TLS-intercepting proxy?); check the URL in a normal browser",
-  },
-  {
-    code: "net::ERR_BLOCKED_BY_CLIENT",
-    pattern: /net::ERR_BLOCKED_BY_CLIENT\b/,
-    reason: "the crawler's external-navigation guard (it also stops cross-origin iframe documents)",
-  },
-  { code: "net::ERR_ABORTED", pattern: /net::ERR_ABORTED\b/, reason: "cancelled in flight, mostly by the crawl navigating on" },
+  netCause("net::ERR_TUNNEL_CONNECTION_FAILED", "a proxy on the scanning machine refused the host"),
+  netCause("net::ERR_PROXY_CONNECTION_FAILED", "the scanning machine's proxy could not be reached"),
+  netCause("net::ERR_PROXY_AUTH_UNSUPPORTED", "the scanning machine's proxy wants authentication"),
+  netCause(
+    "net::ERR_CERT_AUTHORITY_INVALID",
+    "the scanning browser does not trust the certificate's issuer (a TLS-intercepting proxy?); check the URL in a normal browser",
+  ),
+  netCause("net::ERR_BLOCKED_BY_CLIENT", "the crawler's external-navigation guard (it also stops cross-origin iframe documents)"),
+  netCause("net::ERR_ABORTED", "cancelled in flight, mostly by the crawl navigating on"),
   {
     code: "net::ERR_BLOCKED_BY_ORB (served fine)",
-    // `markServedOrb` appends this to an ORB error whose URL answered with an image when fetched.
-    pattern: /net::ERR_BLOCKED_BY_ORB \(served fine when fetched directly\)/,
+    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_ORB ${ORB_SERVED_NOTE}`)),
     reason: "the browser's opaque-response blocking stopped a file that serves fine when fetched directly; Chromium does that now and then while a page's requests are intercepted, as the crawler's are",
   },
   {
@@ -221,6 +226,11 @@ export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; 
     reason: "Playwright's Chromium has no H.264 / AAC codecs, which Chrome has; the same media plays there",
   },
 ];
+
+/** A `net::ERR_*` cause, matched by its code. */
+function netCause(code: string, reason: string): { code: string; pattern: RegExp; reason: string } {
+  return { code, pattern: new RegExp(`${escapeRegExp(code)}\\b`), reason };
+}
 
 function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
   return ENVIRONMENT_CAUSES.find((c) => c.pattern.test(message));
@@ -341,10 +351,13 @@ export function analyzeScan(
   chaos: readonly ScanChaosRun[] = [],
   options: AnalyzeScanOptions = {},
 ): ScanAnalysis {
-  const environment = environmentNotes([baseline, ...chaos.map((r) => r.report)]);
-  const envPages = environmentPages(baseline);
-  baseline = withoutEnvironmentErrors(baseline);
-  chaos = chaos.map((r) => ({ ...r, report: withoutEnvironmentErrors(r.report) }));
+  // The clean crawl alone for the notes: the chaos crawls repeat the same
+  // pages, and counting them too would multiply one blocked host by four.
+  const clean = splitEnvironment(baseline);
+  const environment = environmentNotes(clean.environment);
+  const envPages = environmentPages(clean.environment);
+  baseline = clean.report;
+  chaos = chaos.map((r) => ({ ...r, report: splitEnvironment(r.report).report }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
     ...errorFindings(baseline, envPages),
@@ -375,7 +388,7 @@ function coverageWarnings(report: CrawlReport): string[] {
   if (!start) return ["The crawl visited no page."];
   const net = start.perfPage?.network;
   // Links the crawl could follow: same-site, and not back to the page itself.
-  const onward = start.links.filter((l) => sameOrigin(l, start.url) && l.replace(/[#?].*$/, "").replace(/\/$/, "") !== start.url.replace(/[#?].*$/, "").replace(/\/$/, ""));
+  const onward = start.links.filter((l) => sameOrigin(l, start.url) && pageIdentity(l) !== pageIdentity(start.url));
   if (report.pages.length <= 1 && onward.length === 0) {
     out.push(
       "The crawl reached only the start page, and it had no same-site links to follow. It may be a single-page app with no URL per view, or the site served a bot check, a rate limit or an error page, or it needs a login (--storage-state). The findings cover that one page.",
@@ -389,10 +402,19 @@ function coverageWarnings(report: CrawlReport): string[] {
   return out;
 }
 
-function withoutEnvironmentErrors(report: CrawlReport): CrawlReport {
-  const clusters = report.errorClusters ?? [];
-  if (!clusters.some((c) => environmentCause(c.sample.message))) return report;
-  return { ...report, errorClusters: clusters.filter((c) => !environmentCause(c.sample.message)) };
+type EnvironmentCluster = { cluster: ErrorCluster; cause: (typeof ENVIRONMENT_CAUSES)[number] };
+
+/** The report without its environment-caused error clusters, and those clusters with their cause. */
+function splitEnvironment(report: CrawlReport): { report: CrawlReport; environment: EnvironmentCluster[] } {
+  const environment: EnvironmentCluster[] = [];
+  const kept: ErrorCluster[] = [];
+  for (const cluster of report.errorClusters ?? []) {
+    const cause = environmentCause(cluster.sample.message);
+    if (cause) environment.push({ cluster, cause });
+    else kept.push(cluster);
+  }
+  if (environment.length === 0) return { report, environment };
+  return { report: { ...report, errorClusters: kept }, environment };
 }
 
 /**
@@ -400,10 +422,10 @@ function withoutEnvironmentErrors(report: CrawlReport): CrawlReport {
  * to fetch" exception on one of them may be that failure's knock-on effect;
  * the finding says so rather than being dropped, since it cannot be proved.
  */
-function environmentPages(report: CrawlReport): Set<string> {
+function environmentPages(environment: readonly EnvironmentCluster[]): Set<string> {
   const pages = new Set<string>();
-  for (const c of report.errorClusters ?? []) {
-    if (c.type === "network" && environmentCause(c.sample.message)) for (const u of c.urls) pages.add(u);
+  for (const { cluster } of environment) {
+    if (cluster.type === "network") for (const u of cluster.urls) pages.add(u);
   }
   return pages;
 }
@@ -439,16 +461,11 @@ function isCrawlerError(c: ErrorCluster): boolean {
   return c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(c.sample.message);
 }
 
-function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[] {
-  const byCode = new Map<string, { count: number; hosts: Set<string> }>();
-  // The clean crawl alone: the chaos crawls repeat the same pages, and
-  // counting them too would multiply one blocked host by four.
-  const report = reports[0];
-  for (const c of report?.errorClusters ?? []) {
-    const cause = environmentCause(c.sample.message);
-    if (!cause) continue;
+function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvironmentNote[] {
+  const byCode = new Map<string, { reason: string; count: number; hosts: Set<string> }>();
+  for (const { cluster: c, cause } of environment) {
     const code = cause.code;
-    const entry = byCode.get(code) ?? { count: 0, hosts: new Set<string>() };
+    const entry = byCode.get(code) ?? { reason: cause.reason, count: 0, hosts: new Set<string>() };
     entry.count += c.count;
     // A request failure reads "<url> - net::ERR_…"; a console echo names no URL.
     const url = /^(https?:\/\/\S+) - /.exec(c.sample.message)?.[1];
@@ -464,7 +481,7 @@ function environmentNotes(reports: readonly CrawlReport[]): ScanEnvironmentNote[
   return [...byCode.entries()]
     .map(([code, e]) => ({
       code,
-      reason: ENVIRONMENT_CAUSES.find((c) => c.code === code)!.reason,
+      reason: e.reason,
       count: e.count,
       hosts: [...e.hosts].slice(0, SCAN_WHERE_CAP),
     }))
@@ -526,7 +543,7 @@ function linkedFrom(p: PageResult): string {
 
 const ERROR_RULES: Record<
   ErrorCluster["type"],
-  { rule: string; severity: ScanSeverity; category: ScanCategory; title: string; hint: string } | null
+  { rule: string; severity: ScanSeverity; category: ScanCategory; title: string; hint: string }
 > = {
   exception: {
     rule: "js-exception",
@@ -572,14 +589,13 @@ const ERROR_RULES: Record<
   },
 };
 
-function errorFindings(report: CrawlReport, envPages: ReadonlySet<string> = new Set()): ScanFinding[] {
+function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): ScanFinding[] {
   const out: ScanFinding[] = [];
   // Documents that answered 4xx/5xx: the browser logs each as "Failed to load
   // resource", which `pageFailures` already reports as the page's own finding.
   const failedDocs = new Set(report.pages.filter((p) => (p.statusCode ?? 0) >= 400).map((p) => p.url));
   for (const c of report.errorClusters ?? []) {
     const r = ERROR_RULES[c.type];
-    if (!r) continue;
     if (isCrawlerError(c)) continue;
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;
@@ -652,7 +668,7 @@ function resilienceFindings(
       // a look at what the UI showed, not a crash.
       severity: severe ? "high" : "low",
       category: "resilience",
-      title: `Only when an API request fails: ${ERROR_RULES[c.type]?.title ?? c.type}: ${truncate(c.sample.message, 100)}`,
+      title: `Only when an API request fails: ${ERROR_RULES[c.type].title}: ${truncate(c.sample.message, 100)}`,
       where: capWhere([...urls]),
       occurrences: count,
       evidence: [
@@ -976,7 +992,7 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
 
   // Shipped code the crawl never ran.
   const js = report.perf?.coverage?.js;
-  if (js?.usedPct !== undefined && 100 - js.usedPct >= SCAN_THRESHOLDS.unusedJsPct.warn && js.totalBytes > 100 * 1024) {
+  if (js?.usedPct !== undefined && 100 - js.usedPct >= SCAN_THRESHOLDS.unusedJsPct.warn && js.totalBytes > SCAN_THRESHOLDS.unusedJsMinKB * 1024) {
     const unused = 100 - js.usedPct;
     out.push({
       rule: "unused-js",
@@ -1136,99 +1152,75 @@ const SPAN_RULES: SpanRule[] = [
   },
 ];
 
-/** CDP resource types that are the app's own data requests. */
-const API_TYPES = new Set(["Fetch", "XHR"]);
 /** CDP resource types a browser should be able to cache across pages. */
 const STATIC_TYPES = new Set(["Script", "Stylesheet", "Image", "Font", "Media"]);
 
 function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfSpanReport>): ScanFinding[] {
   const out: ScanFinding[] = [];
   const ctx: SpanContext = { navigated: (s) => navigated(s) || moved.has(s) };
+  // A perfKey the crawl hit several times is one place: `located` keeps its
+  // worst value.
   for (const r of SPAN_RULES) {
-    // Worst value per perfKey: a key the crawl hit several times is one place.
-    const byKey = new Map<string, Located>();
+    const hits: Located[] = [];
     for (const s of spans) {
       const v = r.value(s, ctx);
-      if (v === undefined || v < r.thresholds.warn) continue;
-      const prev = byKey.get(s.key);
-      if (!prev || v > prev.value) byKey.set(s.key, { where: s.key, value: v, line: r.line(s, v) });
+      if (v !== undefined && v >= r.thresholds.warn) hits.push({ where: s.key, value: v, line: r.line(s, v) });
     }
-    if (byKey.size === 0) continue;
-    const hits = [...byKey.values()];
-    out.push(
-      located(hits, {
-        rule: r.rule,
-        severity: severityOf(hits, r.thresholds, r.warnSeverity),
-        category: "perf",
-        title: r.title,
-        hint: r.hint,
-      }),
-    );
+    pushLocated(out, hits, { rule: r.rule, category: "perf", title: r.title, hint: r.hint }, r.thresholds, r.warnSeverity);
   }
 
-  const worstPerKey = (into: Map<string, Located>, hit: Located) => {
-    const prev = into.get(hit.where);
-    if (!prev || hit.value > prev.value) into.set(hit.where, hit);
-  };
-  const slow = new Map<string, Located>();
-  const heavy = new Map<string, Located>();
-  const dup = new Map<string, Located>();
-  const perItem = new Map<string, Located>();
+  const slow: Located[] = [];
+  const heavy: Located[] = [];
+  const dup: Located[] = [];
+  const perItem: Located[] = [];
   // `full` counts the loads that transferred the file (≥ 1 KB), the rest were
   // revalidations: the first full download is the one a cache needs.
-  const downloads = new Map<string, { path: string; loads: Set<string>; kb: number; full: number }>();
+  const downloads = new Map<string, { loads: number; kb: number; full: number }>();
   for (const s of spans) {
     const exact = new Map<string, number>();
     const byEndpoint = new Map<string, Set<string>>();
     for (const q of s.network.requests) {
       const path = q.url.split("?")[0]!;
       if (q.durationMs >= SCAN_THRESHOLDS.slowRequestMs.warn) {
-        worstPerKey(slow, { where: path, value: q.durationMs, line: `${path}: ${fmt(q.durationMs)}ms (${q.type}${q.thirdParty ? ", third-party" : ""})` });
+        slow.push({ where: path, value: q.durationMs, line: `${path}: ${fmt(q.durationMs)}ms (${q.type}${q.thirdParty ? ", third-party" : ""})` });
       }
       if (q.kb >= SCAN_THRESHOLDS.resourceKB.warn) {
-        worstPerKey(heavy, { where: path, value: q.kb, line: `${path}: ${fmt(q.kb)} KB (${q.type}${q.thirdParty ? ", third-party" : ""})` });
+        heavy.push({ where: path, value: q.kb, line: `${path}: ${fmt(q.kb)} KB (${q.type}${q.thirdParty ? ", third-party" : ""})` });
       }
       // The site's own API only (a third-party beacon repeating is the tag's
       // business), and only responses that were transferred: a second request
       // answered from cache costs nothing.
-      if (API_TYPES.has(q.type) && !q.thirdParty) {
+      if (isOwnApiRequest(q)) {
         if (q.kb > 0) exact.set(q.url, (exact.get(q.url) ?? 0) + 1);
         const label = endpointLabel(q.url);
         if (label?.includes(":id")) byEndpoint.set(label, (byEndpoint.get(label) ?? new Set()).add(q.url));
       }
       // The site's own files: a third party's cache headers are not the site's to set.
       if (isLoad(s) && STATIC_TYPES.has(q.type) && q.kb > 0 && !q.thirdParty && !q.url.startsWith("data:")) {
-        // The same file: a full download is matched by path and size, so a
-        // cache-busting query that changes on every load still matches; a
-        // revalidation (a few hundred bytes of 304) by its whole URL, since an
-        // image service serves many files from one path (`/_next/image?url=`).
+        // A revalidation is a few hundred bytes of 304.
         const revalidation = q.kb < 1;
         // The file, by its URL with cache-busting parameters dropped: a query
         // that changes on every load (`?v=<Date.now()>`) still names the same
         // file, while an image service's `?url=…&w=…` names different ones.
         const id = assetIdentity(q.url);
-        const d = downloads.get(id) ?? { path: id, loads: new Set<string>(), kb: 0, full: 0 };
-        d.loads.add(`${s.key}#${d.loads.size}`);
+        const d = downloads.get(id) ?? { loads: 0, kb: 0, full: 0 };
+        d.loads++;
         d.kb = Math.max(d.kb, q.kb);
         if (!revalidation) d.full++;
         downloads.set(id, d);
       }
     }
     for (const [url, n] of exact) {
-      if (n < 2) continue;
-      worstPerKey(dup, { where: s.key, value: n, line: `${s.key}: ${url} requested ${n}×` });
+      if (n < SCAN_THRESHOLDS.duplicateRequests.warn) continue;
+      dup.push({ where: s.key, value: n, line: `${s.key}: ${url} requested ${n}×` });
     }
     for (const [label, urls] of byEndpoint) {
       if (urls.size < SCAN_THRESHOLDS.perItemRequests.warn) continue;
-      worstPerKey(perItem, { where: s.key, value: urls.size, line: `${s.key}: ${urls.size} requests to ${label}` });
+      perItem.push({ where: s.key, value: urls.size, line: `${s.key}: ${urls.size} requests to ${label}` });
     }
   }
-  const push = (map: Map<string, Located>, f: Omit<ScanFinding, "where" | "occurrences" | "evidence" | "severity">, t: { poor: number }, warnSeverity: ScanSeverity) => {
-    if (map.size === 0) return;
-    const hits = [...map.values()];
-    out.push(located(hits, { ...f, severity: severityOf(hits, t, warnSeverity) }));
-  };
-  push(
+  pushLocated(
+    out,
     slow,
     {
       rule: "slow-request",
@@ -1239,7 +1231,8 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
     SCAN_THRESHOLDS.slowRequestMs,
     "low",
   );
-  push(
+  pushLocated(
+    out,
     heavy,
     {
       rule: "heavy-resource",
@@ -1250,7 +1243,8 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
     SCAN_THRESHOLDS.resourceKB,
     "medium",
   );
-  push(
+  pushLocated(
+    out,
     dup,
     {
       rule: "duplicate-request",
@@ -1258,10 +1252,11 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
       title: "The same API request made more than once in one step",
       hint: "Several components fetch the same thing, or a failed call is retried in a loop. Share one in-flight promise (a request cache), and bound retries.",
     },
-    { poor: 5 },
+    SCAN_THRESHOLDS.duplicateRequests,
     "medium",
   );
-  push(
+  pushLocated(
+    out,
     perItem,
     {
       rule: "per-item-requests",
@@ -1274,20 +1269,20 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
   );
   const repeated: Located[] = [];
   let fullDownloads = false;
-  for (const d of downloads.values()) {
-    if (d.loads.size < SCAN_THRESHOLDS.repeatDownloads.warn) continue;
+  for (const [path, d] of downloads) {
+    if (d.loads < SCAN_THRESHOLDS.repeatDownloads.warn) continue;
     // Downloaded in full once and revalidated after (htmx.org's max-age=0,
     // must-revalidate with an ETag) is a round trip per load, not the bytes.
     if (d.full >= SCAN_THRESHOLDS.repeatDownloads.warn) {
       fullDownloads = true;
-      repeated.push({ where: d.path, value: d.full, line: `${d.path}: downloaded again on ${d.full} page loads (${fmt(d.kb)} KB)` });
+      repeated.push({ where: path, value: d.full, line: `${path}: downloaded again on ${d.full} page loads (${fmt(d.kb)} KB)` });
     } else {
-      const revalidations = d.loads.size - d.full;
+      const revalidations = d.loads - d.full;
       const line =
         d.full === 0
-          ? `${d.path}: revalidated (not reused from cache) on ${revalidations} page loads (${fmt(d.kb)} KB)`
-          : `${d.path}: downloaded once (${fmt(d.kb)} KB), then revalidated (not reused from cache) on ${revalidations} page loads`;
-      repeated.push({ where: d.path, value: d.loads.size, line });
+          ? `${path}: revalidated (not reused from cache) on ${revalidations} page loads (${fmt(d.kb)} KB)`
+          : `${path}: downloaded once (${fmt(d.kb)} KB), then revalidated (not reused from cache) on ${revalidations} page loads`;
+      repeated.push({ where: path, value: d.loads, line });
     }
   }
   if (repeated.length > 0) {
@@ -1330,7 +1325,7 @@ function navigated(s: PerfSpanReport): boolean {
 }
 
 function isLoad(s: PerfSpanReport): boolean {
-  return s.key.endsWith(" :: load");
+  return isLoadKey(s.key);
 }
 
 function documentsOf(p: PageResult): Array<{ url: string; vitals: Record<string, { value: number }> }> {
@@ -1341,12 +1336,28 @@ function documentsOf(p: PageResult): Array<{ url: string; vitals: Record<string,
   return [{ url: p.url, vitals: s.vitals }];
 }
 
+/** A URL as a page: fragment, query and trailing slash dropped. */
+function pageIdentity(url: string): string {
+  return url.replace(/[#?].*$/, "").replace(/\/$/, "");
+}
+
 function sameOrigin(a: string, b: string): boolean {
   try {
     return new URL(a).origin === new URL(b).origin;
   } catch {
     return false;
   }
+}
+
+/** Push a finding for `hits` when there are any: high when one reached `t.poor`, else `warnSeverity`. */
+function pushLocated(
+  out: ScanFinding[],
+  hits: Located[],
+  f: Omit<ScanFinding, "where" | "occurrences" | "evidence" | "severity">,
+  t: { poor: number },
+  warnSeverity: ScanSeverity,
+): void {
+  if (hits.length > 0) out.push(located(hits, { ...f, severity: severityOf(hits, t, warnSeverity) }));
 }
 
 function severityOf(hits: readonly Located[], t: { poor: number }, warnSeverity: ScanSeverity): ScanSeverity {

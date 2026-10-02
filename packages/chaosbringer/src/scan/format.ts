@@ -7,7 +7,7 @@ import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFind
 import type { ScanEndpoint } from "./endpoints.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
-export const PERF_PATTERN_URL = "https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns";
+const PERF_PATTERN_URL = "https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns";
 
 export interface ScanSummaryInput {
   url: string;
