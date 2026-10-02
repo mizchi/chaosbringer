@@ -42,6 +42,7 @@ import { parseSettleArg, resolveSettle } from "./settle.js";
 import { parseShardArg } from "./shard.js";
 import type { CrawlerOptions, Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
+import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
@@ -92,7 +93,7 @@ const { values, positionals } = parseArgs({
     "max-actions-per-page": { type: "string" },
     timeout: { type: "string" },
     settle: { type: "string" },
-    headless: { type: "boolean", default: true },
+    ...HEADLESS_OPTIONS,
     cdp: { type: "string" },
     "cdp-target": { type: "string" },
     "terminal-browser": { type: "boolean", default: false },
@@ -487,7 +488,7 @@ const options: CrawlerOptions = {
   })(),
   timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
   settle,
-  headless: values.headless,
+  headless: resolveHeadless(values),
   cdpEndpoint: values.cdp,
   cdpTargetId: values["cdp-target"],
   terminalBrowser: values["terminal-browser"],

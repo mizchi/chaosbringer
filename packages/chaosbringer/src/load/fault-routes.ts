@@ -7,7 +7,7 @@
  */
 import type { BrowserContext, Route, Request } from "playwright";
 import { validateFaultSchedule } from "../schedule.js";
-import { pickFaultRule } from "../fault-router.js";
+import { applyFault, pickFaultRule, toRegExp } from "../fault-router.js";
 import type { Fault, FaultRule, FaultInjectionStats, UrlMatcher } from "../types.js";
 
 interface CompiledRule {
@@ -39,17 +39,25 @@ interface CompiledRule {
  */
 const LOAD_HANG_RELEASE_MS = 30_000;
 
-function toRegExp(matcher: UrlMatcher | undefined): RegExp | null {
-  if (matcher === undefined) return /.*/;
-  if (matcher instanceof RegExp) return matcher;
-  if (typeof matcher === "string") {
-    try {
-      return new RegExp(matcher);
-    } catch {
-      return null;
-    }
-  }
-  return null;
+/**
+ * The crawler's `toRegExp`, so a load rule matches exactly as a crawl rule
+ * does (stateful `g` / `y` flags dropped: this copy kept them, and a `/g`
+ * pattern fired on every other request). A rule with no pattern matches
+ * every request, as it always has here.
+ */
+function loadPattern(matcher: UrlMatcher | undefined): RegExp | null {
+  return matcher === undefined ? /.*/ : toRegExp(matcher);
+}
+
+/**
+ * Load runs have no per-page teardown hook to drain parked routes, so a hang
+ * always gets a bound: `releaseAfterMs` when given, else LOAD_HANG_RELEASE_MS.
+ * Until then the request stays in flight, which is the fault. The crawler's
+ * `applyFault` aborts a bounded hang on an `unref`'d timer, so a run with a
+ * 30s default does not hold the process open after its report is printed.
+ */
+function boundedForLoad(fault: Fault): Fault {
+  return fault.kind === "hang" && fault.releaseAfterMs === undefined ? { ...fault, releaseAfterMs: LOAD_HANG_RELEASE_MS } : fault;
 }
 
 export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | undefined): CompiledRule[] {
@@ -65,7 +73,7 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
     // `decisions` entry silently never fired. A firing policy that is wrong
     // in a way nothing reports is the worst kind of fault config.
     validateFaultSchedule(`load fault rule "${r.name ?? String(r.urlPattern)}"`, r);
-    const pattern = toRegExp(r.urlPattern);
+    const pattern = loadPattern(r.urlPattern);
     if (!pattern) continue;
     out.push({
       rule: r,
@@ -79,45 +87,6 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
     });
   }
   return out;
-}
-
-async function applyFault(route: Route, fault: Fault): Promise<void> {
-  switch (fault.kind) {
-    case "abort":
-      await route.abort(fault.errorCode ?? "failed");
-      return;
-    case "status": {
-      const body =
-        fault.body !== undefined ? fault.body : JSON.stringify({ error: fault.status });
-      await route.fulfill({
-        status: fault.status,
-        body,
-        contentType: fault.contentType ?? "application/json",
-      });
-      return;
-    }
-    case "delay":
-      await new Promise((r) => setTimeout(r, fault.ms));
-      await route.fallback();
-      return;
-    case "hang": {
-      // Load runs have no per-page teardown hook to drain parked routes, so
-      // a hang always gets a bound here: `releaseAfterMs` when given, else
-      // LOAD_HANG_RELEASE_MS. Until then the request stays in flight, which
-      // is the fault.
-      const ms = fault.releaseAfterMs ?? LOAD_HANG_RELEASE_MS;
-      // `unref`: the default bound is 30s, and without this a load run with
-      // an unbounded `hang` holds the process open for 30s after its report
-      // is printed.
-      const timer = setTimeout(() => {
-        void route.abort("timedout").catch(() => {
-          /* context already gone */
-        });
-      }, ms);
-      timer.unref?.();
-      return;
-    }
-  }
 }
 
 /**
@@ -151,7 +120,7 @@ export async function installFaultRoutes(
       return;
     }
     winner.firings.push(Date.now());
-    await applyFault(route, winner.rule.fault);
+    await applyFault(route, boundedForLoad(winner.rule.fault));
   });
 }
 

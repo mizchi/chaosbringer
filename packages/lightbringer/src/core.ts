@@ -54,6 +54,7 @@ export {
   DEFAULT_EVALUATE_TIMEOUT_MS,
 } from "./defaults";
 export { BoundedEvaluator } from "./evaluate";
+export { hostLocale } from "./locale";
 export type { EvaluateOutcome } from "./evaluate";
 export type { EnvSessionOptions } from "./config";
 export type { NetProfile } from "./defaults";

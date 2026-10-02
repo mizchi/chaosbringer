@@ -36,7 +36,7 @@ import type {
   RecipePrecondition,
   RecipeStep,
 } from "./types.js";
-import { hostLocale } from "../browser-locale.js";
+import { type IsolatedPage, newIsolatedPage } from "../browser-session.js";
 
 export interface RepairOptions {
   /** Verified recipe whose replay is failing. */
@@ -84,8 +84,14 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     : () => {};
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
-  const context = await browser.newContext({ locale: hostLocale() });
-  const page = await context.newPage();
+  let isolated: IsolatedPage;
+  try {
+    isolated = await newIsolatedPage(browser);
+  } catch (err) {
+    if (ownsBrowser) await browser.close().catch(() => {});
+    throw err;
+  }
+  const { context, page } = isolated;
   const startUrl = opts.startUrl ?? deriveStartUrl(opts.recipe, opts.baseUrl);
 
   // Build a Goal whose successCheck = original postconditions held.

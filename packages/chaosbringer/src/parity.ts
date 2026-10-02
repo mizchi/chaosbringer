@@ -15,6 +15,7 @@
 
 import { createHash } from "node:crypto";
 import { diffJsonBodies, type BodyDiffResult } from "./body-diff.js";
+import { contextOptions } from "./browser-session.js";
 
 export type MismatchKind =
   /** HTTP status codes differ. */
@@ -331,7 +332,7 @@ export interface ContextLike {
   close(): Promise<void>;
 }
 export interface BrowserLike {
-  newContext(): Promise<ContextLike>;
+  newContext(options?: { locale?: string }): Promise<ContextLike>;
   close(): Promise<void>;
 }
 
@@ -361,7 +362,7 @@ async function probeBrowserSide(
   url: string,
   timeoutMs: number,
 ): Promise<{ pageErrors: string[]; consoleErrors: string[] }> {
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext(contextOptions());
   const page = await ctx.newPage();
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];

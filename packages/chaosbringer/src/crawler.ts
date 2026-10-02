@@ -149,7 +149,7 @@ import {
   type RequestTracker,
   type ResolvedSettle,
 } from "./settle.js";
-import { hostLocale } from "./browser-locale.js";
+import { contextOptions } from "./browser-session.js";
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -693,20 +693,19 @@ export class ChaosCrawler {
           this.options.device && devices[this.options.device]
             ? devices[this.options.device]
             : undefined;
-        this.context = await this.browser.newContext({
+        this.context = await this.browser.newContext(contextOptions({
           ...deviceDesc,
           // Device descriptor's viewport wins when set — device emulation is
           // only meaningful if the viewport matches. Otherwise fall back to
           // the configured default.
           viewport: deviceDesc?.viewport ?? this.options.viewport,
           userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
-          locale: hostLocale(),
           // Record mode: ask Playwright to capture all network into the HAR.
           recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
           // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
           // and validates the file; we don't touch it.
           storageState: this.options.storageState || undefined,
-        });
+        }));
       }
 
       // lightbringer's in-page collector (web-vitals + long-task observers),

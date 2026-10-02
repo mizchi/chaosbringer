@@ -1,7 +1,6 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * A same-site URL that redirects to another origin (svelte.dev/chat → a
@@ -10,24 +9,22 @@ import { ChaosCrawler } from "./crawler.js";
  * links and its perf as the crawled site's. It now stops at the landing page.
  */
 describe("a page that redirects off-site", () => {
-  let site: http.Server;
-  let other: http.Server;
+  let site: TestServer;
+  let other: TestServer;
   let base: string;
   let otherOrigin: string;
 
-  const listen = async (server: http.Server, host: string) => {
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    return `http://${host}:${(server.address() as AddressInfo).port}`;
-  };
-
   beforeAll(async () => {
     // Another origin: `localhost` is not `127.0.0.1` to the browser.
-    other = http.createServer((_req, res) => {
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end(`<!doctype html><title>other</title><a href="/join">join</a><script>console.error("the other site's error")</script>`);
-    });
-    otherOrigin = await listen(other, "localhost");
-    site = http.createServer((req, res) => {
+    other = await startTestServer(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<!doctype html><title>other</title><a href="/join">join</a><script>console.error("the other site's error")</script>`);
+      },
+      { host: "localhost" },
+    );
+    otherOrigin = other.url;
+    site = await startTestServer((req, res) => {
       if (req.url === "/join") {
         res.writeHead(302, { location: `${otherOrigin}/signup` });
         res.end();
@@ -46,12 +43,12 @@ describe("a page that redirects off-site", () => {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(`<!doctype html><title>site</title><a href="/chat">chat</a>`);
     });
-    base = await listen(site, "127.0.0.1");
+    base = site.url;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => site.close(() => r()));
-    await new Promise<void>((r) => other.close(() => r()));
+    await site.close();
+    await other.close();
   });
 
   it("goes back when a clicked same-site link redirects off-site, and keeps nothing of that site", async () => {

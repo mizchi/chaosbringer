@@ -1,7 +1,6 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * `excludePatterns` kept the crawl from visiting a URL as a page, but not from
@@ -10,12 +9,12 @@ import { ChaosCrawler } from "./crawler.js";
  * acting on an excluded login page for the rest of the page's steps.
  */
 describe("excluded URLs and clicks", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   const hits: string[] = [];
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       hits.push(req.url ?? "");
       if (req.url === "/plus") {
         res.writeHead(302, { location: "/plus/login" });
@@ -46,12 +45,11 @@ describe("excluded URLs and clicks", () => {
       // A button that stays on the page, so some steps are measured here.
       res.end(`<!doctype html><title>home</title><a href="/logout">Log out</a><a href="/plus">Plus</a><button type="button">Stay</button>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   it("never clicks a link to an excluded URL, and goes back from one a click redirected to", async () => {
@@ -63,6 +61,8 @@ describe("excluded URLs and clicks", () => {
       perf: true,
       excludePatterns: ["/logout", "/login"],
       actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 },
+      // Fixed picks: this seed clicks both "Plus" and "Stay" in six steps.
+      seed: 1,
     }).start();
 
     expect(hits).not.toContain("/logout");
@@ -120,18 +120,17 @@ describe("excluded URLs and clicks", () => {
 
 describe("the browser's language", () => {
   it("is a valid BCP 47 tag even when the host locale is POSIX", async () => {
-    const server = http.createServer((_req, res) => {
+    const server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html" });
       // webscraper.io does this; `en-US@posix` makes it throw.
       res.end(`<!doctype html><title>l</title><script>new Intl.Locale(navigator.language)</script>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+    const url = `${server.url}/`;
     try {
       const report = await new ChaosCrawler({ baseUrl: url, maxPages: 1, maxActionsPerPage: 0, headless: true }).start();
       expect(report.pages[0]!.errors).toEqual([]);
     } finally {
-      await new Promise<void>((r) => server.close(() => r()));
+      await server.close();
     }
   }, 60_000);
 });

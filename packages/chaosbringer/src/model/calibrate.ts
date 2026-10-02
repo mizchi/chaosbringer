@@ -20,6 +20,7 @@
 import { chromium, type Route } from "playwright";
 import { escapeRegExp } from "../filters.js";
 import type { TimingProfile } from "../timing.js";
+import { newIsolatedPage } from "../browser-session.js";
 
 export interface CalibrateOptions {
   /** Origin to measure against. Any page that can issue a same-origin fetch. */
@@ -75,7 +76,7 @@ async function oneRun(opts: CalibrateOptions): Promise<CalibrationRun> {
   const samples = opts.samples ?? 20;
   const browser = await chromium.launch({ headless: opts.headless ?? true });
   try {
-    const page = await browser.newPage();
+    const { page } = await newIsolatedPage(browser);
     let nominal = 0;
     const probe = opts.probePath ?? new URL(opts.url).pathname;
 
@@ -149,10 +150,12 @@ async function oneRun(opts: CalibrateOptions): Promise<CalibrationRun> {
     for (let i = 0; i < 2; i++) {
       const t0 = Date.now();
       const b = await chromium.launch({ headless: opts.headless ?? true });
-      const p = await b.newPage();
-      await p.goto(opts.url, { waitUntil: "networkidle" });
-      await p.close();
-      await b.close();
+      try {
+        const { page: p } = await newIsolatedPage(b);
+        await p.goto(opts.url, { waitUntil: "networkidle" });
+      } finally {
+        await b.close();
+      }
       fixedSamples.push(Date.now() - t0);
     }
     const fixedPerPlanMs = Math.max(...fixedSamples);

@@ -35,7 +35,8 @@ import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
 import { verifyAndPromote } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
-import { hostLocale } from "../browser-locale.js";
+import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
+import { newIsolatedPage } from "../browser-session.js";
 
 const HELP = `chaosbringer recipes <subcommand> [options]
 
@@ -338,7 +339,7 @@ async function harvestCmd(argv: string[]): Promise<void> {
     options: {
       ...COMMON_OPTIONS,
       trust: { type: "boolean" },
-      headless: { type: "boolean" },
+      ...HEADLESS_OPTIONS,
     },
     allowPositionals: true,
     strict: true,
@@ -349,10 +350,9 @@ async function harvestCmd(argv: string[]): Promise<void> {
     return;
   }
   const store = openStore(values);
-  const browser = await chromium.launch({ headless: values.headless !== false });
+  const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
-    const ctx = await browser.newContext({ locale: hostLocale() });
-    const page = await ctx.newPage();
+    const { page } = await newIsolatedPage(browser);
     await page.goto(url, { waitUntil: "domcontentloaded" });
     const harvested = await loadPageScenarios(page, { trustPublisher: values.trust });
     for (const r of harvested) store.upsert(r);
@@ -381,7 +381,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
       runs: { type: "string" },
       "min-success-rate": { type: "string" },
       "base-url": { type: "string" },
-      headless: { type: "boolean" },
+      ...HEADLESS_OPTIONS,
     },
     allowPositionals: true,
     strict: true,
@@ -405,22 +405,21 @@ async function verifyCmd(argv: string[]): Promise<void> {
     ? Number(values["min-success-rate"])
     : 0.8;
 
-  const browser = await chromium.launch({ headless: values.headless !== false });
+  const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
     const result = await verifyAndPromote(store, recipe, {
       runs,
       minSuccessRate,
       verbose: !values.quiet,
       setupPage: async () => {
-        const ctx = await browser.newContext({ locale: hostLocale() });
-        const page = await ctx.newPage();
+        const { page, close } = await newIsolatedPage(browser);
         // verifyAndPromote does NOT navigate for you — caller's setupPage
         // owns the start state. The recipe's first step (if it's a
         // navigate) drives the page; otherwise we go to baseUrl.
         if (recipe.steps[0]?.kind !== "navigate") {
           await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
         }
-        return { page, cleanup: () => ctx.close() };
+        return { page, cleanup: close };
       },
     });
     if (values.json) {
@@ -540,7 +539,7 @@ async function repairCmd(argv: string[]): Promise<void> {
       "start-url": { type: "string" },
       "repair-budget": { type: "string" },
       seed: { type: "string" },
-      headless: { type: "boolean" },
+      ...HEADLESS_OPTIONS,
     },
     allowPositionals: true,
     strict: true,
@@ -567,7 +566,7 @@ async function repairCmd(argv: string[]): Promise<void> {
   }
   const seed = values.seed ? Number(values.seed) : undefined;
   const budget = values["repair-budget"] ? Number(values["repair-budget"]) : undefined;
-  const browser = await chromium.launch({ headless: values.headless !== false });
+  const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
     const result = await repairRecipe({
       recipe,

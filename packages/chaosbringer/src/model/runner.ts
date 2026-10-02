@@ -51,6 +51,7 @@ import {
 import type { CrawlReport, FaultRule, Invariant, RuntimeFault, UrlMatcher } from "../types.js";
 import type { FaultPlan, PlanOutcome, PlanStep } from "./plan.js";
 import { validatePlan } from "./plan.js";
+import { toRegExp } from "../fault-router.js";
 
 /** Which layer realises an outcome. Mixing layers on one rule desyncs occurrence counters. */
 type OutcomeLayer = "runtime" | "network" | "none";
@@ -702,15 +703,6 @@ export function compilePlanFaults(
  * one spelling has to inspect the other. Returns `null` for a string that is
  * not a valid pattern; the layer that compiles it for real reports that.
  */
-function toRegExp(matcher: UrlMatcher): RegExp | null {
-  if (matcher instanceof RegExp) return matcher;
-  try {
-    return new RegExp(matcher);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Is this pattern anchored at the end of the URL string?
  *
