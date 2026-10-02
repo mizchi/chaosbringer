@@ -27,6 +27,11 @@ describe("fingerprintError", () => {
     expect(csp("4e64c7e8ebdc2af2", "ta3qgOjChbk6bJJNgxodW06Z1H3/IcWm7fWRIsN0WkA=")).toBe(
       csp("9bb094f6d60ac381", "hZhXKqL3V9mpohqAHCc0GmfFPvqrhP8tP/zBKtvjXmg="),
     );
+    // The hash in that message lies past the 160-character fingerprint, so
+    // check it on a short one.
+    const hash = (h: string) =>
+      fingerprintError(err({ type: "console", message: `Refused to execute inline script: 'sha256-${h}' not in script-src` }));
+    expect(hash("ta3qgOjChbk6bJJNgxodW06Z1H3/IcWm7fWRIsN0WkA=")).toBe(hash("hZhXKqL3V9mpohqAHCc0GmfFPvqrhP8tP/zBKtvjXmg="));
   });
 
   it("strips source locations", () => {
@@ -39,6 +44,8 @@ describe("fingerprintError", () => {
     const a = fingerprintError(err({ type: "console", message: "user 12345 not found" }));
     const b = fingerprintError(err({ type: "console", message: "user 98765 not found" }));
     expect(a).toBe(b);
+    const small = (n: string) => fingerprintError(err({ type: "console", message: `user ${n} not found` }));
+    expect(small("12")).not.toBe(small("34"));
   });
 
   it("distinct message shapes produce distinct fingerprints", () => {

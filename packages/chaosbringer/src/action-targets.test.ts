@@ -142,6 +142,23 @@ describe("weighActionTargets: link familiarity", () => {
   });
 });
 
+describe("weighActionTargets: excluded URLs", () => {
+  const ctx = context({ excluded: (url) => url.includes("/logout") });
+  const kinds = (els: RawActionTarget[]) => weighActionTargets(els, ctx).map((t) => t.type);
+
+  it("drops a link to an excluded URL, so the crawl never clicks it", () => {
+    expect(kinds([element({ tag: "a", href: "https://example.com/logout", text: "Log out" })])).toEqual(["scroll"]);
+  });
+
+  it("resolves a relative href before asking", () => {
+    expect(kinds([element({ tag: "a", href: "/logout", text: "Log out" })])).toEqual(["scroll"]);
+  });
+
+  it("keeps a link whose href cannot be resolved, and elements with no href", () => {
+    expect(kinds([element({ tag: "a", href: "http://[", text: "x" }), element({ tag: "button", text: "Go" })])).toHaveLength(3);
+  });
+});
+
 describe("weighActionTargets: positional boosts", () => {
   it("multiplies a nav-region link by 1.5", () => {
     const inNav = weigh(element({ tag: "a", isNavLink: true }));

@@ -62,6 +62,14 @@ export function fakeSpan(key: string, o: SpanShape = {}): PerfSpanReport {
   } as PerfSpanReport;
 }
 
+/** One entry of a span's `network.requests`: a same-site fetch of 1 KB taking 1 ms, unless `o` says otherwise. */
+export function fakeRequest(
+  url: string,
+  o: Partial<PerfSpanReport["network"]["requests"][number]> = {},
+): PerfSpanReport["network"]["requests"][number] {
+  return { url, type: "Fetch", startOffsetMs: 0, durationMs: 1, kb: 1, thirdParty: false, ...o };
+}
+
 export function fakePage(url: string, load?: PerfSpanReport, extra: Partial<PageResult> = {}): PageResult {
   return {
     url,

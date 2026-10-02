@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "../clusters.js";
-import { fakeAction, fakePage, fakeReport, fakeSpan } from "../perf-fixtures.test-helpers.js";
+import { fakeAction, fakePage, fakeReport, fakeRequest, fakeSpan } from "../perf-fixtures.test-helpers.js";
 import type { PagePerfSummary, PerfSpanReport } from "../types.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -240,7 +240,8 @@ describe("analyzeScan: perf", () => {
     const r = analyzeScan(
       fakeReport(
         [fakePage(`${U}/`, span("/ :: load", (s) => ((s.network.requestCount = 90), (s.network.waves = 5))))],
-        [fakeAction(span("/ :: input #q", (s) => (s.network.requestCount = 20)))],
+        // The action has waves too: only the load's count for request-waterfall.
+        [fakeAction(span("/ :: input #q", (s) => ((s.network.requestCount = 20), (s.network.waves = 5))))],
       ),
     );
     expect(r.findings.find((f) => f.rule === "chatty-action")!.where).toEqual(["/ :: input #q"]);
@@ -309,14 +310,7 @@ describe("analyzeScan: perf", () => {
   });
 
   it("finds duplicate requests, per-item fan-out and heavy responses in a step's requests", () => {
-    const req = (url: string, o: { type?: string; kb?: number } = {}) => ({
-      url,
-      type: o.type ?? "Fetch",
-      startOffsetMs: 0,
-      durationMs: 10,
-      kb: o.kb ?? 1,
-      thirdParty: false,
-    });
+    const req = (url: string, o: { type?: string; kb?: number } = {}) => fakeRequest(url, { durationMs: 10, ...o });
     const load = span("/ :: load", (s) => {
       s.network.requests = [
         req(`${U}/api/user`),
@@ -465,9 +459,7 @@ describe("analyzeScan: false positives seen on real sites", () => {
     const goto = cluster("exception", "page.goto: Timeout 30000ms exceeded.\nCall log: navigating to ...", [`${U}/slow`]);
     const clean = fakeReport([fakePage(`${U}/slow`)], []);
     const chaos = fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] });
-    expect(rules(analyzeScan(fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] })))).toEqual([
-      "page-load-failed",
-    ]);
+    expect(rules(analyzeScan(chaos))).toEqual(["page-load-failed"]);
     expect(rules(analyzeScan(clean, [{ fault: "hang", report: chaos }]))).toEqual(["fault-page-broken"]);
   });
 
@@ -540,14 +532,7 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 
   it("ignores repeated third-party beacons and cache hits as duplicates", () => {
-    const req = (url: string, o: { kb?: number; thirdParty?: boolean } = {}) => ({
-      url,
-      type: "XHR",
-      startOffsetMs: 0,
-      durationMs: 1,
-      kb: o.kb ?? 1,
-      thirdParty: o.thirdParty ?? false,
-    });
+    const req = (url: string, o: { kb?: number; thirdParty?: boolean } = {}) => fakeRequest(url, { type: "XHR", ...o });
     const s = span("/ :: click #go", (x) => {
       x.network.requests = [
         req("https://log.tracker.example/event?a=1", { thirdParty: true }),
@@ -671,7 +656,7 @@ describe("RULE_PATTERNS", () => {
 });
 
 describe("withSidecarRequests", () => {
-  const req = (url: string) => ({ url, type: "Fetch", startOffsetMs: 0, durationMs: 1, kb: 1, thirdParty: false });
+  const req = (url: string) => fakeRequest(url);
 
   it("puts each key's full list back in crawl order, keeping the report's list when it is longer", () => {
     const load = fakeSpan("/ :: load");
@@ -692,7 +677,7 @@ describe("withSidecarRequests", () => {
 });
 
 describe("deriveScanEndpoints", () => {
-  const req = (url: string, type = "Fetch", thirdParty = false) => ({ url, type, startOffsetMs: 0, durationMs: 1, kb: 1, thirdParty });
+  const req = (url: string, type = "Fetch", thirdParty = false) => fakeRequest(url, { type, thirdParty });
 
   it("keeps same-site fetch / XHR, folds ids, and ranks by count", () => {
     const load = fakeSpan("/ :: load");
