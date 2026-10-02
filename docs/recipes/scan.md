@@ -154,6 +154,12 @@ The report leaves them out of the findings and lists them once, under
   certificate is bad still fails to load, and that is still reported.
 - "no supported source" media errors: Playwright's Chromium ships without
   the H.264 / AAC codecs that Chrome has.
+- `net::ERR_BLOCKED_BY_ORB` on a file that serves fine: Chromium's
+  opaque-response blocking now and then stops a cross-origin image while the
+  page's requests are intercepted, as the crawler's are. After the crawls the
+  scan fetches each blocked URL once; one that answers 2xx as an image, media
+  or font goes here. One that does not (a 403 with an XML body) stays a
+  finding.
 
 An exception such as "Failed to fetch" on a page where one of these broke a
 request stays in the findings, but its evidence says it may be the knock-on
