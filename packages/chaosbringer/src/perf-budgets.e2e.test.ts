@@ -1,6 +1,4 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +7,7 @@ import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { runPerfCli } from "./perf-cli.js";
 import { formatReport } from "./reporter.js";
 import type { CrawlerOptions, CrawlReport } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Phase 2's loop, end to end: crawl a page twice with `perf`, emit budgets
@@ -43,14 +42,14 @@ const clickGo: Driver = {
 };
 
 describe("perf budgets: emit → gate → perfBudgets", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
   let dir: string;
   let logSpy: ReturnType<typeof vi.spyOn>;
   let errSpy: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
       if (url.pathname !== "/app") {
         res.writeHead(404, { "content-type": "text/plain" });
@@ -60,14 +59,12 @@ describe("perf budgets: emit → gate → perfBudgets", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(APP(url.searchParams.get("slow") === "1" ? 150 : 0));
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
     dir = mkdtempSync(join(tmpdir(), "chaosbringer-perf-budgets-e2e-"));
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -90,7 +87,7 @@ describe("perf budgets: emit → gate → perfBudgets", () => {
       maxActionsPerPage: 1,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 1,
       driver: clickGo,
       ...extra,

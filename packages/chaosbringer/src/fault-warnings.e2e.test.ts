@@ -1,11 +1,10 @@
-import http from "node:http";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AddressInfo } from "node:net";
 import { faults } from "@mizchi/playwright-faults";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * The run-end warning has to reach the logger, on all four layers.
@@ -23,22 +22,21 @@ import { ChaosCrawler } from "./crawler.js";
  * not contain.
  */
 describe("run-end fault warnings reach the logger", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   let logDir: string;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(`<!doctype html><title>warnings</title><body><p>nothing to do here</p></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     logDir = mkdtempSync(join(tmpdir(), "cb-warn-"));
   }, 60_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   /** The `warn`-level events a finished crawl wrote, in order. */

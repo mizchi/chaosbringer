@@ -9,6 +9,7 @@ import { NETWORK_PROFILES, type NetworkProfile } from "../types.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind, type ScanSeverity } from "./analyze.js";
 import { formatScanSummary } from "./format.js";
 import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan } from "./run.js";
+import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 
 const HELP = `
 chaosbringer scan — sweep a site for bugs and slow spots
@@ -86,7 +87,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
       network: { type: "string" },
       device: { type: "string" },
       timeout: { type: "string" },
-      "no-headless": { type: "boolean", default: false },
+      ...HEADLESS_OPTIONS,
       "fail-on": { type: "string" },
       quiet: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
@@ -129,7 +130,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
     coverage: !values["no-coverage"],
     hangReleaseMs: intFlag("--hang-ms", values["hang-ms"], 1),
     crawler: {
-      headless: !values["no-headless"],
+      headless: resolveHeadless(values),
       ...(values.exclude ? { excludePatterns: values.exclude } : {}),
       ...(ignoreErrorPatterns.length > 0 ? { ignoreErrorPatterns } : {}),
       ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),

@@ -30,6 +30,7 @@ import { minimizeRecipeTrace } from "./minimize.js";
 import type { RecipeStore } from "./store.js";
 import { tracingDriver, type TracingDriver } from "./tracing-driver.js";
 import type { ActionRecipe, ActionTrace, Goal } from "./types.js";
+import { type IsolatedPage, newIsolatedPage } from "../browser-session.js";
 
 export interface InvestigateOptions {
   /** The failure to reproduce. Its `url` is where we start. */
@@ -101,8 +102,14 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
   const rng = createRng(seed);
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  let isolated: IsolatedPage;
+  try {
+    isolated = await newIsolatedPage(browser);
+  } catch (err) {
+    if (ownsBrowser) await browser.close().catch(() => {});
+    throw err;
+  }
+  const { context, page } = isolated;
 
   const tracing = tracingDriver({ inner: opts.driver, goal });
   const startedAt = Date.now();
@@ -221,10 +228,9 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
       let recipeSteps = trace.steps;
       if (opts.minimize && trace.steps.length > 1) {
         const setupPage = async (): Promise<{ page: Page; cleanup: () => Promise<void> }> => {
-          const ctx = await browser.newContext();
-          const pg = await ctx.newPage();
+          const { page: pg, close } = await newIsolatedPage(browser);
           await pg.goto(opts.failure.url, { waitUntil: "domcontentloaded" });
-          return { page: pg, cleanup: () => ctx.close() };
+          return { page: pg, cleanup: close };
         };
         const minimized = await minimizeRecipeTrace({
           trace,

@@ -12,7 +12,7 @@ const media = (urls: string[]): MediaReport => ({
 });
 
 describe("keepTextualUncompressed", () => {
-  it("keeps text by its CDP MIME type, drops typed binary and untyped non-text names", () => {
+  it("keeps compressible types by their CDP MIME type (JSON, TTF), drops typed binary (octet-stream) and untyped non-text names", () => {
     const m = media([
       "https://x.test/api/products?page=1",
       "https://x.test/models/car.pts",

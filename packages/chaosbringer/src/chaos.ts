@@ -14,6 +14,7 @@ import type {
   CrawlReport,
   ChaosRemoteServer,
 } from "./types.js";
+import { newIsolatedPage } from "./browser-session.js";
 
 export interface ChaosResult {
   report: CrawlReport;
@@ -68,12 +69,11 @@ export interface ChaosRunOptions extends CrawlerOptions {
 async function runSetup(hook: ChaosSetupHook, baseUrl: string): Promise<void> {
   const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
+    const { page, close } = await newIsolatedPage(browser);
     try {
       await hook({ page, baseUrl });
     } finally {
-      await context.close();
+      await close();
     }
   } finally {
     await browser.close();

@@ -65,15 +65,12 @@ describe("attributeRequestFaults", () => {
       requests,
       spans,
     );
+    // seq 1 is the request at 1103, not the cache hit at 1050, which never
+    // reached a route handler.
     expect(out).toEqual([
       { name: "delay", span: 0 },
       { name: "delay", span: 1 },
     ]);
-  });
-
-  it("skips cache hits, which never reach a route handler", () => {
-    const out = attributeRequestFaults([{ name: "d", url: "/api/x", seq: 1, open: [] }], requests, spans);
-    expect(out).toEqual([{ name: "d", span: 1 }]);
   });
 
   it("puts a request no span started on none", () => {

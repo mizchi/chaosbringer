@@ -1,6 +1,4 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -9,6 +7,7 @@ import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { formatReport } from "./reporter.js";
 import type { CrawlerEvents, CrawlerOptions, CrawlReport, PageError } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Per-step measurement, end to end: a load span per page and an action span
@@ -128,12 +127,12 @@ function scriptedDriver(labels: string[], hide: Set<string> = new Set()): Driver
 }
 
 describe("per-step perf spans (perf option)", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
   let outDir: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = req.url ?? "";
       if (path === "/hang") return; // never answers: the goto times out
       const chainN = /^\/chain\/(\d+)$/.exec(path);
@@ -152,7 +151,7 @@ describe("per-step perf spans (perf option)", () => {
         return;
       }
       if (path === "/page-metrics") {
-        const port = (server.address() as AddressInfo).port;
+        const port = server.port;
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(pageMetrics(`http://localhost:${port}`));
         return;
@@ -175,14 +174,12 @@ describe("per-step perf spans (perf option)", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(body);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
     outDir = mkdtempSync(join(tmpdir(), "chaosbringer-perf-e2e-"));
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
     rmSync(outDir, { recursive: true, force: true });
   });
 
@@ -198,7 +195,7 @@ describe("per-step perf spans (perf option)", () => {
       maxActionsPerPage: 2,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 1,
       ...extra,
       },
@@ -379,7 +376,7 @@ describe("per-step perf spans (perf option)", () => {
           maxActionsPerPage: 0,
           headless: true,
           timeout: 10_000,
-          logLevel: "silent",
+          logLevel: "error",
           perf,
           // The default navigation guard runs on the page's CDP session too;
           // off here so the count is the perf layer's own.
@@ -464,7 +461,7 @@ describe("per-step perf spans (perf option)", () => {
       maxActionsPerPage: 0,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       perf: true,
     });
     await crawler.start();
@@ -490,7 +487,7 @@ describe("per-step perf spans (perf option)", () => {
           maxActionsPerPage: 0,
           headless: true,
           timeout: 10_000,
-          logLevel: "silent",
+          logLevel: "error",
           perf: { outDir: shared },
         });
         const page = await browser.newPage();

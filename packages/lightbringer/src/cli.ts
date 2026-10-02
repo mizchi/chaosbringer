@@ -25,6 +25,7 @@ import {
 import { RUN_REPORT_RE, runArtifactPath, slugOfRunReport, slugify } from "./artifacts";
 import { sessionOptionsFromEnv, toSessionOptions } from "./config";
 import { netProfileByName } from "./defaults";
+import { hostLocale } from "./locale";
 
 interface Step {
   name: string;
@@ -131,7 +132,7 @@ async function runOnce(index: number): Promise<PerfReport> {
     args: gpu ? ["--ignore-gpu-blocklist", "--enable-gpu", "--use-angle=metal"] : [],
   });
   try {
-    const ctxOpts: BrowserContextOptions = scenario.viewport ? { viewport: scenario.viewport } : {};
+    const ctxOpts: BrowserContextOptions = { locale: hostLocale(), ...(scenario.viewport ? { viewport: scenario.viewport } : {}) };
     const context = await browser.newContext(ctxOpts);
     const page = await context.newPage();
     const client = await context.newCDPSession(page);

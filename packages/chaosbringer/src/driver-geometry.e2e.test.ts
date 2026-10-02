@@ -1,5 +1,3 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { aiDriver } from "./drivers/ai-driver.js";
@@ -11,6 +9,7 @@ import {
   type DriverProviderCandidate,
   type DriverStep,
 } from "./drivers/types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * The geometry has to survive the trip from the page to the driver, and it
@@ -60,29 +59,28 @@ function capturingDriver(sink: DriverCandidate[][]): Driver {
 }
 
 describe("a driver is told what will receive its click", () => {
-  let server: http.Server;
+  let server: TestServer;
   const seen: DriverCandidate[][] = [];
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(BACKDROP);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 
     await new ChaosCrawler({
-      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      baseUrl: server.url,
       maxPages: 1,
       maxActionsPerPage: 1,
       headless: true,
       timeout: 5000,
-      logLevel: "silent",
+      logLevel: "error",
       driver: capturingDriver(seen),
     }).start();
   }, 120_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server?.close(() => r()));
+    await server?.close();
   });
 
   /** The candidates of the first step, by the element they describe. */
@@ -145,16 +143,15 @@ describe("a driver is told what will receive its click", () => {
  * what that costs: 12 dead clicks the model reported 0.99 on.
  */
 describe("a provider is told what will receive its click", () => {
-  let server: http.Server;
+  let server: TestServer;
   const seen: DriverProviderCandidate[][] = [];
   const screenshotShapes: string[] = [];
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(BACKDROP);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 
     const recording: DriverProvider = {
       name: "recording",
@@ -167,18 +164,18 @@ describe("a provider is told what will receive its click", () => {
     };
 
     await new ChaosCrawler({
-      baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      baseUrl: server.url,
       maxPages: 1,
       maxActionsPerPage: 1,
       headless: true,
       timeout: 5000,
-      logLevel: "silent",
+      logLevel: "error",
       driver: aiDriver({ provider: recording }),
     }).start();
   }, 120_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server?.close(() => r()));
+    await server?.close();
   });
 
   const byName = (name: string): DriverProviderCandidate | undefined =>

@@ -1,10 +1,10 @@
-import http from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { CrawlerOptions, CrawlReport } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Out-of-process iframes' traffic in a `--perf` crawl.
@@ -24,13 +24,13 @@ const SUB: Record<string, number> = { "/embed/app.js": 120, "/embed/style.css": 
 const EMBED_KB = 300;
 
 describe("perf crawl counts out-of-process iframe traffic", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   let embed: string;
   const EXTERNAL = "http://external.invalid";
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0]!;
       const html = (body: string) => {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
@@ -67,16 +67,14 @@ describe("perf crawl counts out-of-process iframe traffic", () => {
       });
       res.end(body);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    const port = (server.address() as AddressInfo).port;
+    const port = server.port;
     base = `http://127.0.0.1:${port}`;
     // `localhost` is another site than `127.0.0.1`: a third-party embed.
     embed = `http://localhost:${port}`;
   }, 30_000);
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   function crawl(options: Partial<CrawlerOptions> = {}, blocked: string[] = []): Promise<CrawlReport> {
@@ -87,7 +85,7 @@ describe("perf crawl counts out-of-process iframe traffic", () => {
         maxActionsPerPage: 0,
         headless: true,
         timeout: 10_000,
-        logLevel: "silent",
+        logLevel: "error",
         seed: 1,
         perf: {},
         // External-navigation blocking fails every cross-origin document

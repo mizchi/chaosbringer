@@ -1,4 +1,3 @@
-import http from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { faults } from "@mizchi/playwright-faults";
@@ -6,6 +5,7 @@ import { chromium } from "playwright";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { CrawlerOptions } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * The HTTP cache survives the crawl's default external-navigation blocking.
@@ -18,7 +18,7 @@ import type { CrawlerOptions } from "./types.js";
  * pin that blocking still blocks, and counts, on the paths that changed.
  */
 describe("HTTP cache and external-navigation blocking", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   const hits = new Map<string, number>();
   const EXTERNAL = "http://external.invalid";
@@ -28,7 +28,7 @@ describe("HTTP cache and external-navigation blocking", () => {
     `<body>${body}${next ? `<a href="${next}">next</a>` : ""}</body>`;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0]!;
       hits.set(path, (hits.get(path) ?? 0) + 1);
       if (path === "/asset.js") {
@@ -53,12 +53,11 @@ describe("HTTP cache and external-navigation blocking", () => {
       res.writeHead(html[path] ? 200 : 404, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(html[path] ?? "missing");
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   beforeEach(() => hits.clear());

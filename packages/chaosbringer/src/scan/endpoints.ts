@@ -5,12 +5,18 @@
  * spans, so the derivation is unit-testable.
  */
 
-import { matchesAnyPattern } from "../filters.js";
+import { escapeRegExp, matchesAnyPattern } from "../filters.js";
+import { isIdSegment } from "../perf-key.js";
 import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport } from "../types.js";
 
 /** CDP resource types that are the app's own data requests. */
-const API_TYPES = new Set(["Fetch", "XHR"]);
+export const API_TYPES: ReadonlySet<string> = new Set(["Fetch", "XHR"]);
+
+/** A request the app's own code made for data: fetch / XHR, not to a third party. */
+export function isOwnApiRequest(r: { type: string; thirdParty?: boolean }): boolean {
+  return API_TYPES.has(r.type) && !r.thirdParty;
+}
 
 /**
  * Same-origin paths a CDN or host injects, not the app's API: Cloudflare's
@@ -28,7 +34,7 @@ const INFRASTRUCTURE_PATH = /^https?:\/\/[^/]+\/(?:cdn-cgi|_vercel|\.well-known)
 const STATIC_FILE = /\.(?:css|m?js|cjs|map|wasm|woff2?|ttf|otf|eot|png|jpe?g|gif|webp|avif|svg|ico|mp4|webm|mp3|ogg|glb|gltf|bin)$/i;
 
 /** How many endpoints the chaos crawl targets at most. */
-export const SCAN_ENDPOINT_CAP = 40;
+const SCAN_ENDPOINT_CAP = 40;
 
 export interface ScanEndpoint {
   /** `origin + path`, with id-like segments shown as `:id`. */
@@ -52,9 +58,6 @@ export function deriveScanEndpoints(
   report: Pick<CrawlReport, "pages" | "actions">,
   { exclude = [] }: { exclude?: readonly string[] } = {},
 ): ScanEndpoint[] {
-  // URLs the crawl must not reach are not its to break either: a router
-  // prefetching the target of a redirect (tailwindcss.com's /plus →
-  // /plus/login) requests an excluded login page.
   const requests: RequestLike[] = [];
   for (const s of reportSpans(report)) requests.push(...s.network.requests);
   // The site's own pages, as endpoints would be labelled: the ones crawled
@@ -63,31 +66,31 @@ export function deriveScanEndpoints(
   // "endpoint": failing the crawled ones fails the document itself, and
   // failing the linked ones fails the router's prefetches of them (on
   // tailwindcss.com every endpoint was a prefetched docs page, and the
-  // "retry storm" was the router prefetching more of them).
-  const pageUrls = report.pages.flatMap((p) => [p.url, ...(p.links ?? [])]);
-  const pages = new Set(pageUrls.map((u) => endpointLabel(u)).filter((l): l is string => l !== null));
+  // "retry storm" was the router prefetching more of them). Compared without
+  // a trailing slash, so `/docs` and `/docs/` are one page.
+  const pages = new Set<string>();
+  for (const u of report.pages.flatMap((p) => [p.url, ...(p.links ?? [])])) {
+    const label = endpointLabel(u);
+    if (label !== null) pages.add(withoutTrailingSlash(label));
+  }
   const byLabel = new Map<string, ScanEndpoint>();
   for (const r of requests) {
-    if (!API_TYPES.has(r.type) || r.thirdParty || INFRASTRUCTURE_PATH.test(r.url)) continue;
+    if (!isOwnApiRequest(r) || INFRASTRUCTURE_PATH.test(r.url)) continue;
+    // URLs the crawl must not reach are not its to break either: a router
+    // prefetching the target of a redirect (tailwindcss.com's /plus →
+    // /plus/login) requests an excluded login page.
     if (matchesAnyPattern(r.url, exclude)) continue;
-    let u: URL;
-    try {
-      u = new URL(r.url);
-    } catch {
-      continue;
-    }
-    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
-    if (STATIC_FILE.test(u.pathname)) continue;
-    const segments = u.pathname.split("/").map((seg) => (isIdLike(seg) ? ":id" : seg));
-    const label = `${u.origin}${segments.join("/")}`;
-    if (pages.has(label) || pages.has(label.replace(/\/$/, "")) || pages.has(`${label}/`)) continue;
+    const route = parseRoute(r.url);
+    if (!route || STATIC_FILE.test(route.pathname)) continue;
+    const label = `${route.origin}${route.segments.join("/")}`;
+    if (pages.has(withoutTrailingSlash(label))) continue;
     const prev = byLabel.get(label);
     if (prev) {
       prev.count++;
       continue;
     }
-    const path = segments.map((seg) => (seg === ":id" ? "[^/]+" : escapeRegex(seg))).join("/");
-    byLabel.set(label, { label, pattern: `^${escapeRegex(u.origin)}${path}(?:[?#].*)?$`, count: 1 });
+    const path = route.segments.map((seg) => (seg === ":id" ? "[^/]+" : escapeRegExp(seg))).join("/");
+    byLabel.set(label, { label, pattern: `^${escapeRegExp(route.origin)}${path}(?:[?#].*)?$`, count: 1 });
   }
   return [...byLabel.values()]
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
@@ -102,6 +105,12 @@ export function endpointsPattern(endpoints: readonly ScanEndpoint[]): string | n
 
 /** `origin + path` of a URL with id-like path segments as `:id`, or `null` for a non-http(s) URL. */
 export function endpointLabel(url: string): string | null {
+  const route = parseRoute(url);
+  return route ? `${route.origin}${route.segments.join("/")}` : null;
+}
+
+/** An http(s) URL's origin and path, its id-like segments as `:id`; `null` for anything else. */
+function parseRoute(url: string): { origin: string; pathname: string; segments: string[] } | null {
   let u: URL;
   try {
     u = new URL(url);
@@ -109,20 +118,9 @@ export function endpointLabel(url: string): string | null {
     return null;
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-  return `${u.origin}${u.pathname
-    .split("/")
-    .map((seg) => (isIdLike(seg) ? ":id" : seg))
-    .join("/")}`;
+  return { origin: u.origin, pathname: u.pathname, segments: u.pathname.split("/").map((seg) => (isIdSegment(seg) ? ":id" : seg)) };
 }
 
-function isIdLike(seg: string): boolean {
-  return (
-    /^\d+$/.test(seg) ||
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg) ||
-    /^[0-9a-f]{16,}$/i.test(seg)
-  );
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function withoutTrailingSlash(label: string): string {
+  return label.endsWith("/") ? label.slice(0, -1) : label;
 }

@@ -1,11 +1,10 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { faults } from "@mizchi/playwright-faults";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { formatReport } from "./reporter.js";
 import type { CrawlerOptions, CrawlReport } from "./types.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Perf under chaos, end to end: spans tagged with the faults active in their
@@ -106,11 +105,11 @@ function repeatDriver(label: string, times: number): Driver {
 }
 
 describe("perf under chaos", () => {
-  let server: http.Server;
+  let server: TestServer;
   let origin: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "").split("?")[0];
       if (path === "/api/item" || path === "/api/x") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -127,13 +126,11 @@ describe("perf under chaos", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(body);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origin = server.url;
   });
 
   afterAll(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   function crawl(path: string, extra: Partial<CrawlerOptions>): Promise<CrawlReport> {
@@ -141,7 +138,7 @@ describe("perf under chaos", () => {
       baseUrl: `${origin}${path}`,
       headless: true,
       timeout: 10_000,
-      logLevel: "silent",
+      logLevel: "error",
       seed: 7,
       perf: true,
       ...extra,
@@ -188,7 +185,6 @@ describe("perf under chaos", () => {
     const text = formatReport(report);
     expect(text).toContain("Degradation under faults (median with vs without):");
     expect(text).toMatch(/\/item\/:id :: load {2}under api-delay/);
-    // Nine pages, each settling on `networkidle`: seconds, not the default 5.
   }, 60_000);
 
   // B2 follow-up (2026-09-24 evaluation, E4 xhr-site): the delayed fetch's
@@ -204,7 +200,7 @@ describe("perf under chaos", () => {
       driver: repeatDriver("Reload", clicks),
       faultInjection: [faults.delay(300, { urlPattern: /\/api\/x$/, probability: 0.5, name: "api-delay-300" })],
     });
-    expect(report.perf?.settle?.mode ?? "networkidle").toBe("networkidle");
+    expect(report.perf?.settle?.mode).toBe("networkidle");
     expect(report.actions).toHaveLength(clicks);
     const key = report.actions[0]!.perf!.key;
     expect(key).toMatch(/^\/xhr :: click .*Reload/);
@@ -270,7 +266,7 @@ describe("perf under chaos", () => {
     expect(formatReport(report)).toContain("Memory climbing across repeats of a step (likely leak):");
   }, 60_000);
 
-  it("unions coverage over every page the crawl visited", async () => {
+  it("reports the crawl's coverage, with fully used scripts not listed as low usage", async () => {
     const report = await crawl("/shop", {
       maxPages: 3,
       maxActionsPerPage: 0,
@@ -281,12 +277,10 @@ describe("perf under chaos", () => {
     expect(js!.totalBytes).toBeGreaterThan(0);
     expect(js!.usedBytes).toBeGreaterThan(0);
     expect(js!.usedBytes).toBeLessThanOrEqual(js!.totalBytes);
-    // The item pages' scripts run end to end; fully used resources are not
-    // "low usage", so only rows with unused bytes may appear (B19).
-    for (const r of js!.lowUsage) expect(r.usedBytes).toBeLessThan(r.totalBytes);
-    // One row per resource across the crawl, not one per page visit.
-    const urls = js!.lowUsage.map((r) => r.url);
-    expect(new Set(urls).size).toBe(urls.length);
+    // The item pages' scripts run end to end, and a fully used resource is not
+    // "low usage" (B19): the union reads 100% with no rows.
+    expect(js!.usedPct).toBe(100);
+    expect(js!.lowUsage).toEqual([]);
     expect(report.perf?.coverage?.css.totalBytes).toBe(0);
     // No stylesheet anywhere: no percentage rather than a misleading 0% (B19).
     expect(report.perf?.coverage?.css.usedPct).toBeUndefined();
@@ -307,6 +301,6 @@ describe("perf under chaos", () => {
     expect(second).toBeDefined();
     expect(second!.usedPct).toBeLessThan(30);
     // the first script ran end to end, so it is not low usage
-    expect(js!.lowUsage.map((r) => r.url)).not.toContain(`${origin}/cov-inline`);
+    expect(js!.lowUsage.map((r) => r.url)).toEqual([`${origin}/cov-inline#inline-2`]);
   }, 60_000);
 });

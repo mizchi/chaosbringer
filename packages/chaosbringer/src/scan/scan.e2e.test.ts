@@ -1,11 +1,10 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runScan } from "./run.js";
 import type { ScanReportFile } from "./run.js";
+import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
 
 /**
  * `runScan` end to end on a small site with one bug of each kind the scan's
@@ -14,14 +13,14 @@ import type { ScanReportFile } from "./run.js";
  * that thrashes layout (clean crawl, perf).
  */
 describe("runScan", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
   let outDir: string;
 
   const page = (body: string) => `<!doctype html><title>t</title><body>${body}</body>`;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0]!;
       if (path === "/api/items") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -50,13 +49,12 @@ describe("runScan", () => {
       res.writeHead(html[path] ? 200 : 404, { "content-type": "text/html" });
       res.end(html[path] ?? "not found");
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     outDir = mkdtempSync(join(tmpdir(), "chaosbringer-scan-"));
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
     rmSync(outDir, { recursive: true, force: true });
   });
 
@@ -69,7 +67,7 @@ describe("runScan", () => {
       outDir,
       coverage: false,
       hangReleaseMs: 1500,
-      crawler: { headless: true, actionWeights: { click: 10, scroll: 0, hover: 0, input: 0, navigate: 0 } },
+      crawler: { headless: true, actionWeights: { scroll: 0 } },
     });
 
     expect(result.endpoints.map((e) => e.label)).toEqual([`${base}/api/items`]);

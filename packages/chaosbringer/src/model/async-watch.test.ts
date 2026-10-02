@@ -1,8 +1,7 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAsyncWatchScript, drainScheduledWork, readPendingAsync } from "./runner.js";
+import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
 
 /**
  * The timer watch is what lets a run say "no rejection escaped" rather than
@@ -20,11 +19,11 @@ import { buildAsyncWatchScript, drainScheduledWork, readPendingAsync } from "./r
  */
 describe("the async watch, in a page", () => {
   let browser: Browser;
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
 
   beforeAll(async () => {
-    server = http.createServer((_req, res) => {
+    server = await startTestServer((_req, res) => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       // Both timers are scheduled during load, which is the case an `afterLoad`
       // install could never see.
@@ -33,14 +32,13 @@ describe("the async watch, in a page", () => {
         setTimeout(() => { window.__ranSoon = true; }, 40);
       </script></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     browser = await chromium.launch();
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   it("reports an uninstrumented page as unmeasured, not as idle", async () => {

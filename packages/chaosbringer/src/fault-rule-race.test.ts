@@ -1,8 +1,7 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * Two rules watching one URL, and what the report says about the one that
@@ -12,11 +11,11 @@ import { ChaosCrawler } from "./crawler.js";
  */
 describe("two fault rules on one URL", () => {
   let browser: Browser;
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
       if (path.startsWith("/api/")) {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -26,14 +25,13 @@ describe("two fault rules on one URL", () => {
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
       res.end(`<!doctype html><title>race</title><body><div id="out">idle</div></body>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
     browser = await chromium.launch();
   }, 60_000);
 
   afterAll(async () => {
     await browser?.close();
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   /**

@@ -23,6 +23,12 @@ describe("compileLoadFaultRules", () => {
     expect(compiled[0]!.pattern.test("https://x/api/users/1")).toBe(true);
   });
 
+  it("drops a stateful /g flag, so the pattern matches every request, not every other one", () => {
+    const [rule] = compileLoadFaultRules([{ urlPattern: /\/api\//g, fault: { kind: "status", status: 500 } }]);
+    const url = "https://x/api/users";
+    expect([rule!.pattern.test(url), rule!.pattern.test(url), rule!.pattern.test(url)]).toEqual([true, true, true]);
+  });
+
   it("normalises method list to uppercase", () => {
     const compiled = compileLoadFaultRules([
       {

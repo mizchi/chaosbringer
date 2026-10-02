@@ -36,17 +36,23 @@ export function perfKeyVersionOf(recorded: number | undefined): number {
 }
 
 /**
- * Collapse one path segment that is an identifier rather than a route name.
+ * Whether one path segment is an identifier rather than a route name.
  * Three shapes cover the ids real apps put in URLs: database row numbers,
  * UUIDs, and long hex digests (Mongo ObjectIds, content hashes). A shorter
  * hex segment is left alone because short words like `cafe` or `add` are
  * valid hex too, and collapsing those would merge routes that differ.
  */
+export function isIdSegment(segment: string): boolean {
+  return (
+    /^\d+$/.test(segment) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment) ||
+    /^[0-9a-f]{16,}$/i.test(segment)
+  );
+}
+
+/** The segment, or `:id` when it is an identifier. */
 function collapseSegment(segment: string): string {
-  if (/^\d+$/.test(segment)) return ":id";
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) return ":id";
-  if (/^[0-9a-f]{16,}$/i.test(segment)) return ":id";
-  return segment;
+  return isIdSegment(segment) ? ":id" : segment;
 }
 
 /**
@@ -152,6 +158,11 @@ export function perfKey(url: string, kind: string): string {
 }
 
 /** The `<urlPattern>` part of a perfKey. */
+/** Whether a perfKey names a page load (`<route> :: load`). */
+export function isLoadKey(key: string): boolean {
+  return key.endsWith(`${PERF_KEY_SEPARATOR}load`);
+}
+
 export function perfKeyRoute(key: string): string {
   return key.split(PERF_KEY_SEPARATOR, 1)[0];
 }

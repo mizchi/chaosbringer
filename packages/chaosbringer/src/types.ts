@@ -940,6 +940,12 @@ export interface PageResult {
   metrics?: PerformanceMetrics;
   links: string[];
   screenshot?: string;
+  /**
+   * The external URLs the crawler kept this page from navigating to: links
+   * and redirects to another origin, including a step it backed out of
+   * (`ActionResult.leftSiteTo`) and the page's own `redirectedTo`. Absent
+   * when none was blocked.
+   */
   blockedNavigations?: string[];
   /** Recovery info if page was recovered from error */
   recovery?: RecoveryInfo;
@@ -953,12 +959,15 @@ export interface PageResult {
   /**
    * Where the page's URL redirected to when that URL matches
    * `excludePatterns` (a /plus that redirects to /plus/login). The crawler
-   * stops there, as for `redirectedTo`.
+   * stops there, as for `redirectedTo`, but it is not a blocked external
+   * navigation. Not set when the page's own URL is excluded too (a
+   * `testPage()` of an excluded URL is crawled as asked).
    */
   excludedTo?: string;
   /**
-   * The response's content type when the URL served something other than an
-   * HTML document (an Atom feed, a JSON file). The browser shows its own
+   * The response's content type when the URL answered 2xx with a declared
+   * type that is not HTML (an Atom feed, a JSON file). A response with no
+   * type is crawled: the browser sniffs it, and so does the crawl. The browser shows its own
    * viewer for it, so the crawler stops there: no errors, links, actions or
    * perf, which would all be the viewer's.
    */

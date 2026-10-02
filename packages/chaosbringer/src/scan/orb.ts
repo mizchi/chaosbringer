@@ -28,7 +28,7 @@ const ORB_ERROR = /^(\S+) - net::ERR_BLOCKED_BY_ORB$/;
 export const ORB_SERVED_NOTE = "(served fine when fetched directly)";
 
 /** How many distinct blocked URLs are fetched at most. */
-export const ORB_PROBE_CAP = 20;
+const ORB_PROBE_CAP = 20;
 
 const SERVABLE = /^(?:image|video|audio|font)\//;
 

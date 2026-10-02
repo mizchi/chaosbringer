@@ -1,9 +1,8 @@
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { faults } from "./faults.js";
 import { scanFaultRule } from "./scan/run.js";
+import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
  * One URL that is both a page and its data (`/` and `/?_rsc=1`, as Next.js
@@ -12,11 +11,11 @@ import { scanFaultRule } from "./scan/run.js";
  * itself fails to load.
  */
 describe("resourceTypes in a crawl", () => {
-  let server: http.Server;
+  let server: TestServer;
   let base: string;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
+    server = await startTestServer((req, res) => {
       if ((req.url ?? "").includes("_rsc")) {
         res.writeHead(200, { "content-type": "text/plain" });
         res.end("data");
@@ -27,12 +26,11 @@ describe("resourceTypes in a crawl", () => {
         fetch("/?_rsc=1").then((r) => r.text()).then((t) => (out.textContent = t), () => (out.textContent = "failed"));
       </script>`);
     });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    base = server.url;
   }, 30_000);
 
   afterAll(async () => {
-    await new Promise<void>((r) => server.close(() => r()));
+    await server.close();
   });
 
   const crawl = (rule: ReturnType<typeof faults.abort>) =>

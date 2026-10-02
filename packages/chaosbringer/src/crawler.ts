@@ -149,6 +149,7 @@ import {
   type RequestTracker,
   type ResolvedSettle,
 } from "./settle.js";
+import { contextOptions } from "./browser-session.js";
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -248,7 +249,10 @@ export class ChaosCrawler {
   private actions: ActionResult[] = [];
   private blockedExternalCount = 0;
   /** This page's steps that left the site; their perf is dropped when the page finishes. */
-  private offSiteActions: ActionResult[] = [];
+  /** The current page's steps that were backed out of (see `returnFromForbidden`). */
+  private backedOutActions: ActionResult[] = [];
+  /** External navigations blocked while the current page was crawled. */
+  private pageBlockedNavigations: string[] = [];
   private startTime = 0;
   private baseOrigin: string;
   /** Actions performed on the page currently being crawled. Reset on
@@ -689,20 +693,19 @@ export class ChaosCrawler {
           this.options.device && devices[this.options.device]
             ? devices[this.options.device]
             : undefined;
-        this.context = await this.browser.newContext({
+        this.context = await this.browser.newContext(contextOptions({
           ...deviceDesc,
           // Device descriptor's viewport wins when set — device emulation is
           // only meaningful if the viewport matches. Otherwise fall back to
           // the configured default.
           viewport: deviceDesc?.viewport ?? this.options.viewport,
           userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
-          locale: hostLocale(),
           // Record mode: ask Playwright to capture all network into the HAR.
           recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
           // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
           // and validates the file; we don't touch it.
           storageState: this.options.storageState || undefined,
-        });
+        }));
       }
 
       // lightbringer's in-page collector (web-vitals + long-task observers),
@@ -1452,6 +1455,7 @@ export class ChaosCrawler {
   /** Bookkeeping for one blocked external navigation, whichever layer blocked it. */
   private noteBlockedNavigation(url: string): void {
     this.blockedExternalCount++;
+    this.pageBlockedNavigations.push(url);
     this.events.onBlockedNavigation?.(url);
     this.logger.logBlockedNavigation(url);
   }
@@ -1850,7 +1854,6 @@ export class ChaosCrawler {
   private async crawlPageWithExistingPage(page: Page, url: string): Promise<PageResult> {
     const errors: PageError[] = [];
     const warnings: string[] = [];
-    const blockedNavigations: string[] = [];
     const startTime = Date.now();
 
     this.events.onPageStart?.(url);
@@ -1860,9 +1863,8 @@ export class ChaosCrawler {
       this.installPageInitScripts(page),
     );
 
-    // Track blocked external navigations
-    const originalBlockedCount = this.blockedExternalCount;
-    this.offSiteActions = [];
+    this.backedOutActions = [];
+    this.pageBlockedNavigations = [];
 
     let result: PageResult;
     // Whether `page.goto` returned. Only a navigation that never did leaves a
@@ -1895,30 +1897,14 @@ export class ChaosCrawler {
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
       navigated = true;
 
-      // A same-site URL that redirected off-site (a /chat that 302s to a
-      // Discord invite). The guard lets redirect hops through, deciding on
-      // the URL the navigation started for, so the page now showing is
-      // another site's: its errors, links and measurements are not this
-      // site's. Record it as a blocked external navigation and stop here.
-      const landed = page.url();
-      if (this.isExternalUrl(landed)) {
+      // The page loaded, but is not the crawl's to act on: stop here.
+      const notCrawled = this.notCrawledReason(page.url(), url, response);
+      if (notCrawled) {
+        if (notCrawled.fields.redirectedTo) this.noteBlockedNavigation(notCrawled.fields.redirectedTo);
         // Close the load span as a normal load would, so the page's perf
         // session finishes cleanly; its report is dropped below.
         await this.perf.endLoad({ settleCapped: loadCapped });
-        throw new RedirectedOffSite(landed, response?.status());
-      }
-      // The same, for a redirect onto a URL the crawl must not reach.
-      if (this.shouldExclude(landed) && !this.shouldExclude(url)) {
-        await this.perf.endLoad({ settleCapped: loadCapped });
-        throw new NotCrawled(`redirected to excluded ${landed}; not crawled`, response?.status(), { excludedTo: landed });
-      }
-      // A feed, JSON file or image linked from the site: the browser renders
-      // its own viewer (an XML tree can be thousands of nodes), and measuring
-      // or clicking that viewer says nothing about the site.
-      const contentType = documentContentType(response);
-      if (contentType !== undefined) {
-        await this.perf.endLoad({ settleCapped: loadCapped });
-        throw new NotCrawled(`not an HTML document (${contentType}); not measured or acted on`, response?.status(), { contentType });
+        throw new NotCrawled(notCrawled.message, response?.status(), notCrawled.fields);
       }
 
       // Drain any unhandled rejections captured during load.
@@ -1988,8 +1974,7 @@ export class ChaosCrawler {
         metrics,
         links,
         screenshot,
-        blockedNavigations:
-          this.blockedExternalCount > originalBlockedCount ? blockedNavigations : undefined,
+        ...this.blockedNavigationsField(),
       };
     } catch (err) {
       const loadTime = Date.now() - startTime;
@@ -2004,45 +1989,30 @@ export class ChaosCrawler {
           warnings: [...warnings, err.message],
           links: [],
           ...err.fields,
-          blockedNavigations,
-        };
-      } else if (err instanceof RedirectedOffSite) {
-        this.noteBlockedNavigation(err.to);
-        blockedNavigations.push(err.to);
-        result = {
-          url,
-          status: "success",
-          ...(err.statusCode !== undefined ? { statusCode: err.statusCode } : {}),
-          loadTime,
-          errors: [],
-          hasErrors: false,
-          warnings: [...warnings, `redirected off-site to ${err.to}; not crawled`],
-          links: [],
-          redirectedTo: err.to,
-          blockedNavigations,
+          ...this.blockedNavigationsField(),
         };
       } else {
-      const isTimeout = err instanceof Error && err.message.includes("Timeout");
-
-      const combinedErrors: PageError[] = [
-        ...errors,
-        {
-          type: "exception",
-          message: errorMessage(err),
-          stack: err instanceof Error ? err.stack : undefined,
+        const isTimeout = err instanceof Error && err.message.includes("Timeout");
+        const combinedErrors: PageError[] = [
+          ...errors,
+          {
+            type: "exception",
+            message: errorMessage(err),
+            stack: err instanceof Error ? err.stack : undefined,
+            url,
+            timestamp: Date.now(),
+          },
+        ];
+        result = {
           url,
-          timestamp: Date.now(),
-        },
-      ];
-      result = {
-        url,
-        status: isTimeout ? "timeout" : "error",
-        loadTime,
-        errors: combinedErrors,
-        hasErrors: combinedErrors.length > 0,
-        warnings,
-        links: [],
-      };
+          status: isTimeout ? "timeout" : "error",
+          loadTime,
+          errors: combinedErrors,
+          hasErrors: combinedErrors.length > 0,
+          warnings,
+          links: [],
+          ...this.blockedNavigationsField(),
+        };
       }
     }
 
@@ -2061,17 +2031,19 @@ export class ChaosCrawler {
     // page: a `goto` that timed out still yields a load span that says what
     // the attempt cost.
     await this.finishPagePerf(result, url, { navigationFailed: !navigated });
-    // What was measured was the other site's page.
+    // A page the crawl stopped at: what was measured was another site's page,
+    // an excluded one, or the browser's viewer for a file.
     if (result.redirectedTo || result.excludedTo || result.contentType) {
       delete result.perf;
       delete result.perfPage;
       result.errors = [];
       result.hasErrors = false;
     }
-    // Steps that left the site (or landed on an excluded URL) measured that
-    // page; errors raised while the page showed it are not this page's.
-    for (const a of this.offSiteActions) delete a.perf;
-    this.offSiteActions = [];
+    // Steps that were backed out of measured the page they landed on (another
+    // site, an excluded URL, a file viewer); errors raised while the page
+    // showed another site or an excluded URL are not this page's.
+    for (const a of this.backedOutActions) delete a.perf;
+    this.backedOutActions = [];
     if (result.errors.some((e) => e.url !== undefined && this.isForbiddenUrl(e.url))) {
       result.errors = result.errors.filter((e) => e.url === undefined || !this.isForbiddenUrl(e.url));
       result.hasErrors = result.errors.length > 0;
@@ -2173,18 +2145,56 @@ export class ChaosCrawler {
   }
 
   /**
-   * A step that left the site: a same-site link that redirected to another
-   * origin (Wikipedia's "Create account" to auth.wikimedia.org). The guard
-   * lets redirect hops through, so the page is now another site's. Record it
-   * as a blocked external navigation, drop the step's measurement (it
-   * measured the other site), and go back so the remaining steps act on
-   * this page again.
+   * Why a page that loaded is not the crawl's to act on, or undefined when it
+   * is. Checked in this order:
+   * - it redirected off-site (a /chat that 302s to a Discord invite): the
+   *   guard lets redirect hops through, deciding on the URL the navigation
+   *   started for, so the page now showing is another site's;
+   * - it redirected onto a URL `excludePatterns` keeps the crawl off;
+   * - it is not an HTML document (a feed, a JSON file): the browser renders
+   *   its own viewer for it, and an XML tree can be thousands of nodes.
    */
+  private notCrawledReason(
+    landed: string,
+    url: string,
+    response: Response | null,
+  ): { message: string; fields: NotCrawled["fields"] } | undefined {
+    if (this.isExternalUrl(landed)) {
+      return { message: `redirected off-site to ${landed}; not crawled`, fields: { redirectedTo: landed } };
+    }
+    if (this.shouldExclude(landed) && !this.shouldExclude(url)) {
+      return { message: `redirected to excluded ${landed}; not crawled`, fields: { excludedTo: landed } };
+    }
+    const contentType = documentContentType(response);
+    if (contentType !== undefined) {
+      return { message: `not an HTML document (${contentType}); not measured or acted on`, fields: { contentType } };
+    }
+    return undefined;
+  }
+
+  /** `blockedNavigations` for the current page's result: absent when none was blocked. */
+  private blockedNavigationsField(): Pick<PageResult, "blockedNavigations"> {
+    return this.pageBlockedNavigations.length > 0 ? { blockedNavigations: [...this.pageBlockedNavigations] } : {};
+  }
+
   /** A URL a step must not stay on: another site, or one `excludePatterns` keeps the crawl off. */
   private isForbiddenUrl(url: string): boolean {
     return this.isExternalUrl(url) || this.shouldExclude(url);
   }
 
+  /**
+   * Back out of a step that left the page somewhere the crawl must not act:
+   * - another site (`leftSiteTo`): a same-site link that redirected off-site
+   *   (Wikipedia's "Create account" to auth.wikimedia.org), counted as a
+   *   blocked external navigation;
+   * - an excluded URL (`excludedTo`): a link that redirected onto one
+   *   (tailwindcss.com's "Plus" to /plus/login);
+   * - a file the browser shows in its own viewer (`openedFile`): a feed or
+   *   a JSON file.
+   * The step's measurement is dropped when the page finishes (it measured
+   * that page), and the crawler goes back so the remaining steps act on
+   * this page again.
+   */
   private async returnFromForbidden(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
     const landed = page.url();
     if (!this.isForbiddenUrl(landed)) {
@@ -2202,7 +2212,7 @@ export class ChaosCrawler {
       // /plus/login) was clickable: only where it ended up is excluded.
       result.excludedTo = landed;
     }
-    this.offSiteActions.push(result);
+    this.backedOutActions.push(result);
     try {
       await page.goBack({ timeout: this.options.timeout, waitUntil: "load" });
     } catch {
@@ -3023,32 +3033,15 @@ export class ChaosCrawler {
 
 /**
  * Thrown inside `crawlPageWithExistingPage` when the page loaded but is not
- * the crawl's to act on: an excluded URL a redirect ended on, or a document
- * that is not HTML.
+ * the crawl's to act on (see `notCrawledReason`).
  */
 class NotCrawled extends Error {
   constructor(
     message: string,
     readonly statusCode: number | undefined,
-    readonly fields: Pick<PageResult, "excludedTo" | "contentType">,
+    readonly fields: Pick<PageResult, "redirectedTo" | "excludedTo" | "contentType">,
   ) {
     super(message);
-  }
-}
-
-/**
- * The browser's language: the host's locale as a valid BCP 47 tag. Left
- * unset, Chromium takes it from the process locale, and under POSIX / C
- * (a container, a CI runner) `navigator.language` reads `en-US@posix`. That
- * is not a tag, so a page's `new Intl.Locale(navigator.language)` throws
- * (webscraper.io's did) for a reason no visitor's browser has. Node's Intl
- * has already resolved the host locale to a tag.
- */
-export function hostLocale(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
-  } catch {
-    return "en-US";
   }
 }
 
@@ -3073,12 +3066,3 @@ function documentContentType(response: Response | null): string | undefined {
   return type;
 }
 
-/** Thrown inside `crawlPageWithExistingPage` when the load ended on another origin. */
-class RedirectedOffSite extends Error {
-  constructor(
-    readonly to: string,
-    readonly statusCode: number | undefined,
-  ) {
-    super(`redirected off-site to ${to}`);
-  }
-}

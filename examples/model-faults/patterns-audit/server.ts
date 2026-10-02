@@ -20,17 +20,14 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { serve } from "@hono/node-server";
+import { startApp, type StartedServer } from "../serve.js";
 import { Hono } from "hono";
 import { createApp as createShippedApp } from "../server.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, "public");
 
-export interface StartedServer {
-  url: string;
-  close: () => Promise<void>;
-}
+export type { StartedServer };
 
 export interface LedgerEntry {
   method: string;
@@ -208,12 +205,5 @@ export function createApp(fixed: boolean): Hono {
 }
 
 export function startServer(port = 0, fixed = false): Promise<StartedServer> {
-  return new Promise((resolve) => {
-    const server = serve({ fetch: createApp(fixed).fetch, port }, (info) => {
-      resolve({
-        url: `http://127.0.0.1:${info.port}`,
-        close: () => new Promise((done) => server.close(() => done())),
-      });
-    });
-  });
+  return startApp(createApp(fixed), port);
 }
