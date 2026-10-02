@@ -696,6 +696,7 @@ export class ChaosCrawler {
           // the configured default.
           viewport: deviceDesc?.viewport ?? this.options.viewport,
           userAgent: this.options.userAgent || deviceDesc?.userAgent || undefined,
+          locale: hostLocale(),
           // Record mode: ask Playwright to capture all network into the HAR.
           recordHar: this.options.har?.mode === "record" ? { path: this.options.har.path } : undefined,
           // Preloaded cookies + localStorage for auth'd crawls. Playwright parses
@@ -1906,6 +1907,19 @@ export class ChaosCrawler {
         await this.perf.endLoad({ settleCapped: loadCapped });
         throw new RedirectedOffSite(landed, response?.status());
       }
+      // The same, for a redirect onto a URL the crawl must not reach.
+      if (this.shouldExclude(landed) && !this.shouldExclude(url)) {
+        await this.perf.endLoad({ settleCapped: loadCapped });
+        throw new NotCrawled(`redirected to excluded ${landed}; not crawled`, response?.status(), { excludedTo: landed });
+      }
+      // A feed, JSON file or image linked from the site: the browser renders
+      // its own viewer (an XML tree can be thousands of nodes), and measuring
+      // or clicking that viewer says nothing about the site.
+      const contentType = documentContentType(response);
+      if (contentType !== undefined) {
+        await this.perf.endLoad({ settleCapped: loadCapped });
+        throw new NotCrawled(`not an HTML document (${contentType}); not measured or acted on`, response?.status(), { contentType });
+      }
 
       // Drain any unhandled rejections captured during load.
       this.reclassifyRejections(errors, await this.drainRejections(page), url);
@@ -1979,7 +1993,20 @@ export class ChaosCrawler {
       };
     } catch (err) {
       const loadTime = Date.now() - startTime;
-      if (err instanceof RedirectedOffSite) {
+      if (err instanceof NotCrawled) {
+        result = {
+          url,
+          status: "success",
+          ...(err.statusCode !== undefined ? { statusCode: err.statusCode } : {}),
+          loadTime,
+          errors: [],
+          hasErrors: false,
+          warnings: [...warnings, err.message],
+          links: [],
+          ...err.fields,
+          blockedNavigations,
+        };
+      } else if (err instanceof RedirectedOffSite) {
         this.noteBlockedNavigation(err.to);
         blockedNavigations.push(err.to);
         result = {
@@ -2035,18 +2062,18 @@ export class ChaosCrawler {
     // the attempt cost.
     await this.finishPagePerf(result, url, { navigationFailed: !navigated });
     // What was measured was the other site's page.
-    if (result.redirectedTo) {
+    if (result.redirectedTo || result.excludedTo || result.contentType) {
       delete result.perf;
       delete result.perfPage;
       result.errors = [];
       result.hasErrors = false;
     }
-    // Steps that left the site measured the other site's page; errors raised
-    // while the page showed it are that site's.
+    // Steps that left the site (or landed on an excluded URL) measured that
+    // page; errors raised while the page showed it are not this page's.
     for (const a of this.offSiteActions) delete a.perf;
     this.offSiteActions = [];
-    if (result.errors.some((e) => e.url !== undefined && this.isExternalUrl(e.url))) {
-      result.errors = result.errors.filter((e) => e.url === undefined || !this.isExternalUrl(e.url));
+    if (result.errors.some((e) => e.url !== undefined && this.isForbiddenUrl(e.url))) {
+      result.errors = result.errors.filter((e) => e.url === undefined || !this.isForbiddenUrl(e.url));
       result.hasErrors = result.errors.length > 0;
     }
 
@@ -2141,7 +2168,7 @@ export class ChaosCrawler {
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
-    await this.returnFromOffSite(page, urlBefore, result);
+    await this.returnFromForbidden(page, urlBefore, result);
     return result;
   }
 
@@ -2153,20 +2180,35 @@ export class ChaosCrawler {
    * measured the other site), and go back so the remaining steps act on
    * this page again.
    */
-  private async returnFromOffSite(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
+  /** A URL a step must not stay on: another site, or one `excludePatterns` keeps the crawl off. */
+  private isForbiddenUrl(url: string): boolean {
+    return this.isExternalUrl(url) || this.shouldExclude(url);
+  }
+
+  private async returnFromForbidden(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
     const landed = page.url();
-    if (!this.isExternalUrl(landed)) return;
-    this.noteBlockedNavigation(landed);
-    // Not `blockedExternal`: replay reads that as "never clicked", and this
-    // click did happen.
-    result.leftSiteTo = landed;
+    if (!this.isForbiddenUrl(landed)) {
+      // A link to a feed or a JSON file opens the browser's viewer for it;
+      // the steps after it would measure and click the viewer.
+      if (landed === urlBefore || (await isHtmlDocument(page))) return;
+      result.openedFile = landed;
+    } else if (this.isExternalUrl(landed)) {
+      this.noteBlockedNavigation(landed);
+      // Not `blockedExternal`: replay reads that as "never clicked", and this
+      // click did happen.
+      result.leftSiteTo = landed;
+    } else {
+      // A link that redirects onto an excluded URL (Tailwind's "Plus" to
+      // /plus/login) was clickable: only where it ended up is excluded.
+      result.excludedTo = landed;
+    }
     this.offSiteActions.push(result);
     try {
       await page.goBack({ timeout: this.options.timeout, waitUntil: "load" });
     } catch {
       // No history entry to go back to (a redirect replaced it): load it again.
     }
-    if (this.isExternalUrl(page.url())) {
+    if (page.url() !== urlBefore) {
       await page.goto(urlBefore, { timeout: this.options.timeout, waitUntil: "load" }).catch(() => {});
     }
   }
@@ -2336,6 +2378,7 @@ export class ChaosCrawler {
         if (this.visited.has(url)) return "visited";
         return this.queue.some((e) => normalizeUrl(e.url) === url) ? "queued" : "new";
       },
+      excluded: (url) => this.shouldExclude(url),
     });
   }
 
@@ -2976,6 +3019,58 @@ export class ChaosCrawler {
   private calculateSummary(): CrawlSummary {
     return summarizePages(this.results, this.discoveryMetrics);
   }
+}
+
+/**
+ * Thrown inside `crawlPageWithExistingPage` when the page loaded but is not
+ * the crawl's to act on: an excluded URL a redirect ended on, or a document
+ * that is not HTML.
+ */
+class NotCrawled extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number | undefined,
+    readonly fields: Pick<PageResult, "excludedTo" | "contentType">,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * The browser's language: the host's locale as a valid BCP 47 tag. Left
+ * unset, Chromium takes it from the process locale, and under POSIX / C
+ * (a container, a CI runner) `navigator.language` reads `en-US@posix`. That
+ * is not a tag, so a page's `new Intl.Locale(navigator.language)` throws
+ * (webscraper.io's did) for a reason no visitor's browser has. Node's Intl
+ * has already resolved the host locale to a tag.
+ */
+export function hostLocale(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
+  } catch {
+    return "en-US";
+  }
+}
+
+/** Whether the page shows an HTML document (true when it cannot tell). */
+async function isHtmlDocument(page: Page): Promise<boolean> {
+  try {
+    return (await page.evaluate(() => document.contentType)).includes("html");
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The content type of a successful response that is not an HTML document, or
+ * undefined for HTML, for a response with no type (the browser sniffs it, and
+ * so does the crawl), and for an error status (its page is reported as one).
+ */
+function documentContentType(response: Response | null): string | undefined {
+  if (!response || !response.ok()) return undefined;
+  const type = response.headers()["content-type"]?.split(";")[0]?.trim().toLowerCase();
+  if (!type || type.includes("html")) return undefined;
+  return type;
 }
 
 /** Thrown inside `crawlPageWithExistingPage` when the load ended on another origin. */

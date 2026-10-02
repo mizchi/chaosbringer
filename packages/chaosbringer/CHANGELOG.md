@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.0...chaosbringer-v0.11.1) (2026-10-02)
+
+Found by scanning playwright.dev, vite.dev, htmx.org, tailwindcss.com, developer.mozilla.org and webscraper.io. See [#178](https://github.com/mizchi/chaosbringer/pull/178).
+
+### Bug Fixes
+
+* **An excluded URL is never clicked.** Before this, `excludePatterns` / `--exclude` only kept the crawl from *visiting* a URL as a page, and a "Log out" link was still clicked with `--exclude /logout`. Now:
+  * links to excluded URLs are not click targets;
+  * when a click or a page load redirects onto an excluded URL, the crawl backs out and records `excludedTo`.
+* **Non-HTML documents are not measured.** A same-site URL that serves something other than HTML (an Atom feed, a JSON file) is recorded with its `contentType` and is not measured or clicked: the browser's XML viewer was reported as the site's "Large DOM". A click that opens one goes back and records `openedFile`.
+* **The browser's language is always a valid tag.** It is now the host locale. Under a POSIX locale `navigator.language` used to be `en-US@posix`, and a page's `new Intl.Locale(navigator.language)` threw.
+* **`scan` no longer breaks page loads as if they were API calls.** Pages the crawled pages link to, and excluded URLs, are no longer chaos targets: a router prefetching linked routes (`?_rsc=`) was failed and reported as a retry storm.
+* **`scan` tells revalidations from re-downloads.** A file downloaded once and then revalidated on every page is reported as revalidated (medium), not as "downloaded again" (high).
+* **`--ignore-analytics` covers ad pixels too.** It now also ignores doubleclick.net, googleadservices.com and mixpanel.com, as the `analytics` preset already did.
+
 ## [0.11.0](https://github.com/mizchi/chaosbringer/compare/96ba95d...chaosbringer-v0.11.0) (2026-10-01)
 
 0.10.0 cannot be imported from npm: it needs exports of `@mizchi/playwright-faults` that were never released. This release depends on `@mizchi/playwright-faults@^0.3.0` and `lightbringer@^0.4.0`, which have them. Upgrade from 0.9.0 straight to 0.11.0.

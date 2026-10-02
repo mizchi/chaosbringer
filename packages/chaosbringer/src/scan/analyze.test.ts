@@ -448,6 +448,15 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(reval.findings.map((f) => [f.rule, f.severity])).toEqual([["repeat-download", "medium"]]);
     const full = analyzeScan(fakeReport(paths.map((p) => fakePage(`${U}${p}`, load(p, { url: `${U}/main.css`, kb: 40 }))), []));
     expect(full.findings.map((f) => [f.rule, f.severity])).toEqual([["repeat-download", "high"]]);
+    // Downloaded once, then a 304 on every later page (htmx.org's
+    // max-age=0, must-revalidate): revalidations, not re-downloads.
+    const once = analyzeScan(
+      fakeReport(paths.map((p, i) => fakePage(`${U}${p}`, load(p, { url: `${U}/bars.png`, kb: i === 0 ? 9.3 : 0.4 }))), []),
+    );
+    expect(once.findings.map((f) => [f.rule, f.severity])).toEqual([["repeat-download", "medium"]]);
+    expect(once.findings[0]!.evidence).toEqual([
+      `${U}/bars.png: downloaded once (9.3 KB), then revalidated (not reused from cache) on 11 page loads`,
+    ]);
     const ads = paths.map((p) => fakePage(`${U}${p}`, load(p, { url: "https://ads.example/consent.js", kb: 70, thirdParty: true })));
     expect(analyzeScan(fakeReport(ads, [])).findings).toEqual([]);
   });
@@ -713,6 +722,20 @@ describe("deriveScanEndpoints", () => {
     load.network.requests = [req(`${U}/blog?_rsc=abc`), req(`${U}/?_rsc=def`), req(`${U}/api/session`)];
     const report = fakeReport([fakePage(`${U}/`, load), fakePage(`${U}/blog`)], []);
     expect(deriveScanEndpoints(report).map((e) => e.label)).toEqual([`${U}/api/session`]);
+  });
+
+  it("leaves out the pages the crawled ones link to (a router prefetching them)", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [req(`${U}/docs/z-index?_rsc=1`), req(`${U}/docs/clear?_rsc=2`), req(`${U}/api/session`)];
+    const page = { ...fakePage(`${U}/`, load), links: [`${U}/docs/z-index`, `${U}/docs/clear`] };
+    expect(deriveScanEndpoints(fakeReport([page], [])).map((e) => e.label)).toEqual([`${U}/api/session`]);
+  });
+
+  it("leaves out excluded URLs", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [req(`${U}/plus/login?_rsc=1`), req(`${U}/api/session`)];
+    const report = fakeReport([fakePage(`${U}/`, load)], []);
+    expect(deriveScanEndpoints(report, { exclude: ["login"] }).map((e) => e.label)).toEqual([`${U}/api/session`]);
   });
 
   it("leaves out static files a page fetches (CSS chunks, WebAssembly, models)", () => {

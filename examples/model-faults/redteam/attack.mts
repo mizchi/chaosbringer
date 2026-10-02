@@ -352,7 +352,13 @@ const bridgeD = {
       const data = (await res.json()) as { orders: number };
       return { orders: data.orders, session };
     }),
-  settleMs: 700,
+  // The probe has to land after the retry answered (first RTT + the app's
+  // 500ms backoff + the retry's RTT: the label reads "placed") and before the
+  // retry's write commits (first RTT + 500 + COMMIT_LATENCY_MS 450 ≥ 950ms:
+  // the duplicate is not counted yet). 700 left a CI runner's slow round
+  // trips ~150ms to fit into, and the label still read "stuck"; 850 keeps
+  // 100ms on the commit side, which moves later with the RTTs too.
+  settleMs: 850,
 };
 
 async function holeD(): Promise<void> {

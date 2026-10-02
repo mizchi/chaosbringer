@@ -950,6 +950,19 @@ export interface PageResult {
    * blocked external navigation.
    */
   redirectedTo?: string;
+  /**
+   * Where the page's URL redirected to when that URL matches
+   * `excludePatterns` (a /plus that redirects to /plus/login). The crawler
+   * stops there, as for `redirectedTo`.
+   */
+  excludedTo?: string;
+  /**
+   * The response's content type when the URL served something other than an
+   * HTML document (an Atom feed, a JSON file). The browser shows its own
+   * viewer for it, so the crawler stops there: no errors, links, actions or
+   * perf, which would all be the viewer's.
+   */
+  contentType?: string;
   /** How this page was discovered */
   discoveryMethod?: DiscoveryMethod;
   /** URL of the page that linked to this page */
@@ -1145,6 +1158,19 @@ export interface ActionResult {
    * blocked external navigation.
    */
   leftSiteTo?: string;
+  /**
+   * Where the action took the page when that URL matches `excludePatterns`
+   * (a link that redirected onto an excluded login page). The crawler went
+   * back; the step carries no perf. Links straight to an excluded URL are
+   * never clicked.
+   */
+  excludedTo?: string;
+  /**
+   * Where the action took the page when that URL is not an HTML document (a
+   * link to an Atom feed or a JSON file, which the browser shows in its own
+   * viewer). The crawler went back; the step carries no perf.
+   */
+  openedFile?: string;
   /**
    * True when the page's URL was different after the action: it followed a
    * link, changed route through the History API, or changed the hash. The

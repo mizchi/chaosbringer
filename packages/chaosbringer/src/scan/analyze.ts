@@ -1168,7 +1168,9 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
   const heavy = new Map<string, Located>();
   const dup = new Map<string, Located>();
   const perItem = new Map<string, Located>();
-  const downloads = new Map<string, { path: string; loads: Set<string>; kb: number }>();
+  // `full` counts the loads that transferred the file (≥ 1 KB), the rest were
+  // revalidations: the first full download is the one a cache needs.
+  const downloads = new Map<string, { path: string; loads: Set<string>; kb: number; full: number }>();
   for (const s of spans) {
     const exact = new Map<string, number>();
     const byEndpoint = new Map<string, Set<string>>();
@@ -1199,9 +1201,10 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
         // that changes on every load (`?v=<Date.now()>`) still names the same
         // file, while an image service's `?url=…&w=…` names different ones.
         const id = assetIdentity(q.url);
-        const d = downloads.get(id) ?? { path: id, loads: new Set<string>(), kb: 0 };
+        const d = downloads.get(id) ?? { path: id, loads: new Set<string>(), kb: 0, full: 0 };
         d.loads.add(`${s.key}#${d.loads.size}`);
         d.kb = Math.max(d.kb, q.kb);
+        if (!revalidation) d.full++;
         downloads.set(id, d);
       }
     }
@@ -1267,10 +1270,19 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
   let fullDownloads = false;
   for (const d of downloads.values()) {
     if (d.loads.size < SCAN_THRESHOLDS.repeatDownloads.warn) continue;
-    const revalidated = d.kb < 1;
-    if (!revalidated) fullDownloads = true;
-    const how = revalidated ? "revalidated (not reused from cache)" : "downloaded again";
-    repeated.push({ where: d.path, value: d.loads.size, line: `${d.path}: ${how} on ${d.loads.size} page loads (${fmt(d.kb)} KB)` });
+    // Downloaded in full once and revalidated after (htmx.org's max-age=0,
+    // must-revalidate with an ETag) is a round trip per load, not the bytes.
+    if (d.full >= SCAN_THRESHOLDS.repeatDownloads.warn) {
+      fullDownloads = true;
+      repeated.push({ where: d.path, value: d.full, line: `${d.path}: downloaded again on ${d.full} page loads (${fmt(d.kb)} KB)` });
+    } else {
+      const revalidations = d.loads.size - d.full;
+      const line =
+        d.full === 0
+          ? `${d.path}: revalidated (not reused from cache) on ${revalidations} page loads (${fmt(d.kb)} KB)`
+          : `${d.path}: downloaded once (${fmt(d.kb)} KB), then revalidated (not reused from cache) on ${revalidations} page loads`;
+      repeated.push({ where: d.path, value: d.loads.size, line });
+    }
   }
   if (repeated.length > 0) {
     out.push(

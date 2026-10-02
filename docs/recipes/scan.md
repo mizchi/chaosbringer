@@ -16,7 +16,9 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
 > Only scan sites you own or may test. The crawler clicks, types and submits
 > forms, and the chaos crawls send each API request just as the page would.
 > Keep destructive URLs out with `--exclude`, and point it at staging rather
-> than production.
+> than production. An excluded URL is neither visited nor clicked: a link
+> straight to it is not a click target, and a click or a page that redirects
+> onto it is backed out of (`excludedTo` on the step or the page).
 
 ## What it runs
 
@@ -193,7 +195,19 @@ reported. The same goes for a click that ends up off-site (Wikipedia's
 "Create account" redirects to auth.wikimedia.org): the step records
 `leftSiteTo`, carries no measurement, and the crawler goes back to the page.
 Static files a page fetches with `fetch()` (CSS chunks, WebAssembly, 3D
-models) are not treated as API endpoints either.
+models) are not treated as API endpoints either, and neither are the pages
+the crawled ones link to: a router prefetching a linked route's data
+(`/docs/z-index?_rsc=…`) is navigation, not the app's API.
+
+A same-site URL that serves something other than HTML (an Atom feed, a JSON
+file) is recorded with its `contentType` and nothing else: the browser shows
+its own viewer for it, and an XML tree of a feed is thousands of DOM nodes
+that are not the site's. A click that opens one is backed out of
+(`openedFile`).
+
+The browser's language is the host's locale as a valid tag. A container or
+CI runner with a POSIX locale would otherwise give `navigator.language` as
+`en-US@posix`, which a page's `new Intl.Locale(navigator.language)` rejects.
 
 ## What it does not see
 

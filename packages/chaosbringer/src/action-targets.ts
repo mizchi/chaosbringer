@@ -87,6 +87,12 @@ export interface WeightingContext {
   /** Base used to resolve relative hrefs before asking about familiarity. */
   baseOrigin: string;
   familiarity: (absoluteUrl: string) => UrlFamiliarity;
+  /**
+   * True for a URL the crawl must not reach (`excludePatterns`). A link to
+   * one is not a target: excluding `/logout` from the pages visited while
+   * still clicking the "Log out" link would log the crawl out anyway.
+   */
+  excluded?: (absoluteUrl: string) => boolean;
 }
 
 /**
@@ -595,7 +601,8 @@ export function weighActionTargets(
   raw: RawActionTarget[],
   ctx: WeightingContext,
 ): ActionTarget[] {
-  const targets: ActionTarget[] = raw.map((t) => {
+  const allowed = ctx.excluded ? raw.filter((t) => !linksToExcluded(t, ctx)) : raw;
+  const targets: ActionTarget[] = allowed.map((t) => {
     const { weight, type } = weightFor(t, ctx);
     return {
       selector: selectorFor(t),
@@ -617,6 +624,15 @@ export function weighActionTargets(
 
   targets.push({ selector: "window", weight: ctx.weights.scroll, type: "scroll" });
   return targets;
+}
+
+function linksToExcluded(t: RawActionTarget, ctx: WeightingContext): boolean {
+  if (!t.href || !ctx.excluded) return false;
+  try {
+    return ctx.excluded(new URL(t.href, ctx.baseOrigin).toString());
+  } catch {
+    return false;
+  }
 }
 
 /** What the crawler falls back to when the page can't be scraped at all. */

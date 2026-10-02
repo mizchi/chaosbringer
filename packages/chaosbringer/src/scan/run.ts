@@ -158,7 +158,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
 
   // Analysed with the sidecars' full request lists; saved as the crawl wrote it.
   const cleanFull = withSidecarRequests(baseline, readSidecarSpans(baseline, join(perfDir, "clean")));
-  const endpoints = deriveScanEndpoints(cleanFull);
+  const endpoints = deriveScanEndpoints(cleanFull, { exclude: options.crawler?.excludePatterns });
   const pattern = endpointsPattern(endpoints);
   const chaos: ScanChaosRun[] = [];
   const chaosFiles: ScanFiles["chaos"] = {};
