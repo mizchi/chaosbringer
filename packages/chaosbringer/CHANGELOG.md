@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.2](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.1...chaosbringer-v0.11.2) (2026-10-02)
+
+Found by scanning bun.sh, hono.dev, docs.python.org, web.dev, jquery.com and demoblaze.com.
+
+### Bug Fixes
+
+* **One CSP violation is one error cluster again.** The fingerprint now drops the CSP nonce and hash. The nonce changes on every response, and the hash identifies the inline block rather than the violation, so jquery.com's two violations came out as 16 clusters, one per page.
+* **`scan` separates ORB blocks that the crawler caused.** Chromium's opaque-response blocking sometimes stops a cross-origin image that is fine, while the page's requests are intercepted. After the crawls, each `net::ERR_BLOCKED_BY_ORB` URL is fetched once directly:
+  * a 2xx image, media or font becomes an environment note;
+  * anything else stays a finding, for example a 403 with an XML body.
+
 ## [0.11.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.0...chaosbringer-v0.11.1) (2026-10-02)
 
 Found by scanning playwright.dev, vite.dev, htmx.org, tailwindcss.com, developer.mozilla.org and webscraper.io. See [#178](https://github.com/mizchi/chaosbringer/pull/178).
