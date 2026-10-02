@@ -179,8 +179,9 @@ OPTIONS:
   --exclude <pattern>   Exclude URL patterns (regex, can be repeated)
   --ignore-error <p>    Ignore error patterns (regex, can be repeated)
   --ignore-analytics    Ignore common analytics script errors (googletagmanager,
-                        google-analytics, hotjar, clarity, segment, amplitude,
-                        cloudflareinsights, facebook.net, and net::ERR_FAILED)
+                        google-analytics, doubleclick, googleadservices, hotjar,
+                        clarity, segment, amplitude, mixpanel, cloudflareinsights,
+                        facebook.net, and net::ERR_FAILED)
   --ignore-preset <p>   Apply a named ignore-error preset (can be repeated; comma-separated).
                         Known: analytics, maps, media-embeds, pdf-orb, iframe-sandbox
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)

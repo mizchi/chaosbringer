@@ -12,12 +12,18 @@ export const COMMON_IGNORE_PATTERNS = [
   "googletagmanager\\.com",
   "google-analytics\\.com",
   "analytics\\.google\\.com",
+  // Ad-conversion pixels: vite.dev's sponsor tracker on doubleclick.net was
+  // still reported with --ignore-analytics, which the `analytics` preset
+  // below already covered.
+  "googleadservices\\.com",
+  "doubleclick\\.net",
   "facebook\\.net",
   "connect\\.facebook\\.net",
   "hotjar\\.com",
   "clarity\\.ms",
   "segment\\.io",
   "amplitude\\.com",
+  "mixpanel\\.com",
   // Generic error message from blocked resources
   "Failed to load resource: net::ERR_FAILED$",
 ];
