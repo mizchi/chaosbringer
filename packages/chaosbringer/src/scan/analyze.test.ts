@@ -731,6 +731,13 @@ describe("deriveScanEndpoints", () => {
     expect(deriveScanEndpoints(fakeReport([page], [])).map((e) => e.label)).toEqual([`${U}/api/session`]);
   });
 
+  it("leaves out excluded URLs", () => {
+    const load = fakeSpan("/ :: load");
+    load.network.requests = [req(`${U}/plus/login?_rsc=1`), req(`${U}/api/session`)];
+    const report = fakeReport([fakePage(`${U}/`, load)], []);
+    expect(deriveScanEndpoints(report, { exclude: ["login"] }).map((e) => e.label)).toEqual([`${U}/api/session`]);
+  });
+
   it("leaves out static files a page fetches (CSS chunks, WebAssembly, models)", () => {
     const load = fakeSpan("/ :: load");
     load.network.requests = [

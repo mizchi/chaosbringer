@@ -5,6 +5,7 @@
  * spans, so the derivation is unit-testable.
  */
 
+import { matchesAnyPattern } from "../filters.js";
 import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport } from "../types.js";
 
@@ -47,7 +48,13 @@ type RequestLike = { url: string; type: string; thirdParty?: boolean };
  * Hand it a report with the sidecars' request lists put back
  * (`withSidecarRequests`): the report alone keeps the five slowest per span.
  */
-export function deriveScanEndpoints(report: Pick<CrawlReport, "pages" | "actions">): ScanEndpoint[] {
+export function deriveScanEndpoints(
+  report: Pick<CrawlReport, "pages" | "actions">,
+  { exclude = [] }: { exclude?: readonly string[] } = {},
+): ScanEndpoint[] {
+  // URLs the crawl must not reach are not its to break either: a router
+  // prefetching the target of a redirect (tailwindcss.com's /plus →
+  // /plus/login) requests an excluded login page.
   const requests: RequestLike[] = [];
   for (const s of reportSpans(report)) requests.push(...s.network.requests);
   // The site's own pages, as endpoints would be labelled: the ones crawled
@@ -62,6 +69,7 @@ export function deriveScanEndpoints(report: Pick<CrawlReport, "pages" | "actions
   const byLabel = new Map<string, ScanEndpoint>();
   for (const r of requests) {
     if (!API_TYPES.has(r.type) || r.thirdParty || INFRASTRUCTURE_PATH.test(r.url)) continue;
+    if (matchesAnyPattern(r.url, exclude)) continue;
     let u: URL;
     try {
       u = new URL(r.url);
