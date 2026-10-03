@@ -155,11 +155,19 @@ The report leaves them out of the findings and lists them once, under
 - "no supported source" media errors: Playwright's Chromium ships without
   the H.264 / AAC codecs that Chrome has.
 - `net::ERR_BLOCKED_BY_ORB` on a file that serves fine: Chromium's
-  opaque-response blocking now and then stops a cross-origin image while the
-  page's requests are intercepted, as the crawler's are. After the crawls the
-  scan fetches each blocked URL once; one that answers 2xx as an image, media
-  or font goes here. One that does not (a 403 with an XML body) stays a
-  finding.
+  opaque-response blocking now and then stops a cross-origin image or script
+  while the page's requests are intercepted, as the crawler's are. After the
+  crawls the scan fetches each blocked URL once; one that answers 2xx as an
+  image, media, font, script or stylesheet goes here. One that does not (a
+  403 with an XML body) stays a finding.
+- `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` on a file that serves fine: a
+  server that answers the scanning browser's `HeadlessChrome` user agent with
+  a bot block carrying `Cross-Origin-Resource-Policy: same-origin` (eslint.org's
+  ad server does). Fetched directly, it answers 2xx without that header, so it
+  goes here, with the console's "Failed to load resource" echo. A file that
+  sends the header to everyone stays a finding.
+  Both probes fetch one URL per path, and its answer stands for every query
+  string of that path.
 
 An exception such as "Failed to fetch" on a page where one of these broke a
 request stays in the findings, but its evidence says it may be the knock-on

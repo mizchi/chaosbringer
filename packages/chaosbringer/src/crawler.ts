@@ -473,7 +473,7 @@ export class ChaosCrawler {
    */
   private reclassifyRejections(
     errors: PageError[],
-    rejections: Array<{ message: string; stack?: string }>,
+    rejections: Array<{ message: string; stack?: string; url?: string }>,
     url: string
   ): void {
     for (const rejection of rejections) {
@@ -489,7 +489,10 @@ export class ChaosCrawler {
         type: "unhandled-rejection",
         message: rejection.message,
         stack: rejection.stack,
-        url,
+        // Where it escaped, as the console and pageerror collectors record
+        // `page.url()` when they fire: after a click that navigated, that is
+        // not the page the crawl visited.
+        url: rejection.url ?? url,
         timestamp: Date.now(),
       };
       this.emitPageError(errors, error);
@@ -557,7 +560,7 @@ export class ChaosCrawler {
   }
 
   /** Pop and return any unhandled promise rejections captured since last call. */
-  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
+  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string; url?: string }>> {
     return drainRejections(page);
   }
 

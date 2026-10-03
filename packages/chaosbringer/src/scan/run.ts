@@ -32,7 +32,7 @@ import {
 } from "./analyze.js";
 import { deriveScanEndpoints, endpointsPattern, type ScanEndpoint } from "./endpoints.js";
 import { formatScanMarkdown, type ScanSummaryInput } from "./format.js";
-import { markServedOrb, orbBlockedUrls, probeServedUrls } from "./orb.js";
+import { blockedResponses, markServed, probeServed } from "./blocked-responses.js";
 import { readSidecarSpans, withSidecarRequests } from "./sidecars.js";
 
 export interface ScanOptions {
@@ -179,13 +179,13 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     log("[scan] chaos crawls skipped: no same-site fetch / XHR request seen");
   }
 
-  // Files the browser's ORB blocked while the crawler intercepted requests,
-  // that are fine when fetched directly: see `orb.ts`.
-  const blocked = orbBlockedUrls([cleanFull, ...chaos.map((c) => c.report)]);
-  const served = blocked.length > 0 ? await probeServedUrls(blocked) : new Set<string>();
+  // Responses the browser refused that are fine when fetched directly: see
+  // `blocked-responses.ts`.
+  const blocked = blockedResponses([cleanFull, ...chaos.map((c) => c.report)]);
+  const served = blocked.length > 0 ? await probeServed(blocked) : new Set<string>();
   const analysis = analyzeScan(
-    markServedOrb(cleanFull, served),
-    chaos.map((c) => ({ ...c, report: markServedOrb(c.report, served) })),
+    markServed(cleanFull, served),
+    chaos.map((c) => ({ ...c, report: markServed(c.report, served) })),
     { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) },
   );
   const files: ScanFiles = {
