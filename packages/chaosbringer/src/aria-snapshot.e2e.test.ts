@@ -1,6 +1,6 @@
 import { type Browser, chromium, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ariaCandidates, ariaOutline, parseAriaSnapshot, readAria } from "./aria-snapshot.js";
+import { ariaCandidates, ariaOutline, nodesFromAriaJSON, parseAriaSnapshot, readAria } from "./aria-snapshot.js";
 
 const PAGE = `<header><nav aria-label="Main"><a href="/a">About "us"</a><a href="/b">Blog</a></nav></header>
 <main><h2>Checkout</h2><form>
@@ -73,6 +73,14 @@ describe("candidates from the accessibility snapshot", () => {
     ]);
   });
 
+  it("reads the same candidates from the YAML snapshot and the JSON one", async () => {
+    const strip = (cs: ReturnType<typeof ariaCandidates>) => cs.map(({ ref: _ref, ...c }) => c);
+    const fromYaml = ariaCandidates(parseAriaSnapshot(await page.ariaSnapshot({ mode: "ai" })));
+    const fromJson = ariaCandidates(nodesFromAriaJSON(await page.ariaSnapshotJSON({ mode: "ai" })));
+    expect(strip(fromYaml)).toEqual(strip(fromJson));
+    expect(fromJson.length).toBeGreaterThan(5);
+  });
+
   it("acts on a role-less clickable through its ref", async () => {
     const { candidates } = await readAria(page);
     const card = candidates.find((c) => c.description.startsWith('clickable "Open card"'))!;
@@ -90,10 +98,11 @@ describe("the outline a model reads", () => {
       "    - /url: /",
       '  - button "Buy" [ref=e4]',
     ].join("\n");
-    const candidates = ariaCandidates(parseAriaSnapshot(snapshot));
-    expect(ariaOutline(snapshot, candidates)).toBe(
-      ["- main:", '  - heading "Shop" [level=1]', '  - [#0] link "Home":', '  - [#1] button "Buy"'].join("\n"),
+    const nodes = parseAriaSnapshot(snapshot);
+    const candidates = ariaCandidates(nodes);
+    expect(ariaOutline(nodes, candidates)).toBe(
+      ["- main", '  - heading "Shop" [level=1]', '  - [#0] link "Home"', '  - [#1] button "Buy"'].join("\n"),
     );
-    expect(ariaOutline(snapshot, candidates, { maxLines: 2 })).toBe(["- main:", '  - heading "Shop" [level=1]', "… (2 more lines)"].join("\n"));
+    expect(ariaOutline(nodes, candidates, { maxLines: 2 })).toBe(["- main", '  - heading "Shop" [level=1]', "… (2 more lines)"].join("\n"));
   });
 });

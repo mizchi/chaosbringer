@@ -274,6 +274,9 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       reason = "the page closed";
       break;
     }
+    // A click that navigated can leave the new document still parsing when
+    // the settle returns (it waited on the old one): an empty snapshot.
+    await page.waitForLoadState("domcontentloaded", { timeout: settleCap }).catch(() => {});
     const view = await readAria(page).catch((err: unknown) => {
       reason = `could not read the page: ${errorMessage(err)}`;
       return null;

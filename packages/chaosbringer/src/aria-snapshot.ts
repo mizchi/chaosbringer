@@ -181,9 +181,13 @@ function ancestors(nodes: readonly AriaNode[], index: number): AriaNode[] {
   return out;
 }
 
-/** In an iframe: its refs are `f1e2`, and a page-level selector cannot reach it. */
-function inFrame(node: AriaNode): boolean {
-  return node.ref !== undefined && !/^e\d+$/.test(node.ref);
+/**
+ * Inside an iframe, which a page-level selector cannot reach. Read from the
+ * tree, not the ref: a frame's refs look like `f1e2`, but so do the main
+ * frame's after a navigation (Playwright 1.63).
+ */
+function inFrame(nodes: readonly AriaNode[], index: number): boolean {
+  return ancestors(nodes, index).some((a) => a.role === "iframe");
 }
 
 export interface AriaCandidateOptions {
@@ -203,7 +207,7 @@ export interface AriaCandidateOptions {
 export function ariaCandidates(nodes: readonly AriaNode[], { max = 60 }: AriaCandidateOptions = {}): AriaCandidate[] {
   const picked: { node: AriaNode; i: number; type: AriaActionType }[] = [];
   nodes.forEach((node, i) => {
-    if (!node.ref || inFrame(node) || node.attrs.disabled) return;
+    if (!node.ref || inFrame(nodes, i) || node.attrs.disabled) return;
     const type = actionType(node, nodes, i);
     if (!type) return;
     if (!CLICK_ROLES.has(node.role) && !FILL_ROLES.has(node.role) && node.role !== "link" && node.role !== "combobox") {
@@ -255,8 +259,7 @@ function descendants(nodes: readonly AriaNode[], index: number): AriaNode[] {
 function stableSelector(nodes: readonly AriaNode[], index: number): string | undefined {
   const node = nodes[index]!;
   if (node.role === "generic" || !node.role) return undefined;
-  const sameRole = (n: AriaNode) => n.role === node.role && !inFrame(n);
-  const matches = (n: AriaNode) => sameRole(n) && (node.name === undefined || n.name === node.name);
+  const matches = (n: AriaNode, j: number) => n.role === node.role && (node.name === undefined || n.name === node.name) && !inFrame(nodes, j);
   const k = nodes.slice(0, index).filter(matches).length;
   const base = node.name === undefined ? `role=${node.role}` : `role=${node.role}[name=${JSON.stringify(node.name)}s]`;
   const total = nodes.filter(matches).length;
@@ -310,38 +313,79 @@ export interface OutlineOptions {
 }
 
 /**
- * The snapshot as a model should read it: refs and `/url` lines dropped,
- * each candidate's line tagged `[#index]` so the outline and the candidate
- * list refer to the same things, and long text cut.
+ * The page as a model should read it: one line per node, indented like the
+ * snapshot, refs and urls left out, each candidate tagged `[#index]` so the
+ * outline and the candidate list refer to the same things, long text cut.
  */
-export function ariaOutline(text: string, candidates: readonly AriaCandidate[], { maxLines = 150 }: OutlineOptions = {}): string {
+export function ariaOutline(nodes: readonly AriaNode[], candidates: readonly AriaCandidate[], { maxLines = 150 }: OutlineOptions = {}): string {
   const byRef = new Map(candidates.map((c) => [c.ref, c.index]));
-  const out: string[] = [];
-  for (const raw of text.split("\n")) {
-    if (/^\s*- \/url:/.test(raw)) continue;
-    const ref = /\[ref=([^\]]+)\]/.exec(raw)?.[1];
-    let line = raw.replace(/ \[ref=[^\]]+\]/g, "").replace(/ \[cursor=pointer\]/g, "");
-    if (line.length > 160) line = `${line.slice(0, 159)}…`;
-    const idx = ref === undefined ? undefined : byRef.get(ref);
-    if (idx !== undefined) line = line.replace(/^(\s*- )/, `$1[#${idx}] `);
-    out.push(line);
-  }
+  const out = nodes.map((n) => {
+    const idx = n.ref === undefined ? undefined : byRef.get(n.ref);
+    let line = `${"  ".repeat(n.depth)}- ${idx === undefined ? "" : `[#${idx}] `}`;
+    if (n.role === "text") line += `text: ${n.text ?? ""}`;
+    else {
+      line += n.role;
+      if (n.name !== undefined) line += ` ${JSON.stringify(n.name)}`;
+      for (const [k, v] of Object.entries(n.attrs)) {
+        if (k === "cursor") continue;
+        line += v === true ? ` [${k}]` : ` [${k}=${v}]`;
+      }
+      if (n.text !== undefined) line += `: ${n.text}`;
+    }
+    return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+  });
   if (out.length <= maxLines) return out.join("\n");
   return [...out.slice(0, maxLines), `… (${out.length - maxLines} more lines)`].join("\n");
 }
 
+/** One node of `ariaSnapshotJSON` (Playwright 1.63). */
+type JsonAriaNode = { role: string; name?: string; ref?: string; text?: string; url?: string; children?: (JsonAriaNode | string)[] } & Record<string, unknown>;
+
+/** `page.ariaSnapshotJSON()`'s tree as the flat node list `parseAriaSnapshot` gives. */
+export function nodesFromAriaJSON(roots: unknown): AriaNode[] {
+  const nodes: AriaNode[] = [];
+  const visit = (n: JsonAriaNode | string, depth: number, parent: number) => {
+    if (typeof n === "string") {
+      nodes.push({ role: "text", text: n, attrs: {}, depth, parent, line: nodes.length });
+      return;
+    }
+    if (typeof n !== "object" || n === null || typeof n.role !== "string") return;
+    const attrs: Record<string, string | true> = {};
+    for (const [k, v] of Object.entries(n)) {
+      if (k === "role" || k === "name" || k === "ref" || k === "text" || k === "url" || k === "children") continue;
+      if (v === true) attrs[k] = true;
+      else if (typeof v === "string" || typeof v === "number") attrs[k] = String(v);
+      else if (v === "mixed") attrs[k] = "mixed";
+    }
+    const node: AriaNode = { role: n.role, attrs, depth, parent, line: nodes.length };
+    if (typeof n.name === "string" && n.name !== "") node.name = n.name;
+    if (typeof n.ref === "string") node.ref = n.ref;
+    if (typeof n.text === "string") node.text = n.text;
+    if (typeof n.url === "string") node.url = n.url;
+    nodes.push(node);
+    const index = nodes.length - 1;
+    for (const c of n.children ?? []) visit(c, depth + 1, index);
+  };
+  for (const r of Array.isArray(roots) ? roots : [roots]) visit(r as JsonAriaNode, 0, -1);
+  return nodes;
+}
+
 export interface AriaView {
-  /** The raw snapshot. */
-  snapshot: string;
   nodes: AriaNode[];
   candidates: AriaCandidate[];
   outline: string;
 }
 
-/** Snapshot `page` and read it. */
+/**
+ * Snapshot `page` and read it: `ariaSnapshotJSON` where Playwright has it
+ * (1.63+), the YAML snapshot otherwise (1.59+).
+ */
 export async function readAria(page: Page, options: AriaCandidateOptions & OutlineOptions = {}): Promise<AriaView> {
-  const snapshot = await page.ariaSnapshot({ mode: "ai" });
-  const nodes = parseAriaSnapshot(snapshot);
+  const withJson = page as Page & { ariaSnapshotJSON?: (o: { mode: "ai" }) => Promise<unknown> };
+  const nodes =
+    typeof withJson.ariaSnapshotJSON === "function"
+      ? nodesFromAriaJSON(await withJson.ariaSnapshotJSON({ mode: "ai" }))
+      : parseAriaSnapshot(await page.ariaSnapshot({ mode: "ai" }));
   const candidates = ariaCandidates(nodes, options);
-  return { snapshot, nodes, candidates, outline: ariaOutline(snapshot, candidates, options) };
+  return { nodes, candidates, outline: ariaOutline(nodes, candidates, options) };
 }
