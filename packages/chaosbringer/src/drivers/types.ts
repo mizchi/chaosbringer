@@ -144,6 +144,14 @@ export interface DriverStep {
   rng: Rng;
   /** Lazy screenshot — only captured when a driver actually asks for it. */
   screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
+  /**
+   * The page as an accessibility outline (`aria-snapshot.ts`): landmarks,
+   * headings, text and controls, indented as the tree nests them, with
+   * `[#N]` marking `candidates[N]`. Lazy like `screenshot`: a snapshot is
+   * taken only when a driver asks. Absent where the runner has no page tree
+   * to offer.
+   */
+  outline?: () => Promise<string>;
   /** Invariant violations observed since the previous step. */
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
   /**
@@ -280,6 +288,11 @@ export interface DriverProviderInput {
    * configured `screenshotMode`.
    */
   screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
+  /**
+   * `DriverStep.outline`, lazy the same way: a provider whose prompt has no
+   * outline slot never pays for the snapshot.
+   */
+  outline?: () => Promise<string>;
   candidates: ReadonlyArray<DriverProviderCandidate>;
   history: ReadonlyArray<DriverHistoryEntry>;
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;

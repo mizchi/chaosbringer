@@ -114,6 +114,15 @@ export interface CrawlerOptions {
   traceparent?: boolean | TraceparentInjectionOptions;
   /** Action weighting configuration */
   actionWeights?: ActionWeights;
+  /**
+   * Also find targets through Playwright's accessibility snapshot
+   * (`aria-targets.ts`): controls the CSS scrape misses (a `<div onclick>`
+   * with a pointer cursor) become targets, and every target the snapshot
+   * also sees is described from the tree (`button "Pay" — in dialog
+   * "Checkout"`) to drivers and models. Costs a snapshot per page and per
+   * driver step. Default false.
+   */
+  ariaTargets?: boolean;
   /** Log file path (enables file logging) */
   logFile?: string;
   /** Log level */
@@ -1097,6 +1106,18 @@ export interface ActionTarget {
   selectValue?: string;
   /** Where it is and whether a click reaches it. See `TargetGeometry`. */
   geometry?: TargetGeometry;
+  /**
+   * How the scrape numbered it (`tag:a:3`, `role:tab:0`): the key the
+   * accessibility snapshot is joined to the scrape by (`aria-targets.ts`).
+   */
+  peerKey?: string;
+  /**
+   * The accessibility snapshot's description of it, with state and where it
+   * sits: `button "Pay" — in dialog "Checkout"`. Set with `ariaTargets`.
+   */
+  ariaDescription?: string;
+  /** The snapshot's ref for it, valid until the next snapshot. */
+  ariaRef?: string;
 }
 
 export interface ActionResult {

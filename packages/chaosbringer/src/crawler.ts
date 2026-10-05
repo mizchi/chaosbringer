@@ -150,6 +150,8 @@ import {
   type ResolvedSettle,
 } from "./settle.js";
 import { contextOptions } from "./browser-session.js";
+import { ariaOutline, readAria } from "./aria-snapshot.js";
+import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -162,6 +164,9 @@ function isDriver(v: unknown): v is Driver {
 }
 
 function describeTarget(t: ActionTarget): string {
+  // The accessibility tree's reading, when `ariaTargets` joined one: the
+  // accessible name, state, and where the control sits.
+  if (t.ariaDescription) return `${t.ariaDescription} (${t.type})`;
   const parts: string[] = [];
   if (t.role) parts.push(t.role);
   if (t.name) parts.push(`"${t.name}"`);
@@ -2384,15 +2389,67 @@ export class ChaosCrawler {
     } catch {
       return scrollOnlyTargets();
     }
-    return weighActionTargets(raw, {
+    const ctx = {
       weights: this.actionWeights,
       baseOrigin: this.baseOrigin,
-      familiarity: (url) => {
-        if (this.visited.has(url)) return "visited";
-        return this.queue.some((e) => normalizeUrl(e.url) === url) ? "queued" : "new";
+      familiarity: (url: string) => {
+        if (this.visited.has(url)) return "visited" as const;
+        return this.queue.some((e) => normalizeUrl(e.url) === url) ? ("queued" as const) : ("new" as const);
       },
-      excluded: (url) => this.shouldExclude(url),
+      excluded: (url: string) => this.shouldExclude(url),
+    };
+    const targets = weighActionTargets(raw, ctx);
+    if (this.options.ariaTargets) await this.joinAria(page, targets, ctx);
+    return targets;
+  }
+
+  /**
+   * `ariaTargets`: describe `targets` from the accessibility snapshot and add
+   * the controls the CSS scrape missed, before the scroll target. A snapshot
+   * that fails leaves the scrape's targets as they are.
+   */
+  private async joinAria(page: Page, targets: ActionTarget[], ctx: Parameters<typeof weighActionTargets>[1]): Promise<void> {
+    let extras: ReturnType<typeof joinAriaTargets>;
+    try {
+      const view = await readAria(page);
+      extras = joinAriaTargets(targets, await matchAriaTargets(page, view));
+    } catch (err) {
+      this.logger.debug("aria_targets_failed", { error: errorMessage(err) });
+      return;
+    }
+    if (extras.length === 0) return;
+    const weighed = weighActionTargets(
+      extras.map((e) => e.raw),
+      ctx,
+    ).filter((t) => t.type !== "scroll");
+    // `weighActionTargets` drops links to excluded URLs, so join back by key.
+    const byKey = new Map(extras.map((e) => [`${e.raw.role === null ? `tag:${e.raw.tag}` : `role:${e.raw.role}`}:${e.raw.index}`, e]));
+    const added = weighed.map((t) => {
+      const e = byKey.get(t.peerKey ?? "");
+      return e ? { ...t, ...(e.selector ? { selector: e.selector } : {}), ariaDescription: e.candidate.description, ariaRef: e.candidate.ref } : t;
     });
+    const scrollAt = targets.findIndex((t) => t.type === "scroll");
+    targets.splice(scrollAt < 0 ? targets.length : scrollAt, 0, ...added);
+    this.logger.debug("aria_targets", { added: added.length });
+  }
+
+  /**
+   * The page as an accessibility outline, `[#N]` marking candidate N of
+   * `targets`. For drivers and models: the structure a flat candidate list
+   * cannot carry.
+   */
+  private async outlineFor(page: Page, targets: ReadonlyArray<ActionTarget>): Promise<string> {
+    const view = await readAria(page);
+    const matches = await matchAriaTargets(page, view);
+    const indexByKey = new Map<string, number>();
+    targets.forEach((t, i) => {
+      if (t.peerKey) indexByKey.set(t.peerKey, i);
+    });
+    const tagged = matches.flatMap((m) => {
+      const index = m.key === null ? undefined : indexByKey.get(m.key);
+      return index === undefined ? [] : [{ ref: m.candidate.ref, index }];
+    });
+    return ariaOutline(view.nodes, tagged);
   }
 
   /**
@@ -2536,6 +2593,8 @@ export class ChaosCrawler {
         // Closed or crashed page — the page-visit URL is the honest answer.
       }
 
+      const stepTargets = targets;
+      let outline: Promise<string> | undefined;
       const step: DriverStep = {
         url,
         currentUrl,
@@ -2545,6 +2604,8 @@ export class ChaosCrawler {
         stepIndex: actionsPerformed,
         rng: this.rng,
         screenshot: screenshotFn,
+        // Once per step, however many times a driver asks.
+        outline: () => (outline ??= this.outlineFor(page, stepTargets)),
         invariantViolations: pendingViolations,
       };
       // Set only when measured, so a driver can tell "unmeasured" from

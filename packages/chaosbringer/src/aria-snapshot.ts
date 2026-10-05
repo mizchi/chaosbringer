@@ -317,7 +317,11 @@ export interface OutlineOptions {
  * snapshot, refs and urls left out, each candidate tagged `[#index]` so the
  * outline and the candidate list refer to the same things, long text cut.
  */
-export function ariaOutline(nodes: readonly AriaNode[], candidates: readonly AriaCandidate[], { maxLines = 150 }: OutlineOptions = {}): string {
+export function ariaOutline(
+  nodes: readonly AriaNode[],
+  candidates: ReadonlyArray<Pick<AriaCandidate, "ref" | "index">>,
+  { maxLines = 150 }: OutlineOptions = {},
+): string {
   const byRef = new Map(candidates.map((c) => [c.ref, c.index]));
   const out = nodes.map((n) => {
     const idx = n.ref === undefined ? undefined : byRef.get(n.ref);

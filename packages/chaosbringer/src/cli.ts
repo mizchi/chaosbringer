@@ -115,6 +115,7 @@ const { values, positionals } = parseArgs({
     "storage-state": { type: "string" },
     budget: { type: "string", multiple: true },
     axe: { type: "boolean", default: false },
+    "aria-targets": { type: "boolean", default: false },
     "axe-tags": { type: "string" },
     "visual-baseline": { type: "string" },
     "visual-threshold": { type: "string" },
@@ -195,6 +196,8 @@ OPTIONS:
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
   --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
+  --aria-targets        Also find targets through the accessibility snapshot (clickable divs the
+                        CSS scrape misses), and describe targets from the tree to drivers
   --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
   --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires pixelmatch + pngjs)
@@ -485,6 +488,7 @@ function buildInvariants(): Invariant[] | undefined {
 }
 
 const options: CrawlerOptions = {
+  ...(values["aria-targets"] ? { ariaTargets: true } : {}),
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
   maxActionsPerPage: (() => {

@@ -8,7 +8,7 @@
  * mirror the OpenRouter provider: every recoverable error collapses to
  * `null`.
  */
-import { parsePromptFile, parseSuggestion, renderUserPrompt, type ParsedPrompt } from "../prompts/loader.js";
+import { outlineFor, parsePromptFile, parseSuggestion, renderUserPrompt, type ParsedPrompt } from "../prompts/loader.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { DriverProvider, DriverProviderInput, DriverProviderResult } from "../types.js";
@@ -55,7 +55,7 @@ export function anthropicDriverProvider(opts: AnthropicDriverProviderOptions): D
 
     async selectAction(input: DriverProviderInput): Promise<DriverProviderResult | null> {
       const prompt = loadPrompt(promptPath);
-      const userText = renderUserPrompt(prompt.userTemplate, input);
+      const userText = renderUserPrompt(prompt.userTemplate, input, await outlineFor(prompt.userTemplate, input));
 
       // This provider is a vision one, so it does pay the capture — but
       // it pays it here, where a failure is just another soft failure.
