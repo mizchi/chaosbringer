@@ -32,10 +32,12 @@ import { readAria, type AriaCandidate } from "../aria-snapshot.js";
 import { newIsolatedPage } from "../browser-session.js";
 import { errorMessage } from "../errors.js";
 import { toRegExp } from "../fault-router.js";
-import { watchUnhandledRejections } from "../rejections.js";
 import { extractCandidate } from "../recipes/capture.js";
 import type { ActionRecipe, ActionTrace, RecipeStep } from "../recipes/types.js";
 import { DEFAULT_SETTLE_QUIET_MS, pageSettleEnv, settleAdaptive, trackPageRequests } from "../settle.js";
+import { type DriveProblem, safeUrl, siteProblems, watchProblems } from "./problems.js";
+
+export type { DriveProblem } from "./problems.js";
 
 /** One thing the decider can ask for. `index` is into this step's candidates. */
 export type DriveDecision =
@@ -90,13 +92,6 @@ export interface DriveDecider {
   decide(input: DriveInput): Promise<DriveDecision | null>;
 }
 
-export interface DriveProblem {
-  kind: "exception" | "unhandled-rejection" | "console" | "network" | "http";
-  message: string;
-  url: string;
-  /** The step that caused it; -1 for the initial load. */
-  step: number;
-}
 
 /** When the goal counts as reached. Every given field must hold. */
 export interface DriveUntil {
@@ -179,30 +174,9 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
   const { page, close } = await newIsolatedPage(browser, opts.contextOptions);
 
-  const problems: DriveProblem[] = [];
-  let currentStep = -1;
-  const problem = (kind: DriveProblem["kind"], message: string) =>
-    problems.push({ kind, message, url: safeUrl(page), step: currentStep });
-  page.on("pageerror", (e) => problem("exception", e.message));
-  page.on("console", (m) => {
-    if (m.type() === "error") problem("console", m.text());
-  });
-  page.on("requestfailed", (r) => {
-    const failure = r.failure()?.errorText ?? "failed";
-    // Cancelled in flight: navigating on cancels beacons and prefetches.
-    if (failure === "net::ERR_ABORTED") return;
-    problem("network", `${r.url()} - ${failure}`);
-  });
-  page.on("response", (r) => {
-    const s = r.status();
-    if (s >= 500 || (s >= 400 && r.request().isNavigationRequest() && r.frame() === page.mainFrame())) {
-      problem("http", `${r.request().method()} ${r.url()} -> ${s}`);
-    }
-  });
-  const rejections = await watchUnhandledRejections(page);
-  const drainRejections = async () => {
-    for (const r of await rejections.drain()) problems.push({ kind: "unhandled-rejection", message: r.message, url: r.url ?? safeUrl(page), step: currentStep });
-  };
+  const watch = await watchProblems(page);
+  const problems = watch.problems;
+  const drainRejections = () => watch.drain();
   const { tracker, detach } = trackPageRequests(page);
   const settle = async () => {
     await page.waitForLoadState("domcontentloaded", { timeout: settleCap }).catch(() => {});
@@ -294,7 +268,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       outline: view.outline,
       candidates: view.candidates.map(({ index, description, type }) => ({ index, description, type })),
       history,
-      problems: problems.slice(seenProblems),
+      problems: siteProblems(problems.slice(seenProblems)),
       ...(feedback !== undefined ? { feedback } : {}),
       screenshot: async () => Buffer.from(await page.screenshot()),
     };
@@ -358,7 +332,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       continue;
     }
 
-    currentStep = step;
+    watch.setStep(step);
     const before = problems.length;
     const entry: DriveHistoryEntry = {
       step,
@@ -388,7 +362,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     }
     await drainRejections();
     entry.url = safeUrl(page);
-    entry.problems = problems.slice(before).map((p) => `${p.kind}: ${p.message}`);
+    entry.problems = siteProblems(problems.slice(before)).map((p) => `${p.kind}: ${p.message}`);
     if (entry.ok) recipeSteps.push(...withExpect(recorded, entry.url, history.at(-1)?.url ?? opts.url));
     history.push(entry);
     opts.onStep?.(entry, decision);
@@ -493,7 +467,7 @@ export function defaultRecipeName(url: string, goal: string): string {
   return `drive/${host}/${slug || "goal"}`;
 }
 
-async function untilHolds(page: Page, until: DriveUntil): Promise<boolean> {
+export async function untilHolds(page: Page, until: DriveUntil): Promise<boolean> {
   const url = safeUrl(page);
   if (until.urlIncludes !== undefined && !url.includes(until.urlIncludes)) return false;
   if (until.urlMatches !== undefined) {
@@ -517,13 +491,6 @@ function describeUntil(until: DriveUntil): string {
   return parts.join(" and ");
 }
 
-function safeUrl(page: Page): string {
-  try {
-    return page.url();
-  } catch {
-    return "";
-  }
-}
 
 function safeHref(url: string): string {
   try {

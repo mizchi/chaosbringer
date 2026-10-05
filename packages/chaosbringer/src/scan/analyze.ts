@@ -238,7 +238,7 @@ function netCause(code: string, reason: string): { code: string; pattern: RegExp
   return { code, pattern: new RegExp(`${escapeRegExp(code)}\\b`), reason };
 }
 
-function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
+export function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
   return ENVIRONMENT_CAUSES.find((c) => c.pattern.test(message));
 }
 

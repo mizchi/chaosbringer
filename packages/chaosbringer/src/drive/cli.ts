@@ -10,6 +10,9 @@ import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { RecipeStore } from "../recipes/store.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
 import { drive, type DriveDecider, type DriveResult, type DriveUntil } from "./drive.js";
+import { siteProblems } from "./problems.js";
+import { recipeChaos, type RecipeChaosResult } from "./chaos.js";
+import { SCAN_FAULT_KINDS, type ScanFaultKind } from "../scan/analyze.js";
 
 const HELP = `
 chaosbringer drive — operate a browser towards a goal, with the checks running
@@ -46,6 +49,12 @@ OPTIONS:
   --save-recipe [name]      Store the recipe of a successful run in the recipe store
   --dir <path>              Recipe store directory (default ./chaosbringer-recipes)
   --storage-state <path>    Playwright storageState to start logged in
+  --chaos                   After a run that reached its goal, replay its recipe with the
+                            app's own API calls failing (each fault in --faults).
+                            Reports what escaped uncaught, a goal shown as reached with
+                            the API down, and where the journey stops
+  --faults <list>           Faults for --chaos: 500,abort,hang (default all three)
+  --hang-ms <ms>            How long the hang fault holds a request (default 8000)
   --no-headless             Show the browser
   --quiet                   Only print the summary
   --help                    Show this help
@@ -74,6 +83,9 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       "save-recipe": { type: "string" },
       dir: { type: "string" },
       "storage-state": { type: "string" },
+      chaos: { type: "boolean", default: false },
+      faults: { type: "string" },
+      "hang-ms": { type: "string" },
       quiet: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
       ...HEADLESS_OPTIONS,
@@ -133,7 +145,52 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       console.log(`no recipe saved: ${result.recipeSkipped ?? "the goal was not reached"}`);
     }
   }
+  let chaos: RecipeChaosResult | undefined;
+  if (values.chaos) {
+    if (!result.recipe) {
+      console.log(`chaos replay skipped: ${result.recipeSkipped ?? "the goal was not reached"}`);
+    } else {
+      const faults = parseFaults(values.faults ?? "all");
+      console.log(`[chaos] replaying ${result.recipe.name} clean, then with ${faults.join(", ")}`);
+      chaos = await recipeChaos({
+        recipe: result.recipe,
+        ...(Object.keys(until).length > 0 ? { until } : {}),
+        faults,
+        ...(values.exclude ? { exclude: values.exclude } : {}),
+        ...(values["hang-ms"] ? { hangReleaseMs: positiveInt(values["hang-ms"], "--hang-ms") } : {}),
+        ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
+        headless: resolveHeadless(values),
+        onRun: quiet
+          ? undefined
+          : (r) => console.log(`[chaos] ${r.label}: steps ${r.replay.ok ? "ran" : `stopped at ${r.replay.failedAt?.index}`}, goal ${r.goalHeld === null ? "?" : r.goalHeld ? "held" : "not held"}, fault fired ${r.fired}×, ${r.newProblems.length} new problem(s)`),
+      });
+      console.log(formatChaosSummary(chaos));
+      if (values.out) writeFileSync(join(values.out, "chaos-report.json"), JSON.stringify(chaos, null, 2));
+    }
+  }
   if (result.status !== "reached" && result.status !== "done") process.exitCode = 1;
+  else if (chaos?.findings.some((f) => f.severity === "high")) process.exitCode = 1;
+}
+
+export function formatChaosSummary(c: RecipeChaosResult): string {
+  if (c.skipped) return `chaos: skipped — ${c.skipped}`;
+  const lines = [`chaos: ${c.findings.length} finding(s) over ${c.endpoints.length || "the given"} endpoint(s)${c.endpoints.length ? `: ${c.endpoints.map((e) => e.label).join(", ")}` : ""}`];
+  const icon = { high: "🔴", medium: "🟠", low: "🟡" };
+  for (const f of c.findings) {
+    lines.push(`  ${icon[f.severity]} ${f.title}`);
+    for (const d of f.detail.slice(0, 3)) lines.push(`      ${d}`);
+  }
+  return lines.join("\n");
+}
+
+function parseFaults(v: string): ScanFaultKind[] {
+  if (v === "" || v === "all") return [...SCAN_FAULT_KINDS];
+  const names: Record<string, ScanFaultKind> = { "500": "status", status: "status", abort: "abort", hang: "hang" };
+  return v.split(",").map((f) => {
+    const k = names[f.trim()];
+    if (!k) throw new Error(`--chaos: unknown fault ${f} (500, abort, hang)`);
+    return k;
+  });
 }
 
 export function formatDriveSummary(r: DriveResult): string {
@@ -141,12 +198,18 @@ export function formatDriveSummary(r: DriveResult): string {
     `drive: ${r.status}${r.reason ? ` — ${r.reason}` : ""}`,
     `  ${r.steps.length} step(s), ${(r.durationMs / 1000).toFixed(1)}s, decider ${r.decider}, ended at ${r.finalUrl}`,
   ];
-  if (r.problems.length > 0) {
-    lines.push(`  ${r.problems.length} problem(s) seen:`);
-    for (const p of r.problems.slice(0, 15)) lines.push(`    [${p.step < 0 ? "load" : `step ${p.step}`}] ${p.kind}: ${p.message.slice(0, 160)}`);
-    if (r.problems.length > 15) lines.push(`    … ${r.problems.length - 15} more`);
+  const site = siteProblems(r.problems);
+  if (site.length > 0) {
+    lines.push(`  ${site.length} problem(s) seen:`);
+    for (const p of site.slice(0, 15)) lines.push(`    [${p.step < 0 ? "load" : `step ${p.step}`}] ${p.kind}: ${p.message.slice(0, 160)}`);
+    if (site.length > 15) lines.push(`    … ${site.length - 15} more`);
   } else {
     lines.push("  no problems seen");
+  }
+  const env = r.problems.length - site.length;
+  if (env > 0) {
+    const reasons = [...new Set(r.problems.flatMap((p) => (p.environment ? [p.environment] : [])))];
+    lines.push(`  ${env} error(s) caused by this machine, not the site: ${reasons.join("; ")}`);
   }
   if (r.video) lines.push(`  video: ${r.video}`);
   if (r.recipe) lines.push(`  recipe: ${r.recipe.name} (${r.recipe.steps.length} steps)`);

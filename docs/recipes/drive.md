@@ -78,6 +78,37 @@ lands on one is undone with a history back.
 - **`drive-report.json`** in `--out`, containing every step, each step's
   problems, the final URL and the model's reasoning.
 
+## Then break it: `--chaos`
+
+A journey `drive` found is a journey worth breaking. `--chaos` replays the
+recipe of a run that reached its goal, first clean, then once per fault with
+every call the journey made to the app's own API failing. The faults are
+`--faults 500,abort,hang`, the same ones the scan's chaos crawls use, and the
+endpoints follow the scan's rules: same-origin `fetch`/`xhr`, no static files,
+no pages. Each faulted replay is compared with the clean one:
+
+- 🔴 **the app let the failure escape**: an uncaught exception or unhandled
+  rejection the clean replay did not have;
+- 🟠 **the goal still showed as reached**: with every API call failing, the
+  page claims a success the server never confirmed (unless the goal needs no
+  API);
+- 🟡 **the journey stops at step N**: expected while the API is down. It tells
+  you which step depends on which call.
+
+A fault that never fired is reported as such. A journey that calls no API of
+its own (a localStorage TodoMVC) is skipped with that reason. `recipeChaos()`
+does the same from code, for any recipe.
+
+```sh
+chaosbringer drive --url http://localhost:3000/ --goal "add a T-shirt to the cart" \
+  --until-text "Added to cart" --chaos --hang-ms 3000
+```
+
+Errors this machine causes rather than the site (a proxy that refuses an
+analytics host, media the bundled Chromium cannot decode) are kept apart
+throughout, using the scan's environment rules. They are neither shown to the
+model nor counted as problems.
+
 ## Without a model: plans
 
 `--plan plan.json` follows a fixed list of steps against the same snapshot,

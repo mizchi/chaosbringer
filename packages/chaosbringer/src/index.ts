@@ -663,3 +663,11 @@ export {
   type AriaView,
   type OutlineOptions,
 } from "./aria-snapshot.js";
+export {
+  recipeChaos,
+  type RecipeChaosFinding,
+  type RecipeChaosOptions,
+  type RecipeChaosResult,
+  type RecipeChaosRun,
+} from "./drive/chaos.js";
+export { siteProblems, watchProblems, type ProblemWatch } from "./drive/problems.js";
