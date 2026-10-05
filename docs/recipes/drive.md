@@ -109,6 +109,27 @@ analytics host, media the bundled Chromium cannot decode) are kept apart
 throughout, using the scan's environment rules. They are neither shown to the
 model nor counted as problems.
 
+## Hand the browser to an agent: `--bind`
+
+`--bind` serves the browser `drive` is driving to other Playwright clients
+(`browser.bind`, Playwright 1.59+). The attach commands are printed at the
+start:
+
+```sh
+chaosbringer drive --url … --goal "…" --bind --bind-title shop --keep-open
+# in another terminal, or from an agent:
+npx playwright cli attach shop
+npx playwright cli -s=shop snapshot
+# or point an MCP client at it:
+npx playwright mcp --endpoint <the printed endpoint>
+```
+
+`--keep-open` leaves the browser on the final page until Ctrl-C. An attached
+agent can then look at the state a run ended in, or take over where `drive`
+stopped. The crawl (`chaosbringer --bind`) and the scan (`chaosbringer scan
+--bind`) take the same flag, to watch a crawl's pages live. From code, it is
+`bind` on `drive()` and on `CrawlerOptions`.
+
 ## Without a model: plans
 
 `--plan plan.json` follows a fixed list of steps against the same snapshot,

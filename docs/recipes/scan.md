@@ -109,6 +109,8 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 | `--hang-ms` | 8000 | how long a hung request is held |
 | `--seed` | random | printed, so the run can be repeated |
 | `--axe` | off | axe-core on every page (needs `axe-core`) |
+| `--aria-targets` | off | also act on controls only the accessibility snapshot sees, such as a `<div onclick>` with a pointer cursor |
+| `--bind` / `--bind-title` | off | serve each crawl's browser to other Playwright clients: `npx playwright cli attach <title>`, or `npx playwright mcp --endpoint` |
 | `--no-coverage` | | skip coverage (and the unused-JS finding) |
 | `--storage-state` | | a Playwright storageState, for a logged-in scan |
 | `--sitemap` | | also start from the URLs of a sitemap.xml |

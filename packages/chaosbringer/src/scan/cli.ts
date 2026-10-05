@@ -34,6 +34,9 @@ OPTIONS:
   --faults <list>         Which fault crawls to run (default 500,abort,hang)
   --seed <n>              Seed for every crawl (default random; printed)
   --axe                   Run axe-core accessibility checks (needs axe-core)
+  --bind                  Serve each crawl's browser to other Playwright clients
+                          (npx playwright cli attach <title>; the endpoint is printed)
+  --bind-title <title>    Name to attach by (default chaosbringer)
   --aria-targets          Also act on controls only the accessibility snapshot sees
                           (a <div onclick> with a pointer cursor)
   --no-coverage           Skip JS / CSS coverage (the unused-JS finding)
@@ -79,6 +82,8 @@ export async function runScanCli(argv: string[]): Promise<void> {
       seed: { type: "string" },
       axe: { type: "boolean", default: false },
       "aria-targets": { type: "boolean", default: false },
+      bind: { type: "boolean", default: false },
+      "bind-title": { type: "string" },
       "no-coverage": { type: "boolean", default: false },
       "hang-ms": { type: "string" },
       exclude: { type: "string", multiple: true },
@@ -135,6 +140,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
     crawler: {
       headless: resolveHeadless(values),
       ...(values["aria-targets"] ? { ariaTargets: true } : {}),
+      ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
       ...(values.exclude ? { excludePatterns: values.exclude } : {}),
       ...(ignoreErrorPatterns.length > 0 ? { ignoreErrorPatterns } : {}),
       ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),

@@ -29,6 +29,7 @@
 
 import { chromium, type Browser, type BrowserContextOptions, type Page } from "playwright";
 import { readAria, type AriaCandidate } from "../aria-snapshot.js";
+import { type BindSpec, type BoundBrowser, bindBrowser, resolveBind } from "../browser-bind.js";
 import { newIsolatedPage } from "../browser-session.js";
 import { errorMessage } from "../errors.js";
 import { toRegExp } from "../fault-router.js";
@@ -131,6 +132,20 @@ export interface DriveOptions {
   /** Name for the recipe of a successful run. Default `drive/<host>/<goal slug>`. */
   recipeName?: string;
   onStep?: (entry: DriveHistoryEntry, decision: DriveDecision) => void;
+  /**
+   * Serve the browser to other Playwright clients while driving
+   * (`browser-bind.ts`): `npx playwright cli attach <title>`, or an MCP
+   * client with `npx playwright mcp --endpoint <endpoint>`.
+   */
+  bind?: BindSpec;
+  /** The browser was bound: where to attach. */
+  onBind?: (bound: BoundBrowser) => void;
+  /**
+   * Awaited before the page is closed, after the run: keep the final state
+   * open for a bound client to look at or take over. The CLI's `--keep-open`
+   * waits for Ctrl-C.
+   */
+  keepOpen?: (result: DriveResult) => Promise<void>;
 }
 
 export type DriveStatus =
@@ -159,6 +174,8 @@ export interface DriveResult {
   /** Why there is no recipe for a successful run. */
   recipeSkipped?: string;
   decider: string;
+  /** Set with `bind`. */
+  bound?: BoundBrowser;
 }
 
 export async function drive(opts: DriveOptions): Promise<DriveResult> {
@@ -172,6 +189,9 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
 
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
+  const bindOptions = resolveBind(opts.bind);
+  const bound = bindOptions ? await bindBrowser(browser, bindOptions) : undefined;
+  if (bound) opts.onBind?.(bound);
   const { page, close } = await newIsolatedPage(browser, opts.contextOptions);
 
   const watch = await watchProblems(page);
@@ -207,6 +227,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       durationMs: Date.now() - started,
       recipe: null,
       decider: opts.decider.name,
+      ...(bound ? { bound } : {}),
     };
     if (status === "reached" || status === "done") {
       const missing = recipeSteps.findIndex((s) => s === null);
@@ -215,6 +236,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       else result.recipe = toRecipe(opts, recipeSteps as RecipeStep[], result.finalUrl);
     }
     detach();
+    if (opts.keepOpen) await opts.keepOpen(result).catch(() => {});
     if (opts.video) {
       await page.screencast.stop().catch(() => {});
       result.video = opts.video;

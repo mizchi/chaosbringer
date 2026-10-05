@@ -671,3 +671,11 @@ export {
   type RecipeChaosRun,
 } from "./drive/chaos.js";
 export { siteProblems, watchProblems, type ProblemWatch } from "./drive/problems.js";
+export {
+  attachHint,
+  bindBrowser,
+  resolveBind,
+  type BindOptions,
+  type BindSpec,
+  type BoundBrowser,
+} from "./browser-bind.js";

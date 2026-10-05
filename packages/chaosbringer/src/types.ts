@@ -123,6 +123,14 @@ export interface CrawlerOptions {
    * driver step. Default false.
    */
   ariaTargets?: boolean;
+  /**
+   * Serve the browser the crawl launches to other Playwright clients while it
+   * runs (`browser.bind`, Playwright 1.59+): `npx playwright cli attach
+   * <title>` or `npx playwright mcp --endpoint <endpoint>` then see and act on
+   * the crawl's pages. `true` binds as "chaosbringer". Ignored when attaching
+   * over CDP. The endpoint is reported through `onBind` and the log.
+   */
+  bind?: import("./browser-bind.js").BindSpec;
   /** Log file path (enables file logging) */
   logFile?: string;
   /** Log level */
@@ -1470,6 +1478,8 @@ export interface CrawlerEvents {
   onAction?: (action: ActionResult) => void;
   onProgress?: (visited: number, total: number) => void;
   onBlockedNavigation?: (url: string) => void;
+  /** The browser was bound (`bind`): where clients can attach. */
+  onBind?: (bound: import("./browser-bind.js").BoundBrowser) => void;
 }
 
 /**

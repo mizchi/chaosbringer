@@ -162,6 +162,41 @@ describe("drive", () => {
     expect(existsSync(video) && statSync(video).size > 1000).toBe(true);
   }, 60_000);
 
+  it("binds its browser, so another client can attach and take over where it stopped", async () => {
+    const own = await chromium.launch();
+    let seenByOther = "";
+    try {
+      const result = await drive({
+        url: `${server.url}/`,
+        goal: "open the sign-in page",
+        decider: planDecider([{ click: 'button "Reject optional"' }, { click: 'link "Sign in"' }]),
+        until: { urlIncludes: "/login" },
+        browser: own,
+        bind: "drive-test",
+        keepOpen: async (r) => {
+          // What an MCP client or `playwright cli attach drive-test` does.
+          const other = await chromium.connect(r.bound!.endpoint);
+          try {
+            const page = other.contexts()[0]!.pages()[0]!;
+            seenByOther = page.url();
+            await page.getByRole("textbox", { name: "Email" }).fill("taken@over.test");
+            await page.getByRole("button", { name: "Sign in" }).click();
+            await page.waitForURL(/welcome/);
+            seenByOther = page.url();
+          } finally {
+            await other.close();
+          }
+        },
+      });
+      expect(result.status).toBe("reached");
+      expect(result.bound).toMatchObject({ title: "drive-test" });
+      expect(result.bound!.endpoint.length).toBeGreaterThan(0);
+      expect(seenByOther).toContain("/welcome?u=taken%40over.test");
+    } finally {
+      await own.close();
+    }
+  }, 60_000);
+
   it("asks a model with the outline and acts on its JSON answer", async () => {
     const bodies: { system: string; messages: { content: { type: string; text?: string }[] }[] }[] = [];
     const answers = ['{"action":"click","index":0,"reasoning":"close the dialog"}', '```json\n{"action":"click","index":0,"reasoning":"sign in"}\n```'];

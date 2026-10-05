@@ -11,6 +11,7 @@ import { RecipeStore } from "../recipes/store.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
 import { drive, type DriveDecider, type DriveResult, type DriveUntil } from "./drive.js";
 import { siteProblems } from "./problems.js";
+import { attachHint, type BoundBrowser, waitForInterrupt } from "../browser-bind.js";
 import { recipeChaos, type RecipeChaosResult } from "./chaos.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind } from "../scan/analyze.js";
 
@@ -49,6 +50,12 @@ OPTIONS:
   --save-recipe [name]      Store the recipe of a successful run in the recipe store
   --dir <path>              Recipe store directory (default ./chaosbringer-recipes)
   --storage-state <path>    Playwright storageState to start logged in
+  --bind                    Serve the browser to other Playwright clients while driving:
+                            npx playwright cli attach <title>, or an MCP client with
+                            npx playwright mcp --endpoint <endpoint> (printed at start)
+  --bind-title <title>      Name to attach by (default chaosbringer)
+  --keep-open               After the run, keep the browser open until Ctrl-C (with --bind:
+                            an agent can look at the final state or take over)
   --chaos                   After a run that reached its goal, replay its recipe with the
                             app's own API calls failing (each fault in --faults).
                             Reports what escaped uncaught, a goal shown as reached with
@@ -84,6 +91,9 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       dir: { type: "string" },
       "storage-state": { type: "string" },
       chaos: { type: "boolean", default: false },
+      bind: { type: "boolean", default: false },
+      "bind-title": { type: "string" },
+      "keep-open": { type: "boolean", default: false },
       faults: { type: "string" },
       "hang-ms": { type: "string" },
       quiet: { type: "boolean", default: false },
@@ -120,6 +130,15 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
     ...(values["save-recipe"] ? { recipeName: values["save-recipe"] } : {}),
     headless: resolveHeadless(values),
+    ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true, onBind: (b: BoundBrowser) => console.log(attachHint(b)) } : {}),
+    ...(values["keep-open"]
+      ? {
+          keepOpen: async (r: DriveResult) => {
+            console.log(`drive: ${r.status}; the browser stays open at ${r.finalUrl}. Ctrl-C to close.`);
+            await waitForInterrupt();
+          },
+        }
+      : {}),
     onStep: quiet
       ? undefined
       : (s, d) => {

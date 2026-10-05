@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
+import { attachHint } from "../browser-bind.js";
 import { saveReport } from "../reporter.js";
 import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions } from "../types.js";
 import {
@@ -149,6 +150,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   });
   const events = (phase: string): CrawlerEvents => ({
     onPageComplete: (p) => log(`[${phase}] ${p.status} ${p.url}${p.errors.length ? ` (${p.errors.length} errors)` : ""}`),
+    onBind: (b) => log(`[${phase}] ${attachHint(b)}`),
   });
 
   const perfDir = join(outDir, "perf");
