@@ -241,6 +241,17 @@ state). A perf finding is a threshold crossed once. `--exclude` destructive
 URLs, and scan only what you may test. Details:
 `docs/recipes/scan.md`.
 
+## Getting a flow under test without writing it
+
+`chaosbringer drive --url <url> --goal "<task>" --until-text "<proof>"`
+operates the browser towards the goal. A model (or a `--plan` file of steps)
+reads the page's accessibility snapshot and picks one action at a time. The
+crawl's error checks run on every step. A run that reaches the goal writes a
+recipe with role selectors; `chaosbringer recipes verify` replays and
+promotes it. `--video` records the run with each action annotated. Use it to
+get a first replayable journey, then put the journey under faults. Details:
+`docs/recipes/drive.md`.
+
 ## Verifying your work
 
 Run it against a *correct* version of the app as well as the broken one, and

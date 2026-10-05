@@ -68,6 +68,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
   model: () => import("./model/cli.js").then((m) => m.runModelCli),
   perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
   scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
+  drive: () => import("./drive/cli.js").then((m) => m.runDriveCli),
 };
 
 const rawSub = process.argv[2];
@@ -244,6 +245,10 @@ PERF SUBCOMMANDS (read crawl reports written with --perf):
 SCAN (bugs + slow spots of an unknown site, one command):
   chaosbringer scan --url <url> [--max-pages 20] [--out chaosbringer-scan] [--no-chaos]
   (chaosbringer scan --help for details)
+
+DRIVE (operate the browser towards a goal, with the checks running):
+  chaosbringer drive --url <url> --goal "<what to do>" [--until-text <text>] [--video run.webm]
+  (chaosbringer drive --help for details)
 
 EXAMPLES:
   # Basic crawl

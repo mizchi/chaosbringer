@@ -88,7 +88,7 @@ chaosbringer --url http://localhost:3000 --seed 1234567 --max-pages 20
 chaosbringer scan --url http://localhost:3000 --max-pages 30   # → chaosbringer-scan/scan-report.md
 ```
 
-`scan` is described in [`docs/recipes/scan.md`](../../docs/recipes/scan.md).
+`scan` is described in [`docs/recipes/scan.md`](../../docs/recipes/scan.md), and `drive` in [`docs/recipes/drive.md`](../../docs/recipes/drive.md).
 
 ### Preview a crawl in an existing Chromium tab
 
