@@ -72,6 +72,7 @@ jobs:
             --max-actions-per-page 5 \
             --seed 1 \
             --output chaos-report.json \
+            --junit chaos-junit.xml \
             --heatmap-out heatmap.json
 
       # Perf baseline for `chaos-pr-gate`'s `chaosbringer perf regress`. Same
@@ -122,8 +123,9 @@ jobs:
       # Persist chaos signals into the same flaker storage that
       # `flaker-nightly.yml` writes — same cache key shape so reads / writes
       # interleave naturally. Each baseline run becomes one set of
-      # TestCaseResults in flaker (one per visited page + one per invariant
-      # violation), keyed by the merge commit. Over enough runs flaker can
+      # TestCaseResults in flaker (one per visited page, through the crawl's
+      # JUnit XML: flaker 0.13 dropped its chaosbringer adapter), keyed by
+      # the merge commit. Over enough runs flaker can
       # tell which chaos errors are real, flaky, or intermittent.
       - name: Cache flaker data
         if: always()
@@ -137,8 +139,8 @@ jobs:
       - name: Import chaos report into flaker
         if: always()
         run: |
-          pnpm exec flaker import chaos-report.json \
-            --adapter chaosbringer \
+          pnpm exec flaker import chaos-junit.xml \
+            --adapter junit \
             --commit "${{ github.sha }}" \
             --branch "${{ github.ref_name }}" \
             --source ci
