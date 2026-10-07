@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
+import { attachHint } from "../browser-bind.js";
 import { saveReport } from "../reporter.js";
 import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions } from "../types.js";
 import {
@@ -32,7 +33,7 @@ import {
 } from "./analyze.js";
 import { deriveScanEndpoints, endpointsPattern, type ScanEndpoint } from "./endpoints.js";
 import { formatScanMarkdown, type ScanSummaryInput } from "./format.js";
-import { markServedOrb, orbBlockedUrls, probeServedUrls } from "./orb.js";
+import { blockedResponses, markServed, probeServed } from "./blocked-responses.js";
 import { readSidecarSpans, withSidecarRequests } from "./sidecars.js";
 
 export interface ScanOptions {
@@ -149,6 +150,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   });
   const events = (phase: string): CrawlerEvents => ({
     onPageComplete: (p) => log(`[${phase}] ${p.status} ${p.url}${p.errors.length ? ` (${p.errors.length} errors)` : ""}`),
+    onBind: (b) => log(`[${phase}] ${attachHint(b)}`),
   });
 
   const perfDir = join(outDir, "perf");
@@ -179,13 +181,13 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     log("[scan] chaos crawls skipped: no same-site fetch / XHR request seen");
   }
 
-  // Files the browser's ORB blocked while the crawler intercepted requests,
-  // that are fine when fetched directly: see `orb.ts`.
-  const blocked = orbBlockedUrls([cleanFull, ...chaos.map((c) => c.report)]);
-  const served = blocked.length > 0 ? await probeServedUrls(blocked) : new Set<string>();
+  // Responses the browser refused that are fine when fetched directly: see
+  // `blocked-responses.ts`.
+  const blocked = blockedResponses([cleanFull, ...chaos.map((c) => c.report)]);
+  const served = blocked.length > 0 ? await probeServed(blocked) : new Set<string>();
   const analysis = analyzeScan(
-    markServedOrb(cleanFull, served),
-    chaos.map((c) => ({ ...c, report: markServedOrb(c.report, served) })),
+    markServed(cleanFull, served),
+    chaos.map((c) => ({ ...c, report: markServed(c.report, served) })),
     { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) },
   );
   const files: ScanFiles = {

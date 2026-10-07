@@ -114,6 +114,23 @@ export interface CrawlerOptions {
   traceparent?: boolean | TraceparentInjectionOptions;
   /** Action weighting configuration */
   actionWeights?: ActionWeights;
+  /**
+   * Also find targets through Playwright's accessibility snapshot
+   * (`aria-targets.ts`): controls the CSS scrape misses (a `<div onclick>`
+   * with a pointer cursor) become targets, and every target the snapshot
+   * also sees is described from the tree (`button "Pay" — in dialog
+   * "Checkout"`) to drivers and models. Costs a snapshot per page and per
+   * driver step. Default false.
+   */
+  ariaTargets?: boolean;
+  /**
+   * Serve the browser the crawl launches to other Playwright clients while it
+   * runs (`browser.bind`, Playwright 1.59+): `npx playwright cli attach
+   * <title>` or `npx playwright mcp --endpoint <endpoint>` then see and act on
+   * the crawl's pages. `true` binds as "chaosbringer". Ignored when attaching
+   * over CDP. The endpoint is reported through `onBind` and the log.
+   */
+  bind?: import("./browser-bind.js").BindSpec;
   /** Log file path (enables file logging) */
   logFile?: string;
   /** Log level */
@@ -496,6 +513,15 @@ export interface CrawlPerfSummary {
    * version 1.
    */
   keyVersion?: number;
+  /**
+   * The browser the crawl measured with (`browser.version()`, e.g.
+   * `153.0.8010.12`). A browser upgrade moves the numbers (Chromium 153 resets
+   * CDP's cumulative counters on a cross-document navigation, and its heap
+   * starts larger), so `perf regress` refuses to compare reports from
+   * different major versions. Absent in reports written before it was
+   * recorded.
+   */
+  browser?: string;
   /**
    * LCP / INP / CLS / TTFB / FCP over the documents that reported each one.
    * A page visit an action navigated away from counts each of its documents
@@ -1097,6 +1123,18 @@ export interface ActionTarget {
   selectValue?: string;
   /** Where it is and whether a click reaches it. See `TargetGeometry`. */
   geometry?: TargetGeometry;
+  /**
+   * How the scrape numbered it (`tag:a:3`, `role:tab:0`): the key the
+   * accessibility snapshot is joined to the scrape by (`aria-targets.ts`).
+   */
+  peerKey?: string;
+  /**
+   * The accessibility snapshot's description of it, with state and where it
+   * sits: `button "Pay" — in dialog "Checkout"`. Set with `ariaTargets`.
+   */
+  ariaDescription?: string;
+  /** The snapshot's ref for it, valid until the next snapshot. */
+  ariaRef?: string;
 }
 
 export interface ActionResult {
@@ -1449,6 +1487,8 @@ export interface CrawlerEvents {
   onAction?: (action: ActionResult) => void;
   onProgress?: (visited: number, total: number) => void;
   onBlockedNavigation?: (url: string) => void;
+  /** The browser was bound (`bind`): where clients can attach. */
+  onBind?: (bound: import("./browser-bind.js").BoundBrowser) => void;
 }
 
 /**

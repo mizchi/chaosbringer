@@ -37,7 +37,7 @@ import { validatePerf } from "./perf-options.js";
 export const KNOWN_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
   "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
-  "userAgent", "traceparent", "actionWeights", "logFile", "logLevel", "logToConsole",
+  "userAgent", "traceparent", "actionWeights", "ariaTargets", "bind", "logFile", "logLevel", "logToConsole",
   "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
   "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",

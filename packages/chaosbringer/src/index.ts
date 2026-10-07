@@ -625,3 +625,57 @@ export {
 } from "./scan/analyze.js";
 export { deriveScanEndpoints, type ScanEndpoint } from "./scan/endpoints.js";
 export { formatScanMarkdown, formatScanSummary } from "./scan/format.js";
+
+// Goal-driven browser operation over the accessibility snapshot.
+export {
+  drive,
+  defaultRecipeName,
+  type DriveCandidateView,
+  type DriveDecider,
+  type DriveDecision,
+  type DriveHistoryEntry,
+  type DriveInput,
+  type DriveOptions,
+  type DriveProblem,
+  type DriveResult,
+  type DriveStatus,
+  type DriveUntil,
+} from "./drive/drive.js";
+export {
+  anthropicDecider,
+  openRouterDecider,
+  parseDriveDecision,
+  planDecider,
+  renderDrivePrompt,
+  type AnthropicDeciderOptions,
+  type OpenRouterDeciderOptions,
+  type DrivePlanStep,
+} from "./drive/deciders.js";
+export {
+  ariaCandidates,
+  ariaOutline,
+  parseAriaSnapshot,
+  readAria,
+  type AriaActionType,
+  type AriaCandidate,
+  type AriaCandidateOptions,
+  type AriaNode,
+  type AriaView,
+  type OutlineOptions,
+} from "./aria-snapshot.js";
+export {
+  recipeChaos,
+  type RecipeChaosFinding,
+  type RecipeChaosOptions,
+  type RecipeChaosResult,
+  type RecipeChaosRun,
+} from "./drive/chaos.js";
+export { siteProblems, watchProblems, type ProblemWatch } from "./drive/problems.js";
+export {
+  attachHint,
+  bindBrowser,
+  resolveBind,
+  type BindOptions,
+  type BindSpec,
+  type BoundBrowser,
+} from "./browser-bind.js";

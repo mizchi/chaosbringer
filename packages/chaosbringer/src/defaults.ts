@@ -54,6 +54,8 @@ export const DEFAULT_OPTIONS: Required<
   blockExternalNavigation: true,
   httpCache: true,
   actionWeights: {},
+  ariaTargets: false,
+  bind: false,
   logFile: "",
   logLevel: "info",
   logToConsole: false,

@@ -18,6 +18,8 @@ import type { Page } from "playwright";
 export interface EscapedRejection {
   message: string;
   stack?: string;
+  /** The document's URL when it escaped: a click may have navigated since. */
+  url?: string;
 }
 
 export interface RejectionWatcher {
@@ -52,6 +54,7 @@ function installRejectionCapture(): void {
     w.__chaosRejections?.push({
       message: reason?.message || String(event.reason),
       ...(reason?.stack !== undefined ? { stack: reason.stack } : {}),
+      url: location.href,
     });
     // Claim it, so it does not also arrive as `pageerror` and get counted
     // twice — once as a rejection and once as a thrown exception.

@@ -95,6 +95,7 @@ export function aiDriver(opts: AiDriverOptions): Driver {
         // not, and the capture no longer runs before the provider has
         // said whether it wants one.
         screenshot: (mode) => step.screenshot(mode ?? screenshotMode),
+        ...(step.outline ? { outline: step.outline } : {}),
         // Destructure-to-omit: the selector is the one field that must
         // not cross, and `DriverProviderCandidate` is defined as exactly
         // this, so a field added to `DriverCandidate` reaches providers

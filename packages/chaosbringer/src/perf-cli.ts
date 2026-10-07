@@ -369,6 +369,42 @@ function keyVersionGate(cmd: string, sources: readonly KeyVersionSource[], allow
   return false;
 }
 
+// ── browser version ─────────────────────────────────────────────────────────
+
+/** One input of a comparison and the browser it measured with. */
+export interface BrowserSource {
+  side: string;
+  source: string;
+  /** `browser.version()` as recorded; absent in reports written before it was. */
+  browser: string | undefined;
+}
+
+/**
+ * Why the baseline and the current reports measured with browsers too
+ * different to compare, or undefined. A major Chromium version moves the
+ * numbers on its own (153 resets CDP's cumulative counters on a
+ * cross-document navigation and starts with a larger heap), so a "regression"
+ * across one is the browser's. A side that recorded no version is refused
+ * when the other did: it predates recording it, and the version is unknown.
+ */
+export function checkBrowserVersions(sources: readonly BrowserSource[]): string | undefined {
+  const major = (v: string | undefined) => (v === undefined ? "unrecorded" : v.split(".")[0]!);
+  const bySide = new Map<string, Set<string>>();
+  for (const s of sources) {
+    const set = bySide.get(s.side) ?? new Set<string>();
+    bySide.set(s.side, set);
+    set.add(major(s.browser));
+  }
+  const all = new Set([...bySide.values()].flatMap((s) => [...s]));
+  if (all.size <= 1) return undefined;
+  const sides = [...bySide].map(([side, set]) => `${side}: ${[...set].map((m) => (m === "unrecorded" ? m : `Chromium ${m}`)).join(", ")}`).join("; ");
+  return `the inputs were measured with different browsers (${sides}), whose numbers differ on their own`;
+}
+
+function reportBrowserSources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): BrowserSource[] {
+  return reports.map((r, i) => ({ side, source: paths[i]!, browser: r.perf?.browser }));
+}
+
 /** The key-version sources of a set of report files. */
 function reportKeySources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): KeyVersionSource[] {
   return reports.map((r, i) => ({ side, source: paths[i]!, keyVersion: r.perf?.keyVersion }));
@@ -806,6 +842,10 @@ Subcommands:
   (perf.keyVersion; absent means 1): version 2 keys an action after a
   navigating click by the page it ran on. --allow-key-mismatch compares
   anyway, with a warning.
+  regress also refuses (exit 2) a baseline and current measured with
+  different major browser versions (perf.browser; a baseline without one
+  predates recording it): a browser upgrade moves the numbers on its own.
+  --allow-browser-mismatch compares anyway, with a warning.
 
   drilldown <report.json> <perfKey> [--top 15] [--perf-dir <dir>]
       Where the span's time went, from its page's trace (crawl with
@@ -1011,6 +1051,7 @@ function runRegress(argv: string[]): void {
       json: { type: "boolean", default: false },
       "allow-settle-mismatch": { type: "boolean", default: false },
       "allow-key-mismatch": { type: "boolean", default: false },
+      "allow-browser-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -1051,6 +1092,22 @@ function runRegress(argv: string[]): void {
     ...reportKeySources("current", cur.paths, curReports),
   ];
   if (!keyVersionGate("regress", keySources, values["allow-key-mismatch"])) return;
+  const browserMismatch = checkBrowserVersions([
+    ...reportBrowserSources("baseline", base.paths, baseReports),
+    ...reportBrowserSources("current", cur.paths, curReports),
+  ]);
+  if (browserMismatch) {
+    if (values["allow-browser-mismatch"]) {
+      console.error(`[perf regress] WARNING (--allow-browser-mismatch): ${browserMismatch}.`);
+    } else {
+      console.error(
+        `perf: regress: refusing to compare: ${browserMismatch}. Record the baseline with the same browser ` +
+          `(the next baseline run replaces it), or pass --allow-browser-mismatch to compare anyway.`,
+      );
+      process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+      return;
+    }
+  }
   const empty = regressNothingMeasured(baseReports, curReports);
   if (empty) {
     fail(`regress: ${empty}`);

@@ -27,7 +27,7 @@ import type { ErrorCluster } from "../clusters.js";
 import { registrableDomain } from "lightbringer/analyze";
 import { escapeRegExp } from "../filters.js";
 import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
-import { ORB_SERVED_NOTE } from "./orb.js";
+import { SERVED_NOTE } from "./blocked-responses.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
 export type ScanCategory = "bug" | "resilience" | "perf" | "a11y";
@@ -201,9 +201,10 @@ export interface AnalyzeScanOptions {
  *   and is deliberate);
  * - media the scanning browser cannot decode: Playwright's Chromium ships
  *   without the H.264 / AAC codecs that Chrome has;
- * - a file the browser's opaque-response blocking stopped while the crawler
- *   intercepted requests, that serves fine when fetched (`orb.ts` relabels
- *   those errors after the crawls).
+ * - a response the browser refused (opaque-response blocking while the
+ *   crawler intercepted requests, or a `Cross-Origin-Resource-Policy` sent
+ *   only to the headless browser) that serves fine when fetched
+ *   (`blocked-responses.ts` relabels those errors after the crawls).
  */
 export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; reason: string }> = [
   netCause("net::ERR_TUNNEL_CONNECTION_FAILED", "a proxy on the scanning machine refused the host"),
@@ -217,8 +218,13 @@ export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; 
   netCause("net::ERR_ABORTED", "cancelled in flight, mostly by the crawl navigating on"),
   {
     code: "net::ERR_BLOCKED_BY_ORB (served fine)",
-    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_ORB ${ORB_SERVED_NOTE}`)),
+    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_ORB ${SERVED_NOTE}`)),
     reason: "the browser's opaque-response blocking stopped a file that serves fine when fetched directly; Chromium does that now and then while a page's requests are intercepted, as the crawler's are",
+  },
+  {
+    code: "net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin (served fine)",
+    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin ${SERVED_NOTE}`)),
+    reason: "the response kept other sites out (Cross-Origin-Resource-Policy) for the scanning browser only, mostly with a bot block of its HeadlessChrome user agent; fetched directly it serves fine",
   },
   {
     code: "media: no supported source",
@@ -232,7 +238,7 @@ function netCause(code: string, reason: string): { code: string; pattern: RegExp
   return { code, pattern: new RegExp(`${escapeRegExp(code)}\\b`), reason };
 }
 
-function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
+export function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
   return ENVIRONMENT_CAUSES.find((c) => c.pattern.test(message));
 }
 

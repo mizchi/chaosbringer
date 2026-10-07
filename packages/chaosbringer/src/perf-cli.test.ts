@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  checkBrowserVersions,
   checkKeyVersions,
   checkSettleModes,
   crawlBudgetsSettleMismatch,
@@ -254,6 +255,21 @@ describe("checkKeyVersions", () => {
     expect(why).toContain("different perfKey versions");
     expect(why).toContain("baseline: v1 ×1");
     expect(why).toContain("current: v2 ×1");
+  });
+});
+
+describe("checkBrowserVersions", () => {
+  const src = (side: string, browser?: string) => ({ side, source: side, browser });
+  it("compares across a patch or minor version of the same major", () => {
+    expect(checkBrowserVersions([src("baseline", "153.0.8010.12"), src("current", "153.1.0.0")])).toBeUndefined();
+    expect(checkBrowserVersions([src("baseline"), src("current")])).toBeUndefined();
+  });
+
+  it("refuses a browser upgrade, and a baseline that predates recording the browser", () => {
+    expect(checkBrowserVersions([src("baseline", "141.0.7390.37"), src("current", "153.0.8010.12")])).toContain(
+      "baseline: Chromium 141; current: Chromium 153",
+    );
+    expect(checkBrowserVersions([src("baseline"), src("current", "153.0.8010.12")])).toContain("baseline: unrecorded");
   });
 });
 

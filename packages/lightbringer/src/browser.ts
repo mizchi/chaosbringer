@@ -237,13 +237,19 @@ export function browserCollector(opts?: CollectorOptions) {
     }
   };
 
+  // Set below, in the top-level document with the emit binding: push what an
+  // observer just recorded to node right away rather than only at pagehide.
+  let onRecorded: (() => void) | undefined;
   const observers: PerformanceObserver[] = [];
   const observe = (
     drain: (e: PerformanceEntryList) => void,
     init: PerformanceObserverInit,
   ) => {
     try {
-      const obs = new PerformanceObserver((list) => drain(list.getEntries()));
+      const obs = new PerformanceObserver((list) => {
+        drain(list.getEntries());
+        if (onRecorded) onRecorded();
+      });
       obs.observe(init);
       observers.push(obs);
     } catch {
@@ -340,6 +346,12 @@ export function browserCollector(opts?: CollectorOptions) {
       /* binding gone mid-teardown */
     }
   };
+  // Chromium 153 (Playwright 1.63) does not deliver the binding call an
+  // unloading document makes: a long task followed by a navigation reached
+  // node as nothing. So a long task, an animation frame, a span measure or an
+  // interaction is also pushed as soon as its observer reports it, while the
+  // document is alive; pagehide still sends whatever came after.
+  onRecorded = emit;
   addEventListener("pagehide", emit, { capture: true });
   document.addEventListener(
     "visibilitychange",

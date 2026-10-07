@@ -619,6 +619,7 @@ export function weighActionTargets(
       fillValue: type === "input" ? fillValueFor(t) : undefined,
       selectValue: type === "select" ? selectValueFor(t) : undefined,
       geometry: t.geometry,
+      peerKey: t.role === null ? `tag:${t.tag}:${t.index}` : `role:${t.role}:${t.index}`,
     };
   });
 

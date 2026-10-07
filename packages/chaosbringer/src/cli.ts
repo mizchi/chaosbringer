@@ -27,6 +27,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { diffReports, loadBaseline } from "./diff.js";
@@ -68,6 +69,7 @@ const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void
   model: () => import("./model/cli.js").then((m) => m.runModelCli),
   perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
   scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
+  drive: () => import("./drive/cli.js").then((m) => m.runDriveCli),
 };
 
 const rawSub = process.argv[2];
@@ -114,6 +116,9 @@ const { values, positionals } = parseArgs({
     "storage-state": { type: "string" },
     budget: { type: "string", multiple: true },
     axe: { type: "boolean", default: false },
+    "aria-targets": { type: "boolean", default: false },
+    bind: { type: "boolean", default: false },
+    "bind-title": { type: "string" },
     "axe-tags": { type: "string" },
     "visual-baseline": { type: "string" },
     "visual-threshold": { type: "string" },
@@ -194,6 +199,11 @@ OPTIONS:
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
   --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
+  --aria-targets        Also find targets through the accessibility snapshot (clickable divs the
+                        CSS scrape misses), and describe targets from the tree to drivers
+  --bind                Serve the crawl's browser to other Playwright clients while it runs:
+                        npx playwright cli attach <title> / npx playwright mcp --endpoint <ep>
+  --bind-title <title>  Name to attach by (default chaosbringer)
   --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
   --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires pixelmatch + pngjs)
@@ -244,6 +254,10 @@ PERF SUBCOMMANDS (read crawl reports written with --perf):
 SCAN (bugs + slow spots of an unknown site, one command):
   chaosbringer scan --url <url> [--max-pages 20] [--out chaosbringer-scan] [--no-chaos]
   (chaosbringer scan --help for details)
+
+DRIVE (operate the browser towards a goal, with the checks running):
+  chaosbringer drive --url <url> --goal "<what to do>" [--until-text <text>] [--video run.webm]
+  (chaosbringer drive --help for details)
 
 EXAMPLES:
   # Basic crawl
@@ -480,6 +494,8 @@ function buildInvariants(): Invariant[] | undefined {
 }
 
 const options: CrawlerOptions = {
+  ...(values["aria-targets"] ? { ariaTargets: true } : {}),
+  ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
   baseUrl,
   maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
   maxActionsPerPage: (() => {
@@ -543,6 +559,7 @@ async function main() {
   }
 
   const crawler = new ChaosCrawler(options, {
+    onBind: (b) => console.log(attachHint(b)),
     onPageStart: (url) => {
       if (!isQuiet && !isCompact) {
         process.stdout.write(`Crawling: ${url}...`);

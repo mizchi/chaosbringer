@@ -45,7 +45,7 @@ export interface ScanEndpoint {
   count: number;
 }
 
-type RequestLike = { url: string; type: string; thirdParty?: boolean };
+export type RequestLike = { url: string; type: string; thirdParty?: boolean };
 
 /**
  * Endpoints the app's own code requested, most requested first. Third-party
@@ -60,6 +60,23 @@ export function deriveScanEndpoints(
 ): ScanEndpoint[] {
   const requests: RequestLike[] = [];
   for (const s of reportSpans(report)) requests.push(...s.network.requests);
+  return endpointsFromRequests(
+    requests,
+    report.pages.flatMap((p) => [p.url, ...(p.links ?? [])]),
+    { exclude },
+  );
+}
+
+/**
+ * `deriveScanEndpoints` over a plain request list and the site's own page
+ * URLs (the visited ones and the ones they link to), for a runner that has
+ * no crawl report: `drive`'s chaos replay records requests itself.
+ */
+export function endpointsFromRequests(
+  requests: readonly RequestLike[],
+  pageUrls: readonly string[],
+  { exclude = [] }: { exclude?: readonly string[] } = {},
+): ScanEndpoint[] {
   // The site's own pages, as endpoints would be labelled: the ones crawled
   // and the ones they link to. A framework that fetches a route's data from
   // the route's own URL (Next.js App Router's `/docs?_rsc=…`) makes a page an
@@ -69,7 +86,7 @@ export function deriveScanEndpoints(
   // "retry storm" was the router prefetching more of them). Compared without
   // a trailing slash, so `/docs` and `/docs/` are one page.
   const pages = new Set<string>();
-  for (const u of report.pages.flatMap((p) => [p.url, ...(p.links ?? [])])) {
+  for (const u of pageUrls) {
     const label = endpointLabel(u);
     if (label !== null) pages.add(withoutTrailingSlash(label));
   }

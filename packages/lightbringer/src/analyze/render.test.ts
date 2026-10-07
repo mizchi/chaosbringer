@@ -12,6 +12,16 @@ describe("diffMetrics", () => {
     expect(r.recalcStyleCount).toBe(3);
     expect(r.nodes).toBe(80);
   });
+
+  it("reads a counter that started over (a navigation in Chromium 153) as what it counted since", () => {
+    const before = { ScriptDuration: 0.5, LayoutCount: 9, Nodes: 300 };
+    const after = { ScriptDuration: 0.002, LayoutCount: 2, Nodes: 120 };
+    const r = diffMetrics(before, after);
+    expect(r.scriptMs).toBe(2);
+    expect(r.layoutCount).toBe(2);
+    // Nodes fall when a page removes them; that stays a negative delta.
+    expect(r.nodes).toBe(-180);
+  });
 });
 
 describe("buildTraceRender", () => {
