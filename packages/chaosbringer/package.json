@@ -1,6 +1,6 @@
 {
   "name": "chaosbringer",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Playwright-based chaos testing tool for web applications",
   "license": "MIT",
   "author": "mizchi",
@@ -74,7 +74,7 @@
   "peerDependencies": {
     "@playwright/test": "^1.59.0",
     "axe-core": "^4.0.0",
-    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0",
+    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0 || ^8.0.0",
     "playwright": "^1.59.0",
     "pngjs": "^7.0.0"
   },
@@ -93,17 +93,17 @@
     }
   },
   "devDependencies": {
-    "@mizchi/flaker": "^0.11.0",
+    "@mizchi/flaker": "^0.14.0",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^22.0.0",
-    "@types/pixelmatch": "^5.2.6",
+    "@types/node": "^26.6.4",
+    "@types/pixelmatch": "^7.1.0",
     "@types/pngjs": "^6.0.5",
-    "axe-core": "^4.11.3",
-    "pixelmatch": "^7.1.0",
+    "axe-core": "^4.14.0",
+    "pixelmatch": "^8.0.0",
     "playwright": "^1.63.0",
     "pngjs": "^7.0.0",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
   }
 }

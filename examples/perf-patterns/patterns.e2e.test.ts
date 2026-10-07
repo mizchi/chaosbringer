@@ -17,13 +17,15 @@ import { loadPatterns, shardPatterns } from "./src/registry.js";
 const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 
-describe.sequential("perf patterns", () => {
+// Tests in this file run in order (nothing is concurrent): each pattern's
+// assertions read the measurement its first test took.
+describe("perf patterns", () => {
   it("has patterns", () => {
     expect(patterns.length).toBeGreaterThan(0);
   });
 
   for (const pattern of patterns) {
-    describe.sequential(`${pattern.id} (${pattern.category})`, () => {
+    describe(`${pattern.id} (${pattern.category})`, () => {
       let m: PatternMeasurement;
 
       it("measures both variants", async () => {

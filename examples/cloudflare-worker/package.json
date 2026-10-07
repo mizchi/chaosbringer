@@ -14,15 +14,15 @@
   },
   "dependencies": {
     "@mizchi/server-faults": "workspace:*",
-    "hono": "^4.6.0"
+    "hono": "^4.13.13"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250101.0",
-    "@types/node": "^22.0.0",
+    "@cloudflare/workers-types": "^5.20261007.1",
+    "@types/node": "^26.6.4",
     "chaosbringer": "workspace:*",
     "playwright": "^1.63.0",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "wrangler": "^3.90.0"
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.148.0"
   }
 }

@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.12.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.2...chaosbringer-v0.12.0) (2026-10-07)
+
+Browser automation on Playwright 1.63. See [#180](https://github.com/mizchi/chaosbringer/pull/180), [#182](https://github.com/mizchi/chaosbringer/pull/182) and the dependency update.
+
+### ⚠ BREAKING CHANGES
+
+* **`playwright` / `@playwright/test` peer ranges are now `^1.59.0`** (were `^1.40.0`). `drive` and the accessibility-snapshot features use `page.ariaSnapshot({ mode: "ai" })` and `page.screencast`, both from 1.59. Tested on 1.63 (Chromium 153).
+* Needs `lightbringer` 0.5.0.
+
+### Features
+
+* **`chaosbringer drive --url <url> --goal "<task>"`** operates a browser towards a goal, one action at a time ([docs](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/drive.md)).
+  * Each step, a model (`anthropicDecider` / `openRouterDecider`) or a model-free `--plan` reads the page's accessibility snapshot: an outline, plus numbered controls with their state and where they sit. It answers with click, fill (with its own text), select, press, done or give up.
+  * The crawl's checks run on every step: exceptions, unhandled rejections, console errors, failed requests and 5xx. They are shown to the model; errors this machine causes are kept apart.
+  * With `--until-url` / `--until-text`, "done" is accepted only while the condition holds.
+  * A run that reaches its goal is written as a recipe with role selectors. `chaosbringer recipes verify` replays it.
+  * `--video` records the run with every action annotated (`page.screencast`).
+* **`drive --chaos`** replays that journey clean, then with the app's own API calls failing (500 / abort / hang). It reports:
+  * failures that escaped uncaught;
+  * a goal still shown as reached while the API was down;
+  * where the journey stops.
+
+  `recipeChaos()` does the same for any recipe.
+* **`--bind`** on crawl, scan and drive serves the browser to other Playwright clients while it runs (`browser.bind`): `npx playwright cli attach <title>`, or an MCP client with `npx playwright mcp --endpoint <endpoint>`. `drive --keep-open` leaves the final page open for one to take over.
+* **`--aria-targets`** on crawl and scan joins the accessibility snapshot to the CSS scrape:
+  * controls the scrape misses become targets, such as a `<div onclick>` with a pointer cursor, a searchbox, or tabs past the cap;
+  * every target is described from the tree (`button "Pay" — in dialog "Checkout"`).
+* **AI drivers see the page's structure.** `DriverStep.outline` and the driver prompt carry an accessibility outline of the page, with `[#N]` marking candidate N.
+* Library additions: `readAria` / `ariaCandidates` / `ariaOutline`, `watchProblems`, `bindBrowser`.
+* `perf.browser` records the browser version. `perf regress` refuses (exit 2) to compare across browser major versions; `--allow-browser-mismatch` overrides.
+* `pixelmatch` 8 is accepted as a peer.
+
+### Bug Fixes
+
+* **`scan` false positives from the scanning browser:**
+  * A `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` that only the headless browser gets becomes an environment note. eslint.org's ad server answers HeadlessChrome with a 403 and `Cross-Origin-Resource-Policy: same-origin`.
+  * An ORB-blocked script or stylesheet that serves fine becomes an environment note too (astro.build's Fathom script).
+  * Refused URLs are probed once per path, so per-page ad URLs no longer use up the probe cap.
+* **An unhandled rejection is reported on the page it escaped on**, not on the page the crawl visited before a click navigated away.
+* `blockedNavigations` was always empty; it now lists the off-site navigations that were blocked.
+* `--no-headless` shows the browser again.
+
 ## [0.11.2](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.1...chaosbringer-v0.11.2) (2026-10-02)
 
 Found by scanning bun.sh, hono.dev, docs.python.org, web.dev, jquery.com and demoblaze.com.

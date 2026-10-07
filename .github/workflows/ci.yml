@@ -64,7 +64,7 @@ jobs:
           pnpm -F "@mizchi/chaosbringer-example-perf-patterns" typecheck
 
   lightbringer:
-    # lightbringer is its own published package with its own toolchain (tsup,
+    # lightbringer is its own published package with its own toolchain (tsdown,
     # vitest 4, oxlint, Playwright specs), and chaosbringer's `--perf` runs on
     # its `lightbringer/core` build, so it gets its own leg instead of riding
     # on build-and-test: a break here names itself in the checks list.
