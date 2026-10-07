@@ -241,6 +241,8 @@ export class ChaosCrawler {
   private events: CrawlerEvents;
   private logger: Logger;
   private browser: Browser | null = null;
+  /** `browser.version()` of a launched browser, recorded in the perf summary. */
+  private browserVersion: string | null = null;
   private context: BrowserContext | null = null;
   private cdpPage: Page | null = null;
   private readonly initializedPages = new WeakSet<Page>();
@@ -696,6 +698,7 @@ export class ChaosCrawler {
           ...this.options.launchOptions,
           headless: this.options.headless,
         });
+        this.browserVersion = this.browser.version();
         const bind = resolveBind(this.options.bind);
         if (bind) {
           const bound = await bindBrowser(this.browser, bind);
@@ -3083,6 +3086,7 @@ export class ChaosCrawler {
       perf: buildCrawlPerfSummary(this.results, this.actions, {
         ...(this.perf.coverage ? { coverage: this.perf.coverage } : {}),
         settle: this.settle,
+        ...(this.browserVersion ? { browser: this.browserVersion } : {}),
       }),
     };
   }

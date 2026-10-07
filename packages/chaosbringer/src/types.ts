@@ -514,6 +514,15 @@ export interface CrawlPerfSummary {
    */
   keyVersion?: number;
   /**
+   * The browser the crawl measured with (`browser.version()`, e.g.
+   * `153.0.8010.12`). A browser upgrade moves the numbers (Chromium 153 resets
+   * CDP's cumulative counters on a cross-document navigation, and its heap
+   * starts larger), so `perf regress` refuses to compare reports from
+   * different major versions. Absent in reports written before it was
+   * recorded.
+   */
+  browser?: string;
+  /**
    * LCP / INP / CLS / TTFB / FCP over the documents that reported each one.
    * A page visit an action navigated away from counts each of its documents
    * (`PagePerfSummary.documents`), under that document's own URL, so `worst.url`
