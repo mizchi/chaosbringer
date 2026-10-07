@@ -180,6 +180,7 @@ async function main() {
     // The driver expects a DriverStep — we synthesise the minimal shape.
     const pick = await driver.selectAction({
       url: page.url(),
+      currentUrl: page.url(),
       page,
       candidates: [],
       history: [],

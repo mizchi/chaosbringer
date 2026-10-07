@@ -1,5 +1,5 @@
 // Artifact naming shared by the runner edges (test-edge.ts, cli.ts). Internal:
-// not a tsup entry and not exported from core. scripts/*.mjs keep their own
+// not a build entry and not exported from core. scripts/*.mjs keep their own
 // copies of these patterns (they only read the files, from dist/core.js).
 import path from "node:path";
 
