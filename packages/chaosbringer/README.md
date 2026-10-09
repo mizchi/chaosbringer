@@ -866,7 +866,7 @@ Mapping is one `<testcase>` per visited page:
 
 - `status="error"` / `"timeout"` → `<error>` (HTTP code or `timeout` in `type`)
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
-- otherwise → passing testcase, no children
+- otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
 Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped.
 

@@ -388,17 +388,21 @@ export interface BrowserSource {
  * when the other did: it predates recording it, and the version is unknown.
  */
 export function checkBrowserVersions(sources: readonly BrowserSource[]): string | undefined {
-  const major = (v: string | undefined) => (v === undefined ? "unrecorded" : v.split(".")[0]!);
   const bySide = new Map<string, Set<string>>();
   for (const s of sources) {
     const set = bySide.get(s.side) ?? new Set<string>();
     bySide.set(s.side, set);
-    set.add(major(s.browser));
+    set.add(browserMajor(s.browser));
   }
   const all = new Set([...bySide.values()].flatMap((s) => [...s]));
   if (all.size <= 1) return undefined;
-  const sides = [...bySide].map(([side, set]) => `${side}: ${[...set].map((m) => (m === "unrecorded" ? m : `Chromium ${m}`)).join(", ")}`).join("; ");
+  const sides = [...bySide].map(([side, set]) => `${side}: ${[...set].join(", ")}`).join("; ");
   return `the inputs were measured with different browsers (${sides}), whose numbers differ on their own`;
+}
+
+/** A recorded `browser.version()` as the major it is compared by: "Chromium 153", or "unrecorded". */
+function browserMajor(version: string | undefined): string {
+  return version === undefined ? "unrecorded" : `Chromium ${version.split(".")[0]!}`;
 }
 
 function reportBrowserSources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): BrowserSource[] {
@@ -637,15 +641,58 @@ export function regressNothingMeasured(
   return undefined;
 }
 
+/** Every perfKey any of the reports measured. */
+function measuredKeys(reports: readonly Pick<CrawlReport, "pages" | "actions">[]): Set<string> {
+  return new Set(reports.flatMap((r) => reportSpans(r).map((s) => s.key)));
+}
+
 /** Keys measured in the baseline that no current report measured, sorted. */
 export function missingKeys(
   baseline: readonly Pick<CrawlReport, "pages" | "actions">[],
   current: readonly Pick<CrawlReport, "pages" | "actions">[],
 ): string[] {
-  const cur = new Set(current.flatMap((r) => reportSpans(r).map((s) => s.key)));
-  return [...new Set(baseline.flatMap((r) => reportSpans(r).map((s) => s.key)))]
-    .filter((k) => !cur.has(k))
-    .sort();
+  const cur = measuredKeys(current);
+  return [...measuredKeys(baseline)].filter((k) => !cur.has(k)).sort();
+}
+
+/** What a regress run compares: the perfKeys both sides measured, and with which browsers. */
+export interface RegressCoverage {
+  /** keys measured on both sides: the only ones whose medians are compared */
+  shared: number;
+  /** keys only the current side measured (reported as new), sorted */
+  onlyCurrent: string[];
+  /** keys only the baseline measured (reported as not measured in current), sorted */
+  onlyBaseline: string[];
+  /** each side's browser majors as `checkBrowserVersions` reads them, e.g. "Chromium 141" */
+  browser: { baseline: string; current: string };
+}
+
+/**
+ * How much a regress run can compare. Only a key on both sides is compared,
+ * so "no regressions" over three shared keys and over forty read the same
+ * unless the count is said; and with none shared there was no comparison at
+ * all, however many spans either side measured.
+ */
+export function regressCoverage(
+  baseline: readonly Pick<CrawlReport, "pages" | "actions" | "perf">[],
+  current: readonly Pick<CrawlReport, "pages" | "actions" | "perf">[],
+): RegressCoverage {
+  const onlyCurrent = missingKeys(current, baseline);
+  const browsers = (rs: typeof baseline) => [...new Set(rs.map((r) => browserMajor(r.perf?.browser)))].join(", ");
+  return {
+    shared: measuredKeys(current).size - onlyCurrent.length,
+    onlyCurrent,
+    onlyBaseline: missingKeys(baseline, current),
+    browser: { baseline: browsers(baseline), current: browsers(current) },
+  };
+}
+
+/** The line `perf regress` prints before its verdict. */
+export function formatRegressCoverage(c: RegressCoverage): string {
+  return (
+    `[regress] compared ${c.shared} perfKey(s) on both sides (${c.onlyCurrent.length} only in current, ` +
+    `${c.onlyBaseline.length} only in baseline); browser ${c.browser.baseline} vs ${c.browser.current}`
+  );
 }
 
 // ── drilldown ───────────────────────────────────────────────────────────────
@@ -832,7 +879,8 @@ Subcommands:
   regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15] [--json]
       Per-perfKey medians, current vs baseline. A regression needs both the
       relative threshold and the metric's absolute floor; noisy medians warn.
-      Exit 1 on a regression.
+      Says how many perfKeys both sides measured (only those are compared)
+      and refuses (exit 2) when there are none. Exit 1 on a regression.
 
   emit-budgets, gate and regress refuse (exit 2) inputs crawled under
   different --settle modes: the settle mode changes what a span measures.
@@ -1113,8 +1161,22 @@ function runRegress(argv: string[]): void {
     fail(`regress: ${empty}`);
     return;
   }
+  // Both sides measured, but nothing in common: every key would be "new" or
+  // "missing" and the run would pass having compared no median. Refused like
+  // the gates above (exit 2, nothing was compared), with no --allow-*: there
+  // is nothing an override could compare.
+  const coverage = regressCoverage(baseReports, curReports);
+  if (coverage.shared === 0) {
+    console.error(
+      `perf: regress: refusing to compare: no perfKey appears on both sides ` +
+        `(${coverage.onlyBaseline.length} key(s) only in the baseline, ${coverage.onlyCurrent.length} only in current), ` +
+        `so there is no median to compare. Crawl both sides with the same --url, --seed and limits.`,
+    );
+    process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+    return;
+  }
   const result = regressPerf(baseReports, curReports, { threshold });
-  const missing = missingKeys(baseReports, curReports);
+  const missing = coverage.onlyBaseline;
   if (missing.length > 0 && !values.json) {
     // Not a failure: a random crawl reaches a different set of targets from
     // run to run. Listed so a key that vanished is seen, not ignored.
@@ -1124,12 +1186,15 @@ function runRegress(argv: string[]): void {
   }
   const skipped = [...base.skipped, ...cur.skipped];
   if (values.json) {
-    console.log(JSON.stringify({ ...result, missingKeys: missing, skippedFiles: skipped, failed: result.regressions.length > 0 }, null, 2));
+    console.log(JSON.stringify({ ...result, comparedKeys: coverage.shared, missingKeys: missing, skippedFiles: skipped, failed: result.regressions.length > 0 }, null, 2));
   } else {
     const { stdout, stderr } = formatRegress(result, {
       baselineLabel: `${positionals.join(" ")} (${base.paths.length} report(s))`,
       currentLabel: `${cur.paths.length} report(s)`,
     });
+    // Right under formatRegress's header (its first line), before any
+    // per-key line and the verdict.
+    stdout.splice(1, 0, formatRegressCoverage(coverage));
     if (skipped.length > 0) stdout.unshift(`[regress] skipped ${skipped.length} non-report JSON file(s): ${skipped.join(", ")}`);
     for (const l of stdout) console.log(l);
     for (const l of stderr) console.error(l);

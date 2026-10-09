@@ -53,6 +53,32 @@ function report(pages: PageResult[], overrides: Partial<CrawlReport> = {}): Craw
   };
 }
 
+/**
+ * The testcases flaker 0.14's `--adapter junit` import reads from `xml`, with
+ * the status it gives each. @mizchi/flaker does not export its adapter (it is
+ * bundled into the CLI, node_modules/@mizchi/flaker/dist/cli/main.js, region
+ * `src/cli/adapters/junit.ts`, and importing that file runs the CLI), so its
+ * regexes are copied here verbatim; only the fields flaker derives from
+ * timing and file/line are left out.
+ */
+function flakerJunitParse(xml: string): { name: string; status: string; errorMessage?: string }[] {
+  const getAttr = (tag: string, attr: string) => tag.match(new RegExp(`${attr}="([^"]*)"`, "i"))?.[1];
+  const out: { name: string; status: string; errorMessage?: string }[] = [];
+  for (const suiteBlock of xml.match(/<testsuite\s[^>]*>[\s\S]*?<\/testsuite>/g) ?? []) {
+    for (const tcBlock of suiteBlock.match(/<testcase\s[^>]*(?:\/>|>[\s\S]*?<\/testcase>)/g) ?? []) {
+      const tcTag = tcBlock.match(/<testcase\s[^>]*/)?.[0] ?? "";
+      let status = "passed";
+      let errorMessage: string | undefined;
+      if (/<failure\s/.test(tcBlock)) {
+        status = "failed";
+        errorMessage = getAttr(tcBlock.match(/<failure\s[^>]*/)?.[0] ?? "", "message");
+      } else if (/<skipped/.test(tcBlock)) status = "skipped";
+      out.push({ name: getAttr(tcTag, "name") ?? "unknown", status, ...(errorMessage !== undefined ? { errorMessage } : {}) });
+    }
+  }
+  return out;
+}
+
 describe("buildJunitXml", () => {
   it("emits a Surefire-style header with totals", () => {
     const xml = buildJunitXml(
@@ -66,9 +92,34 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('time="1.500"');
   });
 
-  it("renders a passing page as a self-closed testcase", () => {
+  it("renders a passing page as a testcase with an explicit close tag", () => {
     const xml = buildJunitXml(report([page("http://localhost:3000/")]));
-    expect(xml).toContain('<testcase name="/" classname="chaosbringer" time="0.250"/>');
+    expect(xml).toContain('<testcase name="/" classname="chaosbringer" time="0.250"></testcase>');
+    expect(xml).not.toContain("/>");
+  });
+
+  // The baseline workflow imports this XML into flaker. A self-closed passing
+  // page followed by a failing one was read as a single failed testcase: on
+  // the fixture crawl, 10 pages became 8 results and the passing /form was
+  // recorded as failed with /broken-link's failure.
+  it("reads as one testcase per page through flaker's JUnit parser", () => {
+    const err: PageError = { type: "console", message: "boom", timestamp: 0 };
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/form"),
+        page("http://localhost:3000/broken-link", { errors: [err], hasErrors: true }),
+        page("http://localhost:3000/about"),
+      ])
+    );
+    expect(flakerJunitParse(xml)).toEqual([
+      { name: "/form", status: "passed" },
+      {
+        name: "/broken-link",
+        status: "failed",
+        errorMessage: "1 error(s) on http://localhost:3000/broken-link: console",
+      },
+      { name: "/about", status: "passed" },
+    ]);
   });
 
   it("strips the baseUrl prefix from the testcase name", () => {
