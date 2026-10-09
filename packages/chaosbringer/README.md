@@ -1388,7 +1388,7 @@ chaosbringer --url http://localhost:3000 \
 | `--quiet` | Minimal output | false |
 | `--help` | Show help | — |
 
-† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in `src/crawler.ts`.
+† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).
 
 Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI.
 

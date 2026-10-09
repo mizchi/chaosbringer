@@ -52,7 +52,7 @@
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "fault-injection",

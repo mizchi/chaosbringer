@@ -55,7 +55,7 @@
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "playwright",
