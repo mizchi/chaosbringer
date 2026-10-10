@@ -225,7 +225,8 @@ describe("buildJunitXml", () => {
   });
 
   // flaker 0.14 checks a testcase for <failure> and <skipped> only, so an
-  // <error> page (a timeout, a 5xx) was imported as passed.
+  // <error> page (a navigation that timed out, or one that failed such as
+  // net::ERR_EMPTY_RESPONSE) was imported as passed.
   it("reads timed-out and errored pages as failed through flaker's JUnit parser", () => {
     const xml = buildJunitXml(
       report([
@@ -284,6 +285,23 @@ describe("buildJunitXml", () => {
     expect(xml).toContain("&quot;tag&quot;");
     expect(xml).toContain("&amp;");
     expect(xml).toContain("&apos;quotes&apos;");
+  });
+
+  // A timed-out page's error carries Playwright's call log, coloured with
+  // ANSI escapes. One ESC byte made the file malformed XML (xmllint: "PCDATA
+  // invalid Char value 27").
+  it("drops ANSI colour codes and control characters XML cannot carry", () => {
+    const esc = String.fromCharCode(27);
+    const err: PageError = {
+      type: "exception",
+      message: `page.goto: Timeout 30000ms exceeded.\nCall log:\n${esc}[2m  - navigating to "http://localhost:3000/slow"${esc}[22m\n`,
+      timestamp: 0,
+      stack: `at a${String.fromCharCode(0)}\tb${String.fromCharCode(8)}\r\n`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/slow", { status: "timeout", errors: [err], hasErrors: true })]));
+    expect(xml).toContain('Call log:\n  - navigating to &quot;http://localhost:3000/slow&quot;\n');
+    expect(xml).toContain("at a\tb\r\n");
+    expect(Array.from(xml).filter((ch) => ch.charCodeAt(0) < 0x20 && !"\t\n\r".includes(ch))).toEqual([]);
   });
 
   it("annotates invariant-violation entries with the invariant name", () => {

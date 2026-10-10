@@ -864,11 +864,11 @@ writeFileSync("junit.xml", buildJunitXml(report, { suiteName: "smoke" }));
 
 Mapping is one `<testcase>` per visited page:
 
-- `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"` and the HTTP code or `navigation timeout` in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0
+- `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"`, and `navigation error` / `navigation timeout` (or `HTTP <code>` when the page has a `statusCode`) in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0. Dashboards that classify by element, not by `type`, show these pages differently from before: Allure as Failed rather than Broken, GitLab as failed rather than error
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
 - otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
-Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped.
+Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped. ANSI colour codes (Playwright's call log has them) and other control characters XML cannot carry are dropped.
 
 ## Visual regression
 
