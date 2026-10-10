@@ -7,10 +7,17 @@
  * parsing.
  *
  * The mapping is one testcase per page:
- *   - status="error" / "timeout"            -> <error>
- *   - status="success" with errors[].length -> <failure>
+ *   - status="timeout"                      -> <failure type="timeout">
+ *   - status="error"                        -> <failure type="error">
+ *   - status="success" with errors[].length -> <failure type="<error types>">
  *   - everything else                       -> passing testcase, no children
  *                                              (`<testcase ...></testcase>`)
+ *
+ * A page that failed to load is a `<failure>`, not an `<error>`: flaker's
+ * JUnit import (the baseline workflow's) checks only for `<failure>` and
+ * `<skipped>`, so an `<error>` testcase was recorded as passed. `type` keeps
+ * the two apart for readers that want to, and the suite's `errors` count is
+ * always 0.
  *
  * Multiple PageError entries are concatenated into one element so the XML
  * stays a flat list (most readers display only the first failure per
@@ -32,14 +39,12 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
 
   let totalTests = 0;
   let totalFailures = 0;
-  let totalErrors = 0;
   const cases: string[] = [];
 
   for (const page of report.pages) {
     totalTests++;
     cases.push(renderTestcase(page, classname, report.baseUrl));
-    if (page.status === "error" || page.status === "timeout") totalErrors++;
-    else if (page.errors.length > 0) totalFailures++;
+    if (page.status === "error" || page.status === "timeout" || page.errors.length > 0) totalFailures++;
   }
 
   const time = (report.duration / 1000).toFixed(3);
@@ -47,7 +52,7 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
     `name="${esc(suiteName)}"`,
     `tests="${totalTests}"`,
     `failures="${totalFailures}"`,
-    `errors="${totalErrors}"`,
+    `errors="0"`,
     `time="${time}"`,
   ].join(" ");
 
@@ -68,11 +73,11 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
   const head = `<testcase name="${esc(name)}" classname="${esc(classname)}" time="${time}"`;
 
   if (page.status === "timeout") {
-    return `${head}><error message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</error></testcase>`;
+    return `${head}><failure message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.status === "error") {
     const code = typeof page.statusCode === "number" ? `HTTP ${page.statusCode}` : "navigation error";
-    return `${head}><error message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</error></testcase>`;
+    return `${head}><failure message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.errors.length > 0) {
     const types = uniqueTypes(page.errors);
