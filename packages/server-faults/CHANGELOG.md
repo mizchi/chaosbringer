@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.1](https://github.com/mizchi/chaosbringer/compare/server-faults-v1.0.0...server-faults-v1.0.1) (2026-10-10)
+
+### Packaging
+
+* The tarball ships `dist` only: no `src`, no source maps ([#184](https://github.com/mizchi/chaosbringer/pull/184)). No code changes.
+
 ## [1.0.0](https://github.com/mizchi/chaosbringer/compare/server-faults-v0.1.0...server-faults-v1.0.0) (2026-05-16)
 
 

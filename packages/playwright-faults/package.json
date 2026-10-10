@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/playwright-faults",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Network / page-lifecycle / JS-runtime fault injection primitives for Playwright. Extracted from chaosbringer.",
   "license": "MIT",
   "author": "mizchi",
