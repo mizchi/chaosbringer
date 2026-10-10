@@ -866,7 +866,7 @@ Mapping is one `<testcase>` per visited page:
 
 - `status="error"` / `"timeout"` → `<error>` (HTTP code or `timeout` in `type`)
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
-- otherwise → passing testcase, no children
+- otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
 Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped.
 
@@ -1388,7 +1388,7 @@ chaosbringer --url http://localhost:3000 \
 | `--quiet` | Minimal output | false |
 | `--help` | Show help | — |
 
-† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in `src/crawler.ts`.
+† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).
 
 Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI.
 

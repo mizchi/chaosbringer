@@ -44,12 +44,22 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # The two installs below run apt-get through sudo. The runner image
+      # already bounds apt's own waits (/etc/apt/apt.conf.d/zz-retries: a 15 s
+      # timeout and one retry, then the next mirror), and the Oct 7 nightly
+      # still sat 24 minutes on one noble-security InRelease after apt printed
+      # its Get: line, until the 25-minute job timeout; that run uploaded no
+      # baseline. No apt setting bounded that stall, so the step timeouts do:
+      # a hang becomes a failed install step that says what hung, instead of
+      # a timed-out job.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 8
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Install Playwright system deps (cache hit)
         if: steps.pw-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 8
         run: pnpm exec playwright install-deps chromium
 
       - name: Start fixture server
@@ -91,8 +101,8 @@ jobs:
       # PR gate downloads `chaos-baseline` from the last *successful* run, so
       # a red run here would leave the chaos `--baseline` gate on an ever
       # older baseline. The perf baseline upload below is skipped instead,
-      # and the PR gate reports "no perf baseline" rather than comparing
-      # against a partial one.
+      # and the PR gate falls back to the newest `chaos-perf-baseline` an
+      # earlier run uploaded rather than comparing against a partial one.
       - name: Perf crawls (baseline, N=3)
         id: perf_crawls
         continue-on-error: true
@@ -120,6 +130,31 @@ jobs:
         if: always()
         run: kill "$(cat .fixture.pid)" 2>/dev/null || true
 
+      # The baselines are uploaded before anything flaker does: they are
+      # what the PR gate needs from this run, and an upload placed after the
+      # flaker import was skipped whenever the import failed.
+      - name: Upload baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-baseline
+          path: |
+            packages/chaosbringer/chaos-report.json
+            packages/chaosbringer/heatmap.json
+          retention-days: 30
+
+      # Its own artifact, not extra files in `chaos-baseline`, so the existing
+      # `--baseline` download keeps getting exactly the files it always got,
+      # and the PR gate looks it up by name, apart from `chaos-baseline`: a
+      # run whose perf crawls failed uploads none, and the gate takes the
+      # newest one an earlier run uploaded.
+      - name: Upload perf baseline
+        if: steps.perf_crawls.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-perf-baseline
+          path: packages/chaosbringer/perf-baseline/*.json
+          retention-days: 30
+
       # Persist chaos signals into the same flaker storage that
       # `flaker-nightly.yml` writes — same cache key shape so reads / writes
       # interleave naturally. Each baseline run becomes one set of
@@ -136,32 +171,18 @@ jobs:
           restore-keys: |
             flaker-data-
 
+      # Only when the crawl wrote its JUnit XML (hashFiles is relative to the
+      # workspace root, not this job's working-directory): after a crawl that
+      # never ran, the import could only fail on a missing file, as it did
+      # on the Oct 7 nightly. continue-on-error because flaker history is a
+      # side output; a failed import must not turn the run red and leave the
+      # PR gate on an older `chaos-baseline`.
       - name: Import chaos report into flaker
-        if: always()
+        if: ${{ !cancelled() && hashFiles('packages/chaosbringer/chaos-junit.xml') != '' }}
+        continue-on-error: true
         run: |
           pnpm exec flaker import chaos-junit.xml \
             --adapter junit \
             --commit "${{ github.sha }}" \
             --branch "${{ github.ref_name }}" \
             --source ci
-
-      - name: Upload baseline
-        uses: actions/upload-artifact@v4
-        with:
-          name: chaos-baseline
-          path: |
-            packages/chaosbringer/chaos-report.json
-            packages/chaosbringer/heatmap.json
-          retention-days: 30
-
-      # Its own artifact, not extra files in `chaos-baseline`, so the existing
-      # `--baseline` download keeps getting exactly the files it always got,
-      # and a PR gate can tell "no perf baseline yet" (artifact missing, the
-      # first run after this lands) apart from "baseline has no report".
-      - name: Upload perf baseline
-        if: steps.perf_crawls.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: chaos-perf-baseline
-          path: packages/chaosbringer/perf-baseline/*.json
-          retention-days: 30

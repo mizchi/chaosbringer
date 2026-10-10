@@ -10,6 +10,7 @@
  *   - status="error" / "timeout"            -> <error>
  *   - status="success" with errors[].length -> <failure>
  *   - everything else                       -> passing testcase, no children
+ *                                              (`<testcase ...></testcase>`)
  *
  * Multiple PageError entries are concatenated into one element so the XML
  * stays a flat list (most readers display only the first failure per
@@ -78,7 +79,14 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
     const summary = `${page.errors.length} error(s) on ${page.url}: ${types.join(", ")}`;
     return `${head}><failure message="${esc(summary)}" type="${esc(types.join(","))}">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
-  return `${head}/>`;
+  // An explicit close, not `<testcase .../>`: flaker's JUnit parser (the
+  // baseline workflow's import) matches a testcase with
+  // `<testcase\s[^>]*(?:\/>|>[\s\S]*?<\/testcase>)`, whose greedy `[^>]*`
+  // eats the `/` of a self-closed tag and runs on to the next
+  // `</testcase>`. A passing page followed by a failing one was imported as
+  // one failed test under the passing page's name, and the failing page was
+  // dropped.
+  return `${head}></testcase>`;
 }
 
 /**

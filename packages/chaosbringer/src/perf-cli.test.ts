@@ -9,10 +9,12 @@ import {
   crawlBudgetsSettleMismatch,
   emitPerfBudgets,
   formatPerfGate,
+  formatRegressCoverage,
   gatePerf,
   missingKeys,
   perfGateNothingChecked,
   perfOutFromRepro,
+  regressCoverage,
   regressNothingMeasured,
   regressPerf,
   runPerfCli,
@@ -31,6 +33,17 @@ function keyed(report: CrawlReport, keyVersion: number): CrawlReport {
     perf: {
       ...(report.perf ?? { vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } }),
       keyVersion,
+    },
+  };
+}
+
+/** `report` as a crawl measured with browser `version` records it (`perf.browser`). */
+function browsed(report: CrawlReport, version: string): CrawlReport {
+  return {
+    ...report,
+    perf: {
+      ...(report.perf ?? { vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } }),
+      browser: version,
     },
   };
 }
@@ -206,6 +219,37 @@ describe("regressPerf", () => {
     expect(regressNothingMeasured([appRun({})], [appRun({})])).toBeUndefined();
     const loadOnly = fakeReport([fakePage("http://localhost:3000/app", fakeSpan("/app :: load"))], []);
     expect(missingKeys([appRun({})], [loadOnly])).toEqual(["/app :: click #go"]);
+  });
+
+  it("regressCoverage counts the keys both sides measured, the keys only one side did, and each side's browser", () => {
+    const base = browsed(appRun({}), "141.0.7390.37");
+    base.actions.push(fakeAction(fakeSpan("/app :: click #gone")));
+    const cur = browsed(appRun({}), "141.0.7390.54");
+    cur.actions.push(fakeAction(fakeSpan("/app :: click #new")), fakeAction(fakeSpan("/app :: click #new2")));
+    const c = regressCoverage([base, base], [cur]);
+    expect(c).toEqual({
+      shared: 2,
+      onlyCurrent: ["/app :: click #new", "/app :: click #new2"],
+      onlyBaseline: ["/app :: click #gone"],
+      browser: { baseline: "Chromium 141", current: "Chromium 141" },
+    });
+    expect(formatRegressCoverage(c)).toBe(
+      "[regress] compared 2 perfKey(s) on both sides (2 only in current, 1 only in baseline); browser Chromium 141 vs Chromium 141",
+    );
+    // Reports written before the browser was recorded, and a side mixing majors (--allow-browser-mismatch).
+    expect(regressCoverage([appRun({})], [cur, browsed(appRun({}), "153.0.8010.12")]).browser).toEqual({
+      baseline: "unrecorded",
+      current: "Chromium 141, Chromium 153",
+    });
+  });
+
+  it("regressCoverage finds no shared key between crawls of different routes", () => {
+    const other = fakeReport([fakePage("http://localhost:3000/other", fakeSpan("/other :: load"))], []);
+    expect(regressCoverage([appRun({})], [other])).toMatchObject({
+      shared: 0,
+      onlyCurrent: ["/other :: load"],
+      onlyBaseline: ["/app :: click #go", "/app :: load"],
+    });
   });
 });
 
@@ -486,6 +530,57 @@ describe("runPerfCli", () => {
     await runPerfCli(["regress", baseDir, "--current", loadOnly]);
     expect(process.exitCode).toBe(0);
     expect(logged()).toContain("1 baseline key(s) not measured in current");
+  });
+
+  // A clean run printed its header and "no regressions past the gate." and
+  // nothing else, so two compared keys and forty read the same.
+  it("regress says how many perfKeys it compared and with which browsers, under the header and before the verdict", async () => {
+    const base = [1, 2, 3].map((i) => write(`b${i}.json`, browsed(appRun({ blockingMs: 100 }), "141.0.7390.37")));
+    const cur = [1, 2, 3].map((i) => write(`c${i}.json`, browsed(appRun({ blockingMs: 100 }), "141.0.7390.37")));
+    await runPerfCli(["regress", ...base, "--current", ...cur]);
+    expect(process.exitCode).toBe(0);
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    const header = lines.findIndex((l: string) => l.includes("[regress] baseline "));
+    const count = lines.indexOf(
+      "[regress] compared 2 perfKey(s) on both sides (0 only in current, 0 only in baseline); browser Chromium 141 vs Chromium 141",
+    );
+    const verdict = lines.findIndex((l: string) => l.includes("no regressions past the gate"));
+    expect(header).toBeGreaterThanOrEqual(0);
+    expect(count).toBe(header + 1);
+    expect(verdict).toBeGreaterThan(count);
+
+    logSpy.mockClear();
+    await runPerfCli(["regress", ...base, "--current", ...cur, "--json"]);
+    expect(JSON.parse(logged())).toMatchObject({ comparedKeys: 2, missingKeys: [], failed: false });
+  });
+
+  // Both sides measured spans, but none under a common key (another site,
+  // seed or route map): every key was "new" or "missing", and regress passed
+  // having compared no median.
+  it("regress refuses (exit 2) when no perfKey appears on both sides", async () => {
+    const base = write("b.json", appRun({}));
+    const other = write(
+      "o.json",
+      fakeReport(
+        [fakePage("http://localhost:3000/other", fakeSpan("/other :: load"))],
+        [fakeAction(fakeSpan("/other :: click #x"))],
+      ),
+    );
+    await runPerfCli(["regress", base, "--current", other]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain(
+      "refusing to compare: no perfKey appears on both sides (2 key(s) only in the baseline, 2 only in current)",
+    );
+    // Refused before comparing: no count line, no verdict.
+    expect(logged()).not.toContain("[regress] compared");
+    expect(logged()).not.toContain("no regressions past the gate");
+
+    // --json is refused the same way, before anything is printed that could read as a pass.
+    process.exitCode = 0;
+    logSpy.mockClear();
+    await runPerfCli(["regress", base, "--current", other, "--json"]);
+    expect(process.exitCode).toBe(2);
+    expect(logged()).toBe("");
   });
 
   it("gate fails on an empty report set, reports without spans, or budgets that match nothing", async () => {

@@ -38,47 +38,87 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # The two installs below run apt-get through sudo. The runner image
+      # already bounds apt's own waits (/etc/apt/apt.conf.d/zz-retries: a 15 s
+      # timeout and one retry, then the next mirror), and a chaos-baseline
+      # nightly still hung 24 minutes on one InRelease fetch past that
+      # timeout, until the job timeout. No apt setting bounded that stall, so
+      # the step timeouts do: a hang becomes a failed install step instead of
+      # a timed-out job.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 8
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Install Playwright system deps (cache hit)
         if: steps.pw-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 8
         run: pnpm exec playwright install-deps chromium
 
+      # The chaos and perf baselines are picked separately. The chaos one
+      # comes from the last successful chaos-baseline run on main. The perf
+      # one is the newest unexpired chaos-perf-baseline artifact from main,
+      # whichever run uploaded it: a run uploads it only when its perf crawls
+      # succeeded, so the last successful run can lack one while an earlier
+      # run's is still good, and taking both from one run skipped the perf
+      # gate on every PR until the next good run. Each pick is logged and put
+      # in the summary, so a verdict can be traced to the run it compared
+      # against. Best-effort throughout: no path fails this step; the steps
+      # below run without a baseline instead.
       - name: Download latest baseline (best-effort)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p baseline
-          run_id=$(gh run list \
+          mkdir -p baseline perf-baseline
+          runs_url="${{ github.server_url }}/${{ github.repository }}/actions/runs"
+          echo '## baselines' >> "$GITHUB_STEP_SUMMARY"
+          say() { echo "$1"; echo "- $1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          chaos_why="no successful chaos-baseline run on main"
+          chaos_run=$(gh run list \
             --workflow=chaos-baseline.yml \
             --branch=main \
             --status=success \
             --limit=1 \
-            --json databaseId \
-            -q '.[0].databaseId' \
-            -R ${{ github.repository }})
+            --json databaseId,headSha,createdAt \
+            -q '.[0] // empty | "\(.databaseId) \(.headSha) \(.createdAt)"' \
+            -R ${{ github.repository }}) || { chaos_run=""; chaos_why="gh run list failed"; }
+          read -r run_id run_sha run_created <<< "$chaos_run" || true
           if [ -n "$run_id" ]; then
             gh run download "$run_id" --name chaos-baseline -D ./baseline -R ${{ github.repository }} || true
           fi
           if [ -f baseline/chaos-report.json ]; then
             echo "BASELINE=$(pwd)/baseline/chaos-report.json" >> "$GITHUB_ENV"
+            say "chaos baseline: run $run_id ($runs_url/$run_id), main@${run_sha:0:7}, $run_created"
+          elif [ -n "$run_id" ]; then
+            say "chaos baseline: none (run $run_id had no chaos-baseline artifact to download); running without --baseline"
           else
-            echo "no baseline available; running without --baseline"
+            say "chaos baseline: none ($chaos_why); running without --baseline"
           fi
-          # Perf baseline: same run, its own artifact. Missing on the first
-          # baseline run after the perf steps landed (and whenever the last
-          # successful baseline predates them), so like the chaos baseline it
-          # is best-effort; the regress step reports and skips instead.
-          mkdir -p perf-baseline
-          if [ -n "$run_id" ]; then
-            gh run download "$run_id" --name chaos-perf-baseline -D ./perf-baseline -R ${{ github.repository }} || true
+
+          # Artifacts come newest first. A fork's PR can run on a branch it
+          # named main too, so the run must also belong to this repository.
+          perf_why="no unexpired chaos-perf-baseline artifact from main"
+          perf_pick=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=chaos-perf-baseline&per_page=30" \
+            --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main" and .workflow_run.head_repository_id == .workflow_run.repository_id)][0] // empty | "\(.workflow_run.id) \(.workflow_run.head_sha) \(.created_at)"') \
+            || { perf_pick=""; perf_why="the artifacts lookup failed"; }
+          read -r perf_run perf_sha perf_created <<< "$perf_pick" || true
+          if [ "$perf_run" = "null" ]; then perf_run=""; fi
+          if [ -n "$perf_run" ]; then
+            gh run download "$perf_run" --name chaos-perf-baseline -D ./perf-baseline -R ${{ github.repository }} || true
           fi
           if ls perf-baseline/*.json > /dev/null 2>&1; then
             echo "PERF_BASELINE=$(pwd)/perf-baseline" >> "$GITHUB_ENV"
+            browser=""
+            if [ -f perf-baseline/run1.json ]; then
+              recorded=$(jq -r '.perf.browser // "unrecorded"' perf-baseline/run1.json 2> /dev/null) || recorded="unreadable"
+              browser=", browser $recorded (run1.json)"
+            fi
+            say "perf baseline: run $perf_run ($runs_url/$perf_run), main@${perf_sha:0:7}, $perf_created$browser"
+          elif [ -n "$perf_run" ]; then
+            say "perf baseline: none (downloading chaos-perf-baseline from run $perf_run failed); perf regress will be skipped"
           else
-            echo "no perf baseline available; perf regress will be skipped"
+            say "perf baseline: none ($perf_why); perf regress will be skipped"
           fi
 
       - name: Start fixture server
@@ -141,12 +181,20 @@ jobs:
       # on a different runner than this job, so a PR that touches nothing
       # can still see runner-to-runner drift; the floors and the 15% are what
       # absorb it. If it flakes, add runs (PERF_RUNS) before loosening them.
+      #
+      # perf regress exits 2 when it refuses to compare: the baseline was
+      # settled under another mode, uses another perfKey version, was
+      # measured with another browser major (or predates recording one), or
+      # shares no perfKey with this PR's reports. That is not a regression,
+      # and main re-records the perf baseline on every push and nightly, so
+      # it is a notice quoting perf regress's reason, not a failure. No
+      # baseline at all is a notice too.
       - name: Perf regress vs baseline
         if: ${{ !cancelled() && steps.perf_crawls.outcome == 'success' }}
         shell: bash
         run: |
           if [ -z "${PERF_BASELINE:-}" ]; then
-            echo "::notice::no chaos-perf-baseline artifact on main yet; skipping perf regress (the next chaos-baseline run creates it)"
+            echo "::notice::perf regress skipped, no usable chaos-perf-baseline artifact from main (none unexpired, or its download failed: see 'Download latest baseline'). The perf baseline on main is re-recorded on every push and nightly."
             exit 0
           fi
           { echo '## perf regress vs main'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -154,16 +202,18 @@ jobs:
           # regression (exit 1) would end the step here, before the closing
           # fence, and every summary section after it would render as code.
           set +e
-          node dist/cli.js perf regress "$PERF_BASELINE" --current perf-current 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          node dist/cli.js perf regress "$PERF_BASELINE" --current perf-current 2>&1 \
+            | tee perf-regress.log | tee -a "$GITHUB_STEP_SUMMARY"
           code=${PIPESTATUS[0]}
           set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          # Exit 2 is "not comparable" (different settle mode or perfKey
-          # version), not a regression: the baseline predates a change to what
-          # the spans measure, and the next chaos-baseline run on main records
-          # a comparable one. Surface it without failing the PR.
           if [ "$code" -eq 2 ]; then
-            echo "::notice::perf baseline is not comparable with this PR's reports (settle mode or perfKey version changed); skipping perf regress until main records a new baseline"
+            reason=$(grep -m1 -o 'refusing to compare: .*' perf-regress.log || true)
+            if [ -z "$reason" ]; then
+              reason="not comparable (settle mode, perfKey version, browser major, or no shared perfKey)."
+            fi
+            # A workflow command reads % as the start of an escape.
+            echo "::notice::perf regress skipped, ${reason//'%'/%25} The perf baseline on main is re-recorded on every push and nightly."
             exit 0
           fi
           exit "$code"
