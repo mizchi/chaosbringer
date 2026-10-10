@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.12.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.12.0...chaosbringer-v0.12.1) (2026-10-10)
+
+See [#184](https://github.com/mizchi/chaosbringer/pull/184).
+
+### Bug Fixes
+
+* **`--junit` output imports into flaker 0.14 page for page.** Passing pages are now written `<testcase …></testcase>` instead of self-closed. flaker's parser read a self-closed testcase followed by a failing one as a single failed testcase, so a 10-page crawl imported as 8 results with a passing page marked failed.
+* **`perf regress` refuses to compare when no perfKey appears on both sides** (exit 2, like the other comparability checks). It used to report "no regressions" having compared nothing.
+  * It also prints how many perfKeys it compared, how many appear on only one side, and the browser on each side.
+  * `--json` adds `comparedKeys`.
+
+### Packaging
+
+* The tarball ships `dist` only: no `src`, no source maps. That is 340 files and 621 KB, down from 823 files and 1.3 MB. The type declarations are unchanged.
+
 ## [0.12.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.11.2...chaosbringer-v0.12.0) (2026-10-07)
 
 Browser automation on Playwright 1.63. See [#180](https://github.com/mizchi/chaosbringer/pull/180), [#182](https://github.com/mizchi/chaosbringer/pull/182) and the dependency update.
