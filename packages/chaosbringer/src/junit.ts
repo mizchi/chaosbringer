@@ -7,10 +7,19 @@
  * parsing.
  *
  * The mapping is one testcase per page:
- *   - status="error" / "timeout"            -> <error>
- *   - status="success" with errors[].length -> <failure>
+ *   - status="timeout"                      -> <failure type="timeout">
+ *   - status="error"                        -> <failure type="error">
+ *   - status="success" with errors[].length -> <failure type="<error types>">
  *   - everything else                       -> passing testcase, no children
  *                                              (`<testcase ...></testcase>`)
+ *
+ * A page that failed to load is a `<failure>`, not an `<error>`: flaker's
+ * JUnit import (the baseline workflow's) checks only for `<failure>` and
+ * `<skipped>`, so an `<error>` testcase was recorded as passed. The suite's
+ * `errors` count is always 0. `type` still tells a load failure from a page
+ * with errors in the XML, but dashboards that classify by element do not
+ * read it: Allure shows these pages as Failed rather than Broken, GitLab
+ * counts them as failed rather than error.
  *
  * Multiple PageError entries are concatenated into one element so the XML
  * stays a flat list (most readers display only the first failure per
@@ -32,14 +41,12 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
 
   let totalTests = 0;
   let totalFailures = 0;
-  let totalErrors = 0;
   const cases: string[] = [];
 
   for (const page of report.pages) {
     totalTests++;
     cases.push(renderTestcase(page, classname, report.baseUrl));
-    if (page.status === "error" || page.status === "timeout") totalErrors++;
-    else if (page.errors.length > 0) totalFailures++;
+    if (page.status === "error" || page.status === "timeout" || page.errors.length > 0) totalFailures++;
   }
 
   const time = (report.duration / 1000).toFixed(3);
@@ -47,7 +54,7 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
     `name="${esc(suiteName)}"`,
     `tests="${totalTests}"`,
     `failures="${totalFailures}"`,
-    `errors="${totalErrors}"`,
+    `errors="0"`,
     `time="${time}"`,
   ].join(" ");
 
@@ -68,11 +75,11 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
   const head = `<testcase name="${esc(name)}" classname="${esc(classname)}" time="${time}"`;
 
   if (page.status === "timeout") {
-    return `${head}><error message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</error></testcase>`;
+    return `${head}><failure message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.status === "error") {
     const code = typeof page.statusCode === "number" ? `HTTP ${page.statusCode}` : "navigation error";
-    return `${head}><error message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</error></testcase>`;
+    return `${head}><failure message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.errors.length > 0) {
     const types = uniqueTypes(page.errors);
@@ -153,9 +160,20 @@ function formatErrorBody(page: PageResult): string {
     .join("\n\n");
 }
 
+/**
+ * ANSI colour sequences (Playwright colours the call log it appends to an
+ * error message) and the other C0 controls XML 1.0 forbids (all but tab, LF
+ * and CR). One ESC byte makes the whole file malformed for a strict parser
+ * (xmllint, and the readers Jenkins, GitLab and Allure use), so they are
+ * dropped rather than escaped: XML 1.0 has no escape for them.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+const NOT_XML = /\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g;
+
 /** XML attribute / text escape. */
 function esc(s: string): string {
   return s
+    .replace(NOT_XML, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

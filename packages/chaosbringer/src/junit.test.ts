@@ -183,23 +183,65 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('name="https://site.example.com/other"');
   });
 
-  it("emits <error> for status=timeout", () => {
+  it("emits <failure type=\"timeout\"> for status=timeout", () => {
     const xml = buildJunitXml(
       report([page("http://localhost:3000/slow", { status: "timeout" })])
     );
-    expect(xml).toContain("<error");
-    expect(xml).toContain('type="timeout"');
-    expect(xml).toContain('errors="1"');
-    expect(xml).not.toContain("<failure");
+    expect(xml).toContain(
+      '<testcase name="/slow" classname="chaosbringer" time="0.250"><failure message="navigation timeout @ http://localhost:3000/slow" type="timeout"></failure></testcase>'
+    );
+    expect(xml).toContain('failures="1"');
+    expect(xml).toContain('errors="0"');
+    expect(xml).not.toContain("<error");
   });
 
-  it("emits <error> for status=error with the HTTP code in the message", () => {
+  it("emits <failure type=\"error\"> for status=error with the HTTP code in the message", () => {
     const xml = buildJunitXml(
       report([page("http://localhost:3000/missing", { status: "error", statusCode: 500 })])
     );
-    expect(xml).toContain("<error");
-    expect(xml).toContain('errors="1"');
-    expect(xml).toContain("HTTP 500");
+    expect(xml).toContain('<failure message="HTTP 500 @ http://localhost:3000/missing" type="error">');
+    expect(xml).toContain('failures="1"');
+    expect(xml).toContain('errors="0"');
+    expect(xml).not.toContain("<error");
+  });
+
+  it("says navigation error when an errored page has no HTTP code", () => {
+    const xml = buildJunitXml(report([page("http://localhost:3000/gone", { status: "error" })]));
+    expect(xml).toContain('<failure message="navigation error @ http://localhost:3000/gone" type="error">');
+  });
+
+  it("counts every kind of failing page once in the suite totals", () => {
+    const err: PageError = { type: "console", message: "boom", timestamp: 0 };
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/"),
+        page("http://localhost:3000/slow", { status: "timeout" }),
+        page("http://localhost:3000/missing", { status: "error", statusCode: 404, errors: [err], hasErrors: true }),
+        page("http://localhost:3000/noisy", { errors: [err], hasErrors: true }),
+      ])
+    );
+    expect(xml).toContain('tests="4" failures="3" errors="0"');
+    expect(xml.match(/<failure /g)).toHaveLength(3);
+  });
+
+  // flaker 0.14 checks a testcase for <failure> and <skipped> only, so an
+  // <error> page (a navigation that timed out, or one that failed such as
+  // net::ERR_EMPTY_RESPONSE) was imported as passed.
+  it("reads timed-out and errored pages as failed through flaker's JUnit parser", () => {
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/"),
+        page("http://localhost:3000/slow", { status: "timeout" }),
+        page("http://localhost:3000/about"),
+        page("http://localhost:3000/missing", { status: "error", statusCode: 500 }),
+      ])
+    );
+    expect(flakerJunitParse(xml)).toEqual([
+      { name: "/", status: "passed" },
+      { name: "/slow", status: "failed", errorMessage: "navigation timeout @ http://localhost:3000/slow" },
+      { name: "/about", status: "passed" },
+      { name: "/missing", status: "failed", errorMessage: "HTTP 500 @ http://localhost:3000/missing" },
+    ]);
   });
 
   it("emits <failure> for a successful page with console errors", () => {
@@ -243,6 +285,23 @@ describe("buildJunitXml", () => {
     expect(xml).toContain("&quot;tag&quot;");
     expect(xml).toContain("&amp;");
     expect(xml).toContain("&apos;quotes&apos;");
+  });
+
+  // A timed-out page's error carries Playwright's call log, coloured with
+  // ANSI escapes. One ESC byte made the file malformed XML (xmllint: "PCDATA
+  // invalid Char value 27").
+  it("drops ANSI colour codes and control characters XML cannot carry", () => {
+    const esc = String.fromCharCode(27);
+    const err: PageError = {
+      type: "exception",
+      message: `page.goto: Timeout 30000ms exceeded.\nCall log:\n${esc}[2m  - navigating to "http://localhost:3000/slow"${esc}[22m\n`,
+      timestamp: 0,
+      stack: `at a${String.fromCharCode(0)}\tb${String.fromCharCode(8)}\r\n`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/slow", { status: "timeout", errors: [err], hasErrors: true })]));
+    expect(xml).toContain('Call log:\n  - navigating to &quot;http://localhost:3000/slow&quot;\n');
+    expect(xml).toContain("at a\tb\r\n");
+    expect(Array.from(xml).filter((ch) => ch.charCodeAt(0) < 0x20 && !"\t\n\r".includes(ch))).toEqual([]);
   });
 
   it("annotates invariant-violation entries with the invariant name", () => {
