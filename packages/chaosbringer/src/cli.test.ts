@@ -4,6 +4,8 @@
  * far as starting a browser.
  */
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
@@ -21,6 +23,16 @@ function cli(args: string[]) {
   });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
+
+describe("--version", () => {
+  it.each([["--version"], ["-V"]])("%s prints the package.json version and exits 0", (flag) => {
+    const { version } = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { version: string };
+    const r = cli([flag]);
+    expect(r.stdout).toBe(`${version}\n`);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+  });
+});
 
 describe("usage errors", () => {
   it.each([

@@ -85,6 +85,7 @@ export const CRAWL_CLI_OPTIONS = {
   strict: { type: "boolean", default: false },
   quiet: { type: "boolean", default: false },
   help: { type: "boolean", default: false },
+  version: { type: "boolean", short: "V", default: false },
 } as const;
 
 /** Parse the main CLI's arguments (`process.argv` when `args` is omitted). */

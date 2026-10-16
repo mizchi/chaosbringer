@@ -114,6 +114,7 @@ const LEFT_OUT: Record<string, string> = {
   compact: "output format",
   quiet: "output format",
   help: "not a run",
+  version: "not a run",
 };
 
 describe("reproCommand covers the main CLI's flags", () => {

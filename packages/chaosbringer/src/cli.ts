@@ -24,12 +24,13 @@
  *   --strict              Exit with error on console errors
  *   --quiet               Minimal output
  *   --help                Show this help
+ *   --version, -V         Print the version
  */
 
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
-import { usageErrorMessage } from "./cli-usage.js";
+import { packageVersion, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
@@ -99,6 +100,11 @@ try {
   exitWithUsageError(err);
 }
 const { values, positionals } = parsed;
+
+if (values.version) {
+  console.log(packageVersion());
+  process.exit(0);
+}
 
 if (values.help) {
   console.log(`
@@ -184,6 +190,7 @@ OPTIONS:
   --strict              Exit with error on any console errors
   --quiet               Minimal output
   --help                Show this help
+  --version, -V         Print the version
 
 PERF SUBCOMMANDS (read crawl reports written with --perf):
   chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]
