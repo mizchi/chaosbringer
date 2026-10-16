@@ -590,6 +590,7 @@ export type {
   ClusterDiffEntry,
   PageDiffEntry,
   FailureArtifactsOptions,
+  ReproFlag,
   TraceparentInjectionOptions,
   ChaosRemoteServer,
   ServerFaultEvent,

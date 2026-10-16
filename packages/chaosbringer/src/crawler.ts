@@ -130,7 +130,7 @@ import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "./defaults.js";
 import { parseTraceparent } from "./traceparent.js";
 import { validateOptions } from "./validate.js";
 import { findFaultRuleShadows } from "./fault-shadow.js";
-import { buildReproCommand } from "./repro-command.js";
+import { buildReproCommand, reproFlags } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
 import { installNavigationGuard, type NavigationGuard } from "./navigation-guard.js";
@@ -1056,6 +1056,7 @@ export class ChaosCrawler {
         screenshot,
         html,
         trace: (opts.saveTrace ?? true) ? this.trace : undefined,
+        reproFlags: reproFlags(this.options, this.rng.seed),
       });
       this.logger.info("failure_artifact_written", { url: result.url, bundleDir });
     } catch (err) {

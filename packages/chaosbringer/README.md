@@ -163,6 +163,8 @@ Every report includes:
 
 Both are printed in the compact header (`[PASS] … (seed=42)`) and the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`).
 
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--log-*`, `--screenshots`, `--failure-artifacts`, `--heatmap*`, `--compact`, `--quiet`, `--no-headless`, `--har-record`, `--bind`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
+
 To rerun an exact failure locally, copy the `Repro:` line from CI.
 
 ## Fault injection
@@ -923,11 +925,11 @@ failures/0000__checkout_review__a91c2f0e/
 ├── page.html        # `await page.content()` snapshot
 ├── errors.json      # full PageError[] (console / exception / network / invariant)
 ├── trace.jsonl      # meta + visits + actions, sliced up to and including this page
-├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl`
+├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl <the run's flags>`
 └── info.json        # URL, status, sourceUrl, recovery, seed, timestamps
 ```
 
-`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. Combine with `--strict` or `--baseline` to gate CI on the same shape of failure.
+`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Add `--baseline` to gate CI on the same shape of failure.
 
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 

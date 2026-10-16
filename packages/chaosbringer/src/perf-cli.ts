@@ -699,7 +699,8 @@ export function formatRegressCoverage(c: RegressCoverage): string {
 
 /** The `--perf-out` directory a report's `reproCommand` names, if any. */
 export function perfOutFromRepro(reproCommand: string | undefined): string | undefined {
-  const m = reproCommand?.match(/--perf-out ('(?:[^']|'\\'')*'|\S+)/);
+  // `=` joins a value that starts with `-` (formatReproFlags).
+  const m = reproCommand?.match(/--perf-out[ =]('(?:[^']|'\\'')*'|\S+)/);
   if (!m) return undefined;
   const raw = m[1]!;
   return raw.startsWith("'") ? raw.slice(1, -1).replace(/'\\''/g, "'") : raw;

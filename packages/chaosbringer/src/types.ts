@@ -328,6 +328,13 @@ export interface CrawlerOptions {
    */
   perfBudgetsFile?: string;
   /**
+   * @internal Set by the CLI: the flags it acts on itself rather than through
+   * these options (`--strict`, the `--axe` / `--visual-*` invariants it
+   * builds, `--allow-settle-mismatch`), so `reproCommand` and each failure
+   * bundle's `repro.sh` carry them too.
+   */
+  cliReproFlags?: ReproFlag[];
+  /**
    * How the crawler waits for the page to settle after `page.goto` and after
    * each chaos action. Default `"networkidle"`: exactly the waits the crawler
    * has always made (a `networkidle` navigation, `waitForLoadState
@@ -707,6 +714,21 @@ export interface FailureArtifactsOptions {
   saveTrace?: boolean;
   /** Cap the number of bundles per run (default: unlimited). */
   maxArtifacts?: number;
+}
+
+/**
+ * One flag of a repro command (`reproCommand`, a bundle's `repro.sh`), with
+ * its value unquoted.
+ */
+export interface ReproFlag {
+  flag: string;
+  value?: string;
+  /**
+   * The value names a file or directory the run reads, relative to the
+   * directory the crawl ran in. `repro.sh` runs from its bundle, so it writes
+   * these as absolute paths.
+   */
+  path?: true;
 }
 
 /** `record` captures responses to a HAR file; `replay` serves them back. */

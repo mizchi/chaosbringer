@@ -351,6 +351,8 @@ describe("argument helpers", () => {
   it("perfOutFromRepro reads --perf-out, quoted or not", () => {
     expect(perfOutFromRepro("chaosbringer --url x --perf-out perf-dir")).toBe("perf-dir");
     expect(perfOutFromRepro("chaosbringer --perf-out 'my dir' --seed 1")).toBe("my dir");
+    // A value starting with `-` is joined with `=`, which parseArgs requires.
+    expect(perfOutFromRepro("chaosbringer --perf-out=-out --seed 1")).toBe("-out");
     expect(perfOutFromRepro("chaosbringer --perf")).toBeUndefined();
     expect(perfOutFromRepro(undefined)).toBeUndefined();
   });

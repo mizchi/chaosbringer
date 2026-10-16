@@ -2,8 +2,9 @@
  * The main CLI's flags, and how they become `CrawlerOptions`.
  *
  * Out of `cli.ts`, which parses `process.argv` and exits as soon as it is
- * imported, so a test can read the flag table and build options from argv the
- * way the CLI does.
+ * imported, so a test can read the flag table: every flag either round-trips
+ * through `reproCommand` or is left out of it on purpose, and a flag added
+ * here without either fails `repro-command.test.ts`.
  */
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
@@ -12,7 +13,7 @@ import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg } from "./settle.js";
 import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant } from "./types.js";
+import type { CrawlerOptions, Invariant, ReproFlag } from "./types.js";
 import { visualRegression } from "./visual.js";
 
 export const CRAWL_CLI_OPTIONS = {
@@ -197,6 +198,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     shardCount = parsed.shardCount;
   }
 
+  const cliReproFlags = cliOnlyReproFlags(values);
   return {
     ...(values["aria-targets"] ? { ariaTargets: true } : {}),
     ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
@@ -244,6 +246,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     invariants: buildInvariants(values),
     perf: perfOptionsFromCliFlags(values),
     perfBudgetsFile: values["perf-budgets"],
+    ...(cliReproFlags.length > 0 ? { cliReproFlags } : {}),
   };
 }
 
@@ -285,4 +288,32 @@ function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
     );
   }
   return list.length > 0 ? list : undefined;
+}
+
+/**
+ * The flags that change the run or its exit code in a form
+ * `buildReproCommand` cannot read back from the options: the CLI applies
+ * `--strict` itself, `--axe` / `--visual-*` become invariant closures, and
+ * `--allow-settle-mismatch` lifts a refusal the CLI makes. Left out:
+ * `--visual-diff-dir` only writes files, and a repro run with
+ * `--visual-update` would rewrite the baselines and hide the diff it is
+ * meant to reproduce.
+ */
+function cliOnlyReproFlags(values: CrawlCliValues): ReproFlag[] {
+  const out: ReproFlag[] = [];
+  if (values.axe) {
+    out.push({ flag: "--axe" });
+    if (values["axe-tags"] !== undefined) out.push({ flag: "--axe-tags", value: values["axe-tags"] });
+  }
+  if (values["visual-baseline"]) {
+    out.push({ flag: "--visual-baseline", value: values["visual-baseline"], path: true });
+    for (const name of ["visual-threshold", "visual-max-diff-pixels", "visual-max-diff-ratio"] as const) {
+      const value = values[name];
+      if (value !== undefined) out.push({ flag: `--${name}`, value });
+    }
+  }
+  // Without it the repro refuses the run's --perf-budgets file (exit 2).
+  if (values["allow-settle-mismatch"]) out.push({ flag: "--allow-settle-mismatch" });
+  if (values.strict) out.push({ flag: "--strict" });
+  return out;
 }
