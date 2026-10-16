@@ -67,12 +67,20 @@ jobs:
         run: |
           # Exit 1 means flakes were found and the next step should process
           # them. Anything else means the command did not run, and a bare
-          # `|| true` swallowed both alike: this step spent weeks dying on an
-          # unknown-option error while looking like a step with nothing to say.
+          # `|| true` swallowed both alike. What never ran was the binary: a
+          # package's own bin is not linked into its node_modules/.bin, so
+          # `pnpm exec chaosbringer` was "command not found" (exit 254) on
+          # every run since the workspace move. Run the build output directly,
+          # as chaos-baseline.yml and chaos-pr-gate.yml do.
+          #
+          # `--seed` because an unseeded run draws a fresh random seed and so
+          # picks different actions: a cluster that fires only when one action
+          # is picked would read as flaky and get an issue opened for it.
           set +e
-          pnpm exec chaosbringer flake \
+          node dist/cli.js flake \
             --url http://127.0.0.1:4455 \
             --runs ${{ github.event.inputs.runs || '10' }} \
+            --seed 1 \
             --max-pages 30 \
             --max-actions 5 \
             --output flake.json
