@@ -6,6 +6,7 @@
  * to set up their own tooling (e.g. inject axe-core into the page).
  */
 
+import type { Frame } from "playwright";
 import type { Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
 import { stateMachineInvariant } from "./state-machine-invariants.js";
@@ -36,6 +37,8 @@ const DEFAULT_AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 interface AxeViolationNode {
   html?: string;
   target?: unknown;
+  /** Selector path from the top document, one entry per frame then the node's own. */
+  ancestry?: unknown;
 }
 interface AxeViolation {
   id: string;
@@ -83,16 +86,43 @@ export function buildAxeRunPayload(opts: AxeInvariantOptions = {}): AxeRunPayloa
 /**
  * Render a violations array to a single-line summary suitable for the
  * invariant failure message. Example:
- *   `3 violations: color-contrast(×5, serious), image-alt(×2, critical)`
+ *   `3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical)`
+ *
+ * `frameOf` names the iframe a node is in (the preset passes its URL), or
+ * returns `undefined` for the top document. A rule's nodes in an iframe are
+ * counted, and listed after the top document's, as a violation of that frame:
+ *   `3 a11y violations: image-alt(×1, critical); in frame http://x/embed: button-name(×1, critical), image-alt(×1, critical)`
  */
-export function formatAxeViolations(violations: AxeViolation[]): string {
+export function formatAxeViolations(
+  violations: AxeViolation[],
+  frameOf: (node: AxeViolationNode) => string | undefined = () => undefined
+): string {
   if (violations.length === 0) return "";
-  const parts = violations.map((v) => {
-    const count = v.nodes?.length ?? 0;
-    const impact = v.impact ? `, ${v.impact}` : "";
-    return `${v.id}(×${count}${impact})`;
-  });
-  return `${violations.length} a11y violations: ${parts.join(", ")}`;
+  const part = (v: AxeViolation, count: number) => `${v.id}(×${count}${v.impact ? `, ${v.impact}` : ""})`;
+  const top: string[] = [];
+  const frames = new Map<string, string[]>();
+  for (const v of violations) {
+    let inTop = 0;
+    const inFrames = new Map<string, number>();
+    for (const node of v.nodes ?? []) {
+      const frame = frameOf(node);
+      if (frame === undefined) inTop++;
+      else inFrames.set(frame, (inFrames.get(frame) ?? 0) + 1);
+    }
+    if (inTop > 0 || inFrames.size === 0) top.push(part(v, inTop));
+    for (const [frame, count] of inFrames) {
+      const parts = frames.get(frame) ?? [];
+      parts.push(part(v, count));
+      frames.set(frame, parts);
+    }
+  }
+  let count = top.length;
+  const sections = top.length > 0 ? [top.join(", ")] : [];
+  for (const [frame, parts] of frames) {
+    count += parts.length;
+    sections.push(`in frame ${frame}: ${parts.join(", ")}`);
+  }
+  return `${count} a11y violations: ${sections.join("; ")}`;
 }
 
 async function loadAxeSource(): Promise<string> {
@@ -111,10 +141,79 @@ async function loadAxeSource(): Promise<string> {
   }
 }
 
+/** The part of the page's `axe` global the preset calls. */
+interface AxeGlobal {
+  run(context: unknown, options: unknown): Promise<AxeResults>;
+  /** Missing before axe-core 4.3. */
+  runPartial(context: unknown, options: unknown): Promise<unknown>;
+  finishRun(partials: unknown[], options: unknown): Promise<AxeResults>;
+  utils: {
+    getFrameContexts(context: unknown, options: unknown): Array<{ frameSelector: unknown; frameContext: unknown }>;
+    shadowSelect(selector: unknown): Element | null;
+  };
+}
+type AxeWindow = typeof globalThis & { axe: AxeGlobal };
+
+/** Key for the chain of `getFrameContexts` selectors that leads to a frame from the top document. */
+const frameKey = (chain: unknown[]) => JSON.stringify(chain);
+
+/**
+ * `axe.runPartial` in `frame`, then depth-first in every iframe axe picks
+ * out of it: the order `axe.finishRun` pairs results with frames in. Each
+ * frame is scanned through its own Playwright `Frame`, so cross-origin and
+ * out-of-process iframes are covered without axe's postMessage between
+ * frames. A frame that can't be scanned (detached mid-scan, or a navigation
+ * the crawl blocked, which leaves the browser's error page) contributes
+ * `null`, which axe counts as untested rather than as a violation.
+ * `frameUrls` gets each scanned iframe's URL under its `frameKey`.
+ */
+async function runPartialInFrames(
+  frame: Frame,
+  source: string,
+  context: unknown,
+  options: AxeRunPayload["options"],
+  chain: unknown[],
+  frameUrls: Map<string, string>
+): Promise<unknown[]> {
+  const frameContexts = await frame.evaluate(
+    (p) => (globalThis as AxeWindow).axe.utils.getFrameContexts(p.context ?? document, p.options),
+    { context, options }
+  );
+  const partials = [
+    await frame.evaluate(
+      (p) => (globalThis as AxeWindow).axe.runPartial(p.context ?? document, p.options),
+      { context, options }
+    ),
+  ];
+  for (const { frameSelector, frameContext } of frameContexts) {
+    let child: unknown[] = [null];
+    try {
+      const element = (
+        await frame.evaluateHandle((s) => (globalThis as AxeWindow).axe.utils.shadowSelect(s), frameSelector)
+      ).asElement();
+      const childFrame = await element?.contentFrame();
+      await element?.dispose();
+      if (childFrame && !childFrame.url().startsWith("chrome-error:")) {
+        await childFrame.evaluate(source);
+        const childChain = [...chain, frameSelector];
+        frameUrls.set(frameKey(childChain), childFrame.url());
+        child = await runPartialInFrames(childFrame, source, frameContext, options, childChain, frameUrls);
+      }
+    } catch {
+      // Detached or navigated away mid-scan: left untested, like a frame axe can't reach.
+    }
+    partials.push(...child);
+  }
+  return partials;
+}
+
 /**
  * Axe-core invariant preset. Injects axe into every page the invariant runs
- * on, calls `axe.run`, and fails with a one-line summary of the violations.
- * Requires `axe-core` to be installed — it's an optional peer dep.
+ * on and into its iframes, same- and cross-origin, scans them as one page
+ * and fails with a one-line summary of the violations, naming the frame of
+ * those inside an iframe. Requires `axe-core` to be installed — it's an
+ * optional peer dep; before axe-core 4.3 (no `runPartial`) only the top
+ * document is scanned.
  */
 export function axe(options: AxeInvariantOptions = {}): Invariant {
   const payload = buildAxeRunPayload(options);
@@ -124,20 +223,38 @@ export function axe(options: AxeInvariantOptions = {}): Invariant {
     when: options.when ?? "afterActions",
     async check({ page }) {
       const source = await loadAxeSource();
-      await page.addScriptTag({ content: source });
-      const results = (await page.evaluate(
-        async (p) => {
-          // @ts-ignore - axe is attached to window by the script tag above.
-          const ax = (globalThis as { axe?: { run: (c: unknown, o: unknown) => Promise<unknown> } }).axe;
-          if (!ax) throw new Error("axe-core failed to install on the page");
-          return ax.run(p.context ?? document, p.options);
-        },
-        payload
-      )) as AxeResults;
+      const main = page.mainFrame();
+      // Evaluated over CDP, which the page's Content-Security-Policy does not
+      // govern. `page.addScriptTag` inserted an inline <script>, which a
+      // `script-src` without 'unsafe-inline' refuses: every page of such a
+      // site failed with an injection error that said nothing about a11y.
+      await main.evaluate(source);
+      const hasRunPartial = await main.evaluate(() => {
+        const ax = (globalThis as { axe?: AxeGlobal }).axe;
+        if (!ax) throw new Error("axe-core failed to install on the page");
+        return typeof ax.runPartial === "function";
+      });
+      const frameUrls = new Map<string, string>();
+      let results: AxeResults;
+      if (hasRunPartial) {
+        const partials = await runPartialInFrames(main, source, payload.context, payload.options, [], frameUrls);
+        results = await main.evaluate(
+          // `ancestry` puts the frames' selectors on each node, for `frameUrls`.
+          (p) => (globalThis as AxeWindow).axe.finishRun(p.partials, { ...p.options, ancestry: true }),
+          { partials, options: payload.options }
+        );
+      } else {
+        results = await main.evaluate(
+          (p) => (globalThis as AxeWindow).axe.run(p.context ?? document, p.options),
+          payload
+        );
+      }
       if (!results || !Array.isArray(results.violations) || results.violations.length === 0) {
         return true;
       }
-      return formatAxeViolations(results.violations);
+      return formatAxeViolations(results.violations, ({ ancestry }) =>
+        Array.isArray(ancestry) && ancestry.length > 1 ? frameUrls.get(frameKey(ancestry.slice(0, -1))) : undefined
+      );
     },
   };
 }

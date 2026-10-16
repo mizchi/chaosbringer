@@ -810,7 +810,9 @@ await chaos({
 
 `axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
 
-A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+axe is injected over CDP, so a page's Content-Security-Policy does not block it, and the page's iframes are scanned with it, same-origin and cross-origin (axe-core 4.3+; older versions scan the top document only). A cross-origin iframe loads only with `blockExternalNavigation: false`: the default guard blocks its document, and the blocked frame is skipped. To leave embeds you don't own out of the scan, `exclude` them (`exclude: ["iframe"]`).
+
+A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Violations inside an iframe follow, per frame URL: `[a11y-axe] 3 a11y violations: image-alt(×1, critical); in frame https://example.com/embed: button-name(×1, critical), image-alt(×1, critical)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
 
 ## Action heatmap
 
