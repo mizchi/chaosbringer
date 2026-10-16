@@ -7,6 +7,7 @@
  */
 
 import type { Frame } from "playwright";
+import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import type { Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
 import { stateMachineInvariant } from "./state-machine-invariants.js";
@@ -158,46 +159,91 @@ type AxeWindow = typeof globalThis & { axe: AxeGlobal };
 const frameKey = (chain: unknown[]) => JSON.stringify(chain);
 
 /**
- * `axe.runPartial` in `frame`, then depth-first in every iframe axe picks
- * out of it: the order `axe.finishRun` pairs results with frames in. Each
- * frame is scanned through its own Playwright `Frame`, so cross-origin and
- * out-of-process iframes are covered without axe's postMessage between
- * frames. A frame that can't be scanned (detached mid-scan, or a navigation
- * the crawl blocked, which leaves the browser's error page) contributes
- * `null`, which axe counts as untested rather than as a violation.
- * `frameUrls` gets each scanned iframe's URL under its `frameKey`.
+ * How long one iframe gets to take axe in and run `axe.runPartial`. Past it
+ * the frame is left untested: its renderer may be stuck (a cross-origin
+ * widget spinning in its own process), or its timers may never fire (a
+ * `sandbox` CSP header without `allow-scripts`, which the iframe element
+ * doesn't show), and either would hold the invariant forever.
  */
-async function runPartialInFrames(
-  frame: Frame,
-  source: string,
-  context: unknown,
-  options: AxeRunPayload["options"],
-  chain: unknown[],
-  frameUrls: Map<string, string>
-): Promise<unknown[]> {
+const FRAME_SCAN_TIMEOUT_MS = 10_000;
+
+/** One frame's `axe.runPartial` result, and the iframes axe picks out of it. */
+interface FrameScan {
+  partial: unknown;
+  frameContexts: Array<{ frameSelector: unknown; frameContext: unknown }>;
+}
+
+async function scanFrame(frame: Frame, context: unknown, options: AxeRunPayload["options"]): Promise<FrameScan> {
   const frameContexts = await frame.evaluate(
     (p) => (globalThis as AxeWindow).axe.utils.getFrameContexts(p.context ?? document, p.options),
     { context, options }
   );
-  const partials = [
-    await frame.evaluate(
-      (p) => (globalThis as AxeWindow).axe.runPartial(p.context ?? document, p.options),
-      { context, options }
-    ),
-  ];
-  for (const { frameSelector, frameContext } of frameContexts) {
+  const partial = await frame.evaluate(
+    (p) => (globalThis as AxeWindow).axe.runPartial(p.context ?? document, p.options),
+    { context, options }
+  );
+  return { partial, frameContexts };
+}
+
+/**
+ * The iframe `frameSelector` picks out of `parent`, with axe taken in and
+ * scanned, or `null` for one that can't be: gone, the browser's error page
+ * left by a navigation the crawl blocked, or sandboxed without
+ * `allow-scripts`. axe can't finish where no timer fires, and every timer it
+ * sets there logs "Blocked script execution" to the console, which the crawl
+ * records as page errors.
+ */
+async function scanChildFrame(
+  parent: Frame,
+  frameSelector: unknown,
+  frameContext: unknown,
+  source: string,
+  options: AxeRunPayload["options"]
+): Promise<{ frame: Frame; scan: FrameScan } | null> {
+  const element = (
+    await parent.evaluateHandle((s) => (globalThis as AxeWindow).axe.utils.shadowSelect(s), frameSelector)
+  ).asElement();
+  if (!element) return null;
+  const runsScripts = await element.evaluate(
+    (el) => !(el instanceof HTMLIFrameElement && el.hasAttribute("sandbox") && !el.sandbox.contains("allow-scripts"))
+  );
+  const frame = runsScripts ? await element.contentFrame() : null;
+  await element.dispose();
+  if (!frame || frame.url().startsWith("chrome-error:")) return null;
+  await frame.evaluate(source);
+  return { frame, scan: await scanFrame(frame, frameContext, options) };
+}
+
+/**
+ * `scan` of `frame`, then depth-first `axe.runPartial` in every iframe axe
+ * picks out of it: the order `axe.finishRun` pairs results with frames in.
+ * Each frame is scanned through its own Playwright `Frame`, so cross-origin
+ * and out-of-process iframes are covered without axe's postMessage between
+ * frames. A frame that can't be scanned (see `scanChildFrame`, detached
+ * mid-scan, or over `FRAME_SCAN_TIMEOUT_MS`) contributes `null`, which axe
+ * counts as untested rather than as a violation. `frameUrls` gets each
+ * scanned iframe's URL under its `frameKey`.
+ */
+async function runPartialInFrames(
+  frame: Frame,
+  scan: FrameScan,
+  source: string,
+  options: AxeRunPayload["options"],
+  chain: unknown[],
+  frameUrls: Map<string, string>
+): Promise<unknown[]> {
+  const partials = [scan.partial];
+  for (const { frameSelector, frameContext } of scan.frameContexts) {
     let child: unknown[] = [null];
     try {
-      const element = (
-        await frame.evaluateHandle((s) => (globalThis as AxeWindow).axe.utils.shadowSelect(s), frameSelector)
-      ).asElement();
-      const childFrame = await element?.contentFrame();
-      await element?.dispose();
-      if (childFrame && !childFrame.url().startsWith("chrome-error:")) {
-        await childFrame.evaluate(source);
+      const scanned = await raceTimeout(
+        scanChildFrame(frame, frameSelector, frameContext, source, options),
+        FRAME_SCAN_TIMEOUT_MS
+      );
+      if (scanned && scanned !== TIMED_OUT) {
         const childChain = [...chain, frameSelector];
-        frameUrls.set(frameKey(childChain), childFrame.url());
-        child = await runPartialInFrames(childFrame, source, frameContext, options, childChain, frameUrls);
+        frameUrls.set(frameKey(childChain), scanned.frame.url());
+        child = await runPartialInFrames(scanned.frame, scanned.scan, source, options, childChain, frameUrls);
       }
     } catch {
       // Detached or navigated away mid-scan: left untested, like a frame axe can't reach.
@@ -237,7 +283,8 @@ export function axe(options: AxeInvariantOptions = {}): Invariant {
       const frameUrls = new Map<string, string>();
       let results: AxeResults;
       if (hasRunPartial) {
-        const partials = await runPartialInFrames(main, source, payload.context, payload.options, [], frameUrls);
+        const scan = await scanFrame(main, payload.context, payload.options);
+        const partials = await runPartialInFrames(main, scan, source, payload.options, [], frameUrls);
         results = await main.evaluate(
           // `ancestry` puts the frames' selectors on each node, for `frameUrls`.
           (p) => (globalThis as AxeWindow).axe.finishRun(p.partials, { ...p.options, ancestry: true }),

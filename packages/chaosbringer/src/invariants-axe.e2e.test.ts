@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { axe } from "./invariants.js";
-import type { CrawlerOptions } from "./types.js";
+import type { CrawlerOptions, PageResult } from "./types.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
@@ -37,6 +37,20 @@ describe("invariants.axe() on a CSP page with iframes", () => {
       if (path === "/embed") return html(`<button></button><iframe title="nested" src="/nested"></iframe>`);
       if (path === "/nested") return html(img);
       if (path === "/plain") return html(img, false);
+      // A frame sandboxed without `allow-scripts` runs no timers, so axe can't
+      // finish there; `allow-scripts` alone (an opaque origin) still can.
+      if (path === "/sandboxed") {
+        return html(
+          `${img}<iframe title="none" sandbox src="/embed"></iframe>` +
+            `<iframe title="same-origin" sandbox="allow-same-origin" src="/embed"></iframe>` +
+            `<iframe title="scripts" sandbox="allow-scripts" src="/nested"></iframe>`
+        );
+      }
+      if (path === "/stuck") return html(`${img}<iframe title="stuck" src="${cross}/spin"></iframe>`);
+      // Its main thread spins from just after load, as a stuck widget's does.
+      if (path === "/spin") {
+        return html(`<p>spin</p><script>addEventListener("load", () => setTimeout(() => { for (;;) {} }))</script>`, false);
+      }
       res.writeHead(404);
       res.end();
     });
@@ -49,7 +63,7 @@ describe("invariants.axe() on a CSP page with iframes", () => {
     await server.close();
   });
 
-  async function axeMessages(path: string, options: Partial<CrawlerOptions> = {}): Promise<string[]> {
+  async function crawl(path: string, options: Partial<CrawlerOptions> = {}): Promise<PageResult> {
     const report = await new ChaosCrawler({
       baseUrl: `${base}${path}`,
       maxPages: 1,
@@ -61,7 +75,11 @@ describe("invariants.axe() on a CSP page with iframes", () => {
       invariants: [axe()],
       ...options,
     }).start();
-    return report.pages[0]!.errors.filter((e) => e.type === "invariant-violation").map((e) => e.message);
+    return report.pages[0]!;
+  }
+
+  async function axeMessages(path: string, options: Partial<CrawlerOptions> = {}): Promise<string[]> {
+    return (await crawl(path, options)).errors.filter((e) => e.type === "invariant-violation").map((e) => e.message);
   }
 
   it.each([
@@ -91,6 +109,30 @@ describe("invariants.axe() on a CSP page with iframes", () => {
 
   it("leaves an excluded iframe out", async () => {
     expect(await axeMessages("/", { invariants: [axe({ exclude: ["iframe"] })] })).toEqual([
+      "[a11y-axe] 1 a11y violations: image-alt(×1, critical)",
+    ]);
+  }, 60_000);
+
+  it("leaves an iframe sandboxed without allow-scripts untested, adding no console errors", async () => {
+    // Scanning such a frame, axe never finished: the check stalled about 30s
+    // a frame, and each timer axe set there logged a "Blocked script
+    // execution" console error, recorded as a page error. The crawl logs a
+    // few of those for such a frame on its own, in the order frames load.
+    const consoleErrors = (page: PageResult) =>
+      page.errors
+        .filter((e) => e.type === "console")
+        .map((e) => e.message)
+        .sort();
+    const withoutAxe = await crawl("/sandboxed", { invariants: [] });
+    const page = await crawl("/sandboxed");
+    expect(consoleErrors(page)).toEqual(consoleErrors(withoutAxe));
+    expect(page.errors.filter((e) => e.type === "invariant-violation").map((e) => e.message)).toEqual([
+      `[a11y-axe] 2 a11y violations: image-alt(×1, critical); in frame ${base}/nested: image-alt(×1, critical)`,
+    ]);
+  }, 60_000);
+
+  it("leaves an out-of-process iframe whose main thread is stuck untested", async () => {
+    expect(await axeMessages("/stuck", { launchOptions: { args: ["--site-per-process"] } })).toEqual([
       "[a11y-axe] 1 a11y violations: image-alt(×1, critical)",
     ]);
   }, 60_000);
