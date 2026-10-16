@@ -778,6 +778,47 @@ describe("format", () => {
     expect(md2).toContain("[long-task-click](https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns/long-task-click.ts)");
     expect(md2).toContain("Chaos crawls: skipped");
   });
+
+  it("says '… and N more' for the items the evidence leaves out, not for errors it sums up", () => {
+    const md = (report: ReturnType<typeof fakeReport>) =>
+      formatScanMarkdown(analyzeScan(report), {
+        url: U,
+        startedAt: "",
+        durationMs: 0,
+        pagesVisited: 1,
+        actions: 0,
+        files: { baseline: "a", chaos: {}, perfDir: "b" },
+      });
+    const more = (text: string) => text.match(/^- … and \d+ more$/gm) ?? [];
+
+    // Seen 3×, summed up in one line: there is nothing more to list. It used
+    // to print "… and 1 more" under a list of nothing.
+    const errors = md(fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom", [`${U}/`, `${U}/a`], 3)] }));
+    expect(errors).toContain("- 3× on 2 pages");
+    expect(more(errors)).toEqual([]);
+
+    // Seven files under a summary line: five listed, two left out (it said 1,
+    // counting the summary line as a file).
+    const lowUsage = [1, 2, 3, 4, 5, 6, 7].map((i) => ({ url: `/chunk-${i}.js`, totalBytes: 100 * 1024, usedBytes: 1024, usedPct: 1 }));
+    const unused = md(
+      fakeReport([fakePage(`${U}/`)], [], {
+        perf: {
+          vitals: {},
+          slowestActions: [],
+          hotInitiators: [],
+          thirdParty: [],
+          totals: { spans: 0, pages: 0 },
+          coverage: {
+            js: { totalBytes: 700 * 1024, usedBytes: 7 * 1024, usedPct: 1, lowUsage },
+            css: { totalBytes: 0, usedBytes: 0, lowUsage: [] },
+          },
+        },
+      }),
+    );
+    expect(unused).toContain("- /chunk-5.js: 1% used of 100 KB");
+    expect(unused).not.toContain("/chunk-6.js");
+    expect(more(unused)).toEqual(["- … and 2 more"]);
+  });
 });
 
 describe("parseFaults", () => {

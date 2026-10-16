@@ -89,7 +89,8 @@ function findingSection(f: ScanFinding, i: number): string[] {
   const out = [`<a id="${anchor(i)}"></a>`, `### ${ICON[f.severity]} ${f.title}`, ""];
   out.push(`\`${f.rule}\` · ${f.category} · ${f.severity} · seen ${f.occurrences}×`, "");
   for (const e of f.evidence) out.push(`- ${e}`);
-  if (f.occurrences > f.evidence.length) out.push(`- … and ${f.occurrences - f.evidence.length} more`);
+  // Not `occurrences` less the lines: "2× on 2 pages" is one line for two errors.
+  if (f.unlisted) out.push(`- … and ${f.unlisted} more`);
   out.push("", f.hint, "");
   if (f.patterns && f.patterns.length > 0) {
     out.push(`Catalog patterns with this signal: ${f.patterns.map((p) => `[${p}](${PERF_PATTERN_URL}/${p}.ts)`).join(", ")}`, "");

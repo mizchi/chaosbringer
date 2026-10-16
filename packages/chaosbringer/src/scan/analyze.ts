@@ -47,6 +47,13 @@ export interface ScanFinding {
   occurrences: number;
   /** The measured facts, one short line each. */
   evidence: string[];
+  /**
+   * How many items `evidence` leaves out: it lists the first `SCAN_WHERE_CAP`
+   * of a finding's pages, steps or files. Absent when it leaves none out. Not
+   * `occurrences` less the lines: an error finding's `occurrences` counts
+   * errors, and its first line sums them up.
+   */
+  unlisted?: number;
   /** What usually causes it and where to look. */
   hint: string;
   /** perf-patterns catalog entries that show this signal (`examples/perf-patterns/src/patterns/<name>.ts`). */
@@ -508,6 +515,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       where: capWhere(failed.map((p) => p.url)),
       occurrences: failed.length,
       evidence: failed.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: ${p.status}${linkedFrom(p)}`),
+      ...unlistedOf(failed.length),
       hint: "The navigation failed or timed out. A timeout on a page that renders fine in a browser is usually a request that never settles (a long poll, a stream, an analytics beacon) — check the page's network tab.",
     });
   }
@@ -521,6 +529,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       where: capWhere(server.map((p) => p.url)),
       occurrences: server.length,
       evidence: server.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
+      ...unlistedOf(server.length),
       hint: "The server failed on these URLs. They were reached by following the site's own links, so a user can reach them too.",
     });
   }
@@ -537,6 +546,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       where: capWhere(broken.map((p) => p.url)),
       occurrences: broken.length,
       evidence: broken.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
+      ...unlistedOf(broken.length),
       hint: "Each URL was found in a link on the site. Fix or remove the link on the page it was linked from.",
     });
   }
@@ -711,6 +721,7 @@ function resilienceFindings(
       evidence: urls
         .slice(0, SCAN_WHERE_CAP)
         .map((u) => `${u}: ${broke.get(u)!.status} under ${broke.get(u)!.faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")} (loaded in the clean crawl)`),
+      ...unlistedOf(urls.length),
       hint: "The page's load depends on the request finishing. Render the shell first and fill the data in when it arrives (or fails).",
     });
   }
@@ -1011,6 +1022,7 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
         `${fmt(js.totalBytes / 1024)} KB of JS, ${fmt(js.usedBytes / 1024)} KB executed`,
         ...js.lowUsage.slice(0, SCAN_WHERE_CAP).map((f) => `${f.url}: ${fmt(f.usedPct)}% used of ${fmt(f.totalBytes / 1024)} KB`),
       ],
+      ...unlistedOf(js.lowUsage.length),
       hint: "Split code the first view does not need behind import() (routes, dialogs, editors) and drop unused dependencies.",
     });
   }
@@ -1383,11 +1395,17 @@ function located(
     where: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.where),
     occurrences: unique.length,
     evidence: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.line),
+    ...unlistedOf(unique.length),
   };
 }
 
 function capWhere(xs: readonly string[]): string[] {
   return [...new Set(xs)].slice(0, SCAN_WHERE_CAP);
+}
+
+/** `unlisted` for `n` items of which the evidence lists the first `SCAN_WHERE_CAP`. */
+function unlistedOf(n: number): Pick<ScanFinding, "unlisted"> {
+  return n > SCAN_WHERE_CAP ? { unlisted: n - SCAN_WHERE_CAP } : {};
 }
 
 function fmt(n: number): string {

@@ -74,6 +74,8 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 - **`where`** is a page URL, or, for a step, its perfKey
   (`<urlPattern> :: <kind>`, see [perf.md](perf.md#perfkey-the-key-that-survives-a-rerun)).
   The key is stable across runs, so you can re-measure the same step.
+- **Evidence** lists at most five pages, steps or files, and `… and N more`
+  counts the rest.
 - **Catalog patterns** link to entries of the
   [perf-patterns catalog](../../examples/perf-patterns/README.md). Each
   entry is a tiny page with the anti-pattern, its fix, and the same
