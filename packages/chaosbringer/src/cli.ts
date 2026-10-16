@@ -26,24 +26,18 @@
  *   --help                Show this help
  */
 
-import { parseArgs } from "node:util";
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
+import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
-import { axe } from "./invariants.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { perfOptionsFromCliFlags } from "./perf-options.js";
-import { parseSettleArg, resolveSettle } from "./settle.js";
-import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant } from "./types.js";
-import { visualRegression } from "./visual.js";
-import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
+import { resolveSettle } from "./settle.js";
+import type { CrawlerOptions } from "./types.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
@@ -85,79 +79,7 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   }
 }
 
-const { values, positionals } = parseArgs({
-  options: {
-    url: { type: "string" },
-    "max-pages": { type: "string" },
-    "max-actions": { type: "string" },
-    // Alias to match the underlying CrawlerOptions field name (used by the
-    // chaos-pr-gate workflow and surfaced as a synonym in docs).
-    "max-actions-per-page": { type: "string" },
-    timeout: { type: "string" },
-    settle: { type: "string" },
-    ...HEADLESS_OPTIONS,
-    cdp: { type: "string" },
-    "cdp-target": { type: "string" },
-    "terminal-browser": { type: "boolean", default: false },
-    screenshots: { type: "boolean", default: false },
-    "screenshot-dir": { type: "string" },
-    output: { type: "string" },
-    exclude: { type: "string", multiple: true },
-    "ignore-error": { type: "string", multiple: true },
-    "ignore-analytics": { type: "boolean", default: false },
-    "ignore-preset": { type: "string", multiple: true },
-    spa: { type: "string", multiple: true },
-    "log-file": { type: "string" },
-    "log-level": { type: "string" },
-    "log-console": { type: "boolean", default: false },
-    seed: { type: "string" },
-    "har-record": { type: "string" },
-    "har-replay": { type: "string" },
-    "storage-state": { type: "string" },
-    budget: { type: "string", multiple: true },
-    axe: { type: "boolean", default: false },
-    "aria-targets": { type: "boolean", default: false },
-    bind: { type: "boolean", default: false },
-    "bind-title": { type: "string" },
-    "axe-tags": { type: "string" },
-    "visual-baseline": { type: "string" },
-    "visual-threshold": { type: "string" },
-    "visual-max-diff-pixels": { type: "string" },
-    "visual-max-diff-ratio": { type: "string" },
-    "visual-diff-dir": { type: "string" },
-    "visual-update": { type: "boolean", default: false },
-    "failure-artifacts": { type: "string" },
-    "cluster-artifacts": { type: "boolean", default: false },
-    "cluster-min-count": { type: "string" },
-    "failure-max": { type: "string" },
-    "trace-out": { type: "string" },
-    "no-http-cache": { type: "boolean", default: false },
-    "trace-replay": { type: "string" },
-    device: { type: "string" },
-    network: { type: "string" },
-    "seed-from-sitemap": { type: "string" },
-    baseline: { type: "string" },
-    "baseline-strict": { type: "boolean", default: false },
-    "github-annotations": { type: "boolean", default: false },
-    shard: { type: "string" },
-    heatmap: { type: "boolean", default: false },
-    "heatmap-top": { type: "string" },
-    "heatmap-out": { type: "string" },
-    junit: { type: "string" },
-    perf: { type: "boolean", default: false },
-    "perf-trace": { type: "boolean", default: false },
-    "perf-mem": { type: "boolean", default: false },
-    "perf-cov": { type: "boolean", default: false },
-    "perf-out": { type: "string" },
-    "perf-budgets": { type: "string" },
-    "allow-settle-mismatch": { type: "boolean", default: false },
-    compact: { type: "boolean", default: false },
-    strict: { type: "boolean", default: false },
-    quiet: { type: "boolean", default: false },
-    help: { type: "boolean", default: false },
-  },
-  allowPositionals: true,
-});
+const { values, positionals } = parseCrawlArgs();
 
 if (values.help) {
   console.log(`
@@ -317,87 +239,29 @@ if (!baseUrl) {
   process.exit(1);
 }
 
-// Build ignore patterns
-const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
-if (values["ignore-analytics"]) {
-  ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
-}
-for (const presetSpec of values["ignore-preset"] ?? []) {
-  try {
-    ignoreErrorPatterns.push(...resolveIgnorePresets(presetSpec));
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    console.error(`Tip: --ignore-preset accepts comma-separated names. Known: ${Object.keys(IGNORE_PRESETS).join(", ")}`);
-    process.exit(1);
-  }
-}
-
-// Validate log level
-const validLogLevels = ["debug", "info", "warn", "error"] as const;
-const logLevel = values["log-level"] as (typeof validLogLevels)[number] | undefined;
-if (logLevel && !validLogLevels.includes(logLevel)) {
-  console.error(`Error: Invalid log level "${logLevel}". Valid levels: ${validLogLevels.join(", ")}`);
+/** Report a refused flag the way every other one is reported, and exit 1. */
+function exitWithUsageError(err: unknown): never {
+  console.error(`Error: ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 }
 
-let seed: number | undefined;
-if (values.seed !== undefined) {
-  const parsed = Number(values.seed);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
-    console.error(`Error: --seed must be a non-negative integer, got "${values.seed}"`);
-    process.exit(1);
-  }
-  seed = parsed;
-}
-
-let har: CrawlerOptions["har"];
-if (values["har-record"] && values["har-replay"]) {
-  console.error("Error: --har-record and --har-replay are mutually exclusive");
-  process.exit(1);
-}
-if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
-if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
-
-let performanceBudget: CrawlerOptions["performanceBudget"];
-if (values.budget && values.budget.length > 0) {
-  performanceBudget = {};
-  for (const raw of values.budget) {
-    for (const entry of raw.split(",")) {
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq <= 0) {
-        console.error(`Error: --budget expects key=ms pairs (got "${trimmed}")`);
-        process.exit(1);
-      }
-      const key = trimmed.slice(0, eq).trim();
-      const ms = Number(trimmed.slice(eq + 1).trim());
-      (performanceBudget as Record<string, number>)[key] = ms;
-    }
-  }
-}
-
-let settle: CrawlerOptions["settle"];
-if (values.settle !== undefined) {
-  try {
-    settle = parseSettleArg(values.settle);
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
+let options: CrawlerOptions;
+try {
+  options = crawlerOptionsFromCli(values, baseUrl);
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 // Read here, not by the crawler, so a bad file fails before a browser starts
 // and the error names the flag. The rules' contents are validated by the
 // crawler (validatePerfBudgets), the same as for the programmatic option.
-let perfBudgets: CrawlerOptions["perfBudgets"];
 const perfBudgetsFile = values["perf-budgets"];
 if (perfBudgetsFile !== undefined) {
   try {
     // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
     const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(settle), `--perf-budgets ${perfBudgetsFile}`);
-    perfBudgets = read.rules;
+    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(options.settle), `--perf-budgets ${perfBudgetsFile}`);
+    options.perfBudgets = read.rules;
     // An emit-budgets file records the settle mode it was measured under;
     // enforcing it on a crawl settled another way fails (or passes) every
     // action budget on the settle, not the app — refused like `perf gate`.
@@ -414,134 +278,9 @@ if (perfBudgetsFile !== undefined) {
       }
     }
   } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
+    exitWithUsageError(err);
   }
 }
-
-let shardIndex: number | undefined;
-let shardCount: number | undefined;
-if (values.shard) {
-  const parsed = parseShardArg(values.shard);
-  shardIndex = parsed.shardIndex;
-  shardCount = parsed.shardCount;
-}
-
-function parseNumberFlag(
-  flag: string,
-  raw: string | undefined,
-  opts: { min?: number; max?: number; integer?: boolean }
-): number | undefined {
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    console.error(`Error: ${flag} must be a finite number (got ${JSON.stringify(raw)})`);
-    process.exit(1);
-  }
-  if (opts.integer && !Number.isInteger(n)) {
-    console.error(`Error: ${flag} must be an integer (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.min !== undefined && n < opts.min) {
-    console.error(`Error: ${flag} must be >= ${opts.min} (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.max !== undefined && n > opts.max) {
-    console.error(`Error: ${flag} must be <= ${opts.max} (got ${n})`);
-    process.exit(1);
-  }
-  return n;
-}
-
-function buildInvariants(): Invariant[] | undefined {
-  const list: Invariant[] = [];
-  if (values.axe) {
-    list.push(
-      axe({
-        tags: values["axe-tags"]
-          ? values["axe-tags"]
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : undefined,
-      })
-    );
-  }
-  if (values["visual-baseline"]) {
-    list.push(
-      visualRegression({
-        baselineDir: values["visual-baseline"],
-        threshold: parseNumberFlag("--visual-threshold", values["visual-threshold"], {
-          min: 0,
-          max: 1,
-        }),
-        maxDiffPixels: parseNumberFlag(
-          "--visual-max-diff-pixels",
-          values["visual-max-diff-pixels"],
-          { min: 0, integer: true }
-        ),
-        maxDiffRatio: parseNumberFlag(
-          "--visual-max-diff-ratio",
-          values["visual-max-diff-ratio"],
-          { min: 0, max: 1 }
-        ),
-        diffDir: values["visual-diff-dir"],
-        updateBaseline: values["visual-update"],
-      })
-    );
-  }
-  return list.length > 0 ? list : undefined;
-}
-
-const options: CrawlerOptions = {
-  ...(values["aria-targets"] ? { ariaTargets: true } : {}),
-  ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
-  baseUrl,
-  maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
-  maxActionsPerPage: (() => {
-    const raw = values["max-actions"] ?? values["max-actions-per-page"];
-    return raw ? parseInt(raw, 10) : undefined;
-  })(),
-  timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
-  settle,
-  headless: resolveHeadless(values),
-  cdpEndpoint: values.cdp,
-  cdpTargetId: values["cdp-target"],
-  terminalBrowser: values["terminal-browser"],
-  screenshots: values.screenshots,
-  screenshotDir: values["screenshot-dir"],
-  excludePatterns: values.exclude,
-  ignoreErrorPatterns: ignoreErrorPatterns.length > 0 ? ignoreErrorPatterns : undefined,
-  spaPatterns: values.spa,
-  logFile: values["log-file"],
-  logLevel: logLevel,
-  logToConsole: values["log-console"],
-  seed,
-  har,
-  storageState: values["storage-state"],
-  performanceBudget,
-  traceOut: values["trace-out"],
-  httpCache: values["no-http-cache"] ? false : undefined,
-  traceReplay: values["trace-replay"],
-  device: values.device,
-  network: values.network as CrawlerOptions["network"],
-  seedFromSitemap: values["seed-from-sitemap"],
-  shardIndex,
-  shardCount,
-  failureArtifacts: values["failure-artifacts"]
-    ? {
-        dir: values["failure-artifacts"],
-        maxArtifacts: parseNumberFlag("--failure-max", values["failure-max"], {
-          min: 0,
-          integer: true,
-        }),
-      }
-    : undefined,
-  invariants: buildInvariants(),
-  perf: perfOptionsFromCliFlags(values),
-  perfBudgets,
-  perfBudgetsFile,
-};
 
 const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
@@ -613,11 +352,16 @@ async function main() {
     if (wantsHeatmap) {
       const entries = buildActionHeatmap(report.actions);
       if (values.heatmap && !isQuiet) {
-        const top =
-          parseNumberFlag("--heatmap-top", values["heatmap-top"], {
-            min: 0,
-            integer: true,
-          }) ?? 20;
+        let top: number;
+        try {
+          top =
+            parseNumberFlag("--heatmap-top", values["heatmap-top"], {
+              min: 0,
+              integer: true,
+            }) ?? 20;
+        } catch (err) {
+          exitWithUsageError(err);
+        }
         console.log("");
         console.log(formatHeatmap(entries, top));
       }
