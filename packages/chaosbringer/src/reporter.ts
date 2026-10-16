@@ -8,6 +8,9 @@ import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
 import type { CrawlReport, PageResult, PerfDegradationEntry } from "./types.js";
 
+/** Failed files listed under an error cluster; the JSON has them all. */
+const CLUSTER_RESOURCES_SHOWN = 5;
+
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
 
@@ -81,6 +84,8 @@ export function formatReport(report: CrawlReport): string {
       lines.push(`[${page.status.toUpperCase()}] ${page.url}`);
       for (const error of page.errors) {
         lines.push(`  [${error.type}] ${truncate(error.message, 80)}`);
+        // "Failed to load resource" alone does not say which file.
+        if (error.resourceUrl) lines.push(`    resource: ${error.resourceUrl}`);
       }
     }
   }
@@ -174,6 +179,11 @@ export function formatReport(report: CrawlReport): string {
       const countStr = cluster.count > 1 ? `×${cluster.count}` : "";
       const urlStr = cluster.urls.length > 1 ? ` [${cluster.urls.length} urls]` : "";
       lines.push(`  [${cluster.type}]${countStr}${urlStr} ${truncate(cluster.fingerprint, 80)}`);
+      const resources = cluster.resourceUrls ?? [];
+      for (const url of resources.slice(0, CLUSTER_RESOURCES_SHOWN)) lines.push(`    resource: ${url}`);
+      if (resources.length > CLUSTER_RESOURCES_SHOWN) {
+        lines.push(`    … and ${resources.length - CLUSTER_RESOURCES_SHOWN} more`);
+      }
     }
   }
 

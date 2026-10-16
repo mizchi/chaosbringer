@@ -23,6 +23,12 @@ export interface ErrorCluster {
   urls: string[];
   /** Distinct invariant names (only meaningful for type=invariant-violation). */
   invariantNames?: string[];
+  /**
+   * Distinct `PageError.resourceUrl`s: the files behind a "Failed to load
+   * resource" cluster, whose message (and so its fingerprint) names none.
+   * Absent when no error in the cluster carries one.
+   */
+  resourceUrls?: string[];
 }
 
 /** Normalise an error message to its fingerprint. */
@@ -71,6 +77,11 @@ export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
       if (err.invariantName && existing.invariantNames && !existing.invariantNames.includes(err.invariantName)) {
         existing.invariantNames.push(err.invariantName);
       }
+      if (err.resourceUrl) {
+        // Not only on the first error: a cluster can mix errors with and without one.
+        existing.resourceUrls ??= [];
+        if (!existing.resourceUrls.includes(err.resourceUrl)) existing.resourceUrls.push(err.resourceUrl);
+      }
     } else {
       bucket.set(key, {
         key,
@@ -80,6 +91,7 @@ export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
         count: 1,
         urls: err.url ? [err.url] : [],
         invariantNames: err.invariantName ? [err.invariantName] : undefined,
+        ...(err.resourceUrl ? { resourceUrls: [err.resourceUrl] } : {}),
       });
     }
   }

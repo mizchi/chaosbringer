@@ -295,6 +295,30 @@ describe("formatReport: fault injection block", () => {
   });
 });
 
+describe("formatReport: failed resources", () => {
+  it("names the file under a failed load, on its page and under its cluster", () => {
+    const message = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+    const files = [1, 2, 3, 4, 5, 6, 7].map((i) => `http://x/img/${i}.png`);
+    const error = { type: "console" as const, message, url: "http://x/", timestamp: 0, resourceUrl: files[0] };
+    const text = formatReport(
+      makeReport({
+        pages: [fakePage("http://x/", undefined, { errors: [error, { type: "console", message: "app log", url: "http://x/", timestamp: 0 }] })],
+        errorClusters: [
+          { key: `console|${message}`, type: "console", fingerprint: message, sample: error, count: 7, urls: ["http://x/"], resourceUrls: files },
+        ],
+      }),
+    );
+    // Under the page's error line: the message alone does not say which file.
+    expect(text).toContain(`  [console] ${message}\n    resource: ${files[0]}\n  [console] app log\n`);
+    // Under the cluster: the first five, then how many more the JSON has.
+    const listed = files
+      .slice(0, 5)
+      .map((u) => `    resource: ${u}\n`)
+      .join("");
+    expect(text).toContain(`  [console]×7 ${message}\n${listed}    … and 2 more\n`);
+  });
+});
+
 describe("getExitCode and an escaping rejection", () => {
   const withRejections = (n: number) =>
     makeReport({

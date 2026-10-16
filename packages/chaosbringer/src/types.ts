@@ -858,6 +858,12 @@ export interface PageError {
   timestamp: number;
   /** Name of the invariant that failed (only for invariant-violation errors). */
   invariantName?: string;
+  /**
+   * The file a console error's "Failed to load resource: …" is about (only
+   * for that browser message, which names no URL itself). `message` stays as
+   * the browser wrote it, so the error's cluster is the same with or without.
+   */
+  resourceUrl?: string;
 }
 
 /**

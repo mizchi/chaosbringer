@@ -94,6 +94,21 @@ describe("analyzeScan: bugs", () => {
     ]);
   });
 
+  it("lists the files a failed load is about, less the documents the page rules report", () => {
+    const message = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+    const files = [1, 2, 3, 4, 5, 6, 7].map((i) => `${U}/img/${i}.png`);
+    const c: ErrorCluster = {
+      ...cluster("console", message, [`${U}/`, `${U}/gone`], 9),
+      sample: { type: "console", message, timestamp: 0, resourceUrl: files[0] },
+      resourceUrls: [`${U}/gone`, ...files],
+    };
+    const r = analyzeScan(fakeReport([fakePage(`${U}/`), fakePage(`${U}/gone`, undefined, { statusCode: 404 })], [], { errorClusters: [c] }));
+    const f = r.findings.find((x) => x.rule === "console-error")!;
+    // The message names no file, so before this the finding said only "9× on 2 pages".
+    expect(f.evidence).toEqual(["9× on 2 pages", ...files.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`)]);
+    expect(f.unlisted).toBe(files.length - SCAN_WHERE_CAP);
+  });
+
   it("files axe violations under a11y", () => {
     const c = { ...cluster("invariant-violation", "color-contrast"), invariantNames: ["a11y-axe"] };
     const [f] = analyzeScan(fakeReport([], [], { errorClusters: [c] })).findings;

@@ -94,6 +94,16 @@ describe("clusterErrors", () => {
     expect(clusters[1]!.count).toBe(2);
   });
 
+  it("records the distinct files behind a failed-load cluster, which its message does not name", () => {
+    const failed = (resourceUrl?: string) =>
+      err({ type: "console", message: "Failed to load resource: the server responded with a status of 404 (Not Found)", resourceUrl });
+    const clusters = clusterErrors([failed(), failed("http://x/a.png"), failed("http://x/b.js"), failed("http://x/a.png")]);
+    expect(clusters).toHaveLength(1);
+    // Kept although the first error had none.
+    expect(clusters[0]!.resourceUrls).toEqual(["http://x/a.png", "http://x/b.js"]);
+    expect(clusterErrors([err({ type: "console", message: "oops" })])[0]!.resourceUrls).toBeUndefined();
+  });
+
   it("records invariant names per cluster", () => {
     const clusters = clusterErrors([
       err({ type: "invariant-violation", message: "[has-h1] no <h1>", invariantName: "has-h1" }),

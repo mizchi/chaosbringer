@@ -75,7 +75,10 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   (`<urlPattern> :: <kind>`, see [perf.md](perf.md#perfkey-the-key-that-survives-a-rerun)).
   The key is stable across runs, so you can re-measure the same step.
 - **Evidence** lists at most five pages, steps or files, and `… and N more`
-  counts the rest.
+  counts the rest. A `console-error` for "Failed to load resource" lists the
+  files that failed (`resource: <url>`), since the browser's message names
+  none. A page that itself answered 4xx or 5xx is left to `broken-link` /
+  `http-5xx`.
 - **Catalog patterns** link to entries of the
   [perf-patterns catalog](../../examples/perf-patterns/README.md). Each
   entry is a tiny page with the anti-pattern, its fix, and the same

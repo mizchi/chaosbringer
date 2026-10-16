@@ -1138,10 +1138,14 @@ Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree
 ```
 ERROR CLUSTERS
   [console]×42 [5 urls] Failed to load resource: the server responded with a status of <n> (Not Found)
+    resource: http://localhost:3000/img/hero.png
+    resource: http://localhost:3000/fonts/body.woff2
   [exception]×3 fixture: boom
 ```
 
 Use it to triage noisy fuzz runs — high-count clusters are the first thing to look at.
+
+The browser's "Failed to load resource" message names no file, so its console error carries the file as `resourceUrl`, and the cluster lists every one as `resourceUrls` (the text report shows the first five). The message itself stays as the browser wrote it, so the cluster key that `--baseline` compares does not depend on which files failed.
 
 ## Exit codes
 

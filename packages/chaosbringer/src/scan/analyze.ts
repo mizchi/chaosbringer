@@ -624,6 +624,9 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
       NETWORK_EXCEPTION.test(c.sample.message) &&
       c.urls.length > 0 &&
       c.urls.every((u) => envPages.has(u));
+    // The files a "Failed to load resource" is about (the message names
+    // none), less the failed documents: the page rules report those.
+    const resources = (c.resourceUrls ?? []).filter((u) => !failedDocs.has(u));
     out.push({
       rule: isAxe ? "a11y-violation" : r.rule,
       // A 401 / 403 is usually an auth check answering a logged-out visitor;
@@ -641,7 +644,10 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
         ...(knockOn
           ? ["Every page it fired on also had a request fail for a reason of the scan's own (see the notes): it may be that failure's knock-on effect. Check in a normal browser."]
           : []),
+        // Last, so the report's "… and N more" follows the list it counts.
+        ...resources.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`),
       ],
+      ...unlistedOf(resources.length),
       hint: r.hint,
     });
   }

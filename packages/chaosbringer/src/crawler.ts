@@ -1756,11 +1756,13 @@ export class ChaosCrawler {
       const text = msg.text();
       if (type === "error") {
         if (this.shouldIgnoreError(text)) return;
+        const resourceUrl = failedResourceUrl(text, msg);
         const error: PageError = {
           type: "console",
           message: text,
           url: page.url(),
           timestamp: Date.now(),
+          ...(resourceUrl ? { resourceUrl } : {}),
         };
         this.emitPageError(errors, error);
       } else if (type === "warning") {
@@ -3139,5 +3141,16 @@ function documentContentType(response: Response | null): string | undefined {
   const type = response.headers()["content-type"]?.split(";")[0]?.trim().toLowerCase();
   if (!type || type.includes("html")) return undefined;
   return type;
+}
+
+/**
+ * The file behind the browser's "Failed to load resource: …" console error,
+ * which names neither it nor the page element: that message's location is
+ * the resource. Undefined for any other message, whose location is the line
+ * of script that logged it.
+ */
+function failedResourceUrl(text: string, msg: ConsoleMessage): string | undefined {
+  if (!text.startsWith("Failed to load resource")) return undefined;
+  return msg.location().url || undefined;
 }
 
