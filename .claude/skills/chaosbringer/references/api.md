@@ -57,7 +57,7 @@ const crawler = new ChaosCrawler({
   seed: 42,                         // reproducible; omit for random
   faultInjection: [ … ],            // network layer: FaultRule[]
   runtimeFaults: [ … ],             // in-page fetch patching: RuntimeFault[]
-  lifecycleFaults: [ … ],           // visibility, offline, CPU: LifecycleFault[]
+  lifecycleFaults: [ … ],           // storage, SW cache, CPU: LifecycleFault[]
   initScripts: [ "…js…" ],          // raw JS run before the page's own scripts
   invariants: [ … ],                // what must hold; see below
 });

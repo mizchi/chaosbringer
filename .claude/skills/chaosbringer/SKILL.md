@@ -109,7 +109,7 @@ something answered first (that's what `suppressed` counts).
 | an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | intercepts at Playwright's route layer, so the app sees a real, wrong response |
 | the `fetch()` call itself to fail — `TypeError`, `AbortError`, a body that won't parse | **runtime** (`runtimeFaults`) | a client-side rejection issues no request, so no route can produce it |
 | a page that never gets a response | network `hang` **or** runtime `never-settle-fetch` | either works; they differ in what reaches your server |
-| the app's own lifecycle to misbehave (visibility, offline, storage) | **lifecycle** (`lifecycleFaults`) | not a request at all |
+| the browser under the page to misbehave (storage wiped or tampered, Service Worker cache evicted, CPU throttled) | **lifecycle** (`lifecycleFaults`) | not a request at all |
 
 The constructors differ in shape by layer: `faults.hang()` returns
 `{ urlPattern, fault }` for `faultInjection`, `faults.rejectBody()` returns

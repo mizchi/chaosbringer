@@ -8,11 +8,11 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 
 | Layer | Library | What it touches | When to use |
 |---|---|---|---|
-| **Application state** | (your test setup; see [`#60`](https://github.com/mizchi/chaosbringer/issues/60) for a built-in hook) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
+| **Application state** | `chaos({ setup })` hook ([below](#pre-run-setup-hook)) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
 | **Network** | `chaosbringer` `faults.*` | HTTP between browser and server (Playwright `route()`) | "What does the UI do when `/api/x` is 500 / slow / aborted" |
 | **Page lifecycle / runtime** | `chaosbringer` `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults) | Inside the server process, before the handler runs | "Do the server's own OTel traces / metrics show the fault, and does the handler degrade gracefully" |
-| **Cloudflare bindings** | (proposed [`#61`](https://github.com/mizchi/chaosbringer/issues/61) `@mizchi/cf-faults`) | KV / Service Binding / D1 / Cache wrappers | "How does the Worker behave when its KV throws" |
+| **Cloudflare bindings** | [`@mizchi/cf-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
 
 **Common confusion:** `faults.status(500, ...)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` (or run both layers together).
 
@@ -54,20 +54,6 @@ npx playwright install chromium
 ```
 
 `chaosbringer` targets ESM. Programmatic consumers need `"type": "module"` (or `.mts` files) and `playwright` as a peer dependency.
-
-### Installing from a git ref
-
-`chaosbringer` is currently distributed via GitHub (no npm package yet). Both forms work:
-
-```bash
-# pin a commit SHA
-pnpm add chaosbringer@github:mizchi/chaosbringer#<sha>
-
-# track main
-pnpm add chaosbringer@github:mizchi/chaosbringer
-```
-
-The package's `prepare` script runs `tsc` on install, so `pnpm install` / `npm install` builds `dist/` automatically — no manual step needed.
 
 ## Quick start — CLI
 
