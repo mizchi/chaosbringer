@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
-import { SUBCOMMANDS } from "./cli-usage.js";
+import { progressText, SUBCOMMANDS } from "./cli-usage.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -47,6 +47,13 @@ describe("--version", () => {
     expect(r.stdout).toBe(`${version}\n`);
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
+  });
+});
+
+describe("progressText", () => {
+  it("redraws one line on a terminal, and writes a line per page anywhere else", () => {
+    expect(progressText(2, 5, true)).toBe("\rProgress: 2/5 pages");
+    expect(progressText(2, 5, false)).toBe("Progress: 2/5 pages\n");
   });
 });
 

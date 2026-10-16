@@ -1,6 +1,7 @@
 /**
  * What the main CLI says about itself rather than about a run: the
- * subcommand table behind `--help`, `--version` and usage errors.
+ * subcommand table behind `--help`, `--version`, usage errors and the
+ * `--compact` progress line.
  *
  * Out of `cli.ts`, which parses `process.argv` and exits as soon as it is
  * imported, so a test can read the table: `--help` listed 3 of the 13
@@ -109,4 +110,14 @@ export function usageErrorMessage(err: unknown): string {
   }
   // validateOptions' messages carry the prefix already.
   return `chaosbringer: ${message.replace(/^chaosbringer: /, "")} (see chaosbringer --help)`;
+}
+
+/**
+ * What `--compact` writes as each page starts. A terminal gets one line
+ * redrawn in place; a pipe or a CI log gets a line per page, where the `\r`
+ * ran them together as `Progress: 1/5 pagesProgress: 2/5 pages…`.
+ */
+export function progressText(visited: number, total: number, isTTY: boolean): string {
+  const text = `Progress: ${visited}/${total} pages`;
+  return isTTY ? `\r${text}` : `${text}\n`;
 }

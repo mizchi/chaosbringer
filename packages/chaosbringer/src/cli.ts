@@ -30,7 +30,7 @@
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
-import { formatSubcommandList, packageVersion, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
+import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
@@ -305,6 +305,7 @@ try {
 const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
+const isTTY = process.stdout.isTTY === true;
 const isStrict = values.strict;
 const baselinePath = values.baseline;
 const isBaselineStrict = values["baseline-strict"];
@@ -336,7 +337,7 @@ async function main() {
     },
     onProgress: (visited, total) => {
       if (!isQuiet && isCompact) {
-        process.stdout.write(`\rProgress: ${visited}/${total} pages`);
+        process.stdout.write(progressText(visited, total, isTTY));
       }
     },
   });
@@ -344,7 +345,7 @@ async function main() {
   try {
     const report = await crawler.start();
 
-    if (isCompact && !isQuiet) {
+    if (isCompact && !isQuiet && isTTY) {
       console.log(""); // New line after progress
     }
 
