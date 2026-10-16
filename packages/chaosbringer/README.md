@@ -1304,7 +1304,7 @@ const merged = mergeReports([r0, r1, r2, r3]);
 
 ### `diff`
 
-Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both (likely third-party noise). Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed.
+Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both sides, each with a raw sample message where it says more than the normalised cluster key. Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed; there, a shared cluster is not caused by either runtime (third-party noise, or a bug both have).
 
 ```bash
 chaosbringer --url http://127.0.0.1:3000 --seed 1 --output left.json

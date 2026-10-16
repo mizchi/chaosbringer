@@ -7,8 +7,9 @@
  * is symmetric: it shows left-only, right-only, and shared clusters
  * without claiming a direction. Designed for the dual-runtime
  * regression workflow described in #88 — same site data, two runtimes,
- * separate which clusters are unique to each side from third-party
- * noise that appears in both.
+ * separate which clusters are unique to each side from the ones in both.
+ * In that workflow a cluster in both is caused by neither runtime: it is
+ * third-party noise, or a bug both share.
  *
  * The heavy lifting (cluster matching, page state computation) lives
  * in `diffReports` so behaviour stays consistent with `--baseline`.
@@ -42,9 +43,10 @@ function loadReport(path: string): CrawlReport {
 interface DiffSummary {
   left: string;
   right: string;
-  leftOnlyClusters: Array<{ key: string; type: string; count: number }>;
-  rightOnlyClusters: Array<{ key: string; type: string; count: number }>;
-  sharedClusters: Array<{ key: string; type: string; leftCount: number; rightCount: number }>;
+  /** `sample` is one raw message of the cluster; the key holds its normalised fingerprint. */
+  leftOnlyClusters: Array<{ key: string; type: string; count: number; sample?: string }>;
+  rightOnlyClusters: Array<{ key: string; type: string; count: number; sample?: string }>;
+  sharedClusters: Array<{ key: string; type: string; leftCount: number; rightCount: number; sample?: string }>;
   leftOnlyFailedPages: Array<{ url: string; errors: number }>;
   rightOnlyFailedPages: Array<{ url: string; errors: number }>;
 }
@@ -67,6 +69,8 @@ function buildSummary(leftPath: string, rightPath: string): DiffSummary {
   const left = loadReport(leftPath);
   const right = loadReport(rightPath);
   const d = diffReports(left, right);
+  const sampleOf = (report: CrawlReport, key: string) =>
+    report.errorClusters.find((c) => c.key === key)?.sample?.message;
   return {
     left: leftPath,
     right: rightPath,
@@ -74,17 +78,20 @@ function buildSummary(leftPath: string, rightPath: string): DiffSummary {
       key: c.key,
       type: c.type,
       count: c.before,
+      sample: sampleOf(left, c.key),
     })),
     rightOnlyClusters: d.newClusters.map((c) => ({
       key: c.key,
       type: c.type,
       count: c.after,
+      sample: sampleOf(right, c.key),
     })),
     sharedClusters: d.unchangedClusters.map((c) => ({
       key: c.key,
       type: c.type,
       leftCount: c.before,
       rightCount: c.after,
+      sample: sampleOf(left, c.key) ?? sampleOf(right, c.key),
     })),
     leftOnlyFailedPages: d.resolvedFailedPages
       .filter((p) => p.before !== null)
@@ -94,6 +101,20 @@ function buildSummary(leftPath: string, rightPath: string): DiffSummary {
       errors: p.after?.errors ?? 0,
     })),
   };
+}
+
+/** Samples longer than this are cut in the human summary; `--json` has them whole. */
+const SAMPLE_SHOWN = 160;
+
+/**
+ * A cluster's raw sample, under its line, when it says more than the key:
+ * the fingerprint replaces URLs and numbers with `<url>` / `<n>`, so
+ * `Failed to load <url>` does not say which file.
+ */
+function sampleLine(c: { key: string; sample?: string }): string[] {
+  const first = c.sample?.split("\n")[0]?.trim();
+  if (!first || c.key.endsWith(`|${first}`)) return [];
+  return [`      e.g. ${first.length > SAMPLE_SHOWN ? `${first.slice(0, SAMPLE_SHOWN - 1)}…` : first}`];
 }
 
 function formatHuman(s: DiffSummary): string {
@@ -108,21 +129,24 @@ function formatHuman(s: DiffSummary): string {
   if (s.leftOnlyClusters.length > 0) {
     out.push("Left-only clusters:");
     for (const c of s.leftOnlyClusters) {
-      out.push(`  [${c.type}] ${c.key} (${c.count})`);
+      out.push(`  [${c.type}] ${c.key} (${c.count})`, ...sampleLine(c));
     }
     out.push("");
   }
   if (s.rightOnlyClusters.length > 0) {
     out.push("Right-only clusters:");
     for (const c of s.rightOnlyClusters) {
-      out.push(`  [${c.type}] ${c.key} (${c.count})`);
+      out.push(`  [${c.type}] ${c.key} (${c.count})`, ...sampleLine(c));
     }
     out.push("");
   }
   if (s.sharedClusters.length > 0) {
-    out.push("Shared clusters (likely third-party noise):");
+    // It said "likely third-party noise", which is what a shared cluster is
+    // in the two-runtime workflow (see HELP) and not in general: the app's
+    // own `fixture: boom` exception, on both sides, was listed under it.
+    out.push("Shared (both sides):");
     for (const c of s.sharedClusters) {
-      out.push(`  [${c.type}] ${c.key} (left=${c.leftCount}, right=${c.rightCount})`);
+      out.push(`  [${c.type}] ${c.key} (left=${c.leftCount}, right=${c.rightCount})`, ...sampleLine(c));
     }
     out.push("");
   }
@@ -146,7 +170,11 @@ function formatHuman(s: DiffSummary): string {
 const HELP = `Usage: chaosbringer diff <left.json> <right.json> [options]
 
 Compare two independent crawl reports. Shows clusters that appear only
-on the left, only on the right, and in both (likely third-party noise).
+on the left, only on the right, and on both sides, with a raw sample
+message where it says more than the normalised key. When the two reports
+are one site served by two runtimes and crawled with the same seed, a
+shared cluster is not caused by either runtime: third-party noise, or a
+bug both have.
 
 Options:
   --json                Output JSON instead of a human-readable summary
