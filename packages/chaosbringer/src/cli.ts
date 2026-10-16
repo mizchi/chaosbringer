@@ -23,14 +23,14 @@
  *   --compact             Compact output format
  *   --strict              Exit with error on console errors
  *   --quiet               Minimal output
- *   --help                Show this help
+ *   --help, -h            Show this help
  *   --version, -V         Print the version
  */
 
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
-import { packageVersion, usageErrorMessage } from "./cli-usage.js";
+import { formatSubcommandList, packageVersion, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
@@ -42,38 +42,20 @@ import { resolveSettle } from "./settle.js";
 import type { CrawlerOptions } from "./types.js";
 import { validateOptions } from "./validate.js";
 
-// Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
-// flags (e.g. --match for `minimize`) don't trip the main options map.
+// Subcommand dispatch (the table is SUBCOMMANDS in cli-usage.ts). Intercept
+// before parseArgs runs so subcommand-specific flags (e.g. --match for
+// `minimize`) don't trip the main options map.
 //
-// Each entry lazy-imports its handler so a `chaosbringer --help` invocation
-// doesn't pay the cost of compiling every subcommand. The handler is
-// expected to set `process.exitCode` on a non-fatal failure; thrown errors
-// are surfaced with the subcommand name and an exit code of 1. Legacy
-// handlers (minimize / flake / shard) call `process.exit` directly inside
-// themselves and never return, so the final `process.exit` here is only
-// reached by the newer handlers that opt into exitCode-based signalling.
-const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void>>> = {
-  minimize: () => import("./minimize.js").then((m) => m.runMinimizeCli),
-  flake: () => import("./flake.js").then((m) => m.runFlakeCli),
-  shard: () => import("./shard.js").then((m) => m.runShardCli),
-  recipes: () => import("./recipes/cli.js").then((m) => m.runRecipesCli),
-  load: () => import("./recipes/load-cli.js").then((m) => m.runLoadCli),
-  diff: () => import("./diff-cli.js").then((m) => m.runDiffCli),
-  "cluster-artifacts": () =>
-    import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
-  parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
-  journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
-  model: () => import("./model/cli.js").then((m) => m.runModelCli),
-  perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
-  scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
-  drive: () => import("./drive/cli.js").then((m) => m.runDriveCli),
-};
-
+// The handler is expected to set `process.exitCode` on a non-fatal failure;
+// thrown errors are surfaced with the subcommand name and an exit code of 1.
+// Legacy handlers (minimize / flake / shard) call `process.exit` directly
+// inside themselves and never return, so the final `process.exit` here is
+// only reached by the newer handlers that opt into exitCode-based signalling.
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
 if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   try {
-    const run = await SUBCOMMANDS[subcommand]();
+    const run = await SUBCOMMANDS[subcommand].load();
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
@@ -189,8 +171,11 @@ OPTIONS:
   --compact             Compact output format
   --strict              Exit with error on any console errors
   --quiet               Minimal output
-  --help                Show this help
+  --help, -h            Show this help
   --version, -V         Print the version
+
+SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
+${formatSubcommandList()}
 
 PERF SUBCOMMANDS (read crawl reports written with --perf):
   chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]

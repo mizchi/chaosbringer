@@ -84,7 +84,7 @@ export const CRAWL_CLI_OPTIONS = {
   compact: { type: "boolean", default: false },
   strict: { type: "boolean", default: false },
   quiet: { type: "boolean", default: false },
-  help: { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
   version: { type: "boolean", short: "V", default: false },
 } as const;
 

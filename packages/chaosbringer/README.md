@@ -1405,7 +1405,7 @@ chaosbringer --url http://localhost:3000 \
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
 | `--quiet` | Minimal output | false |
-| `--help` | Show help | — |
+| `--help`, `-h` | Show help, with a line for every subcommand | — |
 | `--version`, `-V` | Print the installed version | — |
 
 † `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).

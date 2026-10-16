@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
+import { SUBCOMMANDS } from "./cli-usage.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -23,6 +24,21 @@ function cli(args: string[]) {
   });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+describe("--help", () => {
+  it("lists every subcommand of the dispatch table, one line each with its summary", () => {
+    const r = cli(["-h"]);
+    expect(r.status).toBe(0);
+    const section = r.stdout.split("\nSUBCOMMANDS")[1]?.split("\n\n")[0] ?? "";
+    const rows = section.split("\n").slice(1);
+    expect(rows.map((row) => row.trim().split(/\s+/)[0])).toEqual(Object.keys(SUBCOMMANDS));
+    for (const [name, sub] of Object.entries(SUBCOMMANDS)) {
+      expect(rows).toContainEqual(expect.stringMatching(new RegExp(`^  ${name} +${escapeRegExp(sub.summary)}$`)));
+    }
+  });
+});
 
 describe("--version", () => {
   it.each([["--version"], ["-V"]])("%s prints the package.json version and exits 0", (flag) => {
