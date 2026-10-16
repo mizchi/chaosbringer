@@ -79,6 +79,27 @@ Rules currently enforced:
 | `hardcoded-credentials` | warn | password-looking field with a non-templated value |
 | `adjacent-duplicate-wait` | info | two `wait` steps in a row |
 
+## Replaying on another host
+
+A recipe keeps the absolute URLs it was recorded with: `chaosbringer
+drive` saves `{"kind":"navigate","url":"http://localhost:3000/login"}`.
+`recipes verify`, `recipes repair` and `chaosbringer load` replay it on
+`--base-url` instead. Each navigation to the origin the recipe was
+recorded on (its first navigate's) goes to `--base-url`'s origin, path
+and query kept, and so does a `urlContains` that spells that origin out.
+Navigations to another origin (SSO, payments) are left alone. The saved
+recipe is not rewritten; `repair` stores its repaired version with the
+URLs it ran on.
+
+```sh
+pnpm chaosbringer recipes verify auth/login --base-url https://staging.example.test
+# verify: auth/login was recorded on http://localhost:3000; replaying it on https://staging.example.test instead
+```
+
+The warning goes to stderr, so `--json` output stays parseable, and
+`--quiet` drops it. A `--base-url` that does not answer fails the
+replay: `verify` does not promote, `load` counts the failures and exits 1.
+
 ## Auto-repair (CLI form)
 
 `recipes repair` uses the **weighted-random** driver — free, deterministic

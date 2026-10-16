@@ -171,6 +171,13 @@ export interface RunRecipeFixtureOptions {
   chainRequires?: boolean;
   /** Storage-state snapshot policy. */
   snapshot?: boolean | SnapshotPolicy;
+  /**
+   * Site to replay on: the recipe's navigations to the origin it was
+   * recorded on go to this origin instead (`rebaseRecipe`). Default: the
+   * test's `baseURL` when it is http(s), so a suite pointed at staging
+   * replays there.
+   */
+  baseUrl?: string;
 }
 
 export interface InvestigateFixtureOptions {
@@ -226,12 +233,14 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
     },
 
     runRecipe: async (
-      { page, store }: { page: Page; store: RecipeStore },
+      { page, store, baseURL }: { page: Page; store: RecipeStore; baseURL: string | undefined },
       use: (fn: RecipesFixture["runRecipe"]) => Promise<void>,
     ) => {
       await use(async (name, opts = {}) => {
         const recipe = store.get(name);
         if (!recipe) throw new Error(`runRecipe: "${name}" not found in store`);
+        // A `baseURL` off http(s) (`file://` fixtures) has no origin to move to.
+        const baseUrl = opts.baseUrl ?? (baseURL && /^https?:/i.test(baseURL) ? baseURL : undefined);
 
         const chain = opts.chainRequires !== false;
         if (chain && recipe.requires.filter((d) => !d.startsWith("__")).length > 0) {
@@ -240,6 +249,7 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
             recipe,
             store,
             vars: opts.vars,
+            baseUrl,
             snapshot: opts.snapshot,
             onProgress: (ev) => {
               if (ev.kind === "complete") {
@@ -255,7 +265,7 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
           }
           return;
         }
-        const result = await replayRecipe(page, recipe, { vars: opts.vars });
+        const result = await replayRecipe(page, recipe, { vars: opts.vars, baseUrl });
         if (result.ok) {
           store.recordSuccess(name, result.durationMs);
           return;

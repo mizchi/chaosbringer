@@ -26,8 +26,10 @@ import { weightedRandomDriver } from "../drivers/index.js";
 import {
   COMMON_OPTIONS,
   openStore,
+  requireBaseUrl,
   requireRecipe,
   requireVersion,
+  warnRebased,
 } from "./cli-common.js";
 import { diffRecipes, formatRecipeDiff } from "./diff.js";
 import { lintRecipe, lintStore, summarise } from "./lint.js";
@@ -389,7 +391,9 @@ async function verifyCmd(argv: string[]): Promise<void> {
   const name = positionals[0];
   if (values.help || !name) {
     console.log(
-      "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]",
+      "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]\n\n" +
+        "  Replays on --base-url's origin: the recipe's navigations to the origin it\n" +
+        "  was recorded on go there instead, path and query kept (with a warning).",
     );
     return;
   }
@@ -398,24 +402,28 @@ async function verifyCmd(argv: string[]): Promise<void> {
     console.error("verify: --base-url is required");
     process.exit(2);
   }
+  requireBaseUrl("verify", baseUrl);
   const store = openStore(values);
   const recipe = requireRecipe(store, name);
   const runs = Number(values.runs ?? "5");
   const minSuccessRate = values["min-success-rate"]
     ? Number(values["min-success-rate"])
     : 0.8;
+  if (!values.quiet) warnRebased("verify", [recipe], baseUrl);
 
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
     const result = await verifyAndPromote(store, recipe, {
       runs,
       minSuccessRate,
+      baseUrl,
       verbose: !values.quiet,
       setupPage: async () => {
         const { page, close } = await newIsolatedPage(browser);
         // verifyAndPromote does NOT navigate for you — caller's setupPage
         // owns the start state. The recipe's first step (if it's a
-        // navigate) drives the page; otherwise we go to baseUrl.
+        // navigate, rebased onto baseUrl) drives the page; otherwise we
+        // go to baseUrl.
         if (recipe.steps[0]?.kind !== "navigate") {
           await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
         }
@@ -550,7 +558,8 @@ async function repairCmd(argv: string[]): Promise<void> {
       "recipes repair <name> --base-url URL [--start-url URL] [--repair-budget N] [--seed N]\n\n" +
         "  Uses the weighted-random driver to discover a working tail after the\n" +
         "  failing step. For LLM-driven repair, call repairRecipe() programmatically\n" +
-        "  with `driver: aiDriver(...)` instead.",
+        "  with `driver: aiDriver(...)` instead. With --base-url, the recipe replays\n" +
+        "  on that origin, as `recipes verify` does, and the repaired version keeps it.",
     );
     return;
   }
@@ -563,6 +572,10 @@ async function repairCmd(argv: string[]): Promise<void> {
       "repair: --base-url (or --start-url) is required when the recipe does not start with a navigate step",
     );
     process.exit(2);
+  }
+  if (baseUrl) {
+    requireBaseUrl("repair", baseUrl);
+    if (!values.quiet) warnRebased("repair", [recipe], baseUrl);
   }
   const seed = values.seed ? Number(values.seed) : undefined;
   const budget = values["repair-budget"] ? Number(values["repair-budget"]) : undefined;

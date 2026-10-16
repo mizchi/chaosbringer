@@ -62,16 +62,23 @@ lands on one is undone with a history back.
   role selector (`role=button[name="Pay"s] >> nth=1`), which finds it again on
   a later load. The snapshot's refs only last until the next snapshot. A step
   that changed the path waits on replay until it has. Use `--save-recipe
-  <name>` to put it in the recipe store, then:
+  <name>` to put it in the recipe store; `drive` then prints the command
+  that verifies it, with the origin it ran on as `--base-url` (and the
+  `--dir` it saved to). Point `--base-url` at another host to verify it
+  there:
 
   ```sh
   chaosbringer recipes verify shop/add-tshirt --base-url https://shop.example.test/ --runs 3
   ```
 
   This replays it and promotes it to verified, after which `recipeDriver`,
-  `chaosbringer load` and the rest of the recipe tooling can use it. A run
-  that acted on a control with no role and no name cannot be replayed, so it
-  produces no recipe, and the summary says which step.
+  `chaosbringer load` and the rest of the recipe tooling can use it. The
+  recipe keeps the absolute URLs of the run. `verify`, `repair` and `load`
+  move its navigations to that origin onto `--base-url`'s, path and query
+  kept, and warn that they did. Navigations to another origin are left
+  alone. A host that does not answer fails the replay. A run that acted on
+  a control with no role and no name cannot be replayed, so it produces no
+  recipe, and the summary says which step.
 - **A video** with `--video`, recorded with Playwright's `page.screencast`.
   It shows each action annotated on screen and opens with the goal as a
   title card.

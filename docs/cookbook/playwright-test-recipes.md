@@ -60,10 +60,17 @@ test("data-driven signup", async ({ runRecipe }) => {
       vars: { email, password: "ChaosTest!2024" },
       // chainRequires: false   // skip auth/login etc. for this run
       // snapshot: true          // enable storage-state snapshot fast-path
+      // baseUrl: "https://staging.example.test"   // default: the config's baseURL
     });
   }
 });
 ```
+
+A recipe keeps the absolute URLs it was recorded with. `runRecipe` moves
+its navigations to that origin onto the test's `baseURL` (or `baseUrl`),
+path and query kept, so a suite pointed at staging replays recipes
+recorded on localhost there. Navigations to another origin are left
+alone.
 
 ## Harvesting page-declared scenarios
 

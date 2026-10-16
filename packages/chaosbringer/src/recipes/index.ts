@@ -37,7 +37,7 @@ export {
   type RecipeSnapshot,
 } from "./snapshot.js";
 export { preconditionsHold } from "./match.js";
-export { runRecipe } from "./replay.js";
+export { rebaseRecipe, recipeOrigin, runRecipe } from "./replay.js";
 export { extractCandidate, type ExtractCandidateOptions } from "./capture.js";
 export { verifyAndPromote, type VerifyOptions, type VerifyResult } from "./verify.js";
 export {

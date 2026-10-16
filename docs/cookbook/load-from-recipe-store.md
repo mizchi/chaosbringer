@@ -42,6 +42,15 @@ The `LoadReport` has one scenario named `"recipe-mix"` (configurable
 via `scenarioName`). Latency / fault timeline / throughput all behave
 exactly like a hand-written `scenarioLoad` run.
 
+Every replay goes to `baseUrl`. A recipe keeps the absolute URLs it was
+recorded with (`chaosbringer drive` saves `http://localhost:3000/login`),
+and its navigations to that origin move onto `baseUrl`'s origin, path
+and query kept, so a library recorded on localhost load-tests staging.
+Navigations to another origin (an SSO page, a payment provider) are left
+alone, and a recipe whose site is a template (`{{base}}/signup`, below)
+goes wherever `vars` says. `rebaseRecipe(recipe, baseUrl)` shows the
+result for one recipe.
+
 ## Recipe templating
 
 Recipes can now declare `{{var}}` placeholders. Substitution happens

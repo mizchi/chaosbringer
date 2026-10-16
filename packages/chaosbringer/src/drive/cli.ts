@@ -4,16 +4,22 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
+import { recipeOrigin } from "../recipes/replay.js";
 import { RecipeStore } from "../recipes/store.js";
+import type { ActionRecipe } from "../recipes/types.js";
+import { shellQuote } from "../repro-command.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
 import { drive, type DriveDecider, type DriveResult, type DriveUntil } from "./drive.js";
 import { siteProblems } from "./problems.js";
 import { attachHint, type BoundBrowser, waitForInterrupt } from "../browser-bind.js";
 import { recipeChaos, type RecipeChaosResult } from "./chaos.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind } from "../scan/analyze.js";
+
+/** Where `--save-recipe` stores without `--dir`; `recipes`' default too. */
+const DEFAULT_RECIPE_DIR = "chaosbringer-recipes";
 
 const HELP = `
 chaosbringer drive — operate a browser towards a goal, with the checks running
@@ -157,9 +163,9 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   }
   if (values["save-recipe"] !== undefined) {
     if (result.recipe) {
-      const store = new RecipeStore({ localDir: values.dir ?? join(process.cwd(), "chaosbringer-recipes"), globalDir: false });
+      const store = new RecipeStore({ localDir: values.dir ?? join(process.cwd(), DEFAULT_RECIPE_DIR), globalDir: false });
       store.upsert(result.recipe);
-      console.log(`recipe saved: ${result.recipe.name} (verify with: chaosbringer recipes verify ${result.recipe.name})`);
+      console.log(`recipe saved: ${result.recipe.name} (verify with: ${verifyCommand(result.recipe, values.dir)})`);
     } else {
       console.log(`no recipe saved: ${result.recipeSkipped ?? "the goal was not reached"}`);
     }
@@ -189,6 +195,20 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   }
   if (result.status !== "reached" && result.status !== "done") process.exitCode = 1;
   else if (chaos?.findings.some((f) => f.severity === "high")) process.exitCode = 1;
+}
+
+/**
+ * The `recipes verify` command for a recipe `drive` just stored. verify
+ * requires `--base-url`: the origin the recipe was recorded on, which a
+ * reader swaps for another host to verify it there. `--dir` only when
+ * the store is not verify's default, which it would not find otherwise.
+ */
+export function verifyCommand(recipe: ActionRecipe, dir: string | undefined): string {
+  const words = ["chaosbringer", "recipes", "verify", shellQuote(recipe.name)];
+  const origin = recipeOrigin(recipe);
+  if (origin) words.push("--base-url", shellQuote(origin));
+  if (dir !== undefined && resolve(dir) !== resolve(DEFAULT_RECIPE_DIR)) words.push("--dir", shellQuote(dir));
+  return words.join(" ");
 }
 
 export function formatChaosSummary(c: RecipeChaosResult): string {

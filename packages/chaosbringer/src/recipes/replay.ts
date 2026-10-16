@@ -14,7 +14,7 @@
  */
 import type { Page } from "playwright";
 import type { ExpectClause, ActionRecipe, RecipeStep, ReplayResult } from "./types.js";
-import { substituteSteps, type RecipeVars } from "./templating.js";
+import { hasTemplates, substituteSteps, type RecipeVars } from "./templating.js";
 
 const DEFAULT_EXPECT_TIMEOUT_MS = 5000;
 /**
@@ -33,6 +33,14 @@ export interface RunRecipeOptions {
    * missing — silent fallback would let typos bypass form fills.
    */
   vars?: RecipeVars;
+  /**
+   * The site to replay against. A recipe keeps the absolute URLs it was
+   * recorded with, so without this one made on localhost replays on
+   * localhost whatever host the caller meant to test. With it, the
+   * recipe's own URLs move onto this URL's origin; see `rebaseRecipe`.
+   * Throws when it is not an absolute http(s) URL.
+   */
+  baseUrl?: string;
 }
 
 export async function runRecipe(
@@ -41,7 +49,10 @@ export async function runRecipe(
   opts: RunRecipeOptions = {},
 ): Promise<ReplayResult> {
   const start = performance.now();
-  const steps = opts.vars ? substituteSteps(recipe.steps, opts.vars) : recipe.steps;
+  // Rebased before substitution: a `{{var}}` is not part of any origin,
+  // and a substituted value is the caller's, not the recording's.
+  const rebased = opts.baseUrl ? rebaseRecipe(recipe, opts.baseUrl) : recipe;
+  const steps = opts.vars ? substituteSteps(rebased.steps, opts.vars) : rebased.steps;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
     try {
@@ -89,6 +100,87 @@ export async function runRecipe(
     }
   }
   return { ok: true, durationMs: performance.now() - start };
+}
+
+/**
+ * The origin a recipe was recorded on: its first navigate step's, when
+ * that is an absolute http(s) URL (`drive` always starts with one).
+ * `null` when the recipe has no navigate, or its first one templates
+ * the site (`{{base}}/`, `http://{{host}}/`) — the caller's vars name
+ * it then, not the recording.
+ */
+export function recipeOrigin(recipe: Pick<ActionRecipe, "steps">): string | null {
+  const nav = recipe.steps.find((s) => s.kind === "navigate");
+  const origin = nav?.kind === "navigate" ? httpOrigin(nav.url) : null;
+  return origin && !hasTemplates(origin) ? origin : null;
+}
+
+/**
+ * `recipe` replayed on `baseUrl`'s site: every navigate to the recipe's
+ * recorded origin (`recipeOrigin`) goes to `baseUrl`'s origin instead,
+ * path, query, hash and any `{{var}}` in them kept as written, and so do
+ * the `urlContains` / `urlNotContains` expectations that spell that
+ * origin out. Only the origin moves, never a path prefix: a base URL is
+ * often a start page (`https://staging.test/login`), not a mount point.
+ * A navigate to another origin (a payment provider, an SSO page) is left
+ * alone. Saved recipes are not rewritten — this happens at replay.
+ */
+export function rebaseRecipe(recipe: ActionRecipe, baseUrl: string): ActionRecipe {
+  const to = httpOrigin(baseUrl);
+  if (!to) throw new Error(`rebaseRecipe: base URL ${JSON.stringify(baseUrl)} is not an absolute http(s) URL`);
+  const from = recipeOrigin(recipe);
+  if (!from || from === to) return recipe;
+  return { ...recipe, steps: recipe.steps.map((s) => rebaseStep(s, from, to)) };
+}
+
+/**
+ * The warning a CLI prints when `baseUrl` moves `recipe` off the origin
+ * it was recorded on; `null` when it does not move it.
+ */
+export function rebaseNotice(recipe: ActionRecipe, baseUrl: string): string | null {
+  const from = recipeOrigin(recipe);
+  const to = httpOrigin(baseUrl);
+  if (!from || !to || from === to) return null;
+  return `${recipe.name} was recorded on ${from}; replaying it on ${to} instead`;
+}
+
+function rebaseStep(step: RecipeStep, from: string, to: string): RecipeStep {
+  let out = step;
+  if (step.kind === "navigate" && httpOrigin(step.url) === from) {
+    // Rewritten as text, not through `URL`: that would percent-encode
+    // the braces of a `{{var}}` in the path and break the template.
+    const authority = /^[a-z][a-z\d+.-]*:\/\/[^/?#]*/i.exec(step.url);
+    if (authority) out = { ...step, url: to + step.url.slice(authority[0].length) };
+  }
+  if (out.kind === "wait" || out.kind === "waitFor" || !out.expectAfter) return out;
+  const expect = out.expectAfter;
+  const urlContains = swapOrigin(expect.urlContains, from, to);
+  const urlNotContains = swapOrigin(expect.urlNotContains, from, to);
+  if (urlContains === expect.urlContains && urlNotContains === expect.urlNotContains) return out;
+  return {
+    ...out,
+    expectAfter: {
+      ...expect,
+      ...(urlContains !== undefined ? { urlContains } : {}),
+      ...(urlNotContains !== undefined ? { urlNotContains } : {}),
+    },
+  };
+}
+
+/** `text` with a leading `from` origin replaced by `to`; anything else as is. */
+function swapOrigin(text: string | undefined, from: string, to: string): string | undefined {
+  if (text === undefined || !text.startsWith(from)) return text;
+  const next = text.charAt(from.length);
+  return next === "" || "/?#".includes(next) ? to + text.slice(from.length) : text;
+}
+
+function httpOrigin(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 async function executeStep(page: Page, step: RecipeStep): Promise<void> {

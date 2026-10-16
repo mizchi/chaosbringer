@@ -113,6 +113,12 @@ sequential calls in the same session to amortise the chain cost.
 `recipeDriver({ chainRequires: false })` opts out for callers who
 want the legacy metadata-only semantics.
 
+Each link of a chain replays on the site under test, not on the host it
+was recorded on: `recipeDriver` moves a recipe's navigations to its
+recorded origin onto the origin of the page it matched on (or its
+`baseUrl` option), and `runRecipeWithRequires({ baseUrl })` does the
+same for every link.
+
 ## Delta-debugging the regression trace
 
 Phase D's `investigate()` now accepts `minimize: true`. After

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recipeStoreScenario } from "./load-bridge.js";
+import { recipeStoreScenario, storeScenarioRecipes } from "./load-bridge.js";
 import { RecipeStore } from "./store.js";
 import type { ActionRecipe } from "./types.js";
 import { emptyStats } from "./types.js";
@@ -195,5 +195,28 @@ describe("recipeStoreScenario selection strategies", () => {
       })
       .catch(() => {});
     expect(seen).toEqual([3, 7]);
+  });
+});
+
+// What `chaosbringer load` warns about before a run whose base URL moves
+// recipes off the origin they were recorded on: the chains count, since
+// a dependency replays on the base URL too.
+describe("storeScenarioRecipes", () => {
+  it("lists the candidates and what their requires chains run first", () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert({ ...recipe("auth/login"), status: "candidate" });
+    store.upsert({ ...recipe("shop/buy"), requires: ["auth/login", "__repaired-from-v1"] });
+    store.upsert(recipe("blog/read"));
+    const names = (opts: Partial<Parameters<typeof storeScenarioRecipes>[0]>) =>
+      storeScenarioRecipes({ store, ...opts }).map((r) => r.name).sort();
+    expect(names({})).toEqual(["auth/login", "blog/read", "shop/buy"]);
+    expect(names({ filter: (r) => r.name === "shop/buy" })).toEqual(["auth/login", "shop/buy"]);
+    expect(names({ filter: (r) => r.name === "shop/buy", chainRequires: false })).toEqual(["shop/buy"]);
+  });
+
+  it("keeps a candidate whose chain does not resolve", () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert({ ...recipe("shop/buy"), requires: ["auth/missing"] });
+    expect(storeScenarioRecipes({ store }).map((r) => r.name)).toEqual(["shop/buy"]);
   });
 });
