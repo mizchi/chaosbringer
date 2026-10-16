@@ -658,6 +658,17 @@ describe("analyzeScan: coverage warnings", () => {
     expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
     expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
   });
+
+  it("does not call a light start page a bot check when the crawl went on past it", () => {
+    // A small static site: 3 requests and 2 KB on the start page, then nine
+    // more pages. It was told it had maybe been served a bot check.
+    const start = fakePage(`${U}/`, undefined, {
+      links: [`${U}/a`],
+      perfPage: perfPage({ network: { totalRequests: 3, totalEncodedKB: 2, fromCacheCount: 0 } }),
+    });
+    const rest = Array.from({ length: 9 }, (_, i) => fakePage(`${U}/p${i}`));
+    expect(analyzeScan(fakeReport([start, ...rest], [])).coverageWarnings).toEqual([]);
+  });
 });
 
 describe("RULE_PATTERNS", () => {

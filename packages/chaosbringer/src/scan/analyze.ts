@@ -67,9 +67,9 @@ export interface ScanAnalysis {
   environment: ScanEnvironmentNote[];
   /**
    * Why the findings may not cover the site: the clean crawl barely reached
-   * it (one page, no links, a near-empty start page). A bot check, a rate
-   * limit or an error page reads as a clean site with few findings; this says
-   * so instead. Empty when the crawl looked normal.
+   * it (one page, no links, a near-empty start page it got no further than).
+   * A bot check, a rate limit or an error page reads as a clean site with few
+   * findings; this says so instead. Empty when the crawl looked normal.
    */
   coverageWarnings: string[];
 }
@@ -407,7 +407,16 @@ function coverageWarnings(report: CrawlReport): string[] {
       "The crawl reached only the start page, and it had no same-site links to follow. It may be a single-page app with no URL per view, or the site served a bot check, a rate limit or an error page, or it needs a login (--storage-state). The findings cover that one page.",
     );
   }
-  if (net && net.totalRequests <= NEAR_EMPTY_START.requests && net.totalEncodedKB < NEAR_EMPTY_START.kb) {
+  // Only when the crawl got no further: a small static site's start page is
+  // just as light, and a 10-page crawl of one was told it may have been
+  // served a bot check. A bot check or a consent wall stops the crawl too.
+  const stoppedAtStart = report.pages.length <= 1;
+  if (
+    stoppedAtStart &&
+    net &&
+    net.totalRequests <= NEAR_EMPTY_START.requests &&
+    net.totalEncodedKB < NEAR_EMPTY_START.kb
+  ) {
     out.push(
       `The start page was nearly empty (${net.totalRequests} requests, ${fmt(net.totalEncodedKB)} KB). If the site normally shows more, it served the crawler something else (a bot check, a consent wall); re-run later or from another network.`,
     );

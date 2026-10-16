@@ -202,8 +202,9 @@ goes through the proxy, so it stops verifying the real sites' certificates
 as well.
 
 If the crawl barely reached the site (one page with no links, or a nearly
-empty start page), the report opens with a warning instead of reading as a
-clean site. That happens with a bot check, a rate limit, a consent wall, or a
+empty start page it got no further than), the report opens with a warning
+instead of reading as a clean site. A light start page alone is no warning:
+a small static site has one too. That happens with a bot check, a rate limit, a consent wall, or a
 site that needs `--storage-state`. The crawler's own navigation errors
 (`page.goto: Timeout …`) are not reported as the site's exceptions; the page
 that failed to load is. A page that fails in a chaos crawl counts against the
