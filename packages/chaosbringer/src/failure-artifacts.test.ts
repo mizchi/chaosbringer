@@ -127,13 +127,13 @@ describe("buildReproScript", () => {
   });
 
   // The flags of a crawl that logs in, emulates a phone, settles adaptively,
-  // skips /logout, ignores analytics, and fails on console errors.
-  const runFlags = () => {
+  // skips /logout, ignores analytics, and fails on console errors, then `extra`.
+  const runFlags = (...extra: string[]) => {
     const { values } = parseCrawlArgs([
       "--url", "http://localhost:3000", "--seed", "7", "--trace-out", "run.jsonl",
       "--storage-state", "ss.json", "--device", "Pixel 7", "--settle", "adaptive",
       "--exclude", "/logout", "--aria-targets", "--no-http-cache", "--ignore-analytics",
-      "--timeout", "5000", "--strict",
+      "--timeout", "5000", "--strict", ...extra,
     ]);
     const options = crawlerOptionsFromCli(values, "http://localhost:3000");
     const set = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined));
@@ -153,6 +153,26 @@ describe("buildReproScript", () => {
         "--exclude /logout --ignore-analytics --storage-state /work/app/ss.json --device 'Pixel 7' " +
         "--aria-targets --no-http-cache --settle adaptive --strict",
     );
+  });
+
+  // repro.sh runs from its bundle, so a relative path to a file the run read
+  // would name a file in there. A sitemap URL is no file.
+  it.each([
+    ["--har-replay", "net.har", "/work/app/net.har"],
+    ["--perf-budgets", "b.json", "/work/app/b.json"],
+    ["--visual-baseline", "vb", "/work/app/vb"],
+    ["--seed-from-sitemap", "sitemap.xml", "/work/app/sitemap.xml"],
+    ["--seed-from-sitemap", "http://x/sitemap.xml", "http://x/sitemap.xml"],
+  ])("writes %s %s as %s", (flag, value, expected) => {
+    const s = buildReproScript({
+      baseUrl: "http://localhost:3000",
+      tracePath: "./trace.jsonl",
+      flags: runFlags(flag, value),
+      cwd: "/work/app",
+    });
+    const command = s.split("\n").find((l) => l.startsWith("chaosbringer ")) ?? "";
+    const argv = execFileSync("sh", ["-c", `printf '%s\\0' ${command}`], { encoding: "utf8" }).split("\0");
+    expect(argv.filter((_, i) => argv[i - 1] === flag)).toEqual([expected]);
   });
 
   it("runs from its own directory, wherever it is started", () => {
