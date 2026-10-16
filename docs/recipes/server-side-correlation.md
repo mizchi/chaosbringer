@@ -18,7 +18,8 @@ Browser (Playwright)              Server process
   |                                  |     [synthetic 5xx]:
   |                                  |       response.headers +=
   |                                  |         x-chaos-fault-*
-  |                                  |     [latency, partial, slowStream]:
+  |                                  |     [latency, and on Hono only
+  |                                  |      partial, slowStream]:
   |                                  |       real handler runs (after a
   |                                  |       sleep for latency), adapter
   |                                  |       adds headers on the way back
@@ -70,7 +71,7 @@ import { koaMiddleware } from "@mizchi/server-faults/koa";
 app.use(koaMiddleware({ status5xxRate: 0.3, metadataHeader: true }));
 ```
 
-After this change, every synthetic 5xx response and every real response hit by latency, a partial body (`partialResponseRate`) or a slow stream (`slowStreaming`) carries headers like:
+After this change, every synthetic 5xx response and every real response hit by latency, a partial body (`partialResponseRate`, Hono adapter only) or a slow stream (`slowStreaming`, Hono adapter only) carries headers like:
 
 ```
 x-chaos-fault-kind: 5xx
