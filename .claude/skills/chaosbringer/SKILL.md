@@ -71,7 +71,8 @@ The alternatives, and when they beat it:
 
 - **`chaos({ baseUrl, faultInjection, strict: true })`** — chaosbringer drives,
   breaking things across the app. Reach for it to explore an unfamiliar app.
-  Exit codes and `strict` only exist on this path. If you need it to follow a
+  Exit codes only exist on this path (`strict` also exists on the fixture
+  below, where it fails the test instead). If you need it to follow a
   *known* path, pass `driver: flowDriver({ steps })` — the default driver picks
   actions at random, and a test that can't name the button pressed can't make a
   claim. `flowDriver` is one-shot and stateful: reusing an instance across two

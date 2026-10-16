@@ -321,6 +321,14 @@ chaosTest("survives a failing cart", async ({ page, chaos }) => {
 `chaosbringer/fixture` is the only entry point that needs `@playwright/test`
 installed; the package root needs only `playwright`.
 
+A relative URL (`chaos.testPage(page, "/")`, `chaos.crawl("/")`) resolves
+against the config's `use.baseURL`, or `chaosOptions.baseUrl` when set.
+`chaosOptions` takes `seed`, `faultInjection`, `invariants`, `lifecycleFaults`
+and `runtimeFaults` — the last for `crawl()` only, since `testPage()` runs on
+your page and the runtime-fault init script is installed on the crawl's own
+context. `strict: true` fails the test by the CLI's `--strict` rule, and every
+`crawl()` attaches its report as `chaos-report.json`.
+
 `testPage` uses a page *you* own, and releases anything a `hang` parked before
 it returns. If you drive the page across several steps of your own, `release()`
 on the crawler drains on demand.

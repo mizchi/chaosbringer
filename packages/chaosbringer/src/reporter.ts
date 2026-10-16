@@ -471,8 +471,13 @@ export interface ExitCodeOptions {
 
 // CI-friendly exit code helper. The second argument is accepted as either a
 // boolean (legacy `strict`) or an options object so callers can opt into
-// baseline-strict without a larger API change.
-export function getExitCode(report: CrawlReport, strict: boolean | ExitCodeOptions = false): number {
+// baseline-strict without a larger API change. It reads only `summary` and
+// `diff`, so a caller judging something smaller than a crawl — the Playwright
+// fixture's single `testPage()` — applies this rule rather than a copy of it.
+export function getExitCode(
+  report: Pick<CrawlReport, "summary" | "diff">,
+  strict: boolean | ExitCodeOptions = false,
+): number {
   const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
   if (report.summary.errorPages > 0 || report.summary.timeoutPages > 0) {
     return 1;

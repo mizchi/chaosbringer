@@ -1170,32 +1170,32 @@ The browser's "Failed to load resource" message names no file, so its console er
 
 ## Playwright Test integration
 
-Use the pre-configured `chaosTest`:
+The fixture lives at the `chaosbringer/fixture` subpath — the package root does not export it, so that only this entry point needs `@playwright/test` installed. Use the pre-configured `chaosTest`:
 
 ```ts
-import { chaosTest, chaosExpect } from "chaosbringer";
+import { chaosTest, chaosExpect } from "chaosbringer/fixture";
 
 chaosTest("chaos-test homepage", async ({ page, chaos }) => {
-  await page.goto("http://localhost:3000");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/");
   chaosExpect.toHaveNoExceptions(result);
   chaosExpect.toLoadWithin(result, 3000);
 });
 ```
 
+A relative URL resolves against `baseURL` from the Playwright config's `use` — the one `page.goto` resolves against — unless `chaosOptions.baseUrl` is set, which takes precedence. An absolute URL is used as given.
+
 Or extend your existing test:
 
 ```ts
 import { test as base } from "@playwright/test";
-import { withChaos, type ChaosFixtures } from "chaosbringer";
+import { withChaos, type ChaosFixtures } from "chaosbringer/fixture";
 
 const test = base.extend<ChaosFixtures>(
   withChaos({ maxActionsPerPage: 10, ignoreErrorPatterns: ["analytics"] }),
 );
 
 test("my feature", async ({ page, chaos }) => {
-  await page.goto("/dashboard");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/dashboard");
   chaos.expectNoErrors(result);
 });
 ```
@@ -1204,13 +1204,36 @@ Or crawl from within a fixture-based test:
 
 ```ts
 chaosTest("crawl entire site", async ({ chaos }) => {
-  const report = await chaos.crawl("http://localhost:3000");
+  const report = await chaos.crawl("/");
   chaos.expectNoErrors(report);
   chaos.expectNoDeadLinks(report);
 });
 ```
 
+Every `crawl()` attaches its report to the test as `chaos-report.json`, so it is in the HTML report next to the failure.
+
 `expectNoDeadLinks` / `chaosExpect.toHaveNoDeadLinks` surface each broken URL together with the page it was found on, so a CI failure points straight at the broken anchor without cross-referencing the full JSON report.
+
+`chaosOptions` — set per file with `chaosTest.use({ chaosOptions })`, or as `withChaos()`'s defaults — also carries faults, invariants, a seed, and `strict`:
+
+```ts
+import { faults } from "chaosbringer";
+import { chaosTest } from "chaosbringer/fixture";
+
+chaosTest.use({
+  chaosOptions: {
+    seed: 42,
+    faultInjection: [faults.status(503, { urlPattern: /\/api\/stock/ })],
+    strict: true,
+  },
+});
+
+chaosTest("stock page survives a down API", async ({ page, chaos }) => {
+  await chaos.testPage(page, "/stock");
+});
+```
+
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. `lifecycleFaults` and `runtimeFaults` are accepted too; `runtimeFaults` apply to `crawl()` only, since they are an init script on the context the crawl opens and `testPage()` runs on your page. On `testPage()`, `faultInjection` rules are routed on your page and stay routed for the rest of the test.
 
 ## Subcommands
 

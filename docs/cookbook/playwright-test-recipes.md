@@ -5,7 +5,7 @@ Mirror of the existing `chaos` fixture (closes [#91](https://github.com/mizchi/c
 ## Quickstart
 
 ```ts
-import { recipesTest, expect } from "chaosbringer/fixture";
+import { recipesTest } from "chaosbringer/fixture";
 
 recipesTest("buy flow", async ({ runRecipe }) => {
   await runRecipe("shop/buy-tshirt", { vars: { email: "alice@example.com" } });

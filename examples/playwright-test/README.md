@@ -4,11 +4,14 @@ When you already have a Playwright Test suite and you want chaos coverage as one
 
 ## What this example shows
 
-- Tiny static site (`/`, `/about`, `/broken-link`) served by `node:http` — a stand-in for "your app".
+- Tiny static site (`/`, `/about`, `/broken-link`, plus `/stock` and the `/api/stock` it reads) served by `node:http` — a stand-in for "your app".
 - Two integration patterns in one `tests/chaos.spec.ts`:
   1. **`chaosTest`** — the chaos fixture directly. Best when chaos *is* what the file is about.
   2. **`withChaos()` extension** — extend `base` so a regular Playwright Test grows a `chaos` fixture without becoming a chaos-only file.
 - Three useful assertions: `chaos.expectNoErrors(result)`, `chaos.expectNoDeadLinks(report)`, and ordinary `expect(...)` from `@playwright/test`.
+- One fault: `faults.status(503, …)` in `chaosOptions.faultInjection` takes `/api/stock` down, and the test asserts `/stock` shows its fallback — with `strict: true`, so an exception or unhandled rejection from the failed fetch fails the test too.
+
+URLs are relative (`chaos.testPage(page, "/about")`, `chaos.crawl("/")`): the fixture resolves them against `use.baseURL` in `playwright.config.ts`, as `page.goto` does.
 
 The fixture site server boots automatically via `playwright.config.ts`'s `webServer` block — `pnpm test` is one command end-to-end.
 
@@ -37,9 +40,10 @@ The third test (`crawl finds a broken link`) is intentionally written to *expect
 ├── tsconfig.json
 ├── playwright.config.ts   # boots the fixture site as webServer
 ├── site/
-│   └── server.mjs         # 30-line static server (the SUT)
+│   └── server.mjs         # small static server (the SUT)
 └── tests/
-    └── chaos.spec.ts      # both integration patterns, one file
+    ├── chaos.spec.ts      # both integration patterns, and a fault, one file
+    └── recipes.spec.ts    # the recipes fixture, same shape
 ```
 
 ## When to use each pattern
