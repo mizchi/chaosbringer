@@ -76,14 +76,19 @@ jobs:
           # `--seed` because an unseeded run draws a fresh random seed and so
           # picks different actions: a cluster that fires only when one action
           # is picked would read as flaky and get an issue opened for it.
+          #
+          # The reconcile step puts this same command in each issue it opens,
+          # as the way to reproduce it, so the two cannot drift apart.
+          flake=(node dist/cli.js flake
+            --url http://127.0.0.1:4455
+            --runs ${{ github.event.inputs.runs || '10' }}
+            --seed 1
+            --max-pages 30
+            --max-actions 5
+            --output flake.json)
+          echo "FLAKE_COMMAND=${flake[*]}" >> "$GITHUB_ENV"
           set +e
-          node dist/cli.js flake \
-            --url http://127.0.0.1:4455 \
-            --runs ${{ github.event.inputs.runs || '10' }} \
-            --seed 1 \
-            --max-pages 30 \
-            --max-actions 5 \
-            --output flake.json
+          "${flake[@]}"
           status=$?
           set -e
           if [ "$status" -gt 1 ]; then
