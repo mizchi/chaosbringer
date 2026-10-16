@@ -4,12 +4,15 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { ErrorCluster } from "./clusters.js";
 import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
 import type { CrawlReport, PageResult, PerfDegradationEntry } from "./types.js";
 
 /** Failed files listed under an error cluster; the JSON has them all. */
 const CLUSTER_RESOURCES_SHOWN = 5;
+/** Error clusters the compact report lists under a failing verdict. */
+const COMPACT_CLUSTERS_SHOWN = 3;
 
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
@@ -176,9 +179,7 @@ export function formatReport(report: CrawlReport): string {
     lines.push("ERROR CLUSTERS");
     lines.push("-".repeat(40));
     for (const cluster of report.errorClusters) {
-      const countStr = cluster.count > 1 ? `×${cluster.count}` : "";
-      const urlStr = cluster.urls.length > 1 ? ` [${cluster.urls.length} urls]` : "";
-      lines.push(`  [${cluster.type}]${countStr}${urlStr} ${truncate(cluster.fingerprint, 80)}`);
+      lines.push(`  ${formatClusterLine(cluster)}`);
       const resources = cluster.resourceUrls ?? [];
       for (const url of resources.slice(0, CLUSTER_RESOURCES_SHOWN)) lines.push(`    resource: ${url}`);
       if (resources.length > CLUSTER_RESOURCES_SHOWN) {
@@ -299,8 +300,13 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
   // Use the same rule as getExitCode so the human label matches the exit
   // code. Previously the label ignored strict mode and console errors,
   // producing `[PASS]` runs that exited 1. See #6.
-  const status = getExitCode(report, strict) === 0 ? "PASS" : "FAIL";
-  const errors = report.summary.consoleErrors + report.summary.networkErrors + report.summary.jsExceptions;
+  const reasons = exitReasons(report, strict);
+  const status = reasons.length === 0 ? "PASS" : "FAIL";
+  // Every kind the run recorded. Rejections and invariant violations were
+  // left out, so a `--strict` run that failed on a rejection alone printed
+  // `[FAIL] 1 pages, 0 errors`.
+  const s = report.summary;
+  const errors = s.consoleErrors + s.networkErrors + s.jsExceptions + s.unhandledRejections + s.invariantViolations;
   const diffSuffix = report.diff
     ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
     : "";
@@ -309,14 +315,33 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
       ? ` advisor=${report.advisor.callsSucceeded}/${report.advisor.callsAttempted}`
       : "";
 
-  return [
+  const lines = [
     `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}${advisorSuffix}`,
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean);
+  if (reasons.length > 0) {
+    // Compact mode prints nothing else about the run, so a bare [FAIL] left
+    // the reader to open the JSON to learn which rule failed and on what.
+    lines.push(`  Failed: ${reasons.join("; ")}`);
+    const top = report.errorClusters.slice(0, COMPACT_CLUSTERS_SHOWN);
+    if (top.length > 0) {
+      lines.push("  Top clusters:");
+      for (const cluster of top) lines.push(`    ${formatClusterLine(cluster)}`);
+      const more = report.errorClusters.length - top.length;
+      if (more > 0) lines.push(`    … and ${more} more`);
+    }
+    if (report.reproCommand) lines.push(`  Repro: ${report.reproCommand}`);
+  }
+  return lines.join("\n");
+}
+
+/** `[type]×count [N urls] fingerprint`, as the full and the compact report list a cluster. */
+function formatClusterLine(cluster: ErrorCluster): string {
+  const countStr = cluster.count > 1 ? `×${cluster.count}` : "";
+  const urlStr = cluster.urls.length > 1 ? ` [${cluster.urls.length} urls]` : "";
+  return `[${cluster.type}]${countStr}${urlStr} ${truncate(cluster.fingerprint, 80)}`;
 }
 
 export function saveReport(report: CrawlReport, path: string): void {
@@ -469,38 +494,60 @@ export interface ExitCodeOptions {
   baselineStrict?: boolean;
 }
 
+/** What `getExitCode` / `exitReasons` read from a report. */
+type ExitCodeReport = Pick<CrawlReport, "summary" | "diff"> & Partial<Pick<CrawlReport, "pages">>;
+
 // CI-friendly exit code helper. The second argument is accepted as either a
 // boolean (legacy `strict`) or an options object so callers can opt into
-// baseline-strict without a larger API change. It reads only `summary` and
-// `diff`, so a caller judging something smaller than a crawl — the Playwright
-// fixture's single `testPage()` — applies this rule rather than a copy of it.
-export function getExitCode(
-  report: Pick<CrawlReport, "summary" | "diff">,
-  strict: boolean | ExitCodeOptions = false,
-): number {
+// baseline-strict without a larger API change. The verdict reads only
+// `summary` and `diff`, so a caller judging something smaller than a crawl —
+// the Playwright fixture's single `testPage()` — applies this rule rather than
+// a copy of it; `pages`, when given, only names the first failing URL.
+export function getExitCode(report: ExitCodeReport, strict: boolean | ExitCodeOptions = false): number {
+  return exitReasons(report, strict).length > 0 ? 1 : 0;
+}
+
+/**
+ * Why `getExitCode` fails the report, one entry per rule that failed it
+ * (e.g. `--strict: 1 unhandled rejection`); empty when it passes. The exit
+ * code is computed from this list, so what the compact report says failed
+ * is what failed.
+ */
+export function exitReasons(report: ExitCodeReport, strict: boolean | ExitCodeOptions = false): string[] {
   const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
-  if (report.summary.errorPages > 0 || report.summary.timeoutPages > 0) {
-    return 1;
-  }
+  const s = report.summary;
+  const out: string[] = [];
+  if (s.errorPages > 0) out.push(`${plural(s.errorPages, "page")} failed to load${firstUrl(report, "error")}`);
+  if (s.timeoutPages > 0) out.push(`${plural(s.timeoutPages, "page")} timed out${firstUrl(report, "timeout")}`);
   // Invariant violations always fail — the whole point of declaring them.
-  if (report.summary.invariantViolations > 0) {
-    return 1;
-  }
-  if (
-    opts.strict &&
-    (report.summary.consoleErrors > 0 ||
-      report.summary.jsExceptions > 0 ||
+  if (s.invariantViolations > 0) out.push(plural(s.invariantViolations, "invariant violation"));
+  if (opts.strict) {
+    const found = [
+      s.consoleErrors > 0 ? plural(s.consoleErrors, "console error") : "",
+      s.jsExceptions > 0 ? plural(s.jsExceptions, "JS exception") : "",
       // An escaping rejection is the failure mode this library exists to
       // find, and it used to be the one thing `strict` ignored: a run whose
       // whole finding was "the app left a rejection unhandled" exited 0.
-      report.summary.unhandledRejections > 0)
-  ) {
-    return 1;
+      s.unhandledRejections > 0 ? plural(s.unhandledRejections, "unhandled rejection") : "",
+    ].filter(Boolean);
+    if (found.length > 0) out.push(`--strict: ${found.join(", ")}`);
   }
   if (opts.baselineStrict && report.diff) {
-    if (report.diff.newClusters.length > 0 || report.diff.newFailedPages.length > 0) {
-      return 1;
-    }
+    const found = [
+      report.diff.newClusters.length > 0 ? plural(report.diff.newClusters.length, "new cluster") : "",
+      report.diff.newFailedPages.length > 0 ? plural(report.diff.newFailedPages.length, "newly failing page") : "",
+    ].filter(Boolean);
+    if (found.length > 0) out.push(`--baseline-strict: ${found.join(", ")} vs the baseline`);
   }
-  return 0;
+  return out;
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+/** ` (first: <url>)` for the first page with `status`, or nothing for a report without pages. */
+function firstUrl(report: ExitCodeReport, status: PageResult["status"]): string {
+  const page = report.pages?.find((p) => p.status === status);
+  return page ? ` (first: ${page.url})` : "";
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync, unlinkSync, rmSync } from "node:fs";
-import { formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
+import { exitReasons, formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
 import { fakeAction, fakePage, fakeSpan } from "./perf-fixtures.test-helpers.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
@@ -85,6 +85,51 @@ describe("getExitCode", () => {
   });
 });
 
+describe("exitReasons", () => {
+  it("names every rule that fails the run, and nothing for a passing one", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/ok"),
+        fakePage("http://localhost:3000/down", undefined, { status: "error" }),
+        fakePage("http://localhost:3000/slow", undefined, { status: "timeout" }),
+      ],
+      summary: makeSummary({
+        errorPages: 1,
+        timeoutPages: 1,
+        invariantViolations: 2,
+        consoleErrors: 1,
+        jsExceptions: 3,
+        unhandledRejections: 1,
+      }),
+      diff: {
+        newClusters: [{ key: "console|x", type: "console", fingerprint: "x", before: 0, after: 1 }],
+        resolvedClusters: [],
+        unchangedClusters: [],
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(exitReasons(report, { strict: true, baselineStrict: true })).toEqual([
+      "1 page failed to load (first: http://localhost:3000/down)",
+      "1 page timed out (first: http://localhost:3000/slow)",
+      "2 invariant violations",
+      "--strict: 1 console error, 3 JS exceptions, 1 unhandled rejection",
+      "--baseline-strict: 1 new cluster vs the baseline",
+    ]);
+    // Without the flags, only the rules that always apply.
+    expect(exitReasons(report)).toHaveLength(3);
+    expect(exitReasons(makeReport({ summary: makeSummary({ consoleErrors: 5 }) }))).toEqual([]);
+  });
+
+  it("judges a report without pages, as the fixture's testPage() passes one", () => {
+    // The Playwright fixture's strict check hands over a summary alone; the
+    // verdict is the same, only the first failing URL goes unnamed.
+    const run = { summary: makeSummary({ errorPages: 1 }) };
+    expect(exitReasons(run)).toEqual(["1 page failed to load"]);
+    expect(getExitCode(run)).toBe(1);
+  });
+});
+
 describe("formatCompactReport", () => {
   it("shows PASS for clean report", () => {
     const out = formatCompactReport(makeReport({ pagesVisited: 10 }));
@@ -106,6 +151,43 @@ describe("formatCompactReport", () => {
     });
     const out = formatCompactReport(report);
     expect(out).toContain("6 errors");
+  });
+
+  it("counts the rejections and invariant violations a run fails on", () => {
+    // The dogfood case: `--strict --compact` on a page whose only finding is
+    // an unhandled rejection printed `[FAIL] 1 pages, 0 errors`.
+    const rejection = makeReport({ summary: makeSummary({ unhandledRejections: 1 }) });
+    expect(formatCompactReport(rejection, true)).toMatch(/^\[FAIL\] 1 pages, 1 errors,/);
+    const violations = makeReport({ summary: makeSummary({ consoleErrors: 1, invariantViolations: 2 }) });
+    expect(formatCompactReport(violations)).toMatch(/^\[FAIL\] 1 pages, 3 errors,/);
+  });
+
+  it("on FAIL says which rule failed, the top three clusters and the repro command", () => {
+    const clusters = ["a", "b", "c", "d"].map((name, i) => ({
+      key: `unhandled-rejection|boom ${name}`,
+      type: "unhandled-rejection" as const,
+      fingerprint: `boom ${name}`,
+      sample: { type: "unhandled-rejection" as const, message: `boom ${name}`, timestamp: 0 },
+      count: 4 - i,
+      urls: ["http://localhost:3000/"],
+    }));
+    const report = makeReport({
+      summary: makeSummary({ unhandledRejections: 10 }),
+      errorClusters: clusters,
+      reproCommand: "chaosbringer --url http://localhost:3000 --seed 42 --strict",
+    });
+    expect(formatCompactReport(report, true).split("\n")).toEqual([
+      "[FAIL] 1 pages, 10 errors, 1.0s (seed=42)",
+      "  Failed: --strict: 10 unhandled rejections",
+      "  Top clusters:",
+      "    [unhandled-rejection]×4 boom a",
+      "    [unhandled-rejection]×3 boom b",
+      "    [unhandled-rejection]×2 boom c",
+      "    … and 1 more",
+      "  Repro: chaosbringer --url http://localhost:3000 --seed 42 --strict",
+    ]);
+    // A passing run stays one line: nothing failed, so nothing to explain.
+    expect(formatCompactReport(report).split("\n")).toEqual(["[PASS] 1 pages, 10 errors, 1.0s (seed=42)"]);
   });
 
   it("includes metrics when present", () => {
