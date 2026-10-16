@@ -297,26 +297,9 @@ export function formatReport(report: CrawlReport): string {
 }
 
 export function formatCompactReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
-  // Use the same rule as getExitCode so the human label matches the exit
-  // code. Previously the label ignored strict mode and console errors,
-  // producing `[PASS]` runs that exited 1. See #6.
   const reasons = exitReasons(report, strict);
-  const status = reasons.length === 0 ? "PASS" : "FAIL";
-  // Every kind the run recorded. Rejections and invariant violations were
-  // left out, so a `--strict` run that failed on a rejection alone printed
-  // `[FAIL] 1 pages, 0 errors`.
-  const s = report.summary;
-  const errors = s.consoleErrors + s.networkErrors + s.jsExceptions + s.unhandledRejections + s.invariantViolations;
-  const diffSuffix = report.diff
-    ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
-    : "";
-  const advisorSuffix =
-    report.advisor && report.advisor.callsAttempted > 0
-      ? ` advisor=${report.advisor.callsSucceeded}/${report.advisor.callsAttempted}`
-      : "";
-
   const lines = [
-    `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}${advisorSuffix}`,
+    formatVerdictLine(report, strict),
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
@@ -335,6 +318,30 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
     if (report.reproCommand) lines.push(`  Repro: ${report.reproCommand}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * `[PASS|FAIL] <pages> pages, <errors> errors, <seconds>s (seed=<seed>)`:
+ * the first line of the compact report, and all `--quiet` prints of it.
+ */
+export function formatVerdictLine(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
+  // Use the same rule as getExitCode so the human label matches the exit
+  // code. Previously the label ignored strict mode and console errors,
+  // producing `[PASS]` runs that exited 1. See #6.
+  const status = getExitCode(report, strict) === 0 ? "PASS" : "FAIL";
+  // Every kind the run recorded. Rejections and invariant violations were
+  // left out, so a `--strict` run that failed on a rejection alone printed
+  // `[FAIL] 1 pages, 0 errors`.
+  const s = report.summary;
+  const errors = s.consoleErrors + s.networkErrors + s.jsExceptions + s.unhandledRejections + s.invariantViolations;
+  const diffSuffix = report.diff
+    ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
+    : "";
+  const advisorSuffix =
+    report.advisor && report.advisor.callsAttempted > 0
+      ? ` advisor=${report.advisor.callsSucceeded}/${report.advisor.callsAttempted}`
+      : "";
+  return `[${status}] ${report.pagesVisited} pages, ${errors} errors, ${(report.duration / 1000).toFixed(1)}s (seed=${report.seed})${diffSuffix}${advisorSuffix}`;
 }
 
 /** `[type]×count [N urls] fingerprint`, as the full and the compact report list a cluster. */

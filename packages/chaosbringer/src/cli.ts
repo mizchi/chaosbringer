@@ -22,7 +22,7 @@
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
  *   --strict              Exit with error on console errors
- *   --quiet               Minimal output
+ *   --quiet               Print only the verdict line and the paths written
  *   --help, -h            Show this help
  *   --version, -V         Print the version
  */
@@ -33,7 +33,7 @@ import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-cr
 import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
-import { printReport, saveReport, getExitCode } from "./reporter.js";
+import { formatVerdictLine, printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -170,7 +170,7 @@ OPTIONS:
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
   --strict              Exit with error on any console errors
-  --quiet               Minimal output
+  --quiet               Print only the verdict line and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
 
@@ -364,7 +364,13 @@ async function main() {
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
     const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
-    printReport(report, isCompact, exitOptions);
+    // --quiet is the verdict and where the files went: what a script or a
+    // CI step shows, and the paths it reads next. It used to print the
+    // whole report, so the flag only dropped the per-page lines.
+    if (isQuiet) console.log(formatVerdictLine(report, exitOptions));
+    else printReport(report, isCompact, exitOptions);
+    // A path line, set off from the report by a blank line unless --quiet.
+    const announce = (line: string) => console.log(isQuiet ? line : `\n${line}`);
     if (emitGithub) {
       printGithubAnnotations(report, { strict: isStrict });
     }
@@ -380,7 +386,7 @@ async function main() {
       if (heatmapOut) {
         mkdirSync(dirname(heatmapOut), { recursive: true });
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
-        if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+        announce(`Heatmap saved to: ${heatmapOut}`);
       }
     }
 
@@ -392,20 +398,16 @@ async function main() {
         bundleDir: failureDir,
         minCount: clusterMinCount,
       });
-      if (!isQuiet) {
-        console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
-      }
+      announce(`Wrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
     }
 
     saveReport(report, outputPath);
-    if (!isQuiet) {
-      console.log(`\nReport saved to: ${outputPath}`);
-    }
+    announce(`Report saved to: ${outputPath}`);
 
     if (values.junit) {
       mkdirSync(dirname(values.junit), { recursive: true });
       writeFileSync(values.junit, buildJunitXml(report));
-      if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
+      console.log(`JUnit XML saved to: ${values.junit}`);
     }
 
     const exitCode = getExitCode(report, exitOptions);

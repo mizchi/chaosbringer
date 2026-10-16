@@ -49,6 +49,10 @@ describe("main CLI output on a pipe", () => {
         res.end(`<!doctype html><title>home</title><a href="/a">A</a> <a href="/b">B</a>`);
         return;
       }
+      if (req.url === "/reject") {
+        res.end(`<!doctype html><title>reject</title><script>Promise.reject(new Error("boom"))</script>`);
+        return;
+      }
       res.end(`<!doctype html><title>${req.url}</title><a href="/">Home</a>`);
     });
     const sitemap = join(dir, "sitemap.xml");
@@ -76,5 +80,30 @@ describe("main CLI output on a pipe", () => {
     // The verdict follows the last one directly: no blank line left over
     // from ending a redrawn terminal line.
     expect(lines[lines.indexOf("Progress: 3/3 pages") + 1]).toMatch(/^\[PASS\] 3 pages, 0 errors,/);
+  }, 120_000);
+
+  it("--quiet prints the verdict line and the paths written, nothing else", async () => {
+    const output = join(dir, "quiet.json");
+    const junit = join(dir, "quiet.xml");
+    const r = await cli([...crawl, "--quiet", "--output", output, "--junit", junit]);
+    expect(r.status).toBe(0);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=1\)$/),
+      `Report saved to: ${output}`,
+      `JUnit XML saved to: ${junit}`,
+    ]);
+  }, 120_000);
+
+  it("--strict --compact says why a run whose only finding is a rejection failed", async () => {
+    const r = await cli([
+      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
+      ...[...IGNORE_TSX_NAME, "--strict", "--compact", "--output", join(dir, "reject.json")],
+    ]);
+    expect(r.status).toBe(1);
+    // It printed `[FAIL] 1 pages, 0 errors` and nothing else about the run.
+    expect(r.stdout).toMatch(/^\[FAIL\] 1 pages, 1 errors, /m);
+    expect(r.stdout).toContain("\n  Failed: --strict: 1 unhandled rejection\n");
+    expect(r.stdout).toContain("\n    [unhandled-rejection] boom\n");
+    expect(r.stdout).toMatch(/^ {2}Repro: chaosbringer --url \S+\/reject .*--strict/m);
   }, 120_000);
 });
