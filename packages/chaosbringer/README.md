@@ -163,7 +163,7 @@ Every report includes:
 
 Both are printed in the compact header (`[PASS] … (seed=42)`) and the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`).
 
-`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--log-*`, `--screenshots`, `--failure-artifacts`, `--heatmap*`, `--compact`, `--quiet`, `--no-headless`, `--har-record`, `--bind`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
 
 To rerun an exact failure locally, copy the `Repro:` line from CI.
 

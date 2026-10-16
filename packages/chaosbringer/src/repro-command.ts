@@ -191,8 +191,10 @@ function perfFlags(options: Pick<CrawlerOptions, "perf" | "perfBudgets" | "perfB
     if (trace) out.push({ flag: "--perf-trace" });
     if (mem) out.push({ flag: "--perf-mem" });
     if (cov) out.push({ flag: "--perf-cov" });
-    // An output, so not a `path`: a repro.sh run writes it into its own
-    // bundle rather than over the run's.
+    // An output, so not a `path`: from repro.sh, a relative --perf-out
+    // writes into the bundle rather than over the run's. An absolute one is
+    // still the run's directory, where the repro's files land beside the
+    // run's, named by another run id.
     if (p.outDir !== undefined) out.push({ flag: "--perf-out", value: p.outDir });
   }
   if (options.perfBudgetsFile) out.push({ flag: "--perf-budgets", value: options.perfBudgetsFile, path: true });
