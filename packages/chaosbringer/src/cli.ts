@@ -29,6 +29,7 @@
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
+import { usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { printReport, saveReport, getExitCode } from "./reporter.js";
@@ -38,6 +39,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolveSettle } from "./settle.js";
 import type { CrawlerOptions } from "./types.js";
+import { validateOptions } from "./validate.js";
 
 // Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
 // flags (e.g. --match for `minimize`) don't trip the main options map.
@@ -79,7 +81,24 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   }
 }
 
-const { values, positionals } = parseCrawlArgs();
+/**
+ * Report a refused invocation in one line and exit 2, the code the CLI
+ * already used for a `--perf-budgets` file it refuses: nothing ran. An
+ * unknown flag or a malformed number used to escape as a Node stack trace
+ * with exit 1, the code of a crawl that found something.
+ */
+function exitWithUsageError(err: unknown): never {
+  console.error(usageErrorMessage(err));
+  process.exit(2);
+}
+
+let parsed: ReturnType<typeof parseCrawlArgs>;
+try {
+  parsed = parseCrawlArgs();
+} catch (err) {
+  exitWithUsageError(err);
+}
+const { values, positionals } = parsed;
 
 if (values.help) {
   console.log(`
@@ -214,40 +233,40 @@ const strays = positionals.filter((p) => !looksLikeUrl(p));
 if (strays.length > 0) {
   const first = strays[0]!;
   const known = Object.keys(SUBCOMMANDS).sort().join(", ");
-  console.error(`Error: unexpected argument "${first}"`);
-  if (first === "crawl") {
-    console.error(
-      "There is no `crawl` subcommand — crawling is the default, so drop the word: " +
-        "`chaosbringer --url <url>`.",
-    );
-  } else {
-    console.error(`Known subcommands: ${known}. Run with --help for usage information.`);
-  }
-  process.exit(1);
+  exitWithUsageError(
+    first === "crawl"
+      ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
+          "so drop the word: `chaosbringer --url <url>`"
+      : `unexpected argument "${first}"; known subcommands: ${known}`,
+  );
 }
 if (positionals.length > 1) {
-  console.error(`Error: expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
-  process.exit(1);
+  exitWithUsageError(`expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
 }
 
 // URL from --url or first positional
 const baseUrl = values.url || positionals[0];
 
 if (!baseUrl) {
-  console.error("Error: --url is required");
-  console.error("Run with --help for usage information");
-  process.exit(1);
-}
-
-/** Report a refused flag the way every other one is reported, and exit 1. */
-function exitWithUsageError(err: unknown): never {
-  console.error(`Error: ${err instanceof Error ? err.message : err}`);
-  process.exit(1);
+  exitWithUsageError("--url is required");
 }
 
 let options: CrawlerOptions;
+// Parsed before the crawl, not after it: a bad --heatmap-top used to fail
+// only once the whole crawl had run, and a --cluster-artifacts without
+// --failure-artifacts exited before the report was saved.
+let heatmapTop: number;
+let clusterMinCount: number | undefined;
 try {
   options = crawlerOptionsFromCli(values, baseUrl);
+  heatmapTop = parseNumberFlag("--heatmap-top", values["heatmap-top"], { min: 0, integer: true }) ?? 20;
+  clusterMinCount = parseNumberFlag("--cluster-min-count", values["cluster-min-count"], {
+    min: 0,
+    integer: true,
+  });
+  if (values["cluster-artifacts"] && !values["failure-artifacts"]) {
+    throw new Error("--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles");
+  }
 } catch (err) {
   exitWithUsageError(err);
 }
@@ -280,6 +299,15 @@ if (perfBudgetsFile !== undefined) {
   } catch (err) {
     exitWithUsageError(err);
   }
+}
+
+// The crawler validates again; this is so a refused option is a usage error
+// (`--max-pages 0`, `--cdp-target` without `--cdp`), not a stack trace from
+// inside main() after "Starting chaos crawl" was already printed.
+try {
+  validateOptions(options);
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 const outputPath = values.output || "chaos-report.json";
@@ -352,18 +380,8 @@ async function main() {
     if (wantsHeatmap) {
       const entries = buildActionHeatmap(report.actions);
       if (values.heatmap && !isQuiet) {
-        let top: number;
-        try {
-          top =
-            parseNumberFlag("--heatmap-top", values["heatmap-top"], {
-              min: 0,
-              integer: true,
-            }) ?? 20;
-        } catch (err) {
-          exitWithUsageError(err);
-        }
         console.log("");
-        console.log(formatHeatmap(entries, top));
+        console.log(formatHeatmap(entries, heatmapTop));
       }
       const heatmapOut = values["heatmap-out"];
       if (heatmapOut) {
@@ -373,21 +391,13 @@ async function main() {
       }
     }
 
-    if (values["cluster-artifacts"]) {
-      const failureDir = values["failure-artifacts"];
-      if (!failureDir) {
-        console.error(
-          "--cluster-artifacts requires --failure-artifacts <dir> (it copies from the per-page bundles)",
-        );
-        process.exit(1);
-      }
+    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
+    const failureDir = values["failure-artifacts"];
+    if (values["cluster-artifacts"] && failureDir) {
       const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
-      const minCount = values["cluster-min-count"]
-        ? parseInt(values["cluster-min-count"], 10)
-        : undefined;
       const results = writeClusterArtifacts(report, {
         bundleDir: failureDir,
-        minCount,
+        minCount: clusterMinCount,
       });
       if (!isQuiet) {
         console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);

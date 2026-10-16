@@ -1157,6 +1157,8 @@ The browser's "Failed to load resource" message names no file, so its console er
 | At least one page with `status: "error"` or `"timeout"` | **1** |
 | At least one invariant violation (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
+| `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
+| The CLI refused to run: an unknown flag, a malformed value, no `--url`, a `--perf-budgets` file it cannot use. Nothing ran; stderr has one `chaosbringer: …` line | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 

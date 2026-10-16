@@ -94,7 +94,7 @@ export function parseCrawlArgs(args?: string[]) {
 
 export type CrawlCliValues = ReturnType<typeof parseCrawlArgs>["values"];
 
-/** Throws on a bad value; the CLI prints `Error: <message>` and exits 1. */
+/** Throws on a bad value; the CLI prints `chaosbringer: <message>` and exits 2. */
 export function parseNumberFlag(
   flag: string,
   raw: string | undefined,
@@ -119,7 +119,7 @@ export function parseNumberFlag(
 
 /**
  * The crawl `values` ask for. Throws on a value the CLI refuses, with the
- * message it prints after `Error: `. `--perf-budgets` is only named here
+ * message it prints after `chaosbringer: `. `--perf-budgets` is only named here
  * (`perfBudgetsFile`): the CLI reads the rules itself, so a bad file fails
  * with its own exit code.
  */
@@ -203,12 +203,18 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     ...(values["aria-targets"] ? { ariaTargets: true } : {}),
     ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
     baseUrl,
-    maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
+    // parseNumberFlag, not parseInt: `--max-pages abc` was NaN, which
+    // validateOptions refused as `"maxPages" … (got null)` without naming
+    // the flag, and `--max-pages 3x` ran 3 pages.
+    maxPages: values["max-pages"]
+      ? parseNumberFlag("--max-pages", values["max-pages"], { min: 1, integer: true })
+      : undefined,
     maxActionsPerPage: (() => {
+      const flag = values["max-actions"] !== undefined ? "--max-actions" : "--max-actions-per-page";
       const raw = values["max-actions"] ?? values["max-actions-per-page"];
-      return raw ? parseInt(raw, 10) : undefined;
+      return raw ? parseNumberFlag(flag, raw, { min: 0, integer: true }) : undefined;
     })(),
-    timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
+    timeout: values.timeout ? parseNumberFlag("--timeout", values.timeout, { min: 1, integer: true }) : undefined,
     settle,
     headless: resolveHeadless(values),
     cdpEndpoint: values.cdp,
