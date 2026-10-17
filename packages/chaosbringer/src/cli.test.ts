@@ -4,7 +4,8 @@
  * far as starting a browser.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -72,6 +73,30 @@ describe("usage errors", () => {
     expect(r.stderr.trimEnd().split("\n")).toEqual([`chaosbringer: ${message} (see chaosbringer --help)`]);
     expect(r.stdout).toBe("");
     expect(r.status).toBe(2);
+  });
+
+  it("folds a refusal parseArgs words over several lines into the one line", () => {
+    const r = cli([...URL_ARG, "--timeout", "-5"]);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^chaosbringer: Option '--timeout' argument is ambiguous\. .*'--timeout=-XYZ'\. \(see chaosbringer --help\)$/),
+    ]);
+    expect(r.status).toBe(2);
+  });
+
+  it("refuses --perf-budgets emitted under another settle mode in one chaosbringer: line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-budgets-"));
+    try {
+      const file = join(dir, "budgets.json");
+      writeFileSync(file, JSON.stringify({ version: 1, budgets: {}, settle: { mode: "adaptive", quietMs: 500 } }));
+      const r = cli([...URL_ARG, "--perf-budgets", file]);
+      expect(r.stderr.trimEnd().split("\n")).toEqual([
+        expect.stringMatching(new RegExp(`^chaosbringer: --perf-budgets ${escapeRegExp(file)}: refusing to enforce: .*--allow-settle-mismatch`)),
+      ]);
+      expect(r.stdout).toBe("");
+      expect(r.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("names the flag for a malformed number, where parseInt read a prefix of it", () => {

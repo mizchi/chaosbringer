@@ -281,7 +281,7 @@ if (perfBudgetsFile !== undefined) {
         console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
       } else {
         console.error(
-          `Error: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
+          `chaosbringer: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
             `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
             `or pass --allow-settle-mismatch to enforce anyway.`,
         );

@@ -108,8 +108,9 @@ export function usageErrorMessage(err: unknown): string {
     const known = /^Unknown option '([^']+)'/.exec(message);
     if (known) message = `unknown option ${known[1]}`;
   }
-  // validateOptions' messages carry the prefix already.
-  return `chaosbringer: ${message.replace(/^chaosbringer: /, "")} (see chaosbringer --help)`;
+  // validateOptions' messages carry the prefix already. parseArgs' advice
+  // for a value that starts with a dash (`--timeout -5`) spans three lines.
+  return `chaosbringer: ${message.replace(/^chaosbringer: /, "").replace(/\s*\n\s*/g, " ")} (see chaosbringer --help)`;
 }
 
 /**
