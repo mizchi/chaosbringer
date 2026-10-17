@@ -100,9 +100,11 @@ pnpm chaosbringer recipes verify auth/login --base-url https://staging.example.t
 # verify: auth/login was recorded on http://localhost:3000; replaying it on https://staging.example.test instead
 ```
 
-The warning goes to stderr, so `--json` output stays parseable, and
-`--quiet` drops it. A `--base-url` that does not answer fails the
-replay: `verify` does not promote, `load` counts the failures and exits 1.
+The warning goes to stderr, so it never mixes into `--json` output, and
+`--quiet` drops it. `verify` and `repair` print their progress lines to
+stdout, though: pair `--json` with `--quiet` for output a parser reads.
+A `--base-url` that does not answer fails the replay: `verify` does not
+promote, `load` counts the failures and exits 1.
 
 ## Auto-repair (CLI form)
 
