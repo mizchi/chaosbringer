@@ -1219,23 +1219,31 @@ Every `crawl()` attaches its report to the test as `chaos-report.json`, so it is
 `chaosOptions` — set per file with `chaosTest.use({ chaosOptions })`, or as `withChaos()`'s defaults — also carries faults, invariants, a seed, and `strict`:
 
 ```ts
-import { faults } from "chaosbringer";
+import { expect } from "@playwright/test";
+import { COMMON_IGNORE_PATTERNS, faults } from "chaosbringer";
 import { chaosTest } from "chaosbringer/fixture";
 
 chaosTest.use({
   chaosOptions: {
     seed: 42,
+    // Load the page only: the assertion below is about it, not about
+    // wherever a random click would have gone.
+    maxActionsPerPage: 0,
     faultInjection: [faults.status(503, { urlPattern: /\/api\/stock/ })],
+    // Chromium logs the injected 503 as a console error. That is the fault,
+    // not the page; ignore it and keep the default patterns.
+    ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"],
     strict: true,
   },
 });
 
 chaosTest("stock page survives a down API", async ({ page, chaos }) => {
   await chaos.testPage(page, "/stock");
+  await expect(page.getByRole("status")).toHaveText("Stock unavailable");
 });
 ```
 
-`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. `lifecycleFaults` and `runtimeFaults` are accepted too; `runtimeFaults` apply to `crawl()` only, since they are an init script on the context the crawl opens and `testPage()` runs on your page. On `testPage()`, `faultInjection` rules are routed on your page and stay routed for the rest of the test.
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. With it, the console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") fails the test like any other, so a strict test of a status fault ignores that message, as above. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them, hence the spread. `lifecycleFaults` and `runtimeFaults` are accepted too; `runtimeFaults` apply to `crawl()` only, since they are an init script on the context the crawl opens and `testPage()` runs on your page. On `testPage()`, `faultInjection` rules are routed on your page and stay routed for the rest of the test.
 
 ## Subcommands
 

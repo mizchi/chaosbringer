@@ -327,7 +327,14 @@ against the config's `use.baseURL`, or `chaosOptions.baseUrl` when set.
 and `runtimeFaults` — the last for `crawl()` only, since `testPage()` runs on
 your page and the runtime-fault init script is installed on the crawl's own
 context. `strict: true` fails the test by the CLI's `--strict` rule, and every
-`crawl()` attaches its report as `chaos-report.json`.
+`crawl()` attaches its report as `chaos-report.json`. That rule counts the
+console error Chromium logs for an error status a `faults.status` rule
+answered ("Failed to load resource: … 503"), so a strict fault test ignores
+it, spreading the defaults since the option replaces them:
+
+```ts
+ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"],
+```
 
 `testPage` uses a page *you* own, and releases anything a `hang` parked before
 it returns. If you drive the page across several steps of your own, `release()`
