@@ -190,6 +190,45 @@ describe("formatCompactReport", () => {
     expect(formatCompactReport(report).split("\n")).toEqual(["[PASS] 1 pages, 10 errors, 1.0s (seed=42)"]);
   });
 
+  it("on FAIL lists the clusters that failed the run before larger ones that did not", () => {
+    const cluster = (type: "console" | "network" | "exception", fingerprint: string, count: number) => ({
+      key: `${type}|${fingerprint}`,
+      type,
+      fingerprint,
+      sample: { type, message: fingerprint, timestamp: 0 },
+      count,
+      urls: ["http://localhost:3000/"],
+    });
+    const unchanged = [cluster("console", "old a", 9), cluster("console", "old b", 8), cluster("console", "old c", 7)];
+    const boom = cluster("exception", "fixture: boom", 1);
+    const entry = (c: ReturnType<typeof cluster>) => ({ ...c, before: c.count, after: c.count });
+    // The PR gate's case: only the small new cluster fails --baseline-strict.
+    const gated = makeReport({
+      summary: makeSummary({ consoleErrors: 24, jsExceptions: 1 }),
+      errorClusters: [...unchanged, boom],
+      diff: {
+        baselineSeed: 1,
+        newClusters: [{ ...entry(boom), before: 0 }],
+        resolvedClusters: [],
+        unchangedClusters: unchanged.map(entry),
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(formatCompactReport(gated, { baselineStrict: true }).split("\n").slice(1, 5)).toEqual([
+      "  Failed: --baseline-strict: 1 new cluster vs the baseline",
+      "  Top clusters:",
+      "    [exception] fixture: boom (new)",
+      "    [console]×9 old a",
+    ]);
+    // --strict does not fail on network errors, however many there are.
+    const strict = makeReport({
+      summary: makeSummary({ networkErrors: 27, jsExceptions: 1 }),
+      errorClusters: [cluster("network", "net a", 9), cluster("network", "net b", 9), cluster("network", "net c", 9), boom],
+    });
+    expect(formatCompactReport(strict, true).split("\n")[3]).toBe("    [exception] fixture: boom");
+  });
+
   it("includes metrics when present", () => {
     const report = makeReport({
       summary: makeSummary({ avgMetrics: { ttfb: 50, fcp: 120, lcp: 200 } }),

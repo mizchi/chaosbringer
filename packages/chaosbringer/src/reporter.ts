@@ -308,16 +308,41 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
     // Compact mode prints nothing else about the run, so a bare [FAIL] left
     // the reader to open the JSON to learn which rule failed and on what.
     lines.push(`  Failed: ${reasons.join("; ")}`);
-    const top = report.errorClusters.slice(0, COMPACT_CLUSTERS_SHOWN);
+    const fresh = new Set(report.diff?.newClusters.map((c) => c.key));
+    const top = rankByVerdict(report, strict, fresh).slice(0, COMPACT_CLUSTERS_SHOWN);
     if (top.length > 0) {
       lines.push("  Top clusters:");
-      for (const cluster of top) lines.push(`    ${formatClusterLine(cluster)}`);
+      for (const cluster of top) {
+        lines.push(`    ${formatClusterLine(cluster)}${fresh.has(cluster.key) ? " (new)" : ""}`);
+      }
       const more = report.errorClusters.length - top.length;
       if (more > 0) lines.push(`    … and ${more} more`);
     }
     if (report.reproCommand) lines.push(`  Repro: ${report.reproCommand}`);
   }
   return lines.join("\n");
+}
+
+/** Cluster types `--strict` fails a run on (`exitReasons`); network errors are not among them. */
+const STRICT_CLUSTER_TYPES: ReadonlySet<ErrorCluster["type"]> = new Set(["console", "exception", "unhandled-rejection"]);
+
+/**
+ * `report.errorClusters` with the ones a rule that failed the run counts
+ * first: new vs the baseline under `--baseline-strict` (`fresh`), then
+ * invariant violations and the types `--strict` fails on, then the rest,
+ * each group largest first. The three largest alone could all be clusters
+ * the baseline already had, or network errors `--strict` ignores, and
+ * leave the one that failed the run under "… and N more".
+ */
+function rankByVerdict(report: CrawlReport, strict: boolean | ExitCodeOptions, fresh: ReadonlySet<string>): ErrorCluster[] {
+  const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
+  const rank = (c: ErrorCluster): number => {
+    if (opts.baselineStrict && fresh.has(c.key)) return 2;
+    if (c.type === "invariant-violation" || (opts.strict && STRICT_CLUSTER_TYPES.has(c.type))) return 1;
+    return 0;
+  };
+  // A stable sort, so the count order errorClusters comes in holds within a rank.
+  return [...report.errorClusters].sort((a, b) => rank(b) - rank(a));
 }
 
 /**
