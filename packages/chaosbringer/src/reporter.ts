@@ -307,7 +307,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
   if (reasons.length > 0) {
     // Compact mode prints nothing else about the run, so a bare [FAIL] left
     // the reader to open the JSON to learn which rule failed and on what.
-    lines.push(`  Failed: ${reasons.join("; ")}`);
+    lines.push(failedLine(reasons));
     const fresh = new Set(report.diff?.newClusters.map((c) => c.key));
     const top = rankByVerdict(report, strict, fresh).slice(0, COMPACT_CLUSTERS_SHOWN);
     if (top.length > 0) {
@@ -321,6 +321,21 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
     if (report.reproCommand) lines.push(`  Repro: ${report.reproCommand}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * What `--quiet` prints of the report: the verdict line and, on FAIL, the
+ * compact report's `Failed:` line. Without it a failing `--quiet` run said
+ * FAIL and nothing of why.
+ */
+export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
+  const reasons = exitReasons(report, strict);
+  return [formatVerdictLine(report, strict), ...(reasons.length > 0 ? [failedLine(reasons)] : [])].join("\n");
+}
+
+/** `  Failed: <reason>; <reason>`, from `exitReasons`. */
+function failedLine(reasons: readonly string[]): string {
+  return `  Failed: ${reasons.join("; ")}`;
 }
 
 /** Cluster types `--strict` fails a run on (`exitReasons`); network errors are not among them. */
@@ -347,7 +362,7 @@ function rankByVerdict(report: CrawlReport, strict: boolean | ExitCodeOptions, f
 
 /**
  * `[PASS|FAIL] <pages> pages, <errors> errors, <seconds>s (seed=<seed>)`:
- * the first line of the compact report, and all `--quiet` prints of it.
+ * the first line of the compact report and of what `--quiet` prints.
  */
 export function formatVerdictLine(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
   // Use the same rule as getExitCode so the human label matches the exit

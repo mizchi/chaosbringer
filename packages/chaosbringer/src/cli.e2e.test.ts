@@ -94,6 +94,20 @@ describe("main CLI output on a pipe", () => {
     ]);
   }, 120_000);
 
+  it("--quiet says why a run failed in one line, and nothing more of the report", async () => {
+    const output = join(dir, "quiet-reject.json");
+    const r = await cli([
+      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
+      ...[...IGNORE_TSX_NAME, "--strict", "--quiet", "--output", output],
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] 1 pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Report saved to: ${output}`,
+    ]);
+  }, 120_000);
+
   it("--strict --compact says why a run whose only finding is a rejection failed", async () => {
     const r = await cli([
       ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],

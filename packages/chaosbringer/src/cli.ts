@@ -22,7 +22,7 @@
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
  *   --strict              Exit with error on console errors
- *   --quiet               Print only the verdict line and the paths written
+ *   --quiet               Print only the verdict, why a run failed, and the paths written
  *   --help, -h            Show this help
  *   --version, -V         Print the version
  */
@@ -33,7 +33,7 @@ import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-cr
 import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
-import { formatVerdictLine, printReport, saveReport, getExitCode } from "./reporter.js";
+import { formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -170,7 +170,7 @@ OPTIONS:
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
   --strict              Exit with error on any console errors
-  --quiet               Print only the verdict line and the paths written
+  --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
 
@@ -364,10 +364,10 @@ async function main() {
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
     const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
-    // --quiet is the verdict and where the files went: what a script or a
-    // CI step shows, and the paths it reads next. It used to print the
-    // whole report, so the flag only dropped the per-page lines.
-    if (isQuiet) console.log(formatVerdictLine(report, exitOptions));
+    // --quiet is the verdict, why it failed, and where the files went: what
+    // a script or a CI step shows, and the paths it reads next. It used to
+    // print the whole report, so the flag only dropped the per-page lines.
+    if (isQuiet) console.log(formatQuietReport(report, exitOptions));
     else printReport(report, isCompact, exitOptions);
     // A path line, set off from the report by a blank line unless --quiet.
     const announce = (line: string) => console.log(isQuiet ? line : `\n${line}`);
