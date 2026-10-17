@@ -177,6 +177,40 @@ describe("a recipe replayed on another base URL", () => {
     }
   }, 60_000);
 
+  it("recipeDriver leaves a recipe that starts on the matched page and goes to another site there", async () => {
+    // A payment provider: the only absolute URL in the recipe, and not
+    // the site it was recorded on, so not one to move onto the crawl's.
+    const payHits: string[] = [];
+    const pay = await startTestServer(app(payHits));
+    const checkout: ActionRecipe = {
+      ...login,
+      name: "site/pay",
+      preconditions: [{ urlPattern: "/login$" }],
+      steps: [
+        { kind: "fill", selector: "input[name=username]", value: "admin" },
+        { kind: "navigate", url: `${pay.url}/auth-thanks?session=abc`, expectAfter: { hasSelector: "h1" } },
+      ],
+      status: "verified",
+    };
+    const store = storeWith(checkout);
+    const { page, close } = await newIsolatedPage(browser);
+    try {
+      await page.goto(`${other.url}/login`);
+      const step = { url: `${other.url}/login`, currentUrl: `${other.url}/login`, page } as unknown as DriverStep;
+      const pick = await recipeDriver({ store }).selectAction(step);
+      expect(pick?.kind).toBe("custom");
+      if (pick?.kind !== "custom") return;
+      otherHits.length = 0;
+      expect(await pick.perform(page)).toMatchObject({ success: true });
+      expect(page.url()).toBe(`${pay.url}/auth-thanks?session=abc`);
+      expect(payHits).toEqual(["/auth-thanks?session=abc"]);
+      expect(otherHits).toEqual([]);
+    } finally {
+      await close();
+      await pay.close();
+    }
+  }, 60_000);
+
   it("repair replays on the base URL's server", async () => {
     const store = storeWith(login);
     otherHits.length = 0;

@@ -85,11 +85,15 @@ A recipe keeps the absolute URLs it was recorded with: `chaosbringer
 drive` saves `{"kind":"navigate","url":"http://localhost:3000/login"}`.
 `recipes verify`, `recipes repair` and `chaosbringer load` replay it on
 `--base-url` instead. Each navigation to the origin the recipe was
-recorded on (its first navigate's) goes to `--base-url`'s origin, path
-and query kept, and so does a `urlContains` that spells that origin out.
-Navigations to another origin (SSO, payments) are left alone. The saved
-recipe is not rewritten; `repair` stores its repaired version with the
-URLs it ran on.
+recorded on goes to `--base-url`'s origin, path and query kept, and so
+does a `urlContains` that spells that origin out. That origin is its
+first step's, when the recipe starts with a navigate; a recipe that
+starts on the page it matched on (a click, a fill) has it only when its
+first precondition's `urlPattern` names a scheme and host
+(`^https://shop\.example\.test/cart`), and is otherwise not moved. A
+later navigation never decides it: navigations to another origin (SSO,
+payments) are left alone. The saved recipe is not rewritten; `repair`
+stores its repaired version with the URLs it ran on.
 
 ```sh
 pnpm chaosbringer recipes verify auth/login --base-url https://staging.example.test

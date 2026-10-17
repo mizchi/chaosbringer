@@ -35,11 +35,11 @@ function fakePage(): { page: Page; visits: string[] } {
   return { page, visits };
 }
 
-function recipe(steps: RecipeStep[]): ActionRecipe {
+function recipe(steps: RecipeStep[], preconditions: ActionRecipe["preconditions"] = []): ActionRecipe {
   return {
     name: "site/login",
     description: "",
-    preconditions: [],
+    preconditions,
     steps,
     postconditions: [],
     requires: [],
@@ -90,6 +90,23 @@ describe("runRecipe with a baseUrl", () => {
     expect(visits).toEqual([`${BASE}/login`, "https://sso.example.test/authorize?client=app", `${BASE}/callback`]);
   });
 
+  it("leaves a recipe that starts on the matched page, then goes to another site, where it goes", async () => {
+    // Fired on a cart page by `recipeDriver`: the payment provider is the
+    // only absolute URL in it, and is not where it was recorded.
+    const { page, visits } = fakePage();
+    const pay = "https://pay.example.test/checkout?session=abc";
+    const r = recipe(
+      [
+        { kind: "click", selector: "#checkout" },
+        { kind: "navigate", url: pay, expectAfter: { urlContains: "https://pay.example.test/checkout", timeoutMs: 200 } },
+      ],
+      [{ urlPattern: "/cart$" }],
+    );
+    expect(rebaseRecipe(r, BASE)).toBe(r);
+    expect(await runRecipe(page, r, { baseUrl: BASE })).toMatchObject({ ok: true });
+    expect(visits).toEqual([pay]);
+  });
+
   it("keeps a {{var}} in the path, and substitutes it after the move", async () => {
     const { page, visits } = fakePage();
     const r = recipe([{ kind: "navigate", url: `${RECORDED}/users/{{id}}` }]);
@@ -119,12 +136,52 @@ describe("runRecipe with a baseUrl", () => {
 });
 
 describe("recipeOrigin / rebaseRecipe / rebaseNotice", () => {
-  it("takes the origin of the first navigate, normalised", () => {
-    expect(recipeOrigin(recipe([{ kind: "click", selector: "a" }, { kind: "navigate", url: "HTTP://Shop.Example.TEST:80/x" }]))).toBe(
-      "http://shop.example.test",
-    );
+  it("takes the origin of a leading navigate, normalised", () => {
+    expect(recipeOrigin(recipe([{ kind: "navigate", url: "HTTP://Shop.Example.TEST:80/x" }]))).toBe("http://shop.example.test");
     expect(recipeOrigin(recipe([{ kind: "click", selector: "a" }]))).toBeNull();
     expect(recipeOrigin(recipe([{ kind: "navigate", url: "http://{{host}}/x" }]))).toBeNull();
+  });
+
+  it("never takes it from a later navigate", () => {
+    const steps: RecipeStep[] = [
+      { kind: "click", selector: "#checkout" },
+      { kind: "navigate", url: "https://pay.example.test/checkout" },
+    ];
+    expect(recipeOrigin(recipe(steps))).toBeNull();
+    expect(recipeOrigin(recipe(steps, [{ urlPattern: "/cart$" }]))).toBeNull();
+  });
+
+  it("falls back to a first precondition that spells out the scheme and host", () => {
+    const click: RecipeStep[] = [{ kind: "click", selector: "a" }];
+    const origin = (urlPattern: string) => recipeOrigin(recipe(click, [{ urlPattern }]));
+    expect(origin("^https://shop\\.example\\.test/cart$")).toBe("https://shop.example.test");
+    expect(origin("^http:\\/\\/127\\.0\\.0\\.1:4791\\/cart")).toBe("http://127.0.0.1:4791");
+    expect(origin("^http://localhost:4791$")).toBe("http://localhost:4791");
+    // Not a host the pattern names: it matches more than one.
+    expect(origin("^https?://shop\\.example\\.test/")).toBeNull();
+    expect(origin("^http://localhost:\\d+/")).toBeNull();
+    expect(origin("^https://[a-z]+\\.example\\.test/")).toBeNull();
+    expect(origin("^https://shop\\.example\\.tests?/")).toBeNull();
+    expect(origin("shop\\.example\\.test/cart")).toBeNull();
+    // A leading navigate says it first.
+    expect(
+      recipeOrigin(recipe([{ kind: "navigate", url: `${RECORDED}/login` }], [{ urlPattern: "^https://shop\\.example\\.test/" }])),
+    ).toBe(RECORDED);
+  });
+
+  it("moves a later navigate when the precondition names its origin", () => {
+    const r = recipe(
+      [
+        { kind: "click", selector: "#checkout" },
+        { kind: "navigate", url: `${RECORDED}/thanks` },
+        { kind: "navigate", url: "https://pay.example.test/checkout" },
+      ],
+      [{ urlPattern: "^http://127\\.0\\.0\\.1:4791/cart$" }],
+    );
+    expect(rebaseRecipe(r, BASE).steps.slice(1)).toEqual([
+      { kind: "navigate", url: `${BASE}/thanks` },
+      { kind: "navigate", url: "https://pay.example.test/checkout" },
+    ]);
   });
 
   it("returns the recipe itself when there is nothing to move", () => {

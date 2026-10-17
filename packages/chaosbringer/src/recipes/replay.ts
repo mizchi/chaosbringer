@@ -103,16 +103,36 @@ export async function runRecipe(
 }
 
 /**
- * The origin a recipe was recorded on: its first navigate step's, when
- * that is an absolute http(s) URL (`drive` always starts with one).
- * `null` when the recipe has no navigate, or its first one templates
- * the site (`{{base}}/`, `http://{{host}}/`) — the caller's vars name
- * it then, not the recording.
+ * The origin a recipe was recorded on: its first step's, when that is a
+ * navigate to an absolute http(s) URL (`drive` always starts with one).
+ * A recipe that starts on the page it matched on (a click, a fill) has
+ * only its first precondition to say where that was, when its
+ * `urlPattern` spells out a scheme and host (`^https://shop\.test/cart`).
+ * Never a later navigate: that is where the recipe went (a payment
+ * provider, an SSO page), not where it was recorded. `null` when nothing
+ * names the site, or the first navigate templates it (`{{base}}/`,
+ * `http://{{host}}/`) — the caller's vars name it then, not the recording.
  */
-export function recipeOrigin(recipe: Pick<ActionRecipe, "steps">): string | null {
-  const nav = recipe.steps.find((s) => s.kind === "navigate");
-  const origin = nav?.kind === "navigate" ? httpOrigin(nav.url) : null;
+export function recipeOrigin(
+  recipe: Pick<ActionRecipe, "steps"> & Partial<Pick<ActionRecipe, "preconditions">>,
+): string | null {
+  const first = recipe.steps[0];
+  const origin =
+    first?.kind === "navigate" ? httpOrigin(first.url) : patternOrigin(recipe.preconditions?.[0]?.urlPattern);
   return origin && !hasTemplates(origin) ? origin : null;
+}
+
+/**
+ * The origin a `urlPattern` regex source starts with, its escapes (`\.`,
+ * `\/`, `\:`, `\-`) read as the characters they stand for. `null` when
+ * it does not start with a literal scheme and host: `https?://`, a
+ * `[a-z]+` or `\d+` in the host, or a host a quantifier ends on.
+ */
+function patternOrigin(pattern: string | undefined): string | null {
+  const head = pattern
+    ? /^\^?(https?:(?:\\?\/){2}(?:\\[.:-]|[^/\\?#()[\]{}|*+^$])+)(?:$|\/|\\\/|\$)/i.exec(pattern)?.[1]
+    : undefined;
+  return head ? httpOrigin(head.replace(/\\(.)/g, "$1")) : null;
 }
 
 /**
@@ -123,7 +143,8 @@ export function recipeOrigin(recipe: Pick<ActionRecipe, "steps">): string | null
  * origin out. Only the origin moves, never a path prefix: a base URL is
  * often a start page (`https://staging.test/login`), not a mount point.
  * A navigate to another origin (a payment provider, an SSO page) is left
- * alone. Saved recipes are not rewritten — this happens at replay.
+ * alone, and so is every step of a recipe with no recorded origin. Saved
+ * recipes are not rewritten — this happens at replay.
  */
 export function rebaseRecipe(recipe: ActionRecipe, baseUrl: string): ActionRecipe {
   const to = httpOrigin(baseUrl);
