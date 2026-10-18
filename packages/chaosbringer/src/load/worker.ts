@@ -18,7 +18,7 @@ import { StepPerf } from "./step-perf.js";
 import { pickThinkTimeMs } from "./scenario.js";
 import type { LoadStop, Scenario, ScenarioContext, ScenarioStep, ThinkTime } from "./types.js";
 import type { Invariant } from "../types.js";
-import { contextOptions } from "../browser-session.js";
+import { contextOptions, installKeepNamesHelper } from "../browser-session.js";
 
 /**
  * The least a worker waits after a failed iteration, whatever the think time
@@ -143,6 +143,7 @@ export class ScenarioWorker {
         ...(this.opts.storageState ? { storageState: this.opts.storageState } : {}),
       }),
     );
+    await installKeepNamesHelper(this.context);
     if (this.opts.onContextCreated) {
       await this.opts.onContextCreated(this.context);
     }

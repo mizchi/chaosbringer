@@ -150,7 +150,7 @@ import {
   type RequestTracker,
   type ResolvedSettle,
 } from "./settle.js";
-import { contextOptions } from "./browser-session.js";
+import { contextOptions, installKeepNamesHelper } from "./browser-session.js";
 import { bindBrowser, resolveBind } from "./browser-bind.js";
 import { ariaOutline, readAria } from "./aria-snapshot.js";
 import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
@@ -756,6 +756,10 @@ export class ChaosCrawler {
       await (this.cdpPage ?? this.context).addInitScript({
         content: collectorInitScript({ frames: this.perf.enabled }),
       });
+
+      // Only when run from src/ through tsx; ahead of the init scripts that
+      // are functions (the SPA hook, the rejection capture).
+      await installKeepNamesHelper(this.cdpPage ?? this.context);
 
       // CDP runs scope these to the selected page.
       await this.addFaultInitScripts(this.cdpPage ?? this.context);

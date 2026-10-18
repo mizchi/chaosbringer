@@ -1,6 +1,7 @@
 /**
  * The main CLI's output when its stdout is not a terminal — a pipe, as in a
- * CI log or a script — over a real crawl of a three-page site.
+ * CI log or a script — over a real crawl of a three-page site, and what a run
+ * of `src/` through tsx (as `pnpm crawl` runs it) finds on the fixture site.
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,17 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { startFixtureServer } from "../fixtures/site/server.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
+import type { CrawlReport } from "./types.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
-
-/**
- * tsx compiles `src/` with esbuild's keepNames, so a function the crawler
- * hands to `page.evaluate` calls a `__name` helper the page does not have,
- * and every page reports it as an exception. dist/ (tsc) does not.
- */
-const IGNORE_TSX_NAME = ["--ignore-error", "__name is not defined"];
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -65,7 +61,7 @@ describe("main CLI output on a pipe", () => {
     writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
     crawl = [
       "--url", `${server.url}/`, "--seed-from-sitemap", sitemap, "--max-pages", "3", "--max-actions", "0",
-      "--seed", "1", ...IGNORE_TSX_NAME,
+      "--seed", "1",
     ];
   }, 30_000);
 
@@ -103,7 +99,7 @@ describe("main CLI output on a pipe", () => {
     const output = join(dir, "quiet-reject.json");
     const r = await cli([
       "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
-      ...IGNORE_TSX_NAME, "--strict", "--quiet", "--output", output,
+      "--strict", "--quiet", "--output", output,
     ]);
     expect(r.status).toBe(1);
     expect(r.stdout.trimEnd().split("\n")).toEqual([
@@ -122,7 +118,6 @@ describe("main CLI output on a pipe", () => {
     const log = join(dir, "quiet.log");
     const r = await cli(
       ["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"].concat(
-        IGNORE_TSX_NAME,
         ["--strict", "--quiet", "--output", output],
         ["--failure-artifacts", bundles, "--trace-out", trace, "--log-file", log],
       ),
@@ -193,7 +188,7 @@ describe("main CLI output on a pipe", () => {
   it("--strict --compact says why a run whose only finding is a rejection failed", async () => {
     const r = await cli([
       "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
-      ...IGNORE_TSX_NAME, "--strict", "--compact", "--output", join(dir, "reject.json"),
+      "--strict", "--compact", "--output", join(dir, "reject.json"),
     ]);
     expect(r.status).toBe(1);
     // It printed `[FAIL] 1 pages, 0 errors` and nothing else about the run.
@@ -201,5 +196,40 @@ describe("main CLI output on a pipe", () => {
     expect(r.stdout).toContain("\n  Failed: --strict: 1 unhandled rejection\n");
     expect(r.stdout).toContain("\n    [unhandled-rejection] boom\n");
     expect(r.stdout).toMatch(/^ {2}Repro: chaosbringer --url \S+\/reject .*--strict/m);
+  }, 120_000);
+});
+
+describe("a run of src/ through tsx", () => {
+  let site: { url: string; close: () => Promise<void> };
+  let dir: string;
+
+  beforeAll(async () => {
+    site = await startFixtureServer(0);
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-src-"));
+  });
+
+  afterAll(async () => {
+    await site.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // tsx compiles with esbuild's keepNames, which wrapped the functions the
+  // crawler sends into the page in a `__name` helper the page does not have:
+  // the page reported `__name is not defined`, and the SPA hook, the link
+  // collector and the action-target scan threw instead of finding anything.
+  it("finds what dist/ finds on a clean page: no errors, the SPA route, its buttons", async () => {
+    const output = join(dir, "spa-router.json");
+    const r = await cli([
+      "--url", `${site.url}/spa-router`, "--max-pages", "1", "--max-actions", "3", "--seed", "1",
+      "--quiet", "--output", output,
+    ]);
+    expect(r.status).toBe(0);
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.totalErrors).toBe(0);
+    expect(report.pages[0]?.errors).toEqual([]);
+    // Recorded by the History API hook: the page calls `replaceState` on load.
+    expect(report.pages[0]?.links).toContain(`${site.url}/spa-router/auto`);
+    // The page has no links, so a click can only be one of its buttons.
+    expect(report.actions.some((a) => a.type === "click")).toBe(true);
   }, 120_000);
 });
