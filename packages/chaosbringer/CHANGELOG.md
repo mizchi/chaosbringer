@@ -6,17 +6,19 @@ Fixes for results that were hidden, misattributed or impossible to reproduce. Se
 
 ### ⚠ BREAKING CHANGES
 
-* **A bad invocation exits 2, not 1.** An unknown or malformed flag, a missing `--url`, a stray argument, or a `--perf-budgets` file that cannot be used now prints one `chaosbringer: …` line (plus "see --help") instead of a stack trace, and exits 2.
-  * Number flags are strict: `--timeout 5s`, `--max-pages 3x` and `--max-actions 1.5` are refused, where `parseInt` used to accept them.
+* **A bad invocation of the main crawl command exits 2, not 1.** An unknown or malformed flag, a missing `--url`, a stray argument, an option combination `validateOptions` refuses, or a `--perf-budgets` file that cannot be used now prints one `chaosbringer: …` line and exits 2. An unknown flag or bad number used to print a stack trace. Subcommands (`scan`, `diff`, `drive`, `load`, `recipes`, …) keep their own handling and exit 1.
+  * Number flags are strict: `--timeout 5s`, `--max-pages 3x`, `--max-actions 1.5` and `--timeout 0` are refused, where `parseInt` used to accept them. `--heatmap-top` and `--cluster-min-count` are checked before the crawl.
   * `--cluster-artifacts` without `--failure-artifacts` now fails before the crawl rather than after it.
+  * `recipes verify`, `repair` and `load` exit 2 when `--base-url` is not an absolute http(s) URL.
 * **`--junit` writes timed-out and errored pages as `<failure>`, not `<error>`.** They keep `type="timeout"` / `type="error"` and their message, and the suite's `errors` count is always 0. flaker 0.14's import only looks for `<failure>`, so these pages were recorded as passed. Allure now shows them as Failed rather than Broken, and GitLab as failed rather than error.
 * **`--quiet` prints only the verdict line and the paths written**, plus one line saying why a failing run failed. It used to print the full report.
-* **`ServerFaultKind` gains `"partial"` and `"slowStream"`.** A `switch` that was exhaustive over the kinds needs the new cases.
-* **Recipes are replayed on the base URL they are given.** `recipes verify`, `repair`, `load`, `recipeDriver` and the Playwright Test fixture rebase a recipe's recorded origin onto `--base-url` / `baseUrl`. The fixture defaults to the test's http(s) `baseURL`, and `recipeDriver` to the origin of the page the recipe matched on; pass `baseUrl` to choose another.
+* **A server fault event's `attrs.kind` can be `"partial"` or `"slowStream"`.** A `switch` over `ServerFaultEvent["attrs"]["kind"]` that was exhaustive needs the new cases.
+* **Recipes are replayed on the base URL they are given.** `recipes verify`, `repair`, `load`, `recipeDriver`, the recipe-store load scenarios (`recipeStoreScenario`, `scenarioLoadFromStore`) and the Playwright Test fixture rebase a recipe's recorded origin onto `--base-url` / `baseUrl`, and a repaired recipe is saved with the new origin. The fixture defaults to the test's http(s) `baseURL`, and `recipeDriver` to the origin of the page the recipe matched on; pass `baseUrl` to choose another.
+* **The Playwright Test fixture's `strict: true` now fails the test.** It was documented and never read, so suites that set it may start failing on errors they had been passing with.
 
 ### Bug Fixes
 
-* **Recipes recorded by `drive` reported success against hosts they never reached.** A recipe whose first step navigates to an absolute URL went there whatever `--base-url` said, so `recipes verify --base-url <unreachable>` printed `ok … promoted=true` and `load` reported zero failures. Replay now rebases same-origin steps (cross-origin ones stay put) and prints a warning to stderr when it does. `drive`'s "verify it with" hint includes `--base-url`, and `--dir` when the store is not the default. New exports: `rebaseRecipe`, `recipeOrigin`.
+* **Recipes recorded by `drive` reported success against hosts they never reached.** A recipe whose first step navigates to an absolute URL went there whatever `--base-url` said, so `recipes verify --base-url <unreachable>` printed `ok … promoted=true` and `load` reported zero failures. Replay now rebases same-origin steps (cross-origin ones stay put), and the CLI prints a warning to stderr when it does (not under `--quiet`). `runRecipe`, `verifyAndPromote`, `repairRecipe`, `runRecipeWithRequires` and the recipe driver and fixture options take `baseUrl`. `drive`'s "verify it with" hint includes `--base-url`, and `--dir` when the store is not the default. New exports: `rebaseRecipe`, `recipeOrigin`.
 * **The Playwright Test fixture (`chaosbringer/fixture`):**
   * reads Playwright's `baseURL`, so `chaos.crawl("/")` and `chaos.testPage(page, "/")` resolve relative URLs. It used to read the first page's `about:blank` and throw `Invalid URL`;
   * applies `strict`, through the same rules as the CLI's exit code;
@@ -24,27 +26,27 @@ Fixes for results that were hidden, misattributed or impossible to reproduce. Se
   * attaches the crawl report to the test as `chaos-report.json`.
 
   The README now imports it from `chaosbringer/fixture`.
-* **`testPage()` on a page the caller owns:** runtime, iframe and caller init scripts are now installed on it. They were only put on the crawl's own context, so runtime faults never ran there. A second `testPage()` no longer applies its lifecycle faults to the previous page.
+* **`testPage()` on a page the caller owns:** runtime, iframe and caller init scripts are now installed on it before it navigates, and stay on it. They were only put on the crawl's own context, so runtime faults never ran there. A second `testPage()` no longer applies its lifecycle faults to the previous page.
 * **`--axe` / `invariants.axe()`:**
   * axe-core is injected over CDP, which a page's Content-Security-Policy does not govern. An inline script tag was refused by a strict `script-src`, and every page of such a site failed with an injection error that had nothing to do with accessibility;
-  * iframes are scanned too, same- and cross-origin, with the frame's URL in the message. Frames sandboxed without `allow-scripts` are skipped, and each frame's scan is bounded at 10 s.
+  * iframes are scanned too, with the frame's URL in the message and violations counted per rule per frame. This needs axe-core 4.3 or later (older versions scan the top document only), and cross-origin frames are reached only with `blockExternalNavigation: false`. Frames sandboxed without `allow-scripts` are skipped, and each frame's scan is bounded at 10 s. `formatAxeViolations` takes an optional `frameOf`.
 * **server-faults `partial` and `slowStream` events reach the report.** The header parser knew only `5xx` and `latency` and dropped the rest. `ServerFaultEventAttrs` gains `afterBytes`, `chunkDelayMs` and `chunkSize`.
 * **Reproduction commands carry every flag that shapes the run.**
-  * A failure bundle's `repro.sh` carried only `--url` and `--trace-replay`. It now has the run's other options too, with input files resolved against the run's directory.
-  * `reproCommand` adds `--aria-targets`, `--no-http-cache`, a non-default `--timeout`, `--har-replay` and the ignore patterns (as `--ignore-analytics` / `--ignore-preset` where they match).
-  * Values with `?`, `&` or a leading `=` are now quoted.
-* **"Failed to load resource" names the resource.** The console error carries `resourceUrl`, shown in the text report, cluster samples and scan evidence. Its type and message are unchanged, so existing `--baseline` files still compare.
+  * A failure bundle's `repro.sh` carried only `--url` and `--trace-replay`. It now `cd`s to its own directory and has the run's other options (all but `--seed` and `--trace-out`), with input files resolved against the run's directory.
+  * `reproCommand` adds `--aria-targets`, `--no-http-cache`, a non-default `--timeout`, `--har-replay`, the ignore patterns (as `--ignore-analytics` / `--ignore-preset` where they match), and from the CLI `--strict`, `--axe` / `--axe-tags`, the `--visual-*` flags and `--allow-settle-mismatch`.
+  * Values with `?`, `&` or a leading `=` are now quoted, and a value starting with `-` is written `--flag=-x`. New exported type: `ReproFlag`.
+* **"Failed to load resource" names the resource.** The console error carries `resourceUrl`, shown in the text report, cluster samples (`resourceUrls`) and scan evidence. Its type and message are unchanged, so existing `--baseline` files still compare.
 * **JUnit output stays well-formed XML.** ANSI colour codes (Playwright's call log has them) and other control characters XML cannot carry are dropped. One ESC byte made strict parsers reject the whole file.
 
 ### CLI output
 
-* `--compact` counts what the exit code fails on (unhandled rejections and invariant violations included). On FAIL it says why, lists the clusters behind it, and prints the Repro line. It could print `[FAIL] 1 pages, 0 errors`.
-* Progress is written one line per page when stdout is not a terminal, instead of `\r` updates that ran together in CI logs.
+* `--compact` counts every error kind, unhandled rejections and invariant violations included. On FAIL it says why, lists the clusters behind it (those that failed the run first), and prints the Repro line. It could print `[FAIL] 1 pages, 0 errors`. `formatCompactReport` returns the same.
+* `--compact` progress is written one line per page when stdout is not a terminal, instead of `\r` updates that ran together in CI logs.
 * `--version` / `-V`, and `-h` for `--help`.
 * `--help` lists every subcommand.
 * `scan` warns about a near-empty start page only when the crawl did not get past it.
-* `diff` calls clusters present on both sides "Shared" (was "likely third-party noise") and shows a raw sample message for each.
-* `scan`'s "… and N more" counts the items left out, not occurrences.
+* `diff` calls clusters present on both sides "Shared" (was "likely third-party noise"), and shows a raw sample message where it differs from the normalised key; `diff --json` carries a `sample` for each.
+* `scan`'s "… and N more" counts the items left out, not occurrences, and `ScanFinding.unlisted` carries that count.
 
 ## [0.12.1](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.12.0...chaosbringer-v0.12.1) (2026-10-10)
 
