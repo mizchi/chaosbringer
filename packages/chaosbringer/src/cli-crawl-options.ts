@@ -8,6 +8,7 @@
  */
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
+import { SUBCOMMANDS } from "./cli-usage.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
@@ -94,6 +95,42 @@ export function parseCrawlArgs(args?: string[]) {
 }
 
 export type CrawlCliValues = ReturnType<typeof parseCrawlArgs>["values"];
+
+/**
+ * The URL a crawl's arguments name, by `--url` or as its one positional.
+ * Throws with the message the CLI prints after `chaosbringer: `; `shard`
+ * checks its workers' arguments with it too.
+ */
+export function crawlUrlFromArgs(values: CrawlCliValues, positionals: readonly string[]): string {
+  // A positional that is not a URL used to be dropped on the floor, which made
+  // every wrong invocation look like a working one: `chaosbringer crawl --url X`
+  // ran the default crawl and ignored the word `crawl`, so documentation that
+  // invented a subcommand never got caught by anyone running it. There is no
+  // `crawl` subcommand — crawling is what this binary does with no subcommand at
+  // all.
+  const looksLikeUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+  const first = positionals.find((p) => !looksLikeUrl(p));
+  if (first !== undefined) {
+    const known = Object.keys(SUBCOMMANDS).sort().join(", ");
+    throw new Error(
+      first === "crawl"
+        ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
+            "so drop the word: `chaosbringer --url <url>`"
+        : // A Repro: line's trailing `# + …` note, pasted into zsh, which reads
+          // `#` as a word unless `interactivecomments` is set.
+          first === "#"
+          ? 'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+              "`setopt interactivecomments`); drop the `#` and everything after it"
+          : `unexpected argument "${first}"; known subcommands: ${known}`,
+    );
+  }
+  if (positionals.length > 1) {
+    throw new Error(`expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
+  }
+  const baseUrl = values.url || positionals[0];
+  if (!baseUrl) throw new Error("--url is required");
+  return baseUrl;
+}
 
 /** Throws on a bad value; the CLI prints `chaosbringer: <message>` and exits 2. */
 export function parseNumberFlag(

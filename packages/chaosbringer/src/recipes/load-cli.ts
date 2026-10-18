@@ -9,6 +9,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { UsageError } from "../cli-usage.js";
 import { formatLoadReport, parseDurationMs, type DurationInput } from "../load/index.js";
 import {
   isRecipeSelection,
@@ -163,12 +164,8 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     return null;
   }
   const baseUrl = values["base-url"];
-  if (!baseUrl) {
-    console.error("load: --base-url is required\n");
-    console.error(HELP);
-    process.exit(2);
-  }
-  requireBaseUrl("load", baseUrl);
+  if (!baseUrl) throw new UsageError("--base-url is required");
+  requireBaseUrl(baseUrl);
   const workers = parsePositiveInt("--workers", values.workers, 5);
   // Validate at the CLI boundary so a typo in --duration / --ramp-up
   // fails before launching Chromium, with the bad input echoed.
@@ -178,13 +175,11 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     : undefined;
   const filterStatusRaw = values["filter-status"] ?? "verified";
   if (!isRecipeStatus(filterStatusRaw)) {
-    console.error(`load: --filter-status must be ${RECIPE_STATUSES.join("|")}`);
-    process.exit(2);
+    throw new UsageError(`--filter-status must be ${RECIPE_STATUSES.join("|")}`);
   }
   const selectionStr = values.selection ?? "uniform";
   if (!isRecipeSelection(selectionStr)) {
-    console.error(`load: --selection must be ${RECIPE_SELECTIONS.join("|")}`);
-    process.exit(2);
+    throw new UsageError(`--selection must be ${RECIPE_SELECTIONS.join("|")}`);
   }
   const store = openStore({
     dir: values.dir,
@@ -216,16 +211,12 @@ function parseFlags(argv: string[]): ParsedArgs | null {
 
 function parsePositiveInt(flag: string, raw: string | undefined, fallback?: number): number {
   if (raw === undefined) {
-    if (fallback === undefined) {
-      console.error(`load: ${flag} is required`);
-      process.exit(2);
-    }
+    if (fallback === undefined) throw new UsageError(`${flag} is required`);
     return fallback;
   }
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) {
-    console.error(`load: ${flag} must be a positive integer, got ${raw}`);
-    process.exit(2);
+    throw new UsageError(`${flag} must be a positive integer, got ${raw}`);
   }
   return n;
 }
@@ -235,8 +226,7 @@ function validateDuration(flag: string, raw: string): DurationInput {
     parseDurationMs(raw);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error(`load: ${flag} invalid (${detail})`);
-    process.exit(2);
+    throw new UsageError(`${flag} invalid (${detail})`);
   }
   return raw as DurationInput;
 }
@@ -249,21 +239,16 @@ function validateDuration(flag: string, raw: string): DurationInput {
 function parseThinkTime(raw: string | undefined): { minMs: number; maxMs: number } | undefined {
   if (!raw) return undefined;
   const idx = raw.indexOf("-");
-  if (idx <= 0) {
-    console.error(`load: --think-time must be MIN-MAX, got ${raw}`);
-    process.exit(2);
-  }
+  if (idx <= 0) throw new UsageError(`--think-time must be MIN-MAX, got ${raw}`);
+  let minMs: number;
+  let maxMs: number;
   try {
-    const minMs = parseDurationMs(raw.slice(0, idx));
-    const maxMs = parseDurationMs(raw.slice(idx + 1));
-    if (maxMs < minMs) {
-      console.error(`load: --think-time max (${maxMs}ms) is below min (${minMs}ms)`);
-      process.exit(2);
-    }
-    return { minMs, maxMs };
+    minMs = parseDurationMs(raw.slice(0, idx));
+    maxMs = parseDurationMs(raw.slice(idx + 1));
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error(`load: --think-time invalid (${detail})`);
-    process.exit(2);
+    throw new UsageError(`--think-time invalid (${detail})`);
   }
+  if (maxMs < minMs) throw new UsageError(`--think-time max (${maxMs}ms) is below min (${minMs}ms)`);
+  return { minMs, maxMs };
 }

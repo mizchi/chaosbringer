@@ -14,11 +14,13 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs } from "node:util";
+import { isUsageError, UsageError } from "./cli-usage.js";
+import { errorMessage } from "./errors.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
-import { printReport, getExitCode } from "./reporter.js";
+import { randomSeed } from "./random.js";
+import { formatQuietReport, printReport, getExitCode } from "./reporter.js";
 import type {
   ActionResult,
   CrawlReport,
@@ -204,7 +206,7 @@ export function parseShardArg(value: string): { shardIndex: number; shardCount: 
 }
 
 /** Parsed CLI arguments for the shard coordinator. */
-interface ShardCliArgs {
+export interface ShardCliArgs {
   count: number;
   output: string;
   compact: boolean;
@@ -214,10 +216,12 @@ interface ShardCliArgs {
   forward: string[];
 }
 
-function parseShardCliArgs(argv: string[]): ShardCliArgs {
-  // First, split off --count / --output / --help, forward the rest to each
-  // child unchanged. We deliberately do NOT re-validate --url etc here; the
-  // child CLI handles that and errors propagate.
+/**
+ * Split off what the coordinator reads itself (--count, --output, --help) and
+ * forward the rest to each worker unchanged. Null after printing --help.
+ * Exported for tests; `checkWorkerArgs` checks what is forwarded.
+ */
+export function parseShardCliArgs(argv: string[]): ShardCliArgs | null {
   const forward: string[] = [];
   let count: number | null = null;
   let output = "chaos-report.json";
@@ -230,7 +234,7 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     const a = argv[i]!;
     if (a === "--count" || a === "--shards") {
       const v = argv[++i];
-      if (!v) throw new Error(`chaosbringer shard: ${a} requires a value`);
+      if (!v) throw new UsageError(`${a} requires a value`);
       count = Number(v);
       continue;
     }
@@ -240,7 +244,7 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     }
     if (a === "--output" || a === "-o") {
       const v = argv[++i];
-      if (!v) throw new Error("chaosbringer shard: --output requires a value");
+      if (!v) throw new UsageError("--output requires a value");
       output = v;
       continue;
     }
@@ -270,16 +274,52 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     }
     if (a === "--help" || a === "-h") {
       printShardHelp();
-      process.exit(0);
+      return null;
     }
     forward.push(a);
   }
 
   if (count === null || !Number.isFinite(count) || !Number.isInteger(count) || count < 1) {
-    throw new Error("chaosbringer shard: --count <N> is required and must be an integer >= 1");
+    throw new UsageError("--count <N> is required and must be an integer >= 1");
   }
 
   return { count, output, compact, quiet, strict, baselineStrict, forward };
+}
+
+/**
+ * Refuse, before any worker starts, the arguments every worker would refuse,
+ * by the main crawl's own option table and checks. An unknown flag used to
+ * be forwarded, refused by each of the N workers, and end in `could not read
+ * …/shard-0.json` and exit 1. Returns the seed the workers share: the one
+ * given, or a fresh one, so that every shard runs with it and the merged
+ * report's seed and Repro line hold for the whole run.
+ */
+export async function checkWorkerArgs(args: ShardCliArgs): Promise<number> {
+  // Imported on demand, like perf-cli in cli.ts: the library's
+  // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
+  // imports `parseShardArg` from it.
+  const { crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs } = await import("./cli-crawl-options.js");
+  const { validateOptions } = await import("./validate.js");
+  try {
+    const { values, positionals } = parseCrawlArgs([...args.forward, "--shard", `0/${args.count}`]);
+    const options = crawlerOptionsFromCli(values, crawlUrlFromArgs(values, positionals));
+    validateOptions(options);
+    return options.seed ?? randomSeed();
+  } catch (err) {
+    throw isUsageError(err) ? err : new UsageError(errorMessage(err));
+  }
+}
+
+/**
+ * The command that reruns the whole sharded run: a worker's Repro line with
+ * `chaosbringer shard --count N` for its `--shard i/N`. Every worker ran
+ * with the same flags and seed, so any one of them stands for the rest. The
+ * merged report used to keep shard 0's line, which reran shard 0 alone.
+ */
+export function shardReproCommand(workerRepro: string, count: number): string {
+  return workerRepro
+    .replace(/^chaosbringer /, `chaosbringer shard --count ${count} `)
+    .replace(/ --shard \d+\/\d+(?= |$)/, "");
 }
 
 function printShardHelp(): void {
@@ -294,9 +334,12 @@ OPTIONS:
   --output <path>       Merged report output (default: chaos-report.json)
   --help                Show this help
 
-All other options are forwarded verbatim to each shard worker (e.g. --url,
---max-pages, --seed, --seed-from-sitemap, --baseline, --strict, --compact,
---quiet). Each worker receives an additional --shard i/N flag.
+All other options are the main crawl's (chaosbringer --help), checked before
+any worker starts and forwarded verbatim to each shard worker (e.g. --url,
+--max-pages, --seed, --seed-from-sitemap, --baseline, --strict). Each worker
+receives an additional --shard i/N flag, and the same --seed: the given one,
+or one drawn for the run. --quiet and --compact print the merged report the
+way the main command prints its own, without the workers' output.
 
 For full URL-space coverage, combine with --seed-from-sitemap: each shard
 filters the sitemap URLs by hash so every URL is processed by exactly one
@@ -334,9 +377,15 @@ function runShardWorker(args: {
   });
 }
 
-/** Entry point for the `shard` subcommand. Wired from src/cli.ts. */
+/**
+ * Entry point for the `shard` subcommand. Wired from src/cli.ts. Sets
+ * `process.exitCode` rather than exiting: a `process.exit` inside the `try`
+ * skipped the `finally`, and every run left its /tmp/chaos-shard-* behind.
+ */
 export async function runShardCli(argv: string[]): Promise<void> {
   const args = parseShardCliArgs(argv);
+  if (!args) return;
+  const seed = await checkWorkerArgs(args);
   const workdir = mkdtempSync(join(tmpdir(), "chaos-shard-"));
 
   try {
@@ -350,8 +399,13 @@ export async function runShardCli(argv: string[]): Promise<void> {
 
     const workers = Array.from({ length: args.count }, (_, i) => {
       const reportPath = join(workdir, `shard-${i}.json`);
+      // A later --seed wins in parseArgs, so this is the given one or the
+      // fresh one checkWorkerArgs drew: unseeded, each worker used to draw
+      // its own, and no seed reran the run.
       const workerArgs = [
         ...args.forward,
+        "--seed",
+        String(seed),
         "--shard",
         `${i}/${args.count}`,
         "--output",
@@ -363,7 +417,9 @@ export async function runShardCli(argv: string[]): Promise<void> {
         execArgv,
         workerArgs,
         reportPath,
-        quiet: args.quiet,
+        // --compact shows the merged report: N workers' progress lines and
+        // compact reports, interleaved, are not that.
+        quiet: args.quiet || args.compact,
         index: i,
       });
     });
@@ -384,29 +440,32 @@ export async function runShardCli(argv: string[]): Promise<void> {
 
     if (reports.length === 0) {
       console.error("shard: no reports produced — aborting");
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const merged = mergeReports(reports);
+    if (merged.reproCommand) merged.reproCommand = shardReproCommand(merged.reproCommand, args.count);
 
     // Persist merged report.
     const { writeFileSync } = await import("node:fs");
     writeFileSync(args.output, JSON.stringify(merged, null, 2));
 
+    // The main CLI's output modes: --quiet is the verdict, why it failed
+    // and the paths written. It printed the whole merged report.
     const exitOptions = { strict: args.strict, baselineStrict: args.baselineStrict };
-    printReport(merged, args.compact, exitOptions);
-    if (!args.quiet) {
-      console.log(`\nMerged report saved to: ${args.output}`);
-      const failed = results.filter((r) => r.exitCode !== 0).length;
-      if (failed > 0) {
-        console.log(`${failed}/${args.count} shard(s) exited non-zero`);
-      }
+    if (args.quiet) console.log(formatQuietReport(merged, exitOptions));
+    else printReport(merged, args.compact, exitOptions);
+    console.log(args.quiet ? `Merged report saved to: ${args.output}` : `\nMerged report saved to: ${args.output}`);
+    const failed = results.filter((r) => r.exitCode !== 0).length;
+    if (failed > 0) {
+      console.log(`${failed}/${args.count} shard(s) exited non-zero`);
     }
 
     // Exit code: max of (any shard non-zero) and (merged report's getExitCode).
     const reportExit = getExitCode(merged, exitOptions);
-    const workerExit = results.some((r) => r.exitCode !== 0) ? 1 : 0;
-    process.exit(Math.max(reportExit, workerExit));
+    const workerExit = failed > 0 ? 1 : 0;
+    process.exitCode = Math.max(reportExit, workerExit);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }

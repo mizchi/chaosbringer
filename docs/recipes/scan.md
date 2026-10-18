@@ -112,7 +112,9 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   through.
 - **Guard against regressions.** Scan before and after a change, then run
   `chaosbringer perf regress <before>/clean-report.json --current <after>/clean-report.json`.
-- **Gate CI.** `--fail-on high` exits 1 when a high finding exists.
+- **Gate CI.** `--fail-on high` exits 1 when a high finding exists. A
+  mistyped flag or a bad value exits 2 before anything runs, with one
+  `chaosbringer scan: …` line, so a gate does not read it as a finding.
 
 ## Options
 

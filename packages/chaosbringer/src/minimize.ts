@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
 import {
@@ -217,10 +218,9 @@ OPTIONS:
 `);
 }
 
+/** A usage error: `chaosbringer minimize: <msg>` and exit 2, from cli.ts. */
 function fail(msg: string): never {
-  console.error(`Error: ${msg}`);
-  console.error("Run `chaosbringer minimize --help` for usage information.");
-  process.exit(1);
+  throw new UsageError(msg);
 }
 
 /** Entry point wired from src/cli.ts when the `minimize` subcommand is used. */

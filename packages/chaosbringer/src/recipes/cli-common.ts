@@ -4,6 +4,7 @@
  * flags and open the store the same way; keeping that in one place
  * means a future flag (e.g. `--cache`) updates both surfaces.
  */
+import { UsageError } from "../cli-usage.js";
 import { rebaseNotice } from "./replay.js";
 import { RecipeStore } from "./store.js";
 import type { ActionRecipe, RecipeStatus } from "./types.js";
@@ -61,20 +62,31 @@ export function requireRecipe(store: RecipeStore, name: string): ActionRecipe {
 }
 
 /**
- * `process.exit(2)` unless `--base-url` is an absolute http(s) URL:
+ * `raw` as an integer >= `min`, or undefined when the flag was not given. A
+ * value that is not one is a `UsageError` naming the flag: `Number()` alone
+ * read `--keep-last abc` as NaN and `--to-version` left out as 0.
+ */
+export function intFlag(flag: string, raw: string | undefined, min: number): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (raw.trim() === "" || !Number.isInteger(n) || n < min) {
+    throw new UsageError(`${flag} must be an integer >= ${min}, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
+/**
+ * A `UsageError` (exit 2) unless `--base-url` is an absolute http(s) URL:
  * replay moves a recipe's URLs onto its origin (`rebaseRecipe`), and a
  * value with no origin would fail every replay instead of the command.
  */
-export function requireBaseUrl(cmd: string, url: string): void {
+export function requireBaseUrl(url: string): void {
   let ok = false;
   try {
     const { protocol } = new URL(url);
     ok = protocol === "http:" || protocol === "https:";
   } catch {}
-  if (!ok) {
-    console.error(`${cmd}: --base-url must be an absolute http(s) URL, got ${JSON.stringify(url)}`);
-    process.exit(2);
-  }
+  if (!ok) throw new UsageError(`--base-url must be an absolute http(s) URL, got ${JSON.stringify(url)}`);
 }
 
 /**

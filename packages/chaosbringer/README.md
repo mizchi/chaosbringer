@@ -951,6 +951,8 @@ failures/0000__checkout_review__a91c2f0e/
 
 `repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Fault rules and invariants set in code are not replayed, and a comment line in the script names them, as on the `Repro:` line. Add `--baseline` to gate CI on the same shape of failure.
 
+The CLI says where they went and how many there are, in every output mode: `Wrote 3 failure bundle(s) to ./failures/`, next to `Report saved to:`. The `--trace-out` and `--log-file` files get a line each too (`Trace saved to: …`, `Log saved to: …`).
+
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 
 ## Performance budget
@@ -1182,6 +1184,16 @@ The browser's "Failed to load resource" message names no file, so its console er
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
+Every subcommand refuses its arguments the same way: an unknown flag, a missing required flag or operand, or a malformed value exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+
+> **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
+> Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
+> step read a mistyped flag as "the run found something". `load`, `drive` and
+> `recipes verify` already exited 2 for some of theirs, without the one line;
+> `recipes show` and the other `recipes` subs that need a name printed their
+> usage and exited 0 without one. A script that checked a subcommand for
+> exactly 1 on a typo now sees 2.
+
 > **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
 > used to ignore them, so a run whose entire finding was "the app left a
 > rejection unhandled" exited 0 while a single `console.error` exited 1 — and
@@ -1318,7 +1330,7 @@ chaosbringer shard \
   --output chaos-report.json
 ```
 
-All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are forwarded verbatim to each worker. For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
+All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are checked against the main crawl's before any worker starts, so an unknown flag or a malformed value exits 2 once (`chaosbringer shard: unknown option --bogus`) instead of failing in every worker, and are then forwarded verbatim to each worker. Every worker gets the same `--seed`: the one given, or one drawn for the run. That is what makes the merged report's seed, and its `Repro:` line, hold for the whole run: `chaosbringer shard --count 4 --url … --seed 123 …` reruns every shard (it used to be shard 0's line, which reran shard 0 alone). `--quiet` prints the merged verdict, why it failed and `Merged report saved to:`, and `--compact` the merged compact report, as the main command does; neither mixes in the workers' own output. For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
 
 Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean.
 
@@ -1434,7 +1446,7 @@ chaosbringer --url http://localhost:3000 \
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
-| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written | false |
+| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
 | `--help`, `-h` | Show help, with a line for every subcommand | — |
 | `--version`, `-V` | Print the installed version | — |
 

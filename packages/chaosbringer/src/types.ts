@@ -1540,6 +1540,8 @@ export interface CrawlerEvents {
   onBlockedNavigation?: (url: string) => void;
   /** The browser was bound (`bind`): where clients can attach. */
   onBind?: (bound: import("./browser-bind.js").BoundBrowser) => void;
+  /** A `failureArtifacts` bundle was written for `result`, at `bundleDir`. */
+  onFailureBundle?: (bundleDir: string, result: PageResult) => void;
 }
 
 /**

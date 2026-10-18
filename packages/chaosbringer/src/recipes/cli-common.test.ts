@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { UsageError } from "../cli-usage.js";
 import { requireBaseUrl, warnRebased } from "./cli-common.js";
 import type { ActionRecipe } from "./types.js";
 import { emptyStats } from "./types.js";
@@ -42,15 +43,12 @@ describe("warnRebased", () => {
 });
 
 describe("requireBaseUrl", () => {
-  it("exits 2 on a base URL with no http(s) origin", () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
-      throw new Error(`exit ${code}`);
-    });
-    expect(() => requireBaseUrl("verify", "staging.example.test")).toThrow("exit 2");
-    expect(() => requireBaseUrl("verify", "file:///tmp/site")).toThrow("exit 2");
-    expect(error).toHaveBeenCalledWith('verify: --base-url must be an absolute http(s) URL, got "staging.example.test"');
-    requireBaseUrl("verify", "http://127.0.0.1:4791/login");
-    expect(exit).toHaveBeenCalledTimes(2);
+  it("refuses a base URL with no http(s) origin as a usage error (exit 2)", () => {
+    expect(() => requireBaseUrl("staging.example.test")).toThrow(UsageError);
+    expect(() => requireBaseUrl("file:///tmp/site")).toThrow(UsageError);
+    expect(() => requireBaseUrl("staging.example.test")).toThrow(
+      '--base-url must be an absolute http(s) URL, got "staging.example.test"',
+    );
+    expect(() => requireBaseUrl("http://127.0.0.1:4791/login")).not.toThrow();
   });
 });

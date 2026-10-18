@@ -4,6 +4,8 @@
  */
 
 import { parseArgs } from "node:util";
+import { UsageError } from "../cli-usage.js";
+import { errorMessage } from "../errors.js";
 import { COMMON_IGNORE_PATTERNS, resolveIgnorePresets } from "../ignore-presets.js";
 import { NETWORK_PROFILES, type NetworkProfile } from "../types.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind, type ScanSeverity } from "./analyze.js";
@@ -113,9 +115,6 @@ export async function runScanCli(argv: string[]): Promise<void> {
   }
   const options = scanOptionsFromCli(values);
   const failOn = values["fail-on"];
-  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
-    throw new Error(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
-  }
 
   const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
 
@@ -135,34 +134,51 @@ export async function runScanCli(argv: string[]): Promise<void> {
  * `reproCommand` (`scanReproCommand`) back into the scan it came from.
  */
 export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
-  if (!values.url) throw new Error("--url is required (see chaosbringer scan --help)");
+  // Every check is a usage error: one `chaosbringer scan: …` line and exit 2
+  // (cli.ts), not `scan failed: …` and exit 1, which --fail-on gates on.
+  if (!values.url) throw new UsageError("--url is required");
   try {
     new URL(values.url);
   } catch {
-    throw new Error(`--url must be an absolute URL (got ${JSON.stringify(values.url)})`);
+    throw new UsageError(`--url must be an absolute URL (got ${JSON.stringify(values.url)})`);
+  }
+  const failOn = values["fail-on"];
+  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
+    throw new UsageError(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
   }
 
   const network = values.network;
   if (network !== undefined && (network === "offline" || !NETWORK_PROFILES.includes(network as NetworkProfile))) {
-    throw new Error(`--network must be one of ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")} (got ${JSON.stringify(network)})`);
+    throw new UsageError(`--network must be one of ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")} (got ${JSON.stringify(network)})`);
   }
   const faults = values.faults === undefined ? undefined : parseFaults(values.faults);
 
   const ignoreErrorPatterns = [...(values["ignore-error"] ?? [])];
   if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
-  for (const spec of values["ignore-preset"] ?? []) ignoreErrorPatterns.push(...resolveIgnorePresets(spec));
+  for (const spec of values["ignore-preset"] ?? []) {
+    try {
+      ignoreErrorPatterns.push(...resolveIgnorePresets(spec));
+    } catch (err) {
+      throw new UsageError(`--ignore-preset: ${errorMessage(err)}`);
+    }
+  }
+  const maxPages = intFlag("--max-pages", values["max-pages"], 1);
+  const maxActionsPerPage = intFlag("--max-actions", values["max-actions"], 0);
+  const seed = intFlag("--seed", values.seed, 0);
+  const hangReleaseMs = intFlag("--hang-ms", values["hang-ms"], 1);
+  const timeout = intFlag("--timeout", values.timeout, 1);
 
   return {
     url: values.url,
-    maxPages: intFlag("--max-pages", values["max-pages"], 1),
-    maxActionsPerPage: intFlag("--max-actions", values["max-actions"], 0),
+    maxPages,
+    maxActionsPerPage,
     outDir: values.out,
     chaos: !values["no-chaos"],
     ...(faults ? { faults } : {}),
-    seed: intFlag("--seed", values.seed, 0),
+    seed,
     axe: values.axe,
     coverage: !values["no-coverage"],
-    hangReleaseMs: intFlag("--hang-ms", values["hang-ms"], 1),
+    hangReleaseMs,
     crawler: {
       headless: resolveHeadless(values),
       ...(values["aria-targets"] ? { ariaTargets: true } : {}),
@@ -173,7 +189,7 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
       ...(values.sitemap ? { seedFromSitemap: values.sitemap } : {}),
       ...(network ? { network: network as NetworkProfile } : {}),
       ...(values.device ? { device: values.device } : {}),
-      ...(values.timeout !== undefined ? { timeout: intFlag("--timeout", values.timeout, 1) } : {}),
+      ...(timeout !== undefined ? { timeout } : {}),
     },
   };
 }
@@ -184,17 +200,17 @@ export function parseFaults(raw: string): ScanFaultKind[] {
   for (const part of raw.split(",").map((x) => x.trim()).filter(Boolean)) {
     const kind = part === "500" ? "status" : part;
     if (!SCAN_FAULT_KINDS.includes(kind as ScanFaultKind)) {
-      throw new Error(`--faults: unknown fault ${JSON.stringify(part)} (known: 500, abort, hang)`);
+      throw new UsageError(`--faults: unknown fault ${JSON.stringify(part)} (known: 500, abort, hang)`);
     }
     if (!out.includes(kind as ScanFaultKind)) out.push(kind as ScanFaultKind);
   }
-  if (out.length === 0) throw new Error("--faults needs at least one of 500, abort, hang (or pass --no-chaos)");
+  if (out.length === 0) throw new UsageError("--faults needs at least one of 500, abort, hang (or pass --no-chaos)");
   return out;
 }
 
 function intFlag(flag: string, raw: string | undefined, min: number): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) throw new Error(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
+  if (!Number.isInteger(n) || n < min) throw new UsageError(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { fakeSpan } from "./perf-fixtures.test-helpers.js";
-import { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
+import { UsageError } from "./cli-usage.js";
+import {
+  checkWorkerArgs,
+  fnv1a,
+  mergeReports,
+  parseShardArg,
+  parseShardCliArgs,
+  shardOwns,
+  shardReproCommand,
+} from "./shard.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
 function summary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -268,5 +277,41 @@ describe("mergeReports", () => {
     const mixed = mergeReports([measured("http://x/a", idle), measured("http://x/b", { mode: "adaptive", quietMs: 100 })]);
     expect(mixed.perf).toBeDefined();
     expect(mixed.perf!.settle).toBeUndefined();
+  });
+});
+
+describe("shard CLI", () => {
+  const args = (argv: string[]) => {
+    const parsed = parseShardCliArgs(argv);
+    if (!parsed) throw new Error("parsed as --help");
+    return parsed;
+  };
+
+  it("refuses an unknown flag before a worker starts, by the main crawl's option table", async () => {
+    // Forwarded, it failed in each of the N workers and ended in
+    // `could not read …/shard-0.json` and exit 1.
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--bogus"]))).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+    });
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--max-pages", "0"]))).rejects.toMatchObject({
+      name: "UsageError",
+      message: "--max-pages must be >= 1 (got 0)",
+    });
+    await expect(checkWorkerArgs(args(["--count", "2"]))).rejects.toMatchObject({ message: "--url is required" });
+    expect(() => args(["--url", "http://x.test/"])).toThrow(UsageError);
+  });
+
+  it("gives every worker the seed given, or one drawn for the run", async () => {
+    expect(await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--seed", "42"]))).toBe(42);
+    expect(Number.isInteger(await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/"])))).toBe(true);
+  });
+
+  it("reruns the whole sharded run from the merged Repro line", () => {
+    expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --max-pages 3 --shard 1/4 --strict", 4)).toBe(
+      "chaosbringer shard --count 4 --url http://x.test/ --seed 7 --max-pages 3 --strict",
+    );
+    expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --shard 0/2", 2)).toBe(
+      "chaosbringer shard --count 2 --url http://x.test/ --seed 7",
+    );
   });
 });

@@ -10,6 +10,7 @@
 
 import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
+import { UsageError } from "./cli-usage.js";
 import type { CrawlReport, PageError } from "./types.js";
 
 export interface ClusterOccurrence {
@@ -215,9 +216,9 @@ interface FlakeCliArgs {
 /**
  * Exported for tests. The parser is where the workflow bug lived — a real flag
  * of the root command that this subcommand refused — and it is not reachable
- * from `runFlakeCli` without launching browsers. Note that invalid *values*
- * exit the process via `fail()` rather than throwing, so only the
- * unknown-flag path (thrown by `parseArgs` itself) is assertable in-process.
+ * from `runFlakeCli` without launching browsers. Every refusal throws: an
+ * unknown flag from `parseArgs`, an invalid value a `UsageError` (`fail()`),
+ * which cli.ts reports with exit 2.
  */
 export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
   const { values } = parseArgs({
@@ -312,10 +313,9 @@ OPTIONS:
 `);
 }
 
+/** A usage error: `chaosbringer flake: <msg>` and exit 2, from cli.ts. */
 function fail(msg: string): never {
-  console.error(`Error: ${msg}`);
-  console.error("Run `chaosbringer flake --help` for usage information.");
-  process.exit(1);
+  throw new UsageError(msg);
 }
 
 /** Entry point wired from src/cli.ts when the `flake` subcommand is used. */

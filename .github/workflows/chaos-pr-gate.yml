@@ -207,6 +207,14 @@ jobs:
           code=${PIPESTATUS[0]}
           set -e
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Exit 2 is also a refused invocation (`chaosbringer perf regress:
+          # unknown option …`): this step's own command line is broken, which
+          # is a failure, not a baseline to skip.
+          usage=$(grep -m1 '^chaosbringer perf regress: ' perf-regress.log || true)
+          if [ "$code" -eq 2 ] && [ -n "$usage" ]; then
+            echo "::error::perf regress refused this step's arguments: ${usage//'%'/%25}"
+            exit 2
+          fi
           if [ "$code" -eq 2 ]; then
             reason=$(grep -m1 -o 'refusing to compare: .*' perf-regress.log || true)
             if [ -z "$reason" ]; then

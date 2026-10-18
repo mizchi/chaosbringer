@@ -27,6 +27,7 @@
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { inSubcommand, UsageError } from "../cli-usage.js";
 import { aggregateCoverage, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { parseItfTrace } from "./itf.js";
 import {
@@ -171,14 +172,29 @@ function listFiles(dir: string, suffix: string): string[] {
  *
  * `--runs abc` used to reach `envelope([])` and die with "no calibration runs
  * to aggregate", a message about an internal invariant rather than about the
- * thing the operator typed.
+ * thing the operator typed. A usage error: cli.ts prefixes the command.
  */
 function positiveInt(raw: string, flag: string): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) {
-    throw new Error(`model calibrate: ${flag} needs a positive integer, got "${raw}"`);
+    throw new UsageError(`${flag} needs a positive integer, got "${raw}"`);
   }
   return n;
+}
+
+/**
+ * The flags a command cannot run without, as one usage error, and their
+ * values. Missing, they used to print the whole help to stdout and exit 1,
+ * the code of a run whose plans failed.
+ */
+function requireFlags<V extends Record<string, unknown>, K extends keyof V & string>(
+  values: V,
+  flags: readonly K[],
+): { [F in K]: NonNullable<V[F]> } {
+  const missing = flags.filter((f) => !values[f]).map((f) => `--${f}`);
+  if (missing.length === 1) throw new UsageError(`${missing[0]} is required`);
+  if (missing.length > 1) throw new UsageError(`${missing.join(", ")} are required`);
+  return values as { [F in K]: NonNullable<V[F]> };
 }
 
 /** Strip the ITF / plan suffix so a plan's name matches its file stem. */
@@ -231,11 +247,11 @@ async function runCompile(argv: string[]): Promise<void> {
     },
     allowPositionals: false,
   });
-  if (values.help || !values.traces || !values.out) {
+  if (values.help) {
     console.log(HELP);
-    if (!values.help) process.exitCode = 1;
     return;
   }
+  const { traces, out } = requireFlags(values, ["traces", "out"]);
 
   // `--calls-var list=listCalls`: the operation on the left, the model
   // variable on the right. Malformed input is an error rather than a silently
@@ -244,16 +260,14 @@ async function runCompile(argv: string[]): Promise<void> {
   for (const pair of values["calls-var"] ?? []) {
     const eq = pair.indexOf("=");
     if (eq < 1 || eq === pair.length - 1) {
-      console.error(`model compile: --calls-var expects <operation>=<variable>, got "${pair}"`);
-      process.exitCode = 1;
-      return;
+      throw new UsageError(`--calls-var expects <operation>=<variable>, got "${pair}"`);
     }
     callsVars[pair.slice(0, eq)] = pair.slice(eq + 1);
   }
 
-  const tracePaths = listFiles(resolve(values.traces), ".itf.json");
+  const tracePaths = listFiles(resolve(traces), ".itf.json");
   if (tracePaths.length === 0) {
-    console.error(`model compile: no *.itf.json files in ${values.traces}`);
+    console.error(`model compile: no *.itf.json files in ${traces}`);
     process.exitCode = 1;
     return;
   }
@@ -266,14 +280,14 @@ async function runCompile(argv: string[]): Promise<void> {
     ...(values["ignore-action"] !== undefined ? { ignoreActions: values["ignore-action"] } : {}),
   });
 
-  const outDir = resolve(values.out);
+  const outDir = resolve(out);
   mkdirSync(outDir, { recursive: true });
   for (const plan of plans) {
     validatePlan(plan);
     writeFileSync(join(outDir, `${plan.name}.plan.json`), `${JSON.stringify(plan, null, 2)}\n`);
   }
   const flagged = plans.filter((p) => p.orderSensitive);
-  console.log(`model compile: ${plans.length} plan(s) -> ${values.out}`);
+  console.log(`model compile: ${plans.length} plan(s) -> ${out}`);
   for (const plan of plans) {
     const steps = plan.schedule.map((s) => `${s.rule}@${s.occurrence}=${s.outcome}`).join(" ");
     const state = plan.expect.state
@@ -325,18 +339,18 @@ async function runRun(argv: string[]): Promise<void> {
     },
     allowPositionals: false,
   });
-  if (values.help || !values.plans || !values.url || !values.config) {
+  if (values.help) {
     console.log(HELP);
-    if (!values.help) process.exitCode = 1;
     return;
   }
+  const { plans: plansDir, url, config } = requireFlags(values, ["plans", "url", "config"]);
 
   // `.plan.json`, not `.json`: `model compile` writes that suffix and
   // `stemOf` strips it, so a `profile.json` or `targets.json` living beside
   // the plans is not a plan and must not die as `plan is missing a "name"`.
-  const planPaths = listFiles(resolve(values.plans), ".plan.json");
+  const planPaths = listFiles(resolve(plansDir), ".plan.json");
   if (planPaths.length === 0) {
-    console.error(`model run: no *.plan.json files in ${values.plans}`);
+    console.error(`model run: no *.plan.json files in ${plansDir}`);
     process.exitCode = 1;
     return;
   }
@@ -346,10 +360,10 @@ async function runRun(argv: string[]): Promise<void> {
     return plan;
   });
 
-  const bridge = await loadBridge(values.config);
+  const bridge = await loadBridge(config);
   const results = await runPlans(plans, {
     ...bridge,
-    baseUrl: values.url,
+    baseUrl: url,
     ...(values["allow-order-sensitive"] ? { allowOrderSensitive: true } : {}),
   });
 
@@ -408,19 +422,23 @@ async function runCalibrate(argv: string[]): Promise<void> {
     },
     allowPositionals: false,
   });
-  if (values.help || !values.url) {
+  if (values.help) {
     console.log(HELP);
-    if (!values.help) process.exitCode = 1;
     return;
   }
+  const { url } = requireFlags(values, ["url"]);
+  // Parsed before the import and the first probe, so a bad count is refused
+  // with nothing run.
+  const runs = values.runs !== undefined ? positiveInt(values.runs, "--runs") : undefined;
+  const samples = values.samples !== undefined ? positiveInt(values.samples, "--samples") : undefined;
 
   const { calibrateTiming } = await import("./calibrate.js");
   const { solveTiming } = await import("../timing.js");
   const result = await calibrateTiming({
-    url: values.url,
+    url,
     ...(values["probe-path"] !== undefined ? { probePath: values["probe-path"] } : {}),
-    ...(values.runs !== undefined ? { runs: positiveInt(values.runs, "--runs") } : {}),
-    ...(values.samples !== undefined ? { samples: positiveInt(values.samples, "--samples") } : {}),
+    ...(runs !== undefined ? { runs } : {}),
+    ...(samples !== undefined ? { samples } : {}),
     onProgress: (m) => console.error(`  ${m}`),
   });
 
@@ -463,13 +481,13 @@ export function parseTargetFields(raw: string): MismatchField[] {
     .map((n) => n.trim())
     .filter((n) => n.length > 0);
   if (names.length === 0) {
-    throw new Error(`model shrink: --target was empty; give at least one mismatch field`);
+    throw new UsageError(`--target was empty; give at least one mismatch field`);
   }
   const known = new Set<string>(MISMATCH_FIELDS);
   const bad = names.filter((n) => !known.has(n));
   if (bad.length > 0) {
-    throw new Error(
-      `model shrink: --target has no such mismatch field: ${bad.join(", ")}. ` +
+    throw new UsageError(
+      `--target has no such mismatch field: ${bad.join(", ")}. ` +
         `Known fields: ${MISMATCH_FIELDS.join(", ")}`,
     );
   }
@@ -525,18 +543,23 @@ async function runShrink(argv: string[]): Promise<void> {
     },
     allowPositionals: false,
   });
-  if (values.help || !values.plan || !values.url || !values.config) {
+  if (values.help) {
     console.log(HELP);
-    if (!values.help) process.exitCode = 1;
     return;
   }
+  const { plan: planPath, url, config } = requireFlags(values, ["plan", "url", "config"]);
+  // Parsed before the plan is read and replayed: a typo in one of these
+  // used to be found only once the bridge had loaded.
+  const target = values.target !== undefined ? parseTargetFields(values.target) : undefined;
+  const maxRuns = values["max-runs"] !== undefined ? positiveInt(values["max-runs"], "--max-runs") : undefined;
+  const retries = values.retries !== undefined ? nonNegativeInt(values.retries, "--retries") : undefined;
 
-  const plan = JSON.parse(readFileSync(resolve(values.plan), "utf8")) as FaultPlan;
+  const plan = JSON.parse(readFileSync(resolve(planPath), "utf8")) as FaultPlan;
   validatePlan(plan);
-  const bridge = await loadBridge(values.config);
+  const bridge = await loadBridge(config);
   const runOptions: RunPlanOptions = {
     ...bridge,
-    baseUrl: values.url,
+    baseUrl: url,
     ...(values["allow-order-sensitive"] ? { allowOrderSensitive: true } : {}),
   };
 
@@ -554,11 +577,9 @@ async function runShrink(argv: string[]): Promise<void> {
     plan,
     run: (candidate) => runPlan(candidate, runOptions),
     ...(allowOutcomes !== undefined ? { allowOutcomes } : {}),
-    ...(values.target !== undefined ? { target: parseTargetFields(values.target) } : {}),
-    ...(values["max-runs"] !== undefined
-      ? { maxRuns: positiveInt(values["max-runs"], "--max-runs") }
-      : {}),
-    ...(values.retries !== undefined ? { retries: nonNegativeInt(values.retries, "--retries") } : {}),
+    ...(target !== undefined ? { target } : {}),
+    ...(maxRuns !== undefined ? { maxRuns } : {}),
+    ...(retries !== undefined ? { retries } : {}),
     onStep: (step) =>
       console.error(
         `  run=${step.run} ${step.verdict}${step.kept ? " (kept)" : ""}: ${step.edit}`,
@@ -596,25 +617,26 @@ async function runShrink(argv: string[]): Promise<void> {
 function nonNegativeInt(raw: string, flag: string): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`model shrink: ${flag} needs a non-negative integer, got "${raw}"`);
+    throw new UsageError(`${flag} needs a non-negative integer, got "${raw}"`);
   }
   return n;
 }
 
 export async function runModelCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
+  // A usage error names the command: `chaosbringer model run: …`.
   switch (command) {
     case "calibrate":
-      await runCalibrate(rest);
+      await inSubcommand("model calibrate", () => runCalibrate(rest));
       return;
     case "compile":
-      await runCompile(rest);
+      await inSubcommand("model compile", () => runCompile(rest));
       return;
     case "run":
-      await runRun(rest);
+      await inSubcommand("model run", () => runRun(rest));
       return;
     case "shrink":
-      await runShrink(rest);
+      await inSubcommand("model shrink", () => runShrink(rest));
       return;
     case undefined:
     case "-h":
@@ -622,8 +644,6 @@ export async function runModelCli(argv: string[]): Promise<void> {
       console.log(HELP);
       return;
     default:
-      console.error(`model: unknown command "${command}"`);
-      console.log(HELP);
-      process.exitCode = 1;
+      throw new UsageError(`unknown command "${command}" (expected calibrate, compile, run or shrink)`);
   }
 }

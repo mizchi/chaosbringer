@@ -1065,6 +1065,7 @@ export class ChaosCrawler {
         reproNote: unreplayedNote(this.options),
       });
       this.logger.info("failure_artifact_written", { url: result.url, bundleDir });
+      this.events.onFailureBundle?.(bundleDir, result);
     } catch (err) {
       this.logger.warn("failure_artifact_write_failed", {
         url: result.url,

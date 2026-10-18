@@ -3,7 +3,7 @@
  * CI log or a script — over a real crawl of a three-page site.
  */
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,13 +20,18 @@ const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
  */
 const IGNORE_TSX_NAME = ["--ignore-error", "__name is not defined"];
 
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** Async, not spawnSync: the test server answers from this process's event loop. */
-function cli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function cli(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
       ["--import", "tsx", CLI, ...args],
-      { cwd: PACKAGE_DIR, timeout: 90_000 },
+      { cwd: PACKAGE_DIR, timeout: 90_000, env },
       (err, stdout, stderr) => {
         const status = err ? (typeof err.code === "number" ? err.code : null) : 0;
         resolve({ status, stdout, stderr });
@@ -106,6 +111,83 @@ describe("main CLI output on a pipe", () => {
       "  Failed: --strict: 1 unhandled rejection",
       `Report saved to: ${output}`,
     ]);
+  }, 120_000);
+
+  // The bundles, the trace and the log are what reproduce a failure, and
+  // --quiet (like the full report) named none of them.
+  it("--quiet names the failure bundles, the trace and the log it wrote", async () => {
+    const output = join(dir, "quiet-paths.json");
+    const bundles = join(dir, "bundles");
+    const trace = join(dir, "quiet.trace.jsonl");
+    const log = join(dir, "quiet.log");
+    const r = await cli(
+      ["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"].concat(
+        IGNORE_TSX_NAME,
+        ["--strict", "--quiet", "--output", output],
+        ["--failure-artifacts", bundles, "--trace-out", trace, "--log-file", log],
+      ),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] 1 pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Wrote 1 failure bundle(s) to ${bundles}/`,
+      `Trace saved to: ${trace}`,
+      `Log saved to: ${log}`,
+      `Report saved to: ${output}`,
+    ]);
+    expect(readdirSync(bundles)).toHaveLength(1);
+    expect(existsSync(trace) && existsSync(log)).toBe(true);
+  }, 120_000);
+
+  /** `shard`'s workers in a TMPDIR of their own, so a leaked chaos-shard-* is this run's. */
+  function shardEnv(): { env: NodeJS.ProcessEnv; leaked: () => string[] } {
+    const tmp = mkdtempSync(join(dir, "tmp-"));
+    return {
+      env: { ...process.env, TMPDIR: tmp },
+      leaked: () => readdirSync(tmp).filter((name) => name.startsWith("chaos-shard-")),
+    };
+  }
+
+  it("shard --quiet prints the merged verdict and its path, and a Repro line for the whole run", async () => {
+    const output = join(dir, "shard-quiet.json");
+    const { env, leaked } = shardEnv();
+    // No --seed: the coordinator draws one for every worker.
+    const unseeded = crawl.filter((_, i) => crawl[i] !== "--seed" && crawl[i - 1] !== "--seed");
+    const r = await cli(["shard", "--count", "2", ...unseeded, "--quiet", "--output", output], env);
+    expect(r.status).toBe(0);
+    // It printed the whole merged report, 80-odd lines.
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=\d+\)$/),
+      `Merged report saved to: ${output}`,
+    ]);
+    // A process.exit inside the try skipped the finally that removes it.
+    expect(leaked()).toEqual([]);
+    const merged = JSON.parse(readFileSync(output, "utf8")) as { seed: number; reproCommand: string };
+    // It was shard 0's line, which reran shard 0 alone.
+    expect(merged.reproCommand).toMatch(
+      new RegExp(`^chaosbringer shard --count 2 --url ${escapeRegExp(server.url)}/ --seed ${merged.seed} `),
+    );
+    expect(merged.reproCommand).not.toContain("--shard");
+  }, 180_000);
+
+  it("shard --compact prints the merged compact report, not each worker's", async () => {
+    const { env, leaked } = shardEnv();
+    const r = await cli(["shard", "--count", "2", ...crawl, "--compact", "--output", join(dir, "shard-compact.json")], env);
+    expect(r.status).toBe(0);
+    expect(leaked()).toEqual([]);
+    expect(r.stdout.match(/^\[PASS\] /gm)).toEqual(["[PASS] "]);
+    expect(r.stdout).toMatch(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=1\)$/m);
+    expect(r.stdout).not.toContain("Progress:");
+  }, 180_000);
+
+  it("shard removes its temp dir when no worker wrote a report", async () => {
+    const { env, leaked } = shardEnv();
+    // Every worker refuses the file (exit 2) before a browser starts.
+    const r = await cli(["shard", "--count", "2", ...crawl, "--perf-budgets", join(dir, "missing.json")], env);
+    expect(r.stderr).toContain("shard: no reports produced");
+    expect(r.status).toBe(1);
+    expect(leaked()).toEqual([]);
   }, 120_000);
 
   it("--strict --compact says why a run whose only finding is a rejection failed", async () => {

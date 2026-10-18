@@ -385,12 +385,15 @@ describe("runPerfCli", () => {
     return p;
   }
 
-  it("prints help with no subcommand and fails on an unknown one", async () => {
+  // A usage error is thrown, and cli.ts prints it as one
+  // `chaosbringer perf <sub>: …` line with exit 2; `command` names the sub.
+  it("prints help with no subcommand and refuses an unknown one", async () => {
     await runPerfCli([]);
     expect(logged()).toContain("emit-budgets");
-    await runPerfCli(["frobnicate"]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain('unknown subcommand "frobnicate"');
+    await expect(runPerfCli(["frobnicate"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: 'unknown subcommand "frobnicate" (expected emit-budgets, gate, regress or drilldown)',
+    });
   });
 
   it("emit-budgets writes the file, then gate passes the same runs and fails a slower one", async () => {
@@ -432,19 +435,26 @@ describe("runPerfCli", () => {
   });
 
   it("gate and emit-budgets refuse missing arguments", async () => {
-    await runPerfCli(["gate", "r.json"]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain("--budgets <file> is required");
-    process.exitCode = 0;
-    await runPerfCli(["emit-budgets"]);
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    await expect(runPerfCli(["gate", "r.json"])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf gate",
+      message: "--budgets <file> is required",
+    });
+    await expect(runPerfCli(["emit-budgets"])).rejects.toMatchObject({ name: "UsageError", command: "perf emit-budgets" });
+    // parseArgs' own refusal names the sub too.
+    await expect(runPerfCli(["gate", "--bogus"])).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+      command: "perf gate",
+    });
     await expect(runPerfCli(["emit-budgets", write("x.json", {}), "--out", join(dir, "o.json")])).rejects.toThrow(
       /not a chaosbringer crawl report/,
     );
-    await expect(runPerfCli(["emit-budgets", write("y.json", appRun({})), "--headroom", "0.5"])).rejects.toThrow(
-      /--headroom must be a number >= 1/,
-    );
+    await expect(runPerfCli(["emit-budgets", write("y.json", appRun({})), "--headroom", "0.5"])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf emit-budgets",
+      message: '--headroom must be a number >= 1 (got "0.5")',
+    });
+    expect(process.exitCode).toBe(0);
   });
 
   it("regress refuses (exit 2) a baseline whose perfKeys are another version, unless --allow-key-mismatch", async () => {
@@ -502,9 +512,13 @@ describe("runPerfCli", () => {
     await runPerfCli(["regress", baseDir, "--current", join(baseDir, "r1.json")]);
     expect(process.exitCode).toBe(0);
 
-    await runPerfCli(["regress", baseDir]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain("--current <report.json...> is required");
+    await expect(runPerfCli(["regress", baseDir])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf regress",
+      message: "--current <report.json...> is required",
+    });
+    // Not a refused comparison: that is exit 2 with its own line, set here.
+    expect(process.exitCode).toBe(0);
   });
 
   it("regress fails when the current side has no reports or no spans, and lists vanished keys", async () => {
@@ -850,9 +864,11 @@ describe("runPerfCli", () => {
     });
 
     it("refuses a wrong operand count", async () => {
-      await runPerfCli(["drilldown", "r.json"]);
-      expect(process.exitCode).toBe(1);
-      expect(errored()).toContain("expected <report.json> <perfKey>");
+      await expect(runPerfCli(["drilldown", "r.json"])).rejects.toMatchObject({
+        name: "UsageError",
+        command: "perf drilldown",
+        message: "expected <report.json> <perfKey>",
+      });
     });
   });
 });

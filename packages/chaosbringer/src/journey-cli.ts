@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { summariseBodyDiff } from "./body-diff.js";
+import { UsageError } from "./cli-usage.js";
 import { runJourney, type JourneyStep } from "./journey.js";
 
 const HELP = `Usage: chaosbringer journey --left <url> --right <url> --steps <file> [options]
@@ -96,10 +97,7 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
     return;
   }
   if (!values.left || !values.right || !values.steps) {
-    console.error("journey: --left, --right, and --steps are all required");
-    console.error(HELP);
-    process.exitCode = 1;
-    return;
+    throw new UsageError("--left, --right, and --steps are all required");
   }
 
   const steps = readSteps(values.steps);

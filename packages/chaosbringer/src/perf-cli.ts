@@ -15,7 +15,7 @@
  * them by `perfKey`, so each span is handed over with `name = key`.
  *
  * The pure steps are exported for tests; `runPerfCli` only reads files,
- * prints and sets `process.exitCode`.
+ * prints and sets `process.exitCode`, or throws a `UsageError`.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -47,6 +47,7 @@ import {
   type Stat,
 } from "lightbringer/core";
 import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
+import { inSubcommand, UsageError } from "./cli-usage.js";
 import { PERF_KEY_VERSION, perfKeyVersionOf, perfRuleMatcher } from "./perf-key.js";
 import { DEFAULT_PERF_TRACE_DIR } from "./perf-options.js";
 import { reportSpans } from "./perf-summary.js";
@@ -916,10 +917,17 @@ function fail(msg: string): void {
 function parseNumber(flag: string, raw: string | undefined, def: number, min: number): number {
   if (raw === undefined) return def;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < min) throw new Error(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
+  if (!Number.isFinite(n) || n < min) throw new UsageError(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }
 
+/**
+ * A refused invocation (a missing operand or flag, an unknown sub) is a
+ * `UsageError`: one `chaosbringer perf <sub>: …` line and exit 2, from
+ * cli.ts. `fail` (exit 1) is for inputs that were read and gate nothing.
+ * Exit 2 is also a refused comparison (`refusing to compare: …`), which
+ * prints its own line.
+ */
 export async function runPerfCli(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv;
   if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
@@ -928,19 +936,19 @@ export async function runPerfCli(argv: string[]): Promise<void> {
   }
   switch (sub) {
     case "emit-budgets":
-      runEmit(rest);
+      await inSubcommand("perf emit-budgets", () => runEmit(rest));
       return;
     case "gate":
-      runGate(rest);
+      await inSubcommand("perf gate", () => runGate(rest));
       return;
     case "regress":
-      runRegress(rest);
+      await inSubcommand("perf regress", () => runRegress(rest));
       return;
     case "drilldown":
-      runDrilldown(rest);
+      await inSubcommand("perf drilldown", () => runDrilldown(rest));
       return;
     default:
-      fail(`unknown subcommand "${sub}" (expected emit-budgets, gate, regress or drilldown)`);
+      throw new UsageError(`unknown subcommand "${sub}" (expected emit-budgets, gate, regress or drilldown)`);
   }
 }
 
@@ -960,10 +968,7 @@ function runEmit(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("emit-budgets: expected at least one report path");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected at least one report path");
   // Below 1 a budget would sit under the median it was measured from.
   const headroom = parseNumber("--headroom", values.headroom, DEFAULT_BUDGET_HEADROOM, 1);
   const { paths, skipped: skippedFiles } = expandReportPaths(positionals);
@@ -1017,14 +1022,8 @@ function runGate(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("gate: expected at least one report path");
-    return;
-  }
-  if (!values.budgets) {
-    fail("gate: --budgets <file> is required");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected at least one report path");
+  if (!values.budgets) throw new UsageError("--budgets <file> is required");
   const budgetsJson: unknown = JSON.parse(readFileSync(values.budgets, "utf-8"));
   const rules = perfBudgetRulesFromJson(budgetsJson, values.budgets);
   // The crawler's check: a misspelt metric (`durationMS`) would otherwise be
@@ -1108,14 +1107,8 @@ function runRegress(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("regress: expected a baseline directory or report paths");
-    return;
-  }
-  if (split.current.length === 0) {
-    fail("regress: --current <report.json...> is required");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected a baseline directory or report paths");
+  if (split.current.length === 0) throw new UsageError("--current <report.json...> is required");
   const threshold = parseNumber("--threshold", values.threshold, DEFAULT_REGRESS_THRESHOLD, 0);
   const base = expandReportPaths(positionals);
   const cur = expandReportPaths(split.current);
@@ -1217,10 +1210,7 @@ function runDrilldown(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length !== 2) {
-    fail("drilldown: expected <report.json> <perfKey>");
-    return;
-  }
+  if (positionals.length !== 2) throw new UsageError("expected <report.json> <perfKey>");
   const [reportFile, key] = positionals as [string, string];
   const topN = Math.floor(parseNumber("--top", values.top, DRILLDOWN_TOP_N, 1));
   const report = loadCrawlReport(reportFile);

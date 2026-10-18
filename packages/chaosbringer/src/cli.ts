@@ -29,8 +29,16 @@
 
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
-import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
+import { crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
+import {
+  formatSubcommandList,
+  isUsageError,
+  packageVersion,
+  progressText,
+  SUBCOMMANDS,
+  type UsageError,
+  usageErrorMessage,
+} from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
@@ -48,9 +56,12 @@ import { validateOptions } from "./validate.js";
 //
 // The handler is expected to set `process.exitCode` on a non-fatal failure;
 // thrown errors are surfaced with the subcommand name and an exit code of 1.
-// Legacy handlers (minimize / flake / shard) call `process.exit` directly
-// inside themselves and never return, so the final `process.exit` here is
-// only reached by the newer handlers that opt into exitCode-based signalling.
+// A refused invocation — what `parseArgs` throws for an unknown flag, or a
+// `UsageError` for a missing operand or a bad value — is reported like the
+// main command's own (`exitWithUsageError`): one line, exit 2. It used to be
+// `<sub> failed: Unknown option …` and exit 1, which a CI step reads as "the
+// run found something". `flake` still calls `process.exit(1)` itself on a
+// flaky run, and `minimize` / `flake` `process.exit(0)` on --help.
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
 if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
@@ -59,6 +70,10 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
+    if (isUsageError(err)) {
+      console.error(usageErrorMessage(err, `chaosbringer ${(err as UsageError).command ?? subcommand}`));
+      process.exit(2);
+    }
     console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
     process.exit(1);
   }
@@ -214,38 +229,11 @@ EXAMPLES:
   process.exit(0);
 }
 
-// A positional that is not a URL used to be dropped on the floor, which made
-// every wrong invocation look like a working one: `chaosbringer crawl --url X`
-// ran the default crawl and ignored the word `crawl`, so documentation that
-// invented a subcommand never got caught by anyone running it. There is no
-// `crawl` subcommand — crawling is what this binary does with no subcommand at
-// all.
-const looksLikeUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
-const strays = positionals.filter((p) => !looksLikeUrl(p));
-if (strays.length > 0) {
-  const first = strays[0]!;
-  const known = Object.keys(SUBCOMMANDS).sort().join(", ");
-  exitWithUsageError(
-    first === "crawl"
-      ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
-          "so drop the word: `chaosbringer --url <url>`"
-      : // A Repro: line's trailing `# + …` note, pasted into zsh, which reads
-        // `#` as a word unless `interactivecomments` is set.
-        first === "#"
-        ? 'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
-            "`setopt interactivecomments`); drop the `#` and everything after it"
-        : `unexpected argument "${first}"; known subcommands: ${known}`,
-  );
-}
-if (positionals.length > 1) {
-  exitWithUsageError(`expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
-}
-
-// URL from --url or first positional
-const baseUrl = values.url || positionals[0];
-
-if (!baseUrl) {
-  exitWithUsageError("--url is required");
+let baseUrl: string;
+try {
+  baseUrl = crawlUrlFromArgs(values, positionals);
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 let options: CrawlerOptions;
@@ -323,8 +311,12 @@ async function main() {
     console.log("");
   }
 
+  let failureBundles = 0;
   const crawler = new ChaosCrawler(options, {
     onBind: (b) => console.log(attachHint(b)),
+    onFailureBundle: () => {
+      failureBundles++;
+    },
     onPageStart: (url) => {
       if (!isQuiet && !isCompact) {
         process.stdout.write(`Crawling: ${url}...`);
@@ -395,8 +387,15 @@ async function main() {
       }
     }
 
-    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
+    // What reproduces a failure was written by the crawl, and no line said
+    // where: under --quiet, whose help promises the paths written, the
+    // verdict and `Report saved to:` were all a CI log showed.
     const failureDir = values["failure-artifacts"];
+    if (failureDir) announce(`Wrote ${failureBundles} failure bundle(s) to ${failureDir}/`);
+    if (values["trace-out"]) announce(`Trace saved to: ${values["trace-out"]}`);
+    if (values["log-file"]) announce(`Log saved to: ${values["log-file"]}`);
+
+    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
     if (values["cluster-artifacts"] && failureDir) {
       const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
       const results = writeClusterArtifacts(report, {
