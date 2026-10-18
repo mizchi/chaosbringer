@@ -4,6 +4,7 @@
  * flags and open the store the same way; keeping that in one place
  * means a future flag (e.g. `--cache`) updates both surfaces.
  */
+import { rebaseNotice } from "./replay.js";
 import { RecipeStore } from "./store.js";
 import type { ActionRecipe, RecipeStatus } from "./types.js";
 
@@ -57,6 +58,35 @@ export function requireRecipe(store: RecipeStore, name: string): ActionRecipe {
     process.exit(1);
   }
   return recipe;
+}
+
+/**
+ * `process.exit(2)` unless `--base-url` is an absolute http(s) URL:
+ * replay moves a recipe's URLs onto its origin (`rebaseRecipe`), and a
+ * value with no origin would fail every replay instead of the command.
+ */
+export function requireBaseUrl(cmd: string, url: string): void {
+  let ok = false;
+  try {
+    const { protocol } = new URL(url);
+    ok = protocol === "http:" || protocol === "https:";
+  } catch {}
+  if (!ok) {
+    console.error(`${cmd}: --base-url must be an absolute http(s) URL, got ${JSON.stringify(url)}`);
+    process.exit(2);
+  }
+}
+
+/**
+ * Warn (stderr, so `--json` stays parseable) about each recipe that
+ * `baseUrl` moves off the origin it was recorded on: the run is on
+ * another host than the recipe says, and the reader should know why.
+ */
+export function warnRebased(cmd: string, recipes: Iterable<ActionRecipe>, baseUrl: string): void {
+  for (const recipe of recipes) {
+    const notice = rebaseNotice(recipe, baseUrl);
+    if (notice) console.warn(`${cmd}: ${notice}`);
+  }
 }
 
 export function requireVersion(

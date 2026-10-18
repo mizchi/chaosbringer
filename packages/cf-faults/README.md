@@ -5,7 +5,7 @@ Cloudflare Workers-specific chaos injection. Targets the failure modes that don'
 - **KV namespaces** — make `get` / `put` / `delete` / `list` throw or return null
 - **Service Bindings** — make `env.X.fetch()` return a synthetic 5xx or abort
 
-The wrappers are drop-in (same shape as the underlying binding), so application code is unchanged. Each fault is surfaced through an `observer.onFault` hook with the same `fault.*` attribute schema as [`@mizchi/server-faults`](../server-faults), so a single OTel pipeline catches both layers.
+The wrappers are drop-in (same shape as the underlying binding), so application code is unchanged. Each fault is surfaced through an `observer.onFault` hook whose attrs already use the `fault.*` names that [`@mizchi/server-faults`](../server-faults)'s `toOtelAttrs()` produces (its own `onFault` attrs are flat camelCase), so a single OTel pipeline catches both layers.
 
 ## Install
 
@@ -64,7 +64,7 @@ const res = await enricher.fetch("https://enricher/enrich", { method: "POST", bo
 
 ## Observer schema
 
-`observer.onFault(kind, attrs)` follows the `fault.*` namespace shared with `@mizchi/server-faults`:
+`observer.onFault(kind, attrs)` follows the `fault.*` namespace shared with `@mizchi/server-faults` (there, after `toOtelAttrs()`):
 
 | Attribute | Required | Notes |
 |---|---|---|

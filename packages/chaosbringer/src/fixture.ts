@@ -6,9 +6,10 @@
  * import { test, expect } from '@playwright/test';
  * import { chaosTest, withChaos } from 'chaosbringer/fixture';
  *
- * // Option 1: Use chaosTest directly
+ * // Option 1: Use chaosTest directly. A relative URL resolves against the
+ * // config's `use.baseURL`, as `page.goto` does.
  * chaosTest('chaos test homepage', async ({ page, chaos }) => {
- *   const result = await chaos.testPage(page, 'http://localhost:3000');
+ *   const result = await chaos.testPage(page, '/');
  *   expect(result.errors).toHaveLength(0);
  * });
  *
@@ -18,10 +19,12 @@
  * ```
  */
 
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type Page, type TestInfo } from "@playwright/test";
 import { ChaosCrawler } from "./crawler.js";
+import { summarizePages } from "./filters.js";
 import { COMMON_IGNORE_PATTERNS } from "./ignore-presets.js";
-import type { ChaosTestOptions, PageResult, CrawlReport } from "./types.js";
+import { getExitCode } from "./reporter.js";
+import type { ChaosTestOptions, CrawlerOptions, PageError, PageResult, CrawlReport } from "./types.js";
 import { runRecipeWithRequires } from "./recipes/composition.js";
 import { investigate as runInvestigate, type InvestigateResult } from "./recipes/investigate.js";
 import { loadPageScenarios } from "./recipes/page-scenarios.js";
@@ -36,10 +39,16 @@ import type { FailureContext } from "./recipes/goals.js";
 import type { SnapshotPolicy } from "./recipes/composition.js";
 
 export interface ChaosFixture {
-  /** Test a single page with chaos testing */
+  /**
+   * Test a single page with chaos testing. A relative `url` resolves against
+   * `chaosOptions.baseUrl`, else the config's `baseURL`.
+   */
   testPage(page: Page, url: string): Promise<PageResult>;
 
-  /** Crawl multiple pages starting from a URL */
+  /**
+   * Crawl multiple pages starting from a URL, relative ones resolved as in
+   * `testPage`. The report is attached to the test as `chaos-report.json`.
+   */
   crawl(startUrl: string): Promise<CrawlReport>;
 
   /** Assert no errors were found */
@@ -62,6 +71,70 @@ export interface ChaosFixtures {
 }
 
 /**
+ * The crawler options a `ChaosTestOptions` stands for. One builder for the
+ * fixture and `runChaosTest`, so an option cannot reach one and not the other.
+ */
+function crawlerOptions(options: ChaosTestOptions, baseUrl: string, maxPages: number): CrawlerOptions {
+  return {
+    baseUrl,
+    maxPages,
+    maxActionsPerPage: options.maxActionsPerPage ?? 5,
+    ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
+    blockExternalNavigation: options.blockExternalNavigation ?? true,
+    actionWeights: options.actionWeights,
+    perf: options.perf,
+    settle: options.settle,
+    seed: options.seed,
+    invariants: options.invariants,
+    faultInjection: options.faultInjection,
+    lifecycleFaults: options.lifecycleFaults,
+    runtimeFaults: options.runtimeFaults,
+    headless: true,
+  };
+}
+
+/**
+ * `url` as the absolute URL the crawler needs: as given when it is one,
+ * otherwise resolved against `base` the way `page.goto` resolves a relative
+ * URL against `baseURL`.
+ */
+function resolveUrl(url: string, base: string | undefined, call: string): string {
+  if (URL.canParse(url)) return url;
+  if (base === undefined) {
+    throw new Error(
+      `chaosbringer: ${call}(${JSON.stringify(url)}) has no base to resolve against — ` +
+        "set `baseURL` in the Playwright config's `use`, or `baseUrl` in chaosOptions",
+    );
+  }
+  if (!URL.canParse(url, base)) {
+    throw new Error(`chaosbringer: ${call}(${JSON.stringify(url)}) does not resolve against ${base}`);
+  }
+  return new URL(url, base).href;
+}
+
+/**
+ * Under `strict`, throw for a run `chaosbringer --strict` would exit 1 on. It
+ * asks `getExitCode` itself rather than restating its rule, so the fixture and
+ * the CLI cannot disagree about a run. The message lists the run's errors, as
+ * `expectNoErrors` does.
+ */
+function enforceStrict(
+  options: ChaosTestOptions,
+  call: string,
+  run: Pick<CrawlReport, "summary">,
+  errors: readonly PageError[],
+  attached: boolean,
+): void {
+  if (!options.strict || getExitCode(run, { strict: true }) === 0) return;
+  const lines = errors.map((e) => `[${e.type}] ${e.message}${e.url ? ` (${e.url})` : ""}`);
+  throw new Error(
+    `${call} fails under strict, as \`chaosbringer --strict\` would exit 1 on it — ` +
+      `${errors.length} errors:\n${lines.join("\n")}` +
+      (attached ? "\nThe report is attached to this test as chaos-report.json." : ""),
+  );
+}
+
+/**
  * Create chaos fixture with custom options
  */
 export function withChaos(defaultOptions: ChaosTestOptions = {}) {
@@ -69,38 +142,46 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
     chaosOptions: [{}, { option: true }] as [ChaosTestOptions, { option: true }],
 
     chaos: async (
-      { page, chaosOptions }: { page: Page; chaosOptions: ChaosTestOptions },
-      use: (fixture: ChaosFixture) => Promise<void>
+      { chaosOptions, baseURL }: { chaosOptions: ChaosTestOptions; baseURL?: string },
+      use: (fixture: ChaosFixture) => Promise<void>,
+      testInfo: TestInfo,
     ) => {
       const options = { ...defaultOptions, ...chaosOptions };
 
-      // Get base URL from playwright config or options
-      const baseUrl = options.baseUrl || page.context().pages()[0]?.url() || "http://localhost:3000";
+      // What a relative URL resolves against: the explicit option, else the
+      // config's `baseURL`. This used to read the first page's URL instead,
+      // which is `about:blank` until something navigates, so `crawl("/")`
+      // threw `Invalid URL` and the documented `baseURL` fallback never ran.
+      const base = options.baseUrl || baseURL || undefined;
 
-      const crawler = new ChaosCrawler({
-        baseUrl,
-        maxPages: options.maxPages ?? 10,
-        maxActionsPerPage: options.maxActionsPerPage ?? 5,
-        ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
-        blockExternalNavigation: options.blockExternalNavigation ?? true,
-        actionWeights: options.actionWeights,
-        perf: options.perf,
-        settle: options.settle,
-        headless: true,
-      });
+      // `crawl()` and `testPage()` each set the origin they gate external
+      // navigation on, so with no base the crawler's own is a placeholder.
+      const crawler = new ChaosCrawler(crawlerOptions(options, base ?? "about:blank", options.maxPages ?? 10));
 
       const fixture: ChaosFixture = {
         crawler,
 
         async testPage(testPage: Page, url: string): Promise<PageResult> {
-          return crawler.testPage(testPage, url);
+          const target = resolveUrl(url, base, "chaos.testPage");
+          const result = await crawler.testPage(testPage, target);
+          enforceStrict(options, `chaos.testPage(${target})`, { summary: summarizePages([result]) }, result.errors, false);
+          return result;
         },
 
         async crawl(startUrl: string): Promise<CrawlReport> {
+          const url = resolveUrl(startUrl, base, "chaos.crawl");
           // Update base URL for crawling
-          (crawler as any).options.baseUrl = startUrl;
-          (crawler as any).baseOrigin = new URL(startUrl).origin;
-          return crawler.start();
+          (crawler as any).options.baseUrl = url;
+          (crawler as any).baseOrigin = new URL(url).origin;
+          const report = await crawler.start();
+          // Before the strict check, so a run that fails the test is still in
+          // the test's attachments.
+          await testInfo.attach("chaos-report.json", {
+            body: JSON.stringify(report, null, 2),
+            contentType: "application/json",
+          });
+          enforceStrict(options, `chaos.crawl(${url})`, report, report.pages.flatMap((p) => p.errors), true);
+          return report;
         },
 
         expectNoErrors(result: PageResult | CrawlReport): void {
@@ -171,6 +252,13 @@ export interface RunRecipeFixtureOptions {
   chainRequires?: boolean;
   /** Storage-state snapshot policy. */
   snapshot?: boolean | SnapshotPolicy;
+  /**
+   * Site to replay on: the recipe's navigations to the origin it was
+   * recorded on go to this origin instead (`rebaseRecipe`). Default: the
+   * test's `baseURL` when it is http(s), so a suite pointed at staging
+   * replays there.
+   */
+  baseUrl?: string;
 }
 
 export interface InvestigateFixtureOptions {
@@ -226,12 +314,14 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
     },
 
     runRecipe: async (
-      { page, store }: { page: Page; store: RecipeStore },
+      { page, store, baseURL }: { page: Page; store: RecipeStore; baseURL: string | undefined },
       use: (fn: RecipesFixture["runRecipe"]) => Promise<void>,
     ) => {
       await use(async (name, opts = {}) => {
         const recipe = store.get(name);
         if (!recipe) throw new Error(`runRecipe: "${name}" not found in store`);
+        // A `baseURL` off http(s) (`file://` fixtures) has no origin to move to.
+        const baseUrl = opts.baseUrl ?? (baseURL && /^https?:/i.test(baseURL) ? baseURL : undefined);
 
         const chain = opts.chainRequires !== false;
         if (chain && recipe.requires.filter((d) => !d.startsWith("__")).length > 0) {
@@ -240,6 +330,7 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
             recipe,
             store,
             vars: opts.vars,
+            baseUrl,
             snapshot: opts.snapshot,
             onProgress: (ev) => {
               if (ev.kind === "complete") {
@@ -255,7 +346,7 @@ export function withRecipes(defaults: RecipesFixtureOptions = {}) {
           }
           return;
         }
-        const result = await replayRecipe(page, recipe, { vars: opts.vars });
+        const result = await replayRecipe(page, recipe, { vars: opts.vars, baseUrl });
         if (result.ok) {
           store.recordSuccess(name, result.durationMs);
           return;
@@ -315,19 +406,10 @@ export async function runChaosTest(
   options: ChaosTestOptions = {}
 ): Promise<PageResult> {
   const url = page.url();
-  const crawler = new ChaosCrawler({
-    baseUrl: url,
-    maxPages: 1,
-    maxActionsPerPage: options.maxActionsPerPage ?? 5,
-    ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
-    blockExternalNavigation: options.blockExternalNavigation ?? true,
-    actionWeights: options.actionWeights,
-    perf: options.perf,
-    settle: options.settle,
-    headless: true,
-  });
-
-  return crawler.testPage(page, url);
+  const crawler = new ChaosCrawler(crawlerOptions(options, url, 1));
+  const result = await crawler.testPage(page, url);
+  enforceStrict(options, `runChaosTest(${url})`, { summary: summarizePages([result]) }, result.errors, false);
+  return result;
 }
 
 /**

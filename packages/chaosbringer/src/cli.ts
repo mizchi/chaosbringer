@@ -22,61 +22,40 @@
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
  *   --strict              Exit with error on console errors
- *   --quiet               Minimal output
- *   --help                Show this help
+ *   --quiet               Print only the verdict, why a run failed, and the paths written
+ *   --help, -h            Show this help
+ *   --version, -V         Print the version
  */
 
-import { parseArgs } from "node:util";
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
+import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
+import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
-import { axe } from "./invariants.js";
-import { printReport, saveReport, getExitCode } from "./reporter.js";
+import { formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { perfOptionsFromCliFlags } from "./perf-options.js";
-import { parseSettleArg, resolveSettle } from "./settle.js";
-import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant } from "./types.js";
-import { visualRegression } from "./visual.js";
-import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
+import { resolveSettle } from "./settle.js";
+import type { CrawlerOptions } from "./types.js";
+import { validateOptions } from "./validate.js";
 
-// Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
-// flags (e.g. --match for `minimize`) don't trip the main options map.
+// Subcommand dispatch (the table is SUBCOMMANDS in cli-usage.ts). Intercept
+// before parseArgs runs so subcommand-specific flags (e.g. --match for
+// `minimize`) don't trip the main options map.
 //
-// Each entry lazy-imports its handler so a `chaosbringer --help` invocation
-// doesn't pay the cost of compiling every subcommand. The handler is
-// expected to set `process.exitCode` on a non-fatal failure; thrown errors
-// are surfaced with the subcommand name and an exit code of 1. Legacy
-// handlers (minimize / flake / shard) call `process.exit` directly inside
-// themselves and never return, so the final `process.exit` here is only
-// reached by the newer handlers that opt into exitCode-based signalling.
-const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void>>> = {
-  minimize: () => import("./minimize.js").then((m) => m.runMinimizeCli),
-  flake: () => import("./flake.js").then((m) => m.runFlakeCli),
-  shard: () => import("./shard.js").then((m) => m.runShardCli),
-  recipes: () => import("./recipes/cli.js").then((m) => m.runRecipesCli),
-  load: () => import("./recipes/load-cli.js").then((m) => m.runLoadCli),
-  diff: () => import("./diff-cli.js").then((m) => m.runDiffCli),
-  "cluster-artifacts": () =>
-    import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
-  parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
-  journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
-  model: () => import("./model/cli.js").then((m) => m.runModelCli),
-  perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
-  scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
-  drive: () => import("./drive/cli.js").then((m) => m.runDriveCli),
-};
-
+// The handler is expected to set `process.exitCode` on a non-fatal failure;
+// thrown errors are surfaced with the subcommand name and an exit code of 1.
+// Legacy handlers (minimize / flake / shard) call `process.exit` directly
+// inside themselves and never return, so the final `process.exit` here is
+// only reached by the newer handlers that opt into exitCode-based signalling.
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
 if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   try {
-    const run = await SUBCOMMANDS[subcommand]();
+    const run = await SUBCOMMANDS[subcommand].load();
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
@@ -85,79 +64,29 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   }
 }
 
-const { values, positionals } = parseArgs({
-  options: {
-    url: { type: "string" },
-    "max-pages": { type: "string" },
-    "max-actions": { type: "string" },
-    // Alias to match the underlying CrawlerOptions field name (used by the
-    // chaos-pr-gate workflow and surfaced as a synonym in docs).
-    "max-actions-per-page": { type: "string" },
-    timeout: { type: "string" },
-    settle: { type: "string" },
-    ...HEADLESS_OPTIONS,
-    cdp: { type: "string" },
-    "cdp-target": { type: "string" },
-    "terminal-browser": { type: "boolean", default: false },
-    screenshots: { type: "boolean", default: false },
-    "screenshot-dir": { type: "string" },
-    output: { type: "string" },
-    exclude: { type: "string", multiple: true },
-    "ignore-error": { type: "string", multiple: true },
-    "ignore-analytics": { type: "boolean", default: false },
-    "ignore-preset": { type: "string", multiple: true },
-    spa: { type: "string", multiple: true },
-    "log-file": { type: "string" },
-    "log-level": { type: "string" },
-    "log-console": { type: "boolean", default: false },
-    seed: { type: "string" },
-    "har-record": { type: "string" },
-    "har-replay": { type: "string" },
-    "storage-state": { type: "string" },
-    budget: { type: "string", multiple: true },
-    axe: { type: "boolean", default: false },
-    "aria-targets": { type: "boolean", default: false },
-    bind: { type: "boolean", default: false },
-    "bind-title": { type: "string" },
-    "axe-tags": { type: "string" },
-    "visual-baseline": { type: "string" },
-    "visual-threshold": { type: "string" },
-    "visual-max-diff-pixels": { type: "string" },
-    "visual-max-diff-ratio": { type: "string" },
-    "visual-diff-dir": { type: "string" },
-    "visual-update": { type: "boolean", default: false },
-    "failure-artifacts": { type: "string" },
-    "cluster-artifacts": { type: "boolean", default: false },
-    "cluster-min-count": { type: "string" },
-    "failure-max": { type: "string" },
-    "trace-out": { type: "string" },
-    "no-http-cache": { type: "boolean", default: false },
-    "trace-replay": { type: "string" },
-    device: { type: "string" },
-    network: { type: "string" },
-    "seed-from-sitemap": { type: "string" },
-    baseline: { type: "string" },
-    "baseline-strict": { type: "boolean", default: false },
-    "github-annotations": { type: "boolean", default: false },
-    shard: { type: "string" },
-    heatmap: { type: "boolean", default: false },
-    "heatmap-top": { type: "string" },
-    "heatmap-out": { type: "string" },
-    junit: { type: "string" },
-    perf: { type: "boolean", default: false },
-    "perf-trace": { type: "boolean", default: false },
-    "perf-mem": { type: "boolean", default: false },
-    "perf-cov": { type: "boolean", default: false },
-    "perf-out": { type: "string" },
-    "perf-budgets": { type: "string" },
-    "allow-settle-mismatch": { type: "boolean", default: false },
-    compact: { type: "boolean", default: false },
-    strict: { type: "boolean", default: false },
-    quiet: { type: "boolean", default: false },
-    help: { type: "boolean", default: false },
-  },
-  allowPositionals: true,
-});
+/**
+ * Report a refused invocation in one line and exit 2, the code the CLI
+ * already used for a `--perf-budgets` file it refuses: nothing ran. An
+ * unknown flag or a malformed number used to escape as a Node stack trace
+ * with exit 1, the code of a crawl that found something.
+ */
+function exitWithUsageError(err: unknown): never {
+  console.error(usageErrorMessage(err));
+  process.exit(2);
+}
+
+let parsed: ReturnType<typeof parseCrawlArgs>;
+try {
+  parsed = parseCrawlArgs();
+} catch (err) {
+  exitWithUsageError(err);
+}
+const { values, positionals } = parsed;
+
+if (values.version) {
+  console.log(packageVersion());
+  process.exit(0);
+}
 
 if (values.help) {
   console.log(`
@@ -241,8 +170,12 @@ OPTIONS:
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
   --strict              Exit with error on any console errors
-  --quiet               Minimal output
-  --help                Show this help
+  --quiet               Print only the verdict, why a run failed, and the paths written
+  --help, -h            Show this help
+  --version, -V         Print the version
+
+SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
+${formatSubcommandList()}
 
 PERF SUBCOMMANDS (read crawl reports written with --perf):
   chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]
@@ -292,112 +225,54 @@ const strays = positionals.filter((p) => !looksLikeUrl(p));
 if (strays.length > 0) {
   const first = strays[0]!;
   const known = Object.keys(SUBCOMMANDS).sort().join(", ");
-  console.error(`Error: unexpected argument "${first}"`);
-  if (first === "crawl") {
-    console.error(
-      "There is no `crawl` subcommand — crawling is the default, so drop the word: " +
-        "`chaosbringer --url <url>`.",
-    );
-  } else {
-    console.error(`Known subcommands: ${known}. Run with --help for usage information.`);
-  }
-  process.exit(1);
+  exitWithUsageError(
+    first === "crawl"
+      ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
+          "so drop the word: `chaosbringer --url <url>`"
+      : `unexpected argument "${first}"; known subcommands: ${known}`,
+  );
 }
 if (positionals.length > 1) {
-  console.error(`Error: expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
-  process.exit(1);
+  exitWithUsageError(`expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
 }
 
 // URL from --url or first positional
 const baseUrl = values.url || positionals[0];
 
 if (!baseUrl) {
-  console.error("Error: --url is required");
-  console.error("Run with --help for usage information");
-  process.exit(1);
+  exitWithUsageError("--url is required");
 }
 
-// Build ignore patterns
-const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
-if (values["ignore-analytics"]) {
-  ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
-}
-for (const presetSpec of values["ignore-preset"] ?? []) {
-  try {
-    ignoreErrorPatterns.push(...resolveIgnorePresets(presetSpec));
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    console.error(`Tip: --ignore-preset accepts comma-separated names. Known: ${Object.keys(IGNORE_PRESETS).join(", ")}`);
-    process.exit(1);
+let options: CrawlerOptions;
+// Parsed before the crawl, not after it: a bad --heatmap-top used to fail
+// only once the whole crawl had run, and a --cluster-artifacts without
+// --failure-artifacts exited before the report was saved.
+let heatmapTop: number;
+let clusterMinCount: number | undefined;
+try {
+  options = crawlerOptionsFromCli(values, baseUrl);
+  heatmapTop = parseNumberFlag("--heatmap-top", values["heatmap-top"], { min: 0, integer: true }) ?? 20;
+  clusterMinCount = parseNumberFlag("--cluster-min-count", values["cluster-min-count"], {
+    min: 0,
+    integer: true,
+  });
+  if (values["cluster-artifacts"] && !values["failure-artifacts"]) {
+    throw new Error("--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles");
   }
-}
-
-// Validate log level
-const validLogLevels = ["debug", "info", "warn", "error"] as const;
-const logLevel = values["log-level"] as (typeof validLogLevels)[number] | undefined;
-if (logLevel && !validLogLevels.includes(logLevel)) {
-  console.error(`Error: Invalid log level "${logLevel}". Valid levels: ${validLogLevels.join(", ")}`);
-  process.exit(1);
-}
-
-let seed: number | undefined;
-if (values.seed !== undefined) {
-  const parsed = Number(values.seed);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
-    console.error(`Error: --seed must be a non-negative integer, got "${values.seed}"`);
-    process.exit(1);
-  }
-  seed = parsed;
-}
-
-let har: CrawlerOptions["har"];
-if (values["har-record"] && values["har-replay"]) {
-  console.error("Error: --har-record and --har-replay are mutually exclusive");
-  process.exit(1);
-}
-if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
-if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
-
-let performanceBudget: CrawlerOptions["performanceBudget"];
-if (values.budget && values.budget.length > 0) {
-  performanceBudget = {};
-  for (const raw of values.budget) {
-    for (const entry of raw.split(",")) {
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq <= 0) {
-        console.error(`Error: --budget expects key=ms pairs (got "${trimmed}")`);
-        process.exit(1);
-      }
-      const key = trimmed.slice(0, eq).trim();
-      const ms = Number(trimmed.slice(eq + 1).trim());
-      (performanceBudget as Record<string, number>)[key] = ms;
-    }
-  }
-}
-
-let settle: CrawlerOptions["settle"];
-if (values.settle !== undefined) {
-  try {
-    settle = parseSettleArg(values.settle);
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 // Read here, not by the crawler, so a bad file fails before a browser starts
 // and the error names the flag. The rules' contents are validated by the
 // crawler (validatePerfBudgets), the same as for the programmatic option.
-let perfBudgets: CrawlerOptions["perfBudgets"];
 const perfBudgetsFile = values["perf-budgets"];
 if (perfBudgetsFile !== undefined) {
   try {
     // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
     const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(settle), `--perf-budgets ${perfBudgetsFile}`);
-    perfBudgets = read.rules;
+    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(options.settle), `--perf-budgets ${perfBudgetsFile}`);
+    options.perfBudgets = read.rules;
     // An emit-budgets file records the settle mode it was measured under;
     // enforcing it on a crawl settled another way fails (or passes) every
     // action budget on the settle, not the app — refused like `perf gate`.
@@ -406,7 +281,7 @@ if (perfBudgetsFile !== undefined) {
         console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
       } else {
         console.error(
-          `Error: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
+          `chaosbringer: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
             `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
             `or pass --allow-settle-mismatch to enforce anyway.`,
         );
@@ -414,138 +289,23 @@ if (perfBudgetsFile !== undefined) {
       }
     }
   } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
+    exitWithUsageError(err);
   }
 }
 
-let shardIndex: number | undefined;
-let shardCount: number | undefined;
-if (values.shard) {
-  const parsed = parseShardArg(values.shard);
-  shardIndex = parsed.shardIndex;
-  shardCount = parsed.shardCount;
+// The crawler validates again; this is so a refused option is a usage error
+// (`--max-pages 0`, `--cdp-target` without `--cdp`), not a stack trace from
+// inside main() after "Starting chaos crawl" was already printed.
+try {
+  validateOptions(options);
+} catch (err) {
+  exitWithUsageError(err);
 }
-
-function parseNumberFlag(
-  flag: string,
-  raw: string | undefined,
-  opts: { min?: number; max?: number; integer?: boolean }
-): number | undefined {
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    console.error(`Error: ${flag} must be a finite number (got ${JSON.stringify(raw)})`);
-    process.exit(1);
-  }
-  if (opts.integer && !Number.isInteger(n)) {
-    console.error(`Error: ${flag} must be an integer (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.min !== undefined && n < opts.min) {
-    console.error(`Error: ${flag} must be >= ${opts.min} (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.max !== undefined && n > opts.max) {
-    console.error(`Error: ${flag} must be <= ${opts.max} (got ${n})`);
-    process.exit(1);
-  }
-  return n;
-}
-
-function buildInvariants(): Invariant[] | undefined {
-  const list: Invariant[] = [];
-  if (values.axe) {
-    list.push(
-      axe({
-        tags: values["axe-tags"]
-          ? values["axe-tags"]
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : undefined,
-      })
-    );
-  }
-  if (values["visual-baseline"]) {
-    list.push(
-      visualRegression({
-        baselineDir: values["visual-baseline"],
-        threshold: parseNumberFlag("--visual-threshold", values["visual-threshold"], {
-          min: 0,
-          max: 1,
-        }),
-        maxDiffPixels: parseNumberFlag(
-          "--visual-max-diff-pixels",
-          values["visual-max-diff-pixels"],
-          { min: 0, integer: true }
-        ),
-        maxDiffRatio: parseNumberFlag(
-          "--visual-max-diff-ratio",
-          values["visual-max-diff-ratio"],
-          { min: 0, max: 1 }
-        ),
-        diffDir: values["visual-diff-dir"],
-        updateBaseline: values["visual-update"],
-      })
-    );
-  }
-  return list.length > 0 ? list : undefined;
-}
-
-const options: CrawlerOptions = {
-  ...(values["aria-targets"] ? { ariaTargets: true } : {}),
-  ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
-  baseUrl,
-  maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
-  maxActionsPerPage: (() => {
-    const raw = values["max-actions"] ?? values["max-actions-per-page"];
-    return raw ? parseInt(raw, 10) : undefined;
-  })(),
-  timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
-  settle,
-  headless: resolveHeadless(values),
-  cdpEndpoint: values.cdp,
-  cdpTargetId: values["cdp-target"],
-  terminalBrowser: values["terminal-browser"],
-  screenshots: values.screenshots,
-  screenshotDir: values["screenshot-dir"],
-  excludePatterns: values.exclude,
-  ignoreErrorPatterns: ignoreErrorPatterns.length > 0 ? ignoreErrorPatterns : undefined,
-  spaPatterns: values.spa,
-  logFile: values["log-file"],
-  logLevel: logLevel,
-  logToConsole: values["log-console"],
-  seed,
-  har,
-  storageState: values["storage-state"],
-  performanceBudget,
-  traceOut: values["trace-out"],
-  httpCache: values["no-http-cache"] ? false : undefined,
-  traceReplay: values["trace-replay"],
-  device: values.device,
-  network: values.network as CrawlerOptions["network"],
-  seedFromSitemap: values["seed-from-sitemap"],
-  shardIndex,
-  shardCount,
-  failureArtifacts: values["failure-artifacts"]
-    ? {
-        dir: values["failure-artifacts"],
-        maxArtifacts: parseNumberFlag("--failure-max", values["failure-max"], {
-          min: 0,
-          integer: true,
-        }),
-      }
-    : undefined,
-  invariants: buildInvariants(),
-  perf: perfOptionsFromCliFlags(values),
-  perfBudgets,
-  perfBudgetsFile,
-};
 
 const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
+const isTTY = process.stdout.isTTY === true;
 const isStrict = values.strict;
 const baselinePath = values.baseline;
 const isBaselineStrict = values["baseline-strict"];
@@ -577,7 +337,7 @@ async function main() {
     },
     onProgress: (visited, total) => {
       if (!isQuiet && isCompact) {
-        process.stdout.write(`\rProgress: ${visited}/${total} pages`);
+        process.stdout.write(progressText(visited, total, isTTY));
       }
     },
   });
@@ -585,7 +345,7 @@ async function main() {
   try {
     const report = await crawler.start();
 
-    if (isCompact && !isQuiet) {
+    if (isCompact && !isQuiet && isTTY) {
       console.log(""); // New line after progress
     }
 
@@ -604,7 +364,13 @@ async function main() {
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
     const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
-    printReport(report, isCompact, exitOptions);
+    // --quiet is the verdict, why it failed, and where the files went: what
+    // a script or a CI step shows, and the paths it reads next. It used to
+    // print the whole report, so the flag only dropped the per-page lines.
+    if (isQuiet) console.log(formatQuietReport(report, exitOptions));
+    else printReport(report, isCompact, exitOptions);
+    // A path line, set off from the report by a blank line unless --quiet.
+    const announce = (line: string) => console.log(isQuiet ? line : `\n${line}`);
     if (emitGithub) {
       printGithubAnnotations(report, { strict: isStrict });
     }
@@ -613,52 +379,35 @@ async function main() {
     if (wantsHeatmap) {
       const entries = buildActionHeatmap(report.actions);
       if (values.heatmap && !isQuiet) {
-        const top =
-          parseNumberFlag("--heatmap-top", values["heatmap-top"], {
-            min: 0,
-            integer: true,
-          }) ?? 20;
         console.log("");
-        console.log(formatHeatmap(entries, top));
+        console.log(formatHeatmap(entries, heatmapTop));
       }
       const heatmapOut = values["heatmap-out"];
       if (heatmapOut) {
         mkdirSync(dirname(heatmapOut), { recursive: true });
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
-        if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+        announce(`Heatmap saved to: ${heatmapOut}`);
       }
     }
 
-    if (values["cluster-artifacts"]) {
-      const failureDir = values["failure-artifacts"];
-      if (!failureDir) {
-        console.error(
-          "--cluster-artifacts requires --failure-artifacts <dir> (it copies from the per-page bundles)",
-        );
-        process.exit(1);
-      }
+    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
+    const failureDir = values["failure-artifacts"];
+    if (values["cluster-artifacts"] && failureDir) {
       const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
-      const minCount = values["cluster-min-count"]
-        ? parseInt(values["cluster-min-count"], 10)
-        : undefined;
       const results = writeClusterArtifacts(report, {
         bundleDir: failureDir,
-        minCount,
+        minCount: clusterMinCount,
       });
-      if (!isQuiet) {
-        console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
-      }
+      announce(`Wrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
     }
 
     saveReport(report, outputPath);
-    if (!isQuiet) {
-      console.log(`\nReport saved to: ${outputPath}`);
-    }
+    announce(`Report saved to: ${outputPath}`);
 
     if (values.junit) {
       mkdirSync(dirname(values.junit), { recursive: true });
       writeFileSync(values.junit, buildJunitXml(report));
-      if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
+      console.log(`JUnit XML saved to: ${values.junit}`);
     }
 
     const exitCode = getExitCode(report, exitOptions);

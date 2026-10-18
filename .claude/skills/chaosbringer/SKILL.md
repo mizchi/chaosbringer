@@ -71,7 +71,8 @@ The alternatives, and when they beat it:
 
 - **`chaos({ baseUrl, faultInjection, strict: true })`** — chaosbringer drives,
   breaking things across the app. Reach for it to explore an unfamiliar app.
-  Exit codes and `strict` only exist on this path. If you need it to follow a
+  Exit codes only exist on this path (`strict` also exists on the fixture
+  below, where it fails the test instead). If you need it to follow a
   *known* path, pass `driver: flowDriver({ steps })` — the default driver picks
   actions at random, and a test that can't name the button pressed can't make a
   claim. `flowDriver` is one-shot and stateful: reusing an instance across two
@@ -109,7 +110,7 @@ something answered first (that's what `suppressed` counts).
 | an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | intercepts at Playwright's route layer, so the app sees a real, wrong response |
 | the `fetch()` call itself to fail — `TypeError`, `AbortError`, a body that won't parse | **runtime** (`runtimeFaults`) | a client-side rejection issues no request, so no route can produce it |
 | a page that never gets a response | network `hang` **or** runtime `never-settle-fetch` | either works; they differ in what reaches your server |
-| the app's own lifecycle to misbehave (visibility, offline, storage) | **lifecycle** (`lifecycleFaults`) | not a request at all |
+| the browser under the page to misbehave (storage wiped or tampered, Service Worker cache evicted, CPU throttled) | **lifecycle** (`lifecycleFaults`) | not a request at all |
 
 The constructors differ in shape by layer: `faults.hang()` returns
 `{ urlPattern, fault }` for `faultInjection`, `faults.rejectBody()` returns

@@ -1,7 +1,19 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
+import { DEFAULT_OPTIONS } from "./defaults.js";
 import {
   buildReproScript,
   failureBundleKey,
@@ -9,7 +21,8 @@ import {
   writeFailureBundle,
   type FailureBundleInfo,
 } from "./failure-artifacts.js";
-import type { PageError, PageResult, TraceEntry } from "./types.js";
+import { reproFlags } from "./repro-command.js";
+import type { CrawlerOptions, PageError, PageResult, TraceEntry } from "./types.js";
 
 function page(url: string, overrides: Partial<PageResult> = {}): PageResult {
   return {
@@ -112,6 +125,89 @@ describe("buildReproScript", () => {
     });
     expect(s).toContain("'http://x/has space'");
   });
+
+  // The flags of a crawl that logs in, emulates a phone, settles adaptively,
+  // skips /logout, ignores analytics, and fails on console errors, then `extra`.
+  const runFlags = (...extra: string[]) => {
+    const { values } = parseCrawlArgs([
+      "--url", "http://localhost:3000", "--seed", "7", "--trace-out", "run.jsonl",
+      "--storage-state", "ss.json", "--device", "Pixel 7", "--settle", "adaptive",
+      "--exclude", "/logout", "--aria-targets", "--no-http-cache", "--ignore-analytics",
+      "--timeout", "5000", "--strict", ...extra,
+    ]);
+    const options = crawlerOptionsFromCli(values, "http://localhost:3000");
+    const set = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined));
+    return reproFlags({ ...DEFAULT_OPTIONS, ...set } as Required<CrawlerOptions>, 7);
+  };
+
+  it("replays with the run's flags, less --seed and --trace-out", () => {
+    const s = buildReproScript({
+      baseUrl: "http://localhost:3000",
+      tracePath: "./trace.jsonl",
+      flags: runFlags(),
+      cwd: "/work/app",
+    });
+    const command = s.split("\n").find((l) => l.startsWith("chaosbringer "));
+    expect(command).toBe(
+      "chaosbringer --url http://localhost:3000 --trace-replay ./trace.jsonl --timeout 5000 " +
+        "--exclude /logout --ignore-analytics --storage-state /work/app/ss.json --device 'Pixel 7' " +
+        "--aria-targets --no-http-cache --settle adaptive --strict",
+    );
+  });
+
+  // repro.sh runs from its bundle, so a relative path to a file the run read
+  // would name a file in there. A sitemap URL is no file.
+  it.each([
+    ["--har-replay", "net.har", "/work/app/net.har"],
+    ["--perf-budgets", "b.json", "/work/app/b.json"],
+    ["--visual-baseline", "vb", "/work/app/vb"],
+    ["--seed-from-sitemap", "sitemap.xml", "/work/app/sitemap.xml"],
+    ["--seed-from-sitemap", "http://x/sitemap.xml", "http://x/sitemap.xml"],
+  ])("writes %s %s as %s", (flag, value, expected) => {
+    const s = buildReproScript({
+      baseUrl: "http://localhost:3000",
+      tracePath: "./trace.jsonl",
+      flags: runFlags(flag, value),
+      cwd: "/work/app",
+    });
+    const command = s.split("\n").find((l) => l.startsWith("chaosbringer ")) ?? "";
+    const argv = execFileSync("sh", ["-c", `printf '%s\\0' ${command}`], { encoding: "utf8" }).split("\0");
+    expect(argv.filter((_, i) => argv[i - 1] === flag)).toEqual([expected]);
+  });
+
+  it("runs from its own directory, wherever it is started", () => {
+    const work = mkdtempSync(join(tmpdir(), "chaos-repro-"));
+    const bundle = join(work, "failures", "0000__index__00000000");
+    const bin = join(work, "bin");
+    mkdirSync(bundle, { recursive: true });
+    mkdirSync(bin);
+    // Stands in for the CLI: records the directory and the argv it got.
+    writeFileSync(join(bin, "chaosbringer"), '#!/bin/sh\npwd > "$OUT"\nprintf \'%s\\0\' "$@" >> "$OUT"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(
+      join(bundle, "repro.sh"),
+      buildReproScript({ baseUrl: "http://localhost:3000", tracePath: "./trace.jsonl", flags: runFlags(), cwd: work }),
+      { mode: 0o755 },
+    );
+    const out = join(work, "out");
+    execFileSync("sh", [join(bundle, "repro.sh")], {
+      cwd: tmpdir(),
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OUT: out },
+    });
+    const [cwd, ...rest] = readFileSync(out, "utf8").split("\n");
+    expect(realpathSync(cwd)).toBe(realpathSync(bundle));
+    const argv = rest.join("\n").split("\0").slice(0, -1);
+    // The CLI's own parser takes every flag; the paths still name the run's files.
+    const { values } = parseCrawlArgs(argv);
+    expect(values["trace-replay"]).toBe("./trace.jsonl");
+    expect(values["storage-state"]).toBe(join(work, "ss.json"));
+    expect(values.device).toBe("Pixel 7");
+    expect(values.strict).toBe(true);
+    expect(values.seed).toBeUndefined();
+    expect(values["trace-out"]).toBeUndefined();
+    rmSync(work, { recursive: true, force: true });
+  });
 });
 
 describe("writeFailureBundle", () => {
@@ -142,6 +238,7 @@ describe("writeFailureBundle", () => {
       screenshot: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
       html: "<html><body>broken</body></html>",
       trace,
+      reproFlags: [{ flag: "--url", value: "http://localhost:3000" }, { flag: "--seed", value: "42" }, { flag: "--strict" }],
       now: () => new Date("2024-01-01T00:00:00.000Z"),
     });
 
@@ -169,7 +266,9 @@ describe("writeFailureBundle", () => {
     expect(errors[0].message).toContain("undefined is not a function");
 
     const reproSh = readFileSync(join(bundleDir, "repro.sh"), "utf-8");
-    expect(reproSh).toContain("--trace-replay ./trace.jsonl");
+    expect(reproSh).toContain(
+      "chaosbringer --url http://localhost:3000 --trace-replay ./trace.jsonl --strict\n",
+    );
 
     // repro.sh is executable.
     const mode = statSync(join(bundleDir, "repro.sh")).mode & 0o777;

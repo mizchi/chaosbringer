@@ -130,7 +130,7 @@ import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "./defaults.js";
 import { parseTraceparent } from "./traceparent.js";
 import { validateOptions } from "./validate.js";
 import { findFaultRuleShadows } from "./fault-shadow.js";
-import { buildReproCommand } from "./repro-command.js";
+import { buildReproCommand, reproFlags } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
 import { installNavigationGuard, type NavigationGuard } from "./navigation-guard.js";
@@ -246,6 +246,8 @@ export class ChaosCrawler {
   private context: BrowserContext | null = null;
   private cdpPage: Page | null = null;
   private readonly initializedPages = new WeakSet<Page>();
+  /** Caller pages `installCallerPageFaultScripts` has given the fault init scripts. */
+  private readonly faultScriptPages = new WeakSet<Page>();
   private readonly routeHandlers = new Map<Page, (route: Route) => Promise<void>>();
   /** The CDP navigation guard on the CDP-attach page, disposed at teardown. */
   private readonly navigationGuards = new Map<Page, NavigationGuard>();
@@ -747,34 +749,8 @@ export class ChaosCrawler {
         content: collectorInitScript({ frames: this.perf.enabled }),
       });
 
-      // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
-      // …) on every navigation. CDP runs scope it to the selected page.
-      if (this.compiledRuntimeFaults.length > 0) {
-        const script = buildRuntimeFaultsScript(
-          this.compiledRuntimeFaults.map((c) => c.fault),
-          this.rng.seed,
-        );
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
-
-      // Caller-supplied init scripts, after the fault layers so a script can
-      // observe the patched APIs. Installed even when empty-checked away, so a
-      // caller that passes `[]` costs nothing.
-      for (const script of this.options.initScripts ?? []) {
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
-
-      // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
-      // (and setAttribute("src", …)) so faults fire when the host page assigns
-      // an iframe's URL. Independent of runtimeFaults so a page can configure
-      // either layer on its own.
-      if (this.compiledIframeFaults.length > 0) {
-        const script = buildIframeFaultsScript(
-          this.compiledIframeFaults.map((c) => c.fault),
-          this.rng.seed,
-        );
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
+      // CDP runs scope these to the selected page.
+      await this.addFaultInitScripts(this.cdpPage ?? this.context);
 
       // Replay mode: serve every matching request from the HAR before it hits
       // the network. Fault injection (installed per-page) still wins because
@@ -900,6 +876,10 @@ export class ChaosCrawler {
   async testPage(page: Page, url: string): Promise<PageResult> {
     this.startTime = Date.now();
     this.baseOrigin = new URL(url).origin;
+    // As `crawlPage` does: the executor is bound to the page it was made
+    // for, so a second `testPage()` (or one after `crawl`) would apply its
+    // lifecycle faults to the previous page.
+    this.lifecycleExecutor = null;
 
     // Set up external navigation blocking and/or fault injection routing.
     await this.setupPageInterception(page);
@@ -1056,6 +1036,7 @@ export class ChaosCrawler {
         screenshot,
         html,
         trace: (opts.saveTrace ?? true) ? this.trace : undefined,
+        reproFlags: reproFlags(this.options, this.rng.seed),
       });
       this.logger.info("failure_artifact_written", { url: result.url, bundleDir });
     } catch (err) {
@@ -1756,11 +1737,13 @@ export class ChaosCrawler {
       const text = msg.text();
       if (type === "error") {
         if (this.shouldIgnoreError(text)) return;
+        const resourceUrl = failedResourceUrl(text, msg);
         const error: PageError = {
           type: "console",
           message: text,
           url: page.url(),
           timestamp: Date.now(),
+          ...(resourceUrl ? { resourceUrl } : {}),
         };
         this.emitPageError(errors, error);
       } else if (type === "warning") {
@@ -1854,6 +1837,57 @@ export class ChaosCrawler {
    * Install this page's once-per-page init scripts: the unhandled-rejection
    * watcher and the SPA History-API hook.
    */
+  /**
+   * The runtime-fault, caller and iframe-fault init scripts, in that order:
+   * on the crawl's context from `start()`, and on a caller's page from
+   * `installPageInitScripts`.
+   */
+  private async addFaultInitScripts(target: Page | BrowserContext): Promise<void> {
+    // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
+    // …) on every navigation.
+    if (this.compiledRuntimeFaults.length > 0) {
+      const script = buildRuntimeFaultsScript(
+        this.compiledRuntimeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await target.addInitScript({ content: script });
+    }
+
+    // Caller-supplied init scripts, after the fault layers so a script can
+    // observe the patched APIs. Installed even when empty-checked away, so a
+    // caller that passes `[]` costs nothing.
+    for (const script of this.options.initScripts ?? []) {
+      await target.addInitScript({ content: script });
+    }
+
+    // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
+    // (and setAttribute("src", …)) so faults fire when the host page assigns
+    // an iframe's URL. Independent of runtimeFaults so a page can configure
+    // either layer on its own.
+    if (this.compiledIframeFaults.length > 0) {
+      const script = buildIframeFaultsScript(
+        this.compiledIframeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await target.addInitScript({ content: script });
+    }
+  }
+
+  /**
+   * A caller's page on the `testPage()` path is in a context `start()` never
+   * saw, so it has none of the init scripts `start()` put on the crawl's own:
+   * without these its runtime and iframe faults silently never ran. Added
+   * after `beginLoadSpan`, which installs the perf collector on such a page,
+   * so the collector still runs first and keeps the clock a `clock-skew`
+   * fault replaces, as on the crawl's own pages. Once per page: init scripts
+   * stay on it for every later navigation.
+   */
+  private async installCallerPageFaultScripts(page: Page): Promise<void> {
+    if (page === this.cdpPage || page.context() === this.context || this.faultScriptPages.has(page)) return;
+    this.faultScriptPages.add(page);
+    await this.addFaultInitScripts(page);
+  }
+
   private async installPageInitScripts(page: Page): Promise<void> {
     // Capture unhandled promise rejections. The install claims them via
     // `preventDefault` so they don't also fire as `pageerror` (which we'd
@@ -1911,6 +1945,7 @@ export class ChaosCrawler {
       // measures the navigation under them rather than the faults' own
       // setup, and closes after `collectLoadMetrics` below.
       await this.beginLoadSpan(page, url);
+      await this.installCallerPageFaultScripts(page);
 
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
       navigated = true;
@@ -2084,7 +2119,8 @@ export class ChaosCrawler {
       // `testPage()` path belongs to a context the crawler never touched,
       // even when this same crawler ran `start()` before.
       installCollector: page.context() !== this.context,
-      // The runtime-fault script is on every page of the crawl.
+      // The runtime-fault script is on every page: the crawl's from its
+      // context, a caller's from `installCallerPageFaultScripts`.
       pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
     });
   }
@@ -3139,5 +3175,16 @@ function documentContentType(response: Response | null): string | undefined {
   const type = response.headers()["content-type"]?.split(";")[0]?.trim().toLowerCase();
   if (!type || type.includes("html")) return undefined;
   return type;
+}
+
+/**
+ * The file behind the browser's "Failed to load resource: …" console error,
+ * which names neither it nor the page element: that message's location is
+ * the resource. Undefined for any other message, whose location is the line
+ * of script that logged it.
+ */
+function failedResourceUrl(text: string, msg: ConsoleMessage): string | undefined {
+  if (!text.startsWith("Failed to load resource")) return undefined;
+  return msg.location().url || undefined;
 }
 

@@ -328,6 +328,13 @@ export interface CrawlerOptions {
    */
   perfBudgetsFile?: string;
   /**
+   * @internal Set by the CLI: the flags it acts on itself rather than through
+   * these options (`--strict`, the `--axe` / `--visual-*` invariants it
+   * builds, `--allow-settle-mismatch`), so `reproCommand` and each failure
+   * bundle's `repro.sh` carry them too.
+   */
+  cliReproFlags?: ReproFlag[];
+  /**
    * How the crawler waits for the page to settle after `page.goto` and after
    * each chaos action. Default `"networkidle"`: exactly the waits the crawler
    * has always made (a `networkidle` navigation, `waitForLoadState
@@ -709,6 +716,21 @@ export interface FailureArtifactsOptions {
   maxArtifacts?: number;
 }
 
+/**
+ * One flag of a repro command (`reproCommand`, a bundle's `repro.sh`), with
+ * its value unquoted.
+ */
+export interface ReproFlag {
+  flag: string;
+  value?: string;
+  /**
+   * The value names a file or directory the run reads, relative to the
+   * directory the crawl ran in. `repro.sh` runs from its bundle, so it writes
+   * these as absolute paths.
+   */
+  path?: true;
+}
+
 /** `record` captures responses to a HAR file; `replay` serves them back. */
 export type HarMode = "record" | "replay";
 
@@ -858,6 +880,12 @@ export interface PageError {
   timestamp: number;
   /** Name of the invariant that failed (only for invariant-violation errors). */
   invariantName?: string;
+  /**
+   * The file a console error's "Failed to load resource: …" is about (only
+   * for that browser message, which names no URL itself). `message` stays as
+   * the browser wrote it, so the error's cluster is the same with or without.
+   */
+  resourceUrl?: string;
 }
 
 /**
@@ -1521,7 +1549,11 @@ export interface ServerFaultEvent {
 
 /** Configuration for Playwright Test integration */
 export interface ChaosTestOptions {
-  /** Base URL (uses baseURL from Playwright config if not set) */
+  /**
+   * What a relative URL given to `chaos.crawl()` / `chaos.testPage()`
+   * resolves against. Unset, the Playwright config's `baseURL` is used — the
+   * one `page.goto` resolves against. An absolute URL is used as given.
+   */
   baseUrl?: string;
   /** Maximum pages to visit per test */
   maxPages?: number;
@@ -1531,7 +1563,14 @@ export interface ChaosTestOptions {
   ignoreErrorPatterns?: string[];
   /** Block external navigation */
   blockExternalNavigation?: boolean;
-  /** Fail test on any error */
+  /**
+   * Fail the test on a run `chaosbringer --strict` would exit 1 on, by the
+   * same `getExitCode(report, { strict: true })`: an error or timed-out page,
+   * an invariant violation, a console error, a JS exception, an unhandled
+   * rejection. `chaos.crawl()` and `chaos.testPage()` throw once the run is
+   * over, after `crawl()` has attached its report. Without it the fixture
+   * fails nothing on its own; assert on the result.
+   */
   strict?: boolean;
   /** Action weights */
   actionWeights?: ActionWeights;
@@ -1539,4 +1578,26 @@ export interface ChaosTestOptions {
   perf?: boolean | PerfOptions;
   /** How each step settles; see `CrawlerOptions.settle`. */
   settle?: SettleMode;
+  /**
+   * Seed for action selection and fault probabilities; see
+   * `CrawlerOptions.seed`. One crawler serves the whole test, so its
+   * `crawl()` and `testPage()` calls draw from one sequence.
+   */
+  seed?: number;
+  /** Assertions run on every page; see `CrawlerOptions.invariants`. */
+  invariants?: Invariant[];
+  /**
+   * Network faults (`faults.status(503, …)`, …); see
+   * `CrawlerOptions.faultInjection`. On `testPage()` they are routed on your
+   * page, and stay routed for the rest of the test.
+   */
+  faultInjection?: FaultRule[];
+  /** Page-lifecycle faults; see `CrawlerOptions.lifecycleFaults`. */
+  lifecycleFaults?: LifecycleFault[];
+  /**
+   * JS-runtime faults; see `CrawlerOptions.runtimeFaults`. `crawl()` only:
+   * they are an init script on the browser context the crawl opens, and
+   * `testPage()` runs on your page, which does not get it.
+   */
+  runtimeFaults?: RuntimeFault[];
 }

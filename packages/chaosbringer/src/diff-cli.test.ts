@@ -6,8 +6,8 @@ import type { ErrorCluster } from "./clusters.js";
 import { runDiffCli } from "./diff-cli.js";
 import type { CrawlReport, CrawlSummary, PageError } from "./types.js";
 
-function cluster(o: Partial<ErrorCluster> & { key: string; fingerprint: string }): ErrorCluster {
-  const sample: PageError = { type: "console", message: o.fingerprint, timestamp: 0 };
+function cluster(o: Partial<ErrorCluster> & { key: string; fingerprint: string; message?: string }): ErrorCluster {
+  const sample: PageError = { type: "console", message: o.message ?? o.fingerprint, timestamp: 0 };
   return {
     key: o.key,
     type: o.type ?? "console",
@@ -112,6 +112,48 @@ describe("runDiffCli", () => {
       "console|only-right",
     ]);
     expect(out.sharedClusters.map((c: { key: string }) => c.key)).toEqual(["console|shared"]);
+  });
+
+  it("lists clusters on both sides as shared, not as noise, with a raw message the key leaves out", async () => {
+    const shared = [
+      // The fixture's own exception: the app's bug on both sides, not noise.
+      cluster({ key: "exception|fixture: boom", fingerprint: "fixture: boom", type: "exception" }),
+      cluster({
+        key: "console|Failed to load <url>",
+        fingerprint: "Failed to load <url>",
+        message: "Failed to load https://cdn.example.test/app.js",
+      }),
+    ];
+    const leftPath = writeReport("left.json", makeReport({ errorClusters: shared }));
+    const rightPath = writeReport(
+      "right.json",
+      makeReport({
+        errorClusters: [
+          ...shared,
+          cluster({ key: "console|HTTP <n> on <url>", fingerprint: "HTTP <n> on <url>", message: "HTTP 500 on /api/x" }),
+        ],
+      }),
+    );
+    await runDiffCli([leftPath, rightPath]);
+    const lines = output().split("\n");
+    expect(lines).not.toContainEqual(expect.stringContaining("noise"));
+    const at = lines.indexOf("Shared (both sides):");
+    expect(lines.slice(at, at + 4)).toEqual([
+      "Shared (both sides):",
+      "  [exception] exception|fixture: boom (left=1, right=1)",
+      "  [console] console|Failed to load <url> (left=1, right=1)",
+      "      e.g. Failed to load https://cdn.example.test/app.js",
+    ]);
+    expect(lines).toContain("      e.g. HTTP 500 on /api/x");
+
+    logSpy.mockClear();
+    await runDiffCli([leftPath, rightPath, "--json"]);
+    const json = JSON.parse(output());
+    expect(json.sharedClusters.map((c: { sample: string }) => c.sample)).toEqual([
+      "fixture: boom",
+      "Failed to load https://cdn.example.test/app.js",
+    ]);
+    expect(json.rightOnlyClusters[0].sample).toBe("HTTP 500 on /api/x");
   });
 
   it("--right-only filters to clusters present only on the right", async () => {

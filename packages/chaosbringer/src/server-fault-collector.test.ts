@@ -40,6 +40,33 @@ describe("ServerFaultCollector", () => {
     expect(events.map((e) => e.attrs.path)).toEqual(["/a", "/b"]);
   });
 
+  it("records the stream faults (partial, slowStream) with their attrs", () => {
+    const c = new ServerFaultCollector("x-chaos-fault");
+    c.observe({
+      headers: new Headers({
+        "x-chaos-fault-kind": "partial",
+        "x-chaos-fault-path": "/api/feed",
+        "x-chaos-fault-method": "GET",
+        "x-chaos-fault-after-bytes": "16",
+      }),
+      pageUrl: "https://app/feed",
+    });
+    c.observe({
+      headers: new Headers({
+        "x-chaos-fault-kind": "slowStream",
+        "x-chaos-fault-path": "/api/feed",
+        "x-chaos-fault-method": "GET",
+        "x-chaos-fault-chunk-delay-ms": "100",
+        "x-chaos-fault-chunk-size": "8",
+      }),
+      pageUrl: "https://app/feed",
+    });
+    expect(c.drain().map((e) => e.attrs)).toEqual([
+      { kind: "partial", path: "/api/feed", method: "GET", afterBytes: 16 },
+      { kind: "slowStream", path: "/api/feed", method: "GET", chunkDelayMs: 100, chunkSize: 8 },
+    ]);
+  });
+
   it("drain() empties the buffer", () => {
     const c = new ServerFaultCollector("x-chaos-fault");
     c.observe({

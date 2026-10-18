@@ -31,7 +31,7 @@ import type {
   ScenarioLoadResult,
   ThinkTime,
 } from "../load/index.js";
-import { runRecipeWithRequires } from "./composition.js";
+import { resolveDependencies, runRecipeWithRequires } from "./composition.js";
 import { aggregateFirings, type RecipeRunStats } from "./recipe-driver.js";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
@@ -131,7 +131,7 @@ export function recipeStoreScenarioWithStats(
       {
         name: "pick-and-replay",
         run: async (ctx) => {
-          const candidates = opts.store.verified().filter(filter);
+          const candidates = candidatesOf(opts.store, filter);
           if (candidates.length === 0) {
             throw new Error(
               `${name}: no verified recipes match filter — nothing to replay`,
@@ -150,6 +150,10 @@ export function recipeStoreScenarioWithStats(
             workerMemo.set(ctx.page, memo);
           }
 
+          // Every replay goes to the load run's base URL: a recipe keeps
+          // the origin it was recorded on, and a load test of staging
+          // that quietly hit localhost would report localhost's numbers.
+          const baseUrl = ctx.baseUrl;
           if (chain && recipe.requires.filter((d) => !d.startsWith("__")).length > 0) {
             const result = await runRecipeWithRequires({
               page: ctx.page,
@@ -157,6 +161,7 @@ export function recipeStoreScenarioWithStats(
               store: opts.store,
               alreadyRan: memo,
               vars,
+              baseUrl,
               // Record stats for each link in the chain so the
               // store reflects every replay — mirrors recipeDriver.
               onProgress: (ev) => {
@@ -178,7 +183,7 @@ export function recipeStoreScenarioWithStats(
             }
             return;
           }
-          const result = await runRecipe(ctx.page, recipe, { vars });
+          const result = await runRecipe(ctx.page, recipe, { vars, baseUrl });
           if (result.ok) {
             opts.store.recordSuccess(recipe.name, result.durationMs);
             firings.push({
@@ -211,6 +216,10 @@ export function recipeStoreScenarioWithStats(
 }
 
 export interface ScenarioLoadFromStoreOptions extends RecipeStoreScenarioOptions {
+  /**
+   * The site the run hits. Each recipe replays on this origin, whatever
+   * origin it was recorded on (`rebaseRecipe`).
+   */
   baseUrl: string;
   workers: number;
   duration?: DurationInput;
@@ -262,7 +271,33 @@ export async function scenarioLoadFromStore(
   return { ...result, recipes: bundle.getRunStats() };
 }
 
+/**
+ * Every recipe a store scenario built from `opts` can replay: the
+ * candidates it picks from and, with `chainRequires` on, what their
+ * `requires` chains run first. A chain that does not resolve is left to
+ * fail in the run, where it is reported.
+ */
+export function storeScenarioRecipes(
+  opts: Pick<RecipeStoreScenarioOptions, "store" | "filter" | "chainRequires">,
+): ActionRecipe[] {
+  const out = new Map<string, ActionRecipe>();
+  for (const recipe of candidatesOf(opts.store, opts.filter ?? (() => true))) {
+    let chain = [recipe];
+    if (opts.chainRequires !== false) {
+      try {
+        chain = resolveDependencies(recipe, opts.store);
+      } catch {}
+    }
+    for (const r of chain) out.set(r.name, r);
+  }
+  return [...out.values()];
+}
+
 // -------- internals --------
+
+function candidatesOf(store: RecipeStore, filter: (recipe: ActionRecipe) => boolean): ActionRecipe[] {
+  return store.verified().filter(filter);
+}
 
 function pickRecipe(
   candidates: ReadonlyArray<ActionRecipe>,

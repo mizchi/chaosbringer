@@ -8,11 +8,11 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 
 | Layer | Library | What it touches | When to use |
 |---|---|---|---|
-| **Application state** | (your test setup; see [`#60`](https://github.com/mizchi/chaosbringer/issues/60) for a built-in hook) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
+| **Application state** | `chaos({ setup })` hook ([below](#pre-run-setup-hook)) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
 | **Network** | `chaosbringer` `faults.*` | HTTP between browser and server (Playwright `route()`) | "What does the UI do when `/api/x` is 500 / slow / aborted" |
 | **Page lifecycle / runtime** | `chaosbringer` `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults) | Inside the server process, before the handler runs | "Do the server's own OTel traces / metrics show the fault, and does the handler degrade gracefully" |
-| **Cloudflare bindings** | (proposed [`#61`](https://github.com/mizchi/chaosbringer/issues/61) `@mizchi/cf-faults`) | KV / Service Binding / D1 / Cache wrappers | "How does the Worker behave when its KV throws" |
+| **Cloudflare bindings** | [`@mizchi/cf-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
 
 **Common confusion:** `faults.status(500, ...)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` (or run both layers together).
 
@@ -54,20 +54,6 @@ npx playwright install chromium
 ```
 
 `chaosbringer` targets ESM. Programmatic consumers need `"type": "module"` (or `.mts` files) and `playwright` as a peer dependency.
-
-### Installing from a git ref
-
-`chaosbringer` is currently distributed via GitHub (no npm package yet). Both forms work:
-
-```bash
-# pin a commit SHA
-pnpm add chaosbringer@github:mizchi/chaosbringer#<sha>
-
-# track main
-pnpm add chaosbringer@github:mizchi/chaosbringer
-```
-
-The package's `prepare` script runs `tsc` on install, so `pnpm install` / `npm install` builds `dist/` automatically — no manual step needed.
 
 ## Quick start — CLI
 
@@ -175,7 +161,9 @@ Every report includes:
 - `report.seed` — the seed actually used (random if you didn't pass one).
 - `report.reproCommand` — a shell-safe invocation that rebuilds the same run.
 
-Both are printed in the compact header (`[PASS] … (seed=42)`) and the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`).
+Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict` fails on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`.
+
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
 
 To rerun an exact failure locally, copy the `Repro:` line from CI.
 
@@ -824,7 +812,9 @@ await chaos({
 
 `axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
 
-A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+axe is injected over CDP, so a page's Content-Security-Policy does not block it, and the page's iframes are scanned with it, same-origin and cross-origin (axe-core 4.3+; older versions scan the top document only). A cross-origin iframe loads only with `blockExternalNavigation: false`: the default guard blocks its document, and the blocked frame is skipped. So is an iframe that can't run axe: one sandboxed without `allow-scripts`, or one whose scan doesn't finish within 10s (a stuck widget). To leave embeds you don't own out of the scan, `exclude` them (`exclude: ["iframe"]`).
+
+A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Violations inside an iframe follow, per frame URL: `[a11y-axe] 3 a11y violations: image-alt(×1, critical); in frame https://example.com/embed: button-name(×1, critical), image-alt(×1, critical)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
 
 ## Action heatmap
 
@@ -935,11 +925,11 @@ failures/0000__checkout_review__a91c2f0e/
 ├── page.html        # `await page.content()` snapshot
 ├── errors.json      # full PageError[] (console / exception / network / invariant)
 ├── trace.jsonl      # meta + visits + actions, sliced up to and including this page
-├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl`
+├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl <the run's flags>`
 └── info.json        # URL, status, sourceUrl, recovery, seed, timestamps
 ```
 
-`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. Combine with `--strict` or `--baseline` to gate CI on the same shape of failure.
+`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Add `--baseline` to gate CI on the same shape of failure.
 
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 
@@ -1150,10 +1140,14 @@ Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree
 ```
 ERROR CLUSTERS
   [console]×42 [5 urls] Failed to load resource: the server responded with a status of <n> (Not Found)
+    resource: http://localhost:3000/img/hero.png
+    resource: http://localhost:3000/fonts/body.woff2
   [exception]×3 fixture: boom
 ```
 
 Use it to triage noisy fuzz runs — high-count clusters are the first thing to look at.
+
+The browser's "Failed to load resource" message names no file, so its console error carries the file as `resourceUrl`, and the cluster lists every one as `resourceUrls` (the text report shows the first five). The message itself stays as the browser wrote it, so the cluster key that `--baseline` compares does not depend on which files failed.
 
 ## Exit codes
 
@@ -1163,6 +1157,8 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 | At least one page with `status: "error"` or `"timeout"` | **1** |
 | At least one invariant violation (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
+| `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
+| The CLI refused to run: an unknown flag, a malformed value, no `--url`, a `--perf-budgets` file it cannot use. Nothing ran; stderr has one `chaosbringer: …` line | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
@@ -1176,32 +1172,32 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 
 ## Playwright Test integration
 
-Use the pre-configured `chaosTest`:
+The fixture lives at the `chaosbringer/fixture` subpath — the package root does not export it, so that only this entry point needs `@playwright/test` installed. Use the pre-configured `chaosTest`:
 
 ```ts
-import { chaosTest, chaosExpect } from "chaosbringer";
+import { chaosTest, chaosExpect } from "chaosbringer/fixture";
 
 chaosTest("chaos-test homepage", async ({ page, chaos }) => {
-  await page.goto("http://localhost:3000");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/");
   chaosExpect.toHaveNoExceptions(result);
   chaosExpect.toLoadWithin(result, 3000);
 });
 ```
 
+A relative URL resolves against `baseURL` from the Playwright config's `use` — the one `page.goto` resolves against — unless `chaosOptions.baseUrl` is set, which takes precedence. An absolute URL is used as given.
+
 Or extend your existing test:
 
 ```ts
 import { test as base } from "@playwright/test";
-import { withChaos, type ChaosFixtures } from "chaosbringer";
+import { withChaos, type ChaosFixtures } from "chaosbringer/fixture";
 
 const test = base.extend<ChaosFixtures>(
   withChaos({ maxActionsPerPage: 10, ignoreErrorPatterns: ["analytics"] }),
 );
 
 test("my feature", async ({ page, chaos }) => {
-  await page.goto("/dashboard");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/dashboard");
   chaos.expectNoErrors(result);
 });
 ```
@@ -1210,13 +1206,44 @@ Or crawl from within a fixture-based test:
 
 ```ts
 chaosTest("crawl entire site", async ({ chaos }) => {
-  const report = await chaos.crawl("http://localhost:3000");
+  const report = await chaos.crawl("/");
   chaos.expectNoErrors(report);
   chaos.expectNoDeadLinks(report);
 });
 ```
 
+Every `crawl()` attaches its report to the test as `chaos-report.json`, so it is in the HTML report next to the failure.
+
 `expectNoDeadLinks` / `chaosExpect.toHaveNoDeadLinks` surface each broken URL together with the page it was found on, so a CI failure points straight at the broken anchor without cross-referencing the full JSON report.
+
+`chaosOptions` — set per file with `chaosTest.use({ chaosOptions })`, or as `withChaos()`'s defaults — also carries faults, invariants, a seed, and `strict`:
+
+```ts
+import { expect } from "@playwright/test";
+import { COMMON_IGNORE_PATTERNS, faults } from "chaosbringer";
+import { chaosTest } from "chaosbringer/fixture";
+
+chaosTest.use({
+  chaosOptions: {
+    seed: 42,
+    // Load the page only: the assertion below is about it, not about
+    // wherever a random click would have gone.
+    maxActionsPerPage: 0,
+    faultInjection: [faults.status(503, { urlPattern: /\/api\/stock/ })],
+    // Chromium logs the injected 503 as a console error. That is the fault,
+    // not the page; ignore it and keep the default patterns.
+    ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"],
+    strict: true,
+  },
+});
+
+chaosTest("stock page survives a down API", async ({ page, chaos }) => {
+  await chaos.testPage(page, "/stock");
+  await expect(page.getByRole("status")).toHaveText("Stock unavailable");
+});
+```
+
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. With it, the console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") fails the test like any other, so a strict test of a status fault ignores that message, as above. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them, hence the spread. `lifecycleFaults` and `runtimeFaults` are accepted too; `runtimeFaults` apply to `crawl()` only, since they are an init script on the context the crawl opens and `testPage()` runs on your page. On `testPage()`, `faultInjection` rules are routed on your page and stay routed for the rest of the test.
 
 ## Subcommands
 
@@ -1285,7 +1312,7 @@ const merged = mergeReports([r0, r1, r2, r3]);
 
 ### `diff`
 
-Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both (likely third-party noise). Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed.
+Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both sides, each with a raw sample message where it says more than the normalised cluster key. Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed; there, a shared cluster is not caused by either runtime (third-party noise, or a bug both have).
 
 ```bash
 chaosbringer --url http://127.0.0.1:3000 --seed 1 --output left.json
@@ -1385,8 +1412,9 @@ chaosbringer --url http://localhost:3000 \
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors + JS exceptions | false |
-| `--quiet` | Minimal output | false |
-| `--help` | Show help | — |
+| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written | false |
+| `--help`, `-h` | Show help, with a line for every subcommand | — |
+| `--version`, `-V` | Print the installed version | — |
 
 † `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).
 

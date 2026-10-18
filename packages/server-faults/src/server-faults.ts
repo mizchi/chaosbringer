@@ -12,7 +12,15 @@
  * (1 roll for 5xx, conditionally 1 roll for latency).
  */
 
-export type FaultKind = "5xx" | "latency" | "abort" | "partial" | "slowStream";
+/**
+ * Every fault kind, as a runtime tuple; `FaultKind` is derived from it so the
+ * two cannot disagree. Exists for chaosbringer's header-contract test, which
+ * walks every kind through `attrsToHeaderEntries` and chaosbringer's parser —
+ * a union alone cannot be iterated. Like `attrsToHeaderEntries`, it is
+ * intentionally NOT re-exported from `index.ts`.
+ */
+export const FAULT_KINDS = ["5xx", "latency", "abort", "partial", "slowStream"] as const;
+export type FaultKind = (typeof FAULT_KINDS)[number];
 
 /**
  * How an abort fault tears down the connection.

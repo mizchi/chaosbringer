@@ -94,6 +94,21 @@ describe("analyzeScan: bugs", () => {
     ]);
   });
 
+  it("lists the files a failed load is about, less the documents the page rules report", () => {
+    const message = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+    const files = [1, 2, 3, 4, 5, 6, 7].map((i) => `${U}/img/${i}.png`);
+    const c: ErrorCluster = {
+      ...cluster("console", message, [`${U}/`, `${U}/gone`], 9),
+      sample: { type: "console", message, timestamp: 0, resourceUrl: files[0] },
+      resourceUrls: [`${U}/gone`, ...files],
+    };
+    const r = analyzeScan(fakeReport([fakePage(`${U}/`), fakePage(`${U}/gone`, undefined, { statusCode: 404 })], [], { errorClusters: [c] }));
+    const f = r.findings.find((x) => x.rule === "console-error")!;
+    // The message names no file, so before this the finding said only "9× on 2 pages".
+    expect(f.evidence).toEqual(["9× on 2 pages", ...files.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`)]);
+    expect(f.unlisted).toBe(files.length - SCAN_WHERE_CAP);
+  });
+
   it("files axe violations under a11y", () => {
     const c = { ...cluster("invariant-violation", "color-contrast"), invariantNames: ["a11y-axe"] };
     const [f] = analyzeScan(fakeReport([], [], { errorClusters: [c] })).findings;
@@ -643,6 +658,17 @@ describe("analyzeScan: coverage warnings", () => {
     expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
     expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
   });
+
+  it("does not call a light start page a bot check when the crawl went on past it", () => {
+    // A small static site: 3 requests and 2 KB on the start page, then nine
+    // more pages. It was told it had maybe been served a bot check.
+    const start = fakePage(`${U}/`, undefined, {
+      links: [`${U}/a`],
+      perfPage: perfPage({ network: { totalRequests: 3, totalEncodedKB: 2, fromCacheCount: 0 } }),
+    });
+    const rest = Array.from({ length: 9 }, (_, i) => fakePage(`${U}/p${i}`));
+    expect(analyzeScan(fakeReport([start, ...rest], [])).coverageWarnings).toEqual([]);
+  });
 });
 
 describe("RULE_PATTERNS", () => {
@@ -777,6 +803,47 @@ describe("format", () => {
     });
     expect(md2).toContain("[long-task-click](https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns/long-task-click.ts)");
     expect(md2).toContain("Chaos crawls: skipped");
+  });
+
+  it("says '… and N more' for the items the evidence leaves out, not for errors it sums up", () => {
+    const md = (report: ReturnType<typeof fakeReport>) =>
+      formatScanMarkdown(analyzeScan(report), {
+        url: U,
+        startedAt: "",
+        durationMs: 0,
+        pagesVisited: 1,
+        actions: 0,
+        files: { baseline: "a", chaos: {}, perfDir: "b" },
+      });
+    const more = (text: string) => text.match(/^- … and \d+ more$/gm) ?? [];
+
+    // Seen 3×, summed up in one line: there is nothing more to list. It used
+    // to print "… and 1 more" under a list of nothing.
+    const errors = md(fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom", [`${U}/`, `${U}/a`], 3)] }));
+    expect(errors).toContain("- 3× on 2 pages");
+    expect(more(errors)).toEqual([]);
+
+    // Seven files under a summary line: five listed, two left out (it said 1,
+    // counting the summary line as a file).
+    const lowUsage = [1, 2, 3, 4, 5, 6, 7].map((i) => ({ url: `/chunk-${i}.js`, totalBytes: 100 * 1024, usedBytes: 1024, usedPct: 1 }));
+    const unused = md(
+      fakeReport([fakePage(`${U}/`)], [], {
+        perf: {
+          vitals: {},
+          slowestActions: [],
+          hotInitiators: [],
+          thirdParty: [],
+          totals: { spans: 0, pages: 0 },
+          coverage: {
+            js: { totalBytes: 700 * 1024, usedBytes: 7 * 1024, usedPct: 1, lowUsage },
+            css: { totalBytes: 0, usedBytes: 0, lowUsage: [] },
+          },
+        },
+      }),
+    );
+    expect(unused).toContain("- /chunk-5.js: 1% used of 100 KB");
+    expect(unused).not.toContain("/chunk-6.js");
+    expect(more(unused)).toEqual(["- … and 2 more"]);
   });
 });
 

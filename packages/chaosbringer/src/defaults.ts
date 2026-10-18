@@ -38,6 +38,7 @@ export const DEFAULT_OPTIONS: Required<
     | "perf"
     | "perfBudgets"
     | "perfBudgetsFile"
+    | "cliReproFlags"
   >
 > = {
   maxPages: 50,

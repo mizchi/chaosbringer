@@ -30,6 +30,12 @@ export interface VerifyOptions {
    * hook so the verifier can dispose contexts deterministically.
    */
   setupPage: () => Promise<{ page: Page; cleanup: () => Promise<void> }>;
+  /**
+   * Site under verification (`RunRecipeOptions.baseUrl`). Without it a
+   * recipe that starts with a navigate replays on the host it was
+   * recorded on, and a pass there promotes it for a site it never ran on.
+   */
+  baseUrl?: string;
   /** Logger for visibility — defaults to `console.log` if `verbose`, else silent. */
   verbose?: boolean;
 }
@@ -59,7 +65,7 @@ export async function verifyAndPromote(
   for (let i = 0; i < runs; i++) {
     const { page, cleanup } = await opts.setupPage();
     try {
-      const result = await runRecipe(page, recipe);
+      const result = await runRecipe(page, recipe, { baseUrl: opts.baseUrl });
       outcomes.push({
         ok: result.ok,
         durationMs: result.durationMs,

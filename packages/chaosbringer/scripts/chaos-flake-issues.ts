@@ -10,7 +10,12 @@
  *
  * Issues for clusters that no longer appear are closed with a comment.
  *
- * Required env: GH_TOKEN (or auth via gh CLI), GH_REPO (owner/name).
+ * Required env: GH_TOKEN (or auth via gh CLI), GH_REPO (owner/name), and
+ * FLAKE_COMMAND: the `flake` command that wrote <flake.json>, which each
+ * issue gives as the way to reproduce it. The workflow exports the command
+ * it ran rather than this file restating it: the restated one had drifted
+ * to a binary the monorepo does not link, without the run's --seed or
+ * limits.
  */
 
 import { readFileSync } from "node:fs";
@@ -50,6 +55,12 @@ if (!repo) {
   process.exit(2);
 }
 
+const flakeCommand = process.env.FLAKE_COMMAND;
+if (!flakeCommand) {
+  console.error("FLAKE_COMMAND must be set (the flake command that wrote the report, for the issues' repro)");
+  process.exit(2);
+}
+
 function gh(args: string[], input?: string): string {
   return execFileSync("gh", args, {
     input,
@@ -84,10 +95,10 @@ function buildBody(c: ClusterOccurrence, runs: number): string {
     `**Fired in:** ${fired} / ${runs} runs`,
     `**Per-run counts:** \`[${counts}]\``,
     "",
-    `Reproduce locally:`,
+    "Reproduce locally, from `packages/chaosbringer` after `pnpm build`, with the fixture served at the command's `--url` (`PORT=<port> pnpm fixture:serve`):",
     "",
     "```",
-    `pnpm exec chaosbringer flake --url <fixture-url> --runs ${runs} --output flake.json`,
+    flakeCommand,
     "```",
   ].join("\n");
 }

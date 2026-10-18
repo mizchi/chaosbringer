@@ -16,14 +16,18 @@ import {
   openStore,
   RECIPE_SELECTIONS,
   RECIPE_STATUSES,
+  requireBaseUrl,
+  warnRebased,
 } from "./cli-common.js";
-import { scenarioLoadFromStore, type RecipeSelection } from "./load-bridge.js";
-import type { RecipeStatus } from "./types.js";
+import { scenarioLoadFromStore, storeScenarioRecipes, type RecipeSelection } from "./load-bridge.js";
+import type { ActionRecipe, RecipeStatus } from "./types.js";
 
 const HELP = `chaosbringer load --base-url URL [options]
 
 Options:
-  --base-url URL          (required) base URL the load run hits
+  --base-url URL          (required) base URL the load run hits: each recipe's
+                          navigations to the origin it was recorded on go
+                          to this origin instead (with a warning)
   --workers N             concurrent virtual users (default: 5)
   --duration D            run length, e.g. 30s, 2m (default: 60s)
   --ramp-up D             linear ramp-up window (default: 0)
@@ -67,6 +71,10 @@ export async function runLoadCli(argv: string[]): Promise<void> {
   }
   const parsed = parseFlags(argv);
   if (!parsed) return;
+  const filter = (r: ActionRecipe) => r.status === parsed.filterStatus;
+  if (!parsed.quiet) {
+    warnRebased("load", storeScenarioRecipes({ store: parsed.store, filter }), parsed.baseUrl);
+  }
   const result = await scenarioLoadFromStore({
     baseUrl: parsed.baseUrl,
     workers: parsed.workers,
@@ -75,7 +83,7 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     headless: parsed.headless,
     maxIterationsPerWorker: parsed.maxIterations,
     selection: parsed.selection,
-    filter: (r) => r.status === parsed.filterStatus,
+    filter,
     store: parsed.store,
     thinkTime: parsed.thinkTime,
   });
@@ -135,6 +143,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     console.error(HELP);
     process.exit(2);
   }
+  requireBaseUrl("load", baseUrl);
   const workers = parsePositiveInt("--workers", values.workers, 5);
   // Validate at the CLI boundary so a typo in --duration / --ramp-up
   // fails before launching Chromium, with the bad input echoed.

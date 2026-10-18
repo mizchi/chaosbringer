@@ -18,10 +18,11 @@ Browser (Playwright)              Server process
   |                                  |     [synthetic 5xx]:
   |                                  |       response.headers +=
   |                                  |         x-chaos-fault-*
-  |                                  |     [latency]:
-  |                                  |       sleep, real handler runs,
-  |                                  |       adapter adds headers
-  |                                  |       on the way back
+  |                                  |     [latency, and on Hono only
+  |                                  |      partial, slowStream]:
+  |                                  |       real handler runs (after a
+  |                                  |       sleep for latency), adapter
+  |                                  |       adds headers on the way back
   |<--------- response (with --------|
   |                  fault headers)  |
   |
@@ -70,7 +71,7 @@ import { koaMiddleware } from "@mizchi/server-faults/koa";
 app.use(koaMiddleware({ status5xxRate: 0.3, metadataHeader: true }));
 ```
 
-After this change, every synthetic 5xx response and every latency-affected real response carries headers like:
+After this change, every synthetic 5xx response and every real response hit by latency, a partial body (`partialResponseRate`, Hono adapter only) or a slow stream (`slowStreaming`, Hono adapter only) carries headers like:
 
 ```
 x-chaos-fault-kind: 5xx
@@ -105,11 +106,14 @@ console.log(report.serverFaults);    // ServerFaultEvent[] | undefined
 interface ServerFaultEvent {
   traceId?: string;        // 32-hex, from the request's traceparent
   attrs: {
-    kind: "5xx" | "latency";
+    kind: "5xx" | "latency" | "partial" | "slowStream";
     path: string;          // URL pathname (no host, no query)
     method: string;        // uppercase HTTP method
     targetStatus?: number; // set when kind === "5xx"
     latencyMs?: number;    // set when kind === "latency"
+    afterBytes?: number;   // set when kind === "partial"
+    chunkDelayMs?: number; // set when kind === "slowStream"
+    chunkSize?: number;    // set when kind === "slowStream" rechunked the body
     traceId?: string;      // duplicated here for OTel-attribute parity
   };
   observedAt: number;      // Date.now() at the moment chaos saw the response
@@ -212,6 +216,7 @@ Now any downstream OTel consumer (Jaeger, Tempo, Honeycomb, Datadog) can filter 
 
 ## Limitations
 
+- **Aborts are not ingested.** An `abortRate` fault tears the connection down before any header is sent, so it never appears in `report.serverFaults`; the browser side sees it as a failed request. The server's `observer.onFault` is the only record of it.
 - **Seed propagation is manual.** Both processes must be started with the same seed env var. Future work may add automatic seed broadcast.
 - **Same-process integration (`server: ServerFaultHandle`) is not implemented.** Useful for unit tests where the test driver imports the app and calls `app.fetch()` directly; would skip the response-header round-trip and share an in-memory observer. No demand surfaced yet, deferred.
 

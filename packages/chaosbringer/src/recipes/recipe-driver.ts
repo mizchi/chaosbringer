@@ -89,6 +89,13 @@ export interface RecipeDriverOptions {
    * after it.
    */
   chainRequires?: boolean;
+  /**
+   * Site to replay recipes on (`RunRecipeOptions.baseUrl`). Default: the
+   * origin of the page the recipe matched on — a crawl of staging fires
+   * a recipe recorded on localhost because its preconditions hold on
+   * staging, and its navigations belong there too, not on localhost.
+   */
+  baseUrl?: string;
 }
 
 export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
@@ -120,6 +127,8 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
         const ok = await preconditionsHold(step.page, recipe.preconditions);
         if (!ok) continue;
         log(`matched ${recipe.name}`);
+        // A page off http(s) (about:blank, a file) has no origin to move to.
+        const baseUrl = opts.baseUrl ?? (/^https?:/i.test(step.url) ? step.url : undefined);
         return {
           kind: "custom",
           source,
@@ -137,7 +146,7 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
 
             if (!chain || recipe.requires.filter((d) => !d.startsWith("__")).length === 0) {
               // Fast path: no deps to resolve.
-              const result = await runRecipe(page, recipe);
+              const result = await runRecipe(page, recipe, { baseUrl });
               if (result.ok) {
                 opts.store.recordSuccess(recipe.name, result.durationMs);
                 recordFiring(recipe.name, true, result.durationMs);
@@ -171,6 +180,7 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
                 recipe,
                 store: opts.store,
                 alreadyRan: replayed,
+                baseUrl,
                 onProgress: (ev) => {
                   if (ev.kind === "complete") {
                     if (ev.result.ok) {
