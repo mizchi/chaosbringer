@@ -73,7 +73,10 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 
 - **`where`** is a page URL, or, for a step, its perfKey
   (`<urlPattern> :: <kind>`, see [perf.md](perf.md#perfkey-the-key-that-survives-a-rerun)).
-  The key is stable across runs, so you can re-measure the same step.
+  The key is stable across runs, so you can re-measure the same step. The
+  table shows the first place and `(+N)` for the other places
+  (`ScanFinding.places`); `seen` counts the times, which for an error
+  finding are its errors: four throws on one page are `/multi` seen 4.
 - **Evidence** lists at most five pages, steps or files, and `… and N more`
   counts the rest. A `console-error` for "Failed to load resource" lists the
   files that failed (`resource: <url>`), since the browser's message names
@@ -92,6 +95,13 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 
 ## Going further from a finding
 
+- **Rerun a resilience finding.** Each chaos crawl's report
+  (`chaos-<fault>-report.json`) has as its `reproCommand` the scan that
+  reruns it, also listed under "Files" in `scan-report.md`:
+  `chaosbringer scan --url … --seed 7 --faults 500` plus the other flags
+  that shaped it. It reruns the clean crawl, which finds the endpoints, then
+  that one fault's crawl. A plain `chaosbringer` crawl has no flag for the
+  fault, so it would rerun clean and pass.
 - **See why a step is slow.** Re-run the clean crawl's `reproCommand` with
   `--perf-trace`, then run `chaosbringer perf drilldown <report> "<perfKey>"`.
 - **Turn a resilience finding into a test.** Write the fault the scan used

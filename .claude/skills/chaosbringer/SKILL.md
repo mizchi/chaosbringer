@@ -243,9 +243,12 @@ same-site fetch / XHR failing. Findings are ranked in
 
 Treat it as a map, not an oracle. Each resilience finding is a place to
 write a real test (the fault it names, plus an invariant for the error
-state). A perf finding is a threshold crossed once. `--exclude` destructive
-URLs, and scan only what you may test. Details:
-`docs/recipes/scan.md`.
+state); to see it again first, rerun the `chaosbringer scan … --faults
+<fault>` command in its chaos crawl's report (`reproCommand`). A plain
+crawl's `Repro:` line has no flag for a fault set in code: it names the
+rules in a trailing `# + …` comment and reruns without them. A perf finding
+is a threshold crossed once. `--exclude` destructive URLs, and scan only
+what you may test. Details: `docs/recipes/scan.md`.
 
 ## Getting a flow under test without writing it
 

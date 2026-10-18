@@ -11,9 +11,17 @@
  * branch here, or the CLI's own `cliReproFlags` — or is left out on purpose;
  * `repro-command.test.ts` holds that list and fails on a flag that is in
  * neither.
+ *
+ * Fault rules and invariants set in code have no flag. The command ends in a
+ * comment that counts and names them (`unreplayedNote`): a `chaos()` run
+ * whose 500 broke a page used to print a command that reran it clean and
+ * passed, and said nothing.
  */
 import { DEFAULT_OPTIONS } from "./defaults.js";
+import { iframeFaultName } from "./iframe-faults.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS } from "./ignore-presets.js";
+import { lifecycleFaultName } from "./lifecycle-faults.js";
+import { runtimeFaultName } from "./runtime-faults.js";
 import { settleReproArg } from "./settle.js";
 import { PERF_BUDGET_KEYS } from "./types.js";
 import type { CrawlerOptions, ReproFlag } from "./types.js";
@@ -46,7 +54,62 @@ export function buildReproCommand(
 options: Required<CrawlerOptions>,
 seed: number,
 ): string {
-  return ["chaosbringer", ...formatReproFlags(reproFlags(options, seed))].join(" ");
+  return withUnreplayedNote(["chaosbringer", ...formatReproFlags(reproFlags(options, seed))].join(" "), options);
+}
+
+/** `command`, ending in a `# + …` comment when `options` set something it cannot carry. */
+export function withUnreplayedNote(command: string, options: UnreplayedOptions): string {
+  const note = unreplayedNote(options);
+  return note ? `${command} # + ${note}` : command;
+}
+
+type UnreplayedOptions = Pick<
+  CrawlerOptions,
+  "faultInjection" | "lifecycleFaults" | "runtimeFaults" | "iframeFaults" | "invariants" | "cliReproFlags"
+>;
+
+/** The invariant each CLI flag builds, by the name it gives it (`cli-crawl-options.ts`). */
+const CLI_INVARIANTS: ReadonlyMap<string, string> = new Map([
+  ["--axe", "a11y-axe"],
+  ["--visual-baseline", "visual-regression"],
+]);
+
+/** How many names a note lists before `+N more`. */
+const NOTE_NAMES = 5;
+
+/**
+ * What a run set that no flag of its repro command carries, counted and
+ * named, e.g. `1 fault rule not expressible on the CLI: scan:api-500`;
+ * `undefined` when there is nothing. The fault layers and the invariants
+ * other than the ones `--axe` / `--visual-baseline` built. A rule is named
+ * as its stats name it, an unnamed network rule by its pattern.
+ *
+ * It follows a `#` on the repro line and in `repro.sh`, so it stays a plain
+ * comment: control characters (a newline would start a command) become
+ * spaces, and a name a shell would expand is quoted, which also keeps it
+ * inert in a shell that reads `#` as a word (zsh without
+ * `interactivecomments`).
+ */
+export function unreplayedNote(options: UnreplayedOptions): string | undefined {
+  const invariants = (options.invariants ?? []).map((i) => i.name);
+  for (const { flag } of options.cliReproFlags ?? []) {
+    const built = CLI_INVARIANTS.get(flag);
+    const at = built === undefined ? -1 : invariants.indexOf(built);
+    if (at >= 0) invariants.splice(at, 1);
+  }
+  const groups: Array<[string, string[]]> = [
+    ["fault rule", (options.faultInjection ?? []).map((r) => r.name ?? String(r.urlPattern))],
+    ["lifecycle fault", (options.lifecycleFaults ?? []).map(lifecycleFaultName)],
+    ["runtime fault", (options.runtimeFaults ?? []).map(runtimeFaultName)],
+    ["iframe fault", (options.iframeFaults ?? []).map(iframeFaultName)],
+    ["invariant", invariants],
+  ];
+  const present = groups.filter(([, names]) => names.length > 0);
+  if (present.length === 0) return undefined;
+  const counts = present.map(([noun, names]) => `${names.length} ${noun}${names.length === 1 ? "" : "s"}`);
+  const names = present.flatMap(([, n]) => n).map((n) => shellQuote(n.replace(/\p{Cc}+/gu, " ")));
+  const listed = names.length > NOTE_NAMES ? [...names.slice(0, NOTE_NAMES), `+${names.length - NOTE_NAMES} more`] : names;
+  return `${counts.join(", ")} not expressible on the CLI: ${listed.join(", ")}`;
 }
 
 /** The flags of `buildReproCommand`, unquoted; a bundle's `repro.sh` is built from them too. */
@@ -127,9 +190,10 @@ export function reproFlags(options: Required<CrawlerOptions>, seed: number): Rep
  * `--ignore-analytics`'s list or to a preset becomes that flag, and any other
  * pattern an `--ignore-error`. Longer lists are tried first, so
  * `--ignore-analytics` (the `analytics` preset plus `net::ERR_FAILED`) is not
- * read back as the preset and one stray pattern.
+ * read back as the preset and one stray pattern. `scan` has the same three
+ * flags, so its repro command uses this too.
  */
-function ignoreReproFlags(patterns: readonly string[]): ReproFlag[] {
+export function ignoreReproFlags(patterns: readonly string[]): ReproFlag[] {
   const named: Array<{ flag: ReproFlag; patterns: readonly string[] }> = [
     { flag: { flag: "--ignore-analytics" }, patterns: COMMON_IGNORE_PATTERNS },
     ...Object.entries(IGNORE_PRESETS).map(([name, list]) => ({

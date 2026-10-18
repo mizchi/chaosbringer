@@ -1327,8 +1327,12 @@ export interface CrawlReport {
   seed: number;
   /**
    * Copy-pasteable CLI invocation that reproduces this run. Only includes
-   * CLI-expressible options; programmatic-only options (invariants,
-   * faultInjection) cannot be encoded in a shell command and are omitted.
+   * CLI-expressible options. Fault rules (network, lifecycle, runtime,
+   * iframe) and invariants set in code have no flag; the command then ends
+   * in a comment that counts and names them (`# + 1 fault rule not
+   * expressible on the CLI: api-500`), since the command alone reruns
+   * without them. A `chaosbringer scan` chaos crawl's report holds the
+   * `chaosbringer scan … --faults <fault>` command that reruns it instead.
    */
   reproCommand: string;
   startTime: number;

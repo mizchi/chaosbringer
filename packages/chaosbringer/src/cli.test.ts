@@ -68,6 +68,12 @@ describe("usage errors", () => {
     // Refused by validateOptions, which used to throw from inside main().
     [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
     [[], "--url is required"],
+    // A Repro: line's `# + …` note, pasted into a zsh without interactivecomments.
+    [
+      [...URL_ARG, "#", "+", "1", "fault", "rule", "not", "expressible", "on", "the", "CLI:", "api-500"],
+      'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+        "`setopt interactivecomments`); drop the `#` and everything after it",
+    ],
   ])("%j is one line on stderr and exit 2, before anything runs", (args, message) => {
     const r = cli(args);
     expect(r.stderr.trimEnd().split("\n")).toEqual([`chaosbringer: ${message} (see chaosbringer --help)`]);

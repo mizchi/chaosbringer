@@ -229,7 +229,12 @@ if (strays.length > 0) {
     first === "crawl"
       ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
           "so drop the word: `chaosbringer --url <url>`"
-      : `unexpected argument "${first}"; known subcommands: ${known}`,
+      : // A Repro: line's trailing `# + …` note, pasted into zsh, which reads
+        // `#` as a word unless `interactivecomments` is set.
+        first === "#"
+        ? 'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+            "`setopt interactivecomments`); drop the `#` and everything after it"
+        : `unexpected argument "${first}"; known subcommands: ${known}`,
   );
 }
 if (positionals.length > 1) {

@@ -159,13 +159,15 @@ main();
 
 Every report includes:
 - `report.seed` — the seed actually used (random if you didn't pass one).
-- `report.reproCommand` — a shell-safe invocation that rebuilds the same run.
+- `report.reproCommand` — a shell-safe invocation that rebuilds the same run from its CLI flags.
 
 Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict` fails on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`.
 
 `reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
 
-To rerun an exact failure locally, copy the `Repro:` line from CI.
+Fault rules (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`) and invariants set in code have no flag. The command cannot carry them, and a failure they caused reruns clean without them, so it ends in a comment that counts them and names them as their stats do: `Repro: chaosbringer --url … --seed 42 # + 1 fault rule not expressible on the CLI: api-500`. A shell skips the comment (zsh only with `setopt interactivecomments`; without it the CLI exits 2 and says to drop it). The invariants `--axe` and `--visual-baseline` build are carried as those flags. To rerun such a run, run its `chaos({...})` / `ChaosCrawler` config again with the printed seed. A `chaosbringer scan` chaos crawl's report holds the `chaosbringer scan … --faults <fault>` command that reruns it instead.
+
+To rerun an exact failure of a CLI run locally, copy the `Repro:` line from CI.
 
 ## Fault injection
 
@@ -947,7 +949,7 @@ failures/0000__checkout_review__a91c2f0e/
 └── info.json        # URL, status, sourceUrl, recovery, seed, timestamps
 ```
 
-`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Add `--baseline` to gate CI on the same shape of failure.
+`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Fault rules and invariants set in code are not replayed, and a comment line in the script names them, as on the `Repro:` line. Add `--baseline` to gate CI on the same shape of failure.
 
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 
@@ -1438,7 +1440,7 @@ chaosbringer --url http://localhost:3000 \
 
 † `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).
 
-Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI.
+Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI. A run that sets them says so at the end of its `Repro:` line (see [Reproducible runs](#reproducible-runs)).
 
 ## Action weighting
 

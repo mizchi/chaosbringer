@@ -8,7 +8,7 @@ import { COMMON_IGNORE_PATTERNS, resolveIgnorePresets } from "../ignore-presets.
 import { NETWORK_PROFILES, type NetworkProfile } from "../types.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind, type ScanSeverity } from "./analyze.js";
 import { formatScanSummary } from "./format.js";
-import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan } from "./run.js";
+import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } from "./run.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 
 const HELP = `
@@ -60,7 +60,8 @@ OUTPUT (in --out):
   scan-report.md          The findings, readable
   scan-report.json        The findings, machine-readable
   clean-report.json       The clean crawl's full report
-  chaos-<fault>-report.json  Each chaos crawl's full report
+  chaos-<fault>-report.json  Each chaos crawl's full report; its reproCommand is the
+                          chaosbringer scan … --faults <fault> command that reruns it
   perf/                   Per-page perf sidecars (for \`chaosbringer perf drilldown\`)
 
 Only scan sites you own or are allowed to test: the crawl clicks, types and
@@ -69,51 +70,76 @@ submits forms. Exclude destructive URLs (logout, delete, checkout) with --exclud
 
 const SEVERITIES: ScanSeverity[] = ["high", "medium", "low"];
 
+export const SCAN_CLI_OPTIONS = {
+  url: { type: "string" },
+  "max-pages": { type: "string" },
+  "max-actions": { type: "string" },
+  out: { type: "string" },
+  "no-chaos": { type: "boolean", default: false },
+  faults: { type: "string" },
+  seed: { type: "string" },
+  axe: { type: "boolean", default: false },
+  "aria-targets": { type: "boolean", default: false },
+  bind: { type: "boolean", default: false },
+  "bind-title": { type: "string" },
+  "no-coverage": { type: "boolean", default: false },
+  "hang-ms": { type: "string" },
+  exclude: { type: "string", multiple: true },
+  "ignore-error": { type: "string", multiple: true },
+  "ignore-analytics": { type: "boolean", default: false },
+  "ignore-preset": { type: "string", multiple: true },
+  "storage-state": { type: "string" },
+  sitemap: { type: "string" },
+  network: { type: "string" },
+  device: { type: "string" },
+  timeout: { type: "string" },
+  ...HEADLESS_OPTIONS,
+  "fail-on": { type: "string" },
+  quiet: { type: "boolean", default: false },
+  help: { type: "boolean", default: false },
+} as const;
+
+export function parseScanArgs(argv: string[]) {
+  return parseArgs({ args: argv, options: SCAN_CLI_OPTIONS });
+}
+
+export type ScanCliValues = ReturnType<typeof parseScanArgs>["values"];
+
 export async function runScanCli(argv: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      url: { type: "string" },
-      "max-pages": { type: "string" },
-      "max-actions": { type: "string" },
-      out: { type: "string" },
-      "no-chaos": { type: "boolean", default: false },
-      faults: { type: "string" },
-      seed: { type: "string" },
-      axe: { type: "boolean", default: false },
-      "aria-targets": { type: "boolean", default: false },
-      bind: { type: "boolean", default: false },
-      "bind-title": { type: "string" },
-      "no-coverage": { type: "boolean", default: false },
-      "hang-ms": { type: "string" },
-      exclude: { type: "string", multiple: true },
-      "ignore-error": { type: "string", multiple: true },
-      "ignore-analytics": { type: "boolean", default: false },
-      "ignore-preset": { type: "string", multiple: true },
-      "storage-state": { type: "string" },
-      sitemap: { type: "string" },
-      network: { type: "string" },
-      device: { type: "string" },
-      timeout: { type: "string" },
-      ...HEADLESS_OPTIONS,
-      "fail-on": { type: "string" },
-      quiet: { type: "boolean", default: false },
-      help: { type: "boolean", default: false },
-    },
-  });
+  const { values } = parseScanArgs(argv);
   if (values.help) {
     console.log(HELP);
     return;
   }
+  const options = scanOptionsFromCli(values);
+  const failOn = values["fail-on"];
+  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
+    throw new Error(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
+  }
+
+  const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
+
+  console.log(formatScanSummary(result.analysis));
+  console.log(`\nreport: ${result.files.markdown}\n        ${result.files.json}`);
+  console.log(`seed: ${result.baseline.seed} (pass --seed to re-run the same actions)`);
+
+  if (failOn) {
+    const limit = SEVERITIES.indexOf(failOn as ScanSeverity);
+    if (result.analysis.findings.some((f) => SEVERITIES.indexOf(f.severity) <= limit)) process.exitCode = 1;
+  }
+}
+
+/**
+ * The `runScan` options `values` ask for; throws on a value the CLI refuses.
+ * Apart from `runScanCli` so a test can parse a chaos report's
+ * `reproCommand` (`scanReproCommand`) back into the scan it came from.
+ */
+export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
   if (!values.url) throw new Error("--url is required (see chaosbringer scan --help)");
   try {
     new URL(values.url);
   } catch {
     throw new Error(`--url must be an absolute URL (got ${JSON.stringify(values.url)})`);
-  }
-  const failOn = values["fail-on"];
-  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
-    throw new Error(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
   }
 
   const network = values.network;
@@ -126,7 +152,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
   if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
   for (const spec of values["ignore-preset"] ?? []) ignoreErrorPatterns.push(...resolveIgnorePresets(spec));
 
-  const result = await runScan({
+  return {
     url: values.url,
     maxPages: intFlag("--max-pages", values["max-pages"], 1),
     maxActionsPerPage: intFlag("--max-actions", values["max-actions"], 0),
@@ -149,17 +175,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
       ...(values.device ? { device: values.device } : {}),
       ...(values.timeout !== undefined ? { timeout: intFlag("--timeout", values.timeout, 1) } : {}),
     },
-    onProgress: values.quiet ? undefined : (line) => console.error(line),
-  });
-
-  console.log(formatScanSummary(result.analysis));
-  console.log(`\nreport: ${result.files.markdown}\n        ${result.files.json}`);
-  console.log(`seed: ${result.baseline.seed} (pass --seed to re-run the same actions)`);
-
-  if (failOn) {
-    const limit = SEVERITIES.indexOf(failOn as ScanSeverity);
-    if (result.analysis.findings.some((f) => SEVERITIES.indexOf(f.severity) <= limit)) process.exitCode = 1;
-  }
+  };
 }
 
 /** `500,abort,hang` → fault kinds; `500` is the `status` crawl. */

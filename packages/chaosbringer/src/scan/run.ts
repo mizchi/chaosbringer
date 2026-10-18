@@ -18,11 +18,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
+import { DEFAULT_OPTIONS } from "../defaults.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
 import { attachHint } from "../browser-bind.js";
 import { saveReport } from "../reporter.js";
-import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions } from "../types.js";
+import { formatReproFlags, ignoreReproFlags, withUnreplayedNote } from "../repro-command.js";
+import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions, ReproFlag } from "../types.js";
 import {
   analyzeScan,
   SCAN_FAULT_KINDS,
@@ -38,9 +40,9 @@ import { readSidecarSpans, withSidecarRequests } from "./sidecars.js";
 
 export interface ScanOptions {
   url: string;
-  /** Default 20. */
+  /** Default 20 (`DEFAULT_SCAN_MAX_PAGES`). */
   maxPages?: number;
-  /** Default 5. */
+  /** Default 5 (`DEFAULT_SCAN_MAX_ACTIONS`). */
   maxActionsPerPage?: number;
   /** Where every file goes. Default `chaosbringer-scan`. */
   outDir?: string;
@@ -95,12 +97,59 @@ export interface ScanReportFile extends ScanAnalysis {
   seed: number;
   pagesVisited: number;
   endpoints: ScanEndpoint[];
-  chaos: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number }>;
+  /** `reproCommand` is the crawl's report's: the `chaosbringer scan` command that reruns it (`scanReproCommand`). */
+  chaos: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number; reproCommand: string }>;
   files: ScanFiles;
 }
 
 export const DEFAULT_SCAN_DIR = "chaosbringer-scan";
 export const DEFAULT_HANG_RELEASE_MS = 8000;
+export const DEFAULT_SCAN_MAX_PAGES = 20;
+export const DEFAULT_SCAN_MAX_ACTIONS = 5;
+
+/**
+ * The `chaosbringer scan` command that reruns the chaos crawl for `kind`,
+ * which `runScan` puts in that crawl's report as its `reproCommand`. The
+ * crawl's own command was a plain `chaosbringer` crawl with no flag for the
+ * scan's fault rule: it reran clean and passed, while the report it came
+ * from had a high finding. The scan finds the endpoints to fail from its
+ * clean crawl, so the command reruns that too, then only this fault.
+ *
+ * Every scan flag that shapes the crawls or their findings is carried;
+ * `scan-repro.test.ts` holds the list. Left out: `--out` and the flags that
+ * only change what is shown (`--quiet`, `--no-headless`, `--bind`), and
+ * `--fail-on`, which sets the exit code from the findings. What the options
+ * set in code (`crawler.invariants`, the other fault layers) ends the
+ * command as a comment, as in `buildReproCommand`.
+ */
+export function scanReproCommand(options: ScanOptions, seed: number, kind: ScanFaultKind): string {
+  const c = options.crawler ?? {};
+  const flags: ReproFlag[] = [
+    { flag: "--url", value: options.url },
+    { flag: "--seed", value: String(seed) },
+  ];
+  const push = (flag: string, value?: string) => flags.push(value === undefined ? { flag } : { flag, value });
+  if (options.maxPages !== undefined && options.maxPages !== DEFAULT_SCAN_MAX_PAGES) push("--max-pages", String(options.maxPages));
+  if (options.maxActionsPerPage !== undefined && options.maxActionsPerPage !== DEFAULT_SCAN_MAX_ACTIONS) {
+    push("--max-actions", String(options.maxActionsPerPage));
+  }
+  push("--faults", kind === "status" ? "500" : kind);
+  // Only the hang crawl holds a request.
+  if (kind === "hang" && options.hangReleaseMs !== undefined && options.hangReleaseMs !== DEFAULT_HANG_RELEASE_MS) {
+    push("--hang-ms", String(options.hangReleaseMs));
+  }
+  if (options.axe) push("--axe");
+  if (c.ariaTargets) push("--aria-targets");
+  if (options.coverage === false) push("--no-coverage");
+  for (const p of c.excludePatterns ?? []) push("--exclude", p);
+  flags.push(...ignoreReproFlags(c.ignoreErrorPatterns ?? []));
+  if (c.seedFromSitemap) push("--sitemap", c.seedFromSitemap);
+  if (c.storageState) push("--storage-state", c.storageState);
+  if (c.network) push("--network", c.network);
+  if (c.device) push("--device", c.device);
+  if (c.timeout !== undefined && c.timeout !== DEFAULT_OPTIONS.timeout) push("--timeout", String(c.timeout));
+  return withUnreplayedNote(["chaosbringer", "scan", ...formatReproFlags(flags)].join(" "), c);
+}
 
 /** The one rule of the chaos crawl for `kind`: every API request gets the fault. */
 export function scanFaultRule(kind: ScanFaultKind, urlPattern: string, hangReleaseMs: number): FaultRule {
@@ -142,10 +191,12 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     settle: "adaptive",
     ...options.crawler,
     baseUrl: options.url,
-    maxPages: options.maxPages ?? 20,
-    maxActionsPerPage: options.maxActionsPerPage ?? 5,
+    maxPages: options.maxPages ?? DEFAULT_SCAN_MAX_PAGES,
+    maxActionsPerPage: options.maxActionsPerPage ?? DEFAULT_SCAN_MAX_ACTIONS,
     seed,
     invariants,
+    // The clean crawl's repro is a plain crawl, which builds the same check from --axe.
+    ...(options.axe ? { cliReproFlags: [...(options.crawler?.cliReproFlags ?? []), { flag: "--axe" }] } : {}),
     perf: { coverage: options.coverage ?? true, ...options.perf, outDir: perfDir },
   });
   const events = (phase: string): CrawlerEvents => ({
@@ -172,6 +223,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
         { ...base(join(perfDir, kind)), faultInjection: [scanFaultRule(kind, pattern, hangReleaseMs)] },
         events(kind),
       ).start();
+      report.reproCommand = scanReproCommand(options, seed, kind);
       const path = join(outDir, `chaos-${kind}-report.json`);
       saveReport(report, path);
       chaos.push({ fault: kind, report: withSidecarRequests(report, readSidecarSpans(report, join(perfDir, kind))) });
@@ -203,6 +255,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     fault,
     pagesVisited: report.pagesVisited,
     faultsInjected: (report.faultInjections ?? []).reduce((n, s) => n + s.injected, 0),
+    reproCommand: report.reproCommand,
   }));
   const file: ScanReportFile = {
     url: options.url,

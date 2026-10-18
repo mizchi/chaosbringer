@@ -805,6 +805,48 @@ describe("format", () => {
     expect(md2).toContain("Chaos crawls: skipped");
   });
 
+  it("counts the other places a finding was seen at in its where, not its other errors", () => {
+    const files = { baseline: "a", chaos: {}, perfDir: "b" };
+    const summary = { url: U, startedAt: "", durationMs: 0, pagesVisited: 1, actions: 0, files };
+    // Four throws on one page read "/multi (+3)", as if four pages had thrown.
+    const one = analyzeScan(fakeReport([fakePage(`${U}/multi`)], [], { errorClusters: [cluster("exception", "boom", [`${U}/multi`], 4)] }));
+    expect(one.findings[0]).toMatchObject({ where: [`${U}/multi`], places: 1, occurrences: 4 });
+    expect(formatScanSummary(one)).toMatch(new RegExp(`— ${U}/multi$`, "m"));
+    expect(formatScanMarkdown(one, summary)).toContain(`| ${U}/multi | 4 |`);
+
+    // Nine errors on seven pages: five listed, and the other six counted.
+    const pages = [1, 2, 3, 4, 5, 6, 7].map((i) => `${U}/p${i}`);
+    const seven = analyzeScan(fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom", pages, 9)] }));
+    expect(seven.findings[0]).toMatchObject({ where: pages.slice(0, SCAN_WHERE_CAP), places: 7, occurrences: 9 });
+    expect(formatScanSummary(seven)).toMatch(new RegExp(`— ${U}/p1 \\(\\+6\\)$`, "m"));
+
+    // The same for an error only a fault produced: three on two pages.
+    const clean = fakeReport([fakePage(`${U}/`), fakePage(`${U}/list`)], []);
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("unhandled-rejection", "boom", [`${U}/`, `${U}/list`], 3)] });
+    const fragile = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(fragile.findings[0]).toMatchObject({ rule: "fault-new-error", places: 2, occurrences: 3 });
+    expect(formatScanMarkdown(fragile, summary)).toContain(`| ${U}/ (+1) | 3 |`);
+  });
+
+  it("gives each chaos crawl's report the command that reruns it", () => {
+    const md = formatScanMarkdown(analyzeScan(fakeReport([fakePage(`${U}/`)], [])), {
+      url: U,
+      startedAt: "",
+      durationMs: 0,
+      pagesVisited: 1,
+      actions: 0,
+      chaos: {
+        runs: [{ fault: "status", pagesVisited: 1, faultsInjected: 4, reproCommand: `chaosbringer scan --url ${U} --seed 7 --faults 500` }],
+        endpoints: [],
+      },
+      files: { baseline: "out/clean-report.json", chaos: { status: "out/chaos-status-report.json" }, perfDir: "out/perf" },
+    });
+    expect(md).toContain(
+      `- chaos crawl report (HTTP 500): \`out/chaos-status-report.json\`, rerun with \`chaosbringer scan --url ${U} --seed 7 --faults 500\``,
+    );
+    expect(md).toContain("To reproduce a resilience finding, rerun the `chaosbringer scan … --faults <fault>` command above");
+  });
+
   it("says '… and N more' for the items the evidence leaves out, not for errors it sums up", () => {
     const md = (report: ReturnType<typeof fakeReport>) =>
       formatScanMarkdown(analyzeScan(report), {

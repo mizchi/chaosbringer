@@ -15,8 +15,15 @@ export interface ScanSummaryInput {
   durationMs: number;
   pagesVisited: number;
   actions: number;
-  /** Absent when the chaos crawls were turned off; `runs` is empty when no endpoint was found. */
-  chaos?: { runs: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number }>; endpoints: ScanEndpoint[] };
+  /**
+   * Absent when the chaos crawls were turned off; `runs` is empty when no
+   * endpoint was found. A run's `reproCommand` is the `chaosbringer scan`
+   * command that reruns it (`scanReproCommand`).
+   */
+  chaos?: {
+    runs: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number; reproCommand?: string }>;
+    endpoints: ScanEndpoint[];
+  };
   files: { baseline: string; chaos: Partial<Record<ScanFaultKind, string>>; perfDir: string };
 }
 
@@ -74,12 +81,20 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   lines.push("## Files", "");
   lines.push(`- clean crawl report: \`${s.files.baseline}\``);
   for (const [kind, path] of Object.entries(s.files.chaos)) {
-    lines.push(`- chaos crawl report (${SCAN_FAULT_LABELS[kind as ScanFaultKind]}): \`${path}\``);
+    const repro = s.chaos?.runs.find((r) => r.fault === kind)?.reproCommand;
+    lines.push(`- chaos crawl report (${SCAN_FAULT_LABELS[kind as ScanFaultKind]}): \`${path}\`${repro ? `, rerun with \`${repro}\`` : ""}`);
   }
   lines.push(`- per-page perf sidecars: \`${s.files.perfDir}\``);
+  // A chaos crawl's report used to hold the plain crawl's command, which reran
+  // without the fault and passed.
+  const rerun =
+    Object.keys(s.files.chaos).length > 0
+      ? " To reproduce a resilience finding, rerun the `chaosbringer scan … --faults <fault>` command above, its report's `reproCommand`: " +
+        "it reruns the clean crawl, which finds the endpoints, then that fault's crawl. The clean crawl's `reproCommand` reruns the clean crawl alone."
+      : " The clean crawl's report has the command that reruns it, its `reproCommand`.";
   lines.push(
     "",
-    "Drill into a step with `chaosbringer perf drilldown`, compare two scans' perf with `chaosbringer perf regress`, and reproduce a crawl with the `reproCommand` in its report.",
+    `Drill into a step with \`chaosbringer perf drilldown\` and compare two scans' perf with \`chaosbringer perf regress\`.${rerun}`,
     "",
   );
   return lines.join("\n");
@@ -110,9 +125,14 @@ export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
   return lines.join("\n");
 }
 
+/**
+ * The first place and how many other places: `places`, not `occurrences`,
+ * which for an error finding counts errors. Four throws on one page read
+ * `/multi (+3)`, as if four pages had thrown.
+ */
 function shortWhere(f: ScanFinding): string {
   const first = f.where[0] ?? "";
-  return f.occurrences > 1 ? `${first} (+${f.occurrences - 1})` : first;
+  return f.places > 1 ? `${first} (+${f.places - 1})` : first;
 }
 
 function anchor(i: number): string {
