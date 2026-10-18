@@ -504,7 +504,7 @@ export async function shrinkPlan(options: ShrinkOptions): Promise<ShrinkResult> 
   const judge = async (
     candidate: FaultPlan,
     target: readonly MismatchField[],
-    edit: string,
+    _edit: string,
   ): Promise<ShrinkVerdict> => {
     const key = keyOf(candidate);
     const cached = memo.get(key);

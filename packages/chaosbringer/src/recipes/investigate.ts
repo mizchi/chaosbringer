@@ -15,8 +15,8 @@
  * (`discoverCandidates`) reflects that scope: visible buttons /
  * links / inputs only, no weighting.
  */
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
-import { createRng, type Rng } from "../random.js";
+import { chromium, type Browser, type Locator, type Page } from "playwright";
+import { createRng } from "../random.js";
 import type { ActionResult } from "../types.js";
 import type {
   Driver,
@@ -255,7 +255,7 @@ export async function investigate(opts: InvestigateOptions): Promise<Investigate
         name,
         description,
         origin: "regression",
-        ...((opts.captureExtras as Record<string, unknown>) ?? {}),
+        ...(opts.captureExtras as Record<string, unknown> | undefined),
       });
       opts.store.upsert(recipe);
       log(`stored ${name} (${recipeSteps.length} step(s))`);

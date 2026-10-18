@@ -64,8 +64,8 @@ describe("main CLI output on a pipe", () => {
     const locs = ["/", "/a", "/b"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
     writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
     crawl = [
-      ...["--url", `${server.url}/`, "--seed-from-sitemap", sitemap, "--max-pages", "3", "--max-actions", "0"],
-      ...["--seed", "1", ...IGNORE_TSX_NAME],
+      "--url", `${server.url}/`, "--seed-from-sitemap", sitemap, "--max-pages", "3", "--max-actions", "0",
+      "--seed", "1", ...IGNORE_TSX_NAME,
     ];
   }, 30_000);
 
@@ -102,8 +102,8 @@ describe("main CLI output on a pipe", () => {
   it("--quiet says why a run failed in one line, and nothing more of the report", async () => {
     const output = join(dir, "quiet-reject.json");
     const r = await cli([
-      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
-      ...[...IGNORE_TSX_NAME, "--strict", "--quiet", "--output", output],
+      "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
+      ...IGNORE_TSX_NAME, "--strict", "--quiet", "--output", output,
     ]);
     expect(r.status).toBe(1);
     expect(r.stdout.trimEnd().split("\n")).toEqual([
@@ -192,8 +192,8 @@ describe("main CLI output on a pipe", () => {
 
   it("--strict --compact says why a run whose only finding is a rejection failed", async () => {
     const r = await cli([
-      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
-      ...[...IGNORE_TSX_NAME, "--strict", "--compact", "--output", join(dir, "reject.json")],
+      "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
+      ...IGNORE_TSX_NAME, "--strict", "--compact", "--output", join(dir, "reject.json"),
     ]);
     expect(r.status).toBe(1);
     // It printed `[FAIL] 1 pages, 0 errors` and nothing else about the run.

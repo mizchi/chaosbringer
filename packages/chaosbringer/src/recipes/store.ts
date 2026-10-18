@@ -57,7 +57,7 @@ function defaultGlobalDir(): string {
  * filesystem happy across platforms.
  */
 export function recipeFilename(name: string): string {
-  const sanitised = name.replace(/\//g, "__").replace(/[^A-Za-z0-9_.\-]/g, "_");
+  const sanitised = name.replace(/\//g, "__").replace(/[^A-Za-z0-9_.-]/g, "_");
   return `${sanitised}.json`;
 }
 
@@ -68,7 +68,7 @@ export function recipeFilename(name: string): string {
  * un-versioned path.
  */
 export function recipeHistoryFilename(name: string, version: number): string {
-  const sanitised = name.replace(/\//g, "__").replace(/[^A-Za-z0-9_.\-]/g, "_");
+  const sanitised = name.replace(/\//g, "__").replace(/[^A-Za-z0-9_.-]/g, "_");
   return `${sanitised}.v${version}.json`;
 }
 

@@ -1351,6 +1351,10 @@ export function assetIdentity(url: string): string {
   try {
     const u = new URL(url);
     u.hash = "";
+    // A copy, whatever the lint says: the loop deletes from the params it
+    // walks, and a live URLSearchParams iterator skips the entry after each
+    // one it deletes.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     for (const [k, v] of [...u.searchParams]) {
       if (CACHE_BUST_KEYS.has(k.toLowerCase()) || /^\d{8,}$/.test(v) || /^[0-9a-f]{16,}$/i.test(v)) u.searchParams.delete(k);
     }

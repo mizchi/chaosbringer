@@ -134,7 +134,7 @@ export async function installNavigationGuard(page: Page, options: NavigationGuar
     async dispose() {
       page.off("framenavigated", onFrameNavigated);
       page.off("framedetached", release);
-      for (const frame of [...frames.keys()]) release(frame);
+      for (const frame of frames.keys()) release(frame);
       offMain();
       await main.send("Fetch.disable").catch(() => {});
     },

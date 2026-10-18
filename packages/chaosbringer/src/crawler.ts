@@ -28,7 +28,6 @@ import type {
   QueueEntry,
   DiscoveryMetrics,
   FaultInjectionStats,
-  Fault,
   IframeFaultStats,
   LifecycleStage,
   NetworkProfile,
@@ -409,7 +408,7 @@ export class ChaosCrawler {
 
     // Filter out undefined values to preserve defaults
     const filteredOptions = Object.fromEntries(
-      Object.entries(options).filter(([_, v]) => v !== undefined)
+      Object.entries(options).filter(([, v]) => v !== undefined)
     );
     this.options = { ...DEFAULT_OPTIONS, ...filteredOptions } as Required<CrawlerOptions>;
     this.serverFaultCollector = this.options.server?.mode === "remote"

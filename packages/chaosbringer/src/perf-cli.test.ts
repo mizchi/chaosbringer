@@ -725,8 +725,10 @@ describe("runPerfCli", () => {
 
     function tracedRun(opts: { reportPath?: string; tracePath?: string; perfOut?: string }): CrawlReport {
       const click = { ...fakeSpan(KEY, { durationMs: 200, blockingMs: 120 }), traceWindowUs: [1000, 300000] as [number, number] };
-      const page = fakePage("http://localhost:3000/app", fakeSpan("/app :: load"), {
-        ...(opts.reportPath
+      const page = fakePage(
+        "http://localhost:3000/app",
+        fakeSpan("/app :: load"),
+        opts.reportPath
           ? {
               perfPage: {
                 vitals: {},
@@ -734,8 +736,8 @@ describe("runPerfCli", () => {
                 reportPath: opts.reportPath,
               },
             }
-          : {}),
-      });
+          : {},
+      );
       return fakeReport([page], [fakeAction(click)], {
         reproCommand: `chaosbringer --url http://localhost:3000/app --seed 1${opts.perfOut ? ` --perf-out ${opts.perfOut}` : ""}`,
       });

@@ -17,7 +17,6 @@ import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
 import {
-  groupTrace,
   readTrace,
   writeTrace,
   type TraceAction,
@@ -119,7 +118,7 @@ export async function minimizeTrace(options: MinimizeOptions): Promise<MinimizeR
       const tracePath = join(workdir, `iter-${iterationCounter++}.jsonl`);
       writeTrace(tracePath, candidate);
       const crawler = new ChaosCrawler({
-        ...(options.crawlerOverrides ?? {}),
+        ...options.crawlerOverrides,
         baseUrl: options.baseUrl,
         traceReplay: tracePath,
       } as never);

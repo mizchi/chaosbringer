@@ -47,7 +47,7 @@ describe("sampleUrlFromRegex", () => {
     const sample = sampleUrlFromRegex(
       /^https:\/\/api\.example\.com\/[^/]+\/v\d+\//,
     );
-    expect(sample).not.toMatch(/[\[\]+*?{}|]/);
+    expect(sample).not.toMatch(/[[\]+*?{}|]/);
     expect(sample.startsWith("https://api.example.com/")).toBe(true);
     expect(sample.endsWith("/")).toBe(true);
   });

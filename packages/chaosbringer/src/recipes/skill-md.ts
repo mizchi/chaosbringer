@@ -37,7 +37,6 @@
 import type {
   ActionRecipe,
   ActionTrace,
-  ExpectClause,
   RecipePrecondition,
 } from "./types.js";
 import { emptyStats } from "./types.js";

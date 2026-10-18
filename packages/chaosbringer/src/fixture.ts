@@ -302,7 +302,7 @@ export interface RecipesFixtures {
  *   });
  */
 export function withRecipes(defaults: RecipesFixtureOptions = {}) {
-  const sharedStore = defaults.storeInstance ?? new RecipeStore({ silent: true, ...(defaults.store ?? {}) });
+  const sharedStore = defaults.storeInstance ?? new RecipeStore({ silent: true, ...defaults.store });
 
   return {
     // Playwright Test inspects the parameter declaration to wire

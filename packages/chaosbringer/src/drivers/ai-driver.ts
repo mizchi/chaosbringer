@@ -100,7 +100,7 @@ export function aiDriver(opts: AiDriverOptions): Driver {
         // not cross, and `DriverProviderCandidate` is defined as exactly
         // this, so a field added to `DriverCandidate` reaches providers
         // without a second edit here.
-        candidates: step.candidates.map(({ selector, ...visible }) => visible),
+        candidates: step.candidates.map(({ selector: _selector, ...visible }) => visible),
         history: step.history,
         invariantViolations: step.invariantViolations,
         goal: opts.goal,
