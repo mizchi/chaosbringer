@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.2](https://github.com/mizchi/chaosbringer/compare/server-faults-v1.0.1...server-faults-v1.0.2) (2026-10-18)
+
+### Documentation
+
+* The observability example uses the flat camelCase keys `FaultAttrs` actually has (`attrs.path`, `attrs.method`; it read `attrs["fault.path"]`, which does not compile) and shows `toOtelAttrs` for the dotted `fault.*` names. The conventions table lists both spellings and adds `traceId`.
+* `partial` and `slowStream` fault headers are marked as Hono-adapter only ([#188](https://github.com/mizchi/chaosbringer/pull/188)).
+
+`FaultKind` is now derived from an internal `FAULT_KINDS` tuple; the type is unchanged. No other code changes.
+
 ## [1.0.1](https://github.com/mizchi/chaosbringer/compare/server-faults-v1.0.0...server-faults-v1.0.1) (2026-10-10)
 
 ### Packaging
