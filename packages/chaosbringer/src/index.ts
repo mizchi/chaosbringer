@@ -525,6 +525,7 @@ export {
   type Firing,
   type FaultLayer,
   type FaultWarning,
+  type ServiceWorkerReach,
 } from "./firings.js";
 
 // The network fault layer, applied to a page you drive yourself. Everything

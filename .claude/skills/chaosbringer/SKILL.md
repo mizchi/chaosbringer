@@ -84,8 +84,9 @@ The alternatives, and when they beat it:
   weighted-random, five per page by default — so it may or may not press the
   button your fault is about, which makes it the wrong entry point for a
   targeted regression. `maxActionsPerPage: 0` makes it load-only. (Watch the
-  name: `maxActions` is not an option, and a misspelled option is silently
-  ignored — measured, 4 clicks with the default, 0 with
+  name: `maxActions` is not an option. A misspelled `chaosOptions` key is
+  refused with a "did you mean" error as the fixture is set up; it used to be
+  dropped silently — measured, 4 clicks with the default, 0 with
   `maxActionsPerPage: 0`, 3 with `maxActions: 0`.)
 - **Model-driven** — when the question is "which failure states did we cover",
   a temporal model enumerates them and each state becomes a replayable plan
@@ -101,7 +102,11 @@ runtime fault is `undefined`, and `undefined > 0` is a silent no-op. Use
 `session.firings()`, or `faultFirings(report)` / `unfiredFaults(report)` for a
 crawl, and never write the field name yourself. `matched: 0` means the pattern
 never saw the request; `matched: 3, injected: 0` on a scheduled rule means
-something answered first (that's what `suppressed` counts).
+something answered first (that's what `suppressed` counts). On a site with a
+service worker, `matched: 0` on a network rule can also mean the worker took
+the request where no route sees it — `testPage()` on your own context, or a
+response from the worker's cache; `unfiredFaults` says so when the page's
+`serviceWorker` is set, and a runtime fault fires ahead of the worker either way.
 
 ## Which layer
 

@@ -247,7 +247,7 @@ To enumerate *every* combination rather than the ones you thought of, see [model
 
 Per-rule `matched` / `injected` counters end up in `report.faultInjections`. At the end of a run, chaosbringer warns on the logger about every configured fault that did not take effect — on **all four layers**, not just the network one, and naming which of three things happened: `fault_rule_unmatched` (nothing matched the pattern), `fault_rule_unfired` (it matched and the firing policy said no), `fault_rule_uncounted` (the row carried no usable counter, so nothing measured it). Each carries `rule` and `layer`. Useful for catching typo'd `urlPattern` regexes, rules shadowed by an earlier catch-all, and schedules that never reach the occurrence you meant.
 
-Two exported readers give you the same thing without scraping the log: `faultWarnings(report)` returns those events for a report you already hold, and `unfiredFaults(report)` returns the three diagnoses as strings — an empty array is the assertion you want in a test, since `report.faultInjections[0].injected > 0` only ever covers one layer (and reads `undefined > 0` on the other three).
+Two exported readers give you the same thing without scraping the log: `faultWarnings(report)` returns those events for a report you already hold, and `unfiredFaults(report)` returns the three diagnoses as strings — an empty array is the assertion you want in a test, since `report.faultInjections[0].injected > 0` only ever covers one layer (and reads `undefined > 0` on the other three). After `testPage()`, which returns no report, build one from the crawler's getters and the page's result: `unfiredFaults({ faultInjections: crawler.getFaultStats(), runtimeFaults: crawler.getRuntimeFaultStats(), pages: [result] })`.
 
 A third counter, `suppressed`, appears on a row only when it is non-zero. Rules are first-match-wins, but a *scheduled* rule advances its occurrence whenever its pattern matches — that is what lets two rules on one URL agree about what "occurrence 1" means. So a scheduled rule can decide `inject` and still not act, because a rule ahead of it answered the request. Without `suppressed` that reads as `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule reports: a planned fault that did not happen, indistinguishable from one that was never planned. `RuntimeFaultStats` carries the same field for the same reason, and there `fired` counts effects, not decisions.
 
@@ -269,6 +269,24 @@ faultInjection: [
 ```
 
 If you reverse the order, the catch-all swallows every request and `fulfill-api` will show `matched: 0` in the report (and trigger the unmatched-rule warning described above). Chaosbringer also runs a best-effort static check at crawl start and emits one `fault_rule_shadowed` warning per shadowed pair — catching the common pathological case (broad regex before specific one) before the crawl has consumed a single request.
+
+### Service workers
+
+A request a service worker's `fetch` handler takes never reaches the page's route: what goes to the network is the worker's own request, and Playwright hands that to the context's routes only. So when `faultInjection` is set, the crawl also routes the context it launched, and a rule sees the worker's requests — the ones it forwards to the network, and the worker script itself — with the same first-match-wins order, counters and occurrence numbering as the page's own, ahead of `--har-replay`. The worker stays in place, so the app keeps its cache and offline path.
+
+Two things still escape every network rule:
+
+- what the worker answers from its own cache, which makes no request;
+- every request the worker takes where the crawler does not own the context: `testPage()` on your page (the crawler leaves your context alone), or an attached browser.
+
+A page a worker controlled carries `serviceWorker: "routed"` or `"unrouted"` in its result (recorded when network rules are configured), and a network rule that matched nothing then says the worker may be why — in `unfiredFaults` and in `fault_rule_unmatched`'s `serviceWorker` field — instead of blaming the pattern. `runtimeFaults` patch `fetch` in the page, ahead of the worker, and fire either way; on your own context, `serviceWorkers: "block"` takes the worker out. A forwarded request has `resourceType` `"fetch"` whatever the page asked for, so a rule limited to `resourceTypes: ["document"]` or `["script"]` does not match it.
+
+> **Behaviour change:** on a site with a service worker, network rules used to
+> match nothing the worker handled, so a run injected nothing there and drew
+> nothing from the RNG for it. They now fire on those requests — a catch-all
+> rule can fail the worker script itself — and a `probability` rule draws for
+> each one, so a pinned seed on such a site produces a different action
+> sequence.
 
 ### Fault profiles
 
@@ -775,7 +793,7 @@ await chaos({
 
 - `notFound: "fallback"` (default) lets unmatched URLs fall through to the real network.
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
-- Fault injection rules still apply in replay mode and take precedence over HAR responses.
+- Fault injection rules still apply in replay mode and take precedence over HAR responses — on a service worker's requests too.
 
 > **Heads up — `notFound: "abort"` with `traceparent` injection:** when
 > `traceparent` is enabled, every outgoing request carries a freshly-generated
@@ -1243,7 +1261,9 @@ chaosTest("stock page survives a down API", async ({ page, chaos }) => {
 });
 ```
 
-`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. With it, the console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") fails the test like any other, so a strict test of a status fault ignores that message, as above. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them, hence the spread. `lifecycleFaults` and `runtimeFaults` are accepted too. On `testPage()`, `faultInjection` rules are routed on your page and `runtimeFaults` are installed on it as an init script before it navigates; both stay on that page for the rest of the test.
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. With it, the console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") fails the test like any other, so a strict test of a status fault ignores that message, as above. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them, hence the spread. `lifecycleFaults` and `runtimeFaults` are accepted too. On `testPage()`, `faultInjection` rules are routed on your page and `runtimeFaults` are installed on it as an init script before it navigates; both stay on that page for the rest of the test. `testPage()` returns no report, so read the counters off the crawler: `chaos.crawler.getFaultStats()` for the network rules, `getRuntimeFaultStats()` for the runtime faults — which used to stay at zero on this path, whatever fired (as did `getIframeFaultStats()` on a `ChaosCrawler` of your own). The crawler leaves your context alone, so a request a service worker takes on your page never reaches a `faultInjection` rule (`result.serviceWorker` is `"unrouted"`; see [Service workers](#service-workers)): use `runtimeFaults`, or a context created with `serviceWorkers: "block"`.
+
+`chaosOptions` is checked for misspelled keys the way `ChaosCrawler` checks its options: `maxActionPerPage` or `stirct` throws `unknown chaosOptions key "stirct" — did you mean "strict"?` as the fixture is set up, and so does `runChaosTest()`. A `ChaosCrawler` option the fixture does not take (`timeout`, `iframeFaults`) throws too. Both used to be dropped without a word: the test ran with 5 actions a page, or without `strict`.
 
 ## Subcommands
 
@@ -1498,6 +1518,7 @@ One event per configured fault that did not take effect, on any of the four laye
 - A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
 - The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
 - For a `runtimeFaults` rule: the app makes the call from a context the init-script patch does not cover, or issues no client-side call at all.
+- For a network rule on a PWA: a service worker took the request. The event then carries `serviceWorker: { reach, pages }` and `unfiredFaults` says so instead of blaming the pattern. `reach: "routed"` is the crawl's own context, where the rule does see what the worker forwards (as a `resourceType: "fetch"` request) and misses only what it answers from its own cache; `"unrouted"` is `testPage()` on your context or an attached browser, where the rule sees nothing the worker takes. See [Service workers](#service-workers).
 
 **`fault_rule_unfired`** — the pattern was right and the firing policy declined: `matched` is non-zero and nothing fired. A `schedule` shorter than the number of matching calls, a `probability` that never rolled, or (when `suppressed` is present on the event) a rule ahead of this one answering the request first.
 

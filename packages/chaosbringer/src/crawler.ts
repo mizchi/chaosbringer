@@ -29,8 +29,10 @@ import type {
   DiscoveryMetrics,
   FaultInjectionStats,
   Fault,
+  IframeFaultStats,
   LifecycleStage,
   NetworkProfile,
+  RuntimeFaultStats,
 } from "./types.js";
 import {
   compileLifecycleFaults,
@@ -305,6 +307,13 @@ export class ChaosCrawler {
    */
   private heldRoutes: Route[] = [];
   private heldRequests = 0;
+  /**
+   * The context `installServiceWorkerFaultRoute` routed, so that the network
+   * faults see the requests its service workers make. Null with no network
+   * faults, with an attached browser (its context is the user's), and outside
+   * `start()`: a caller's context on the `testPage()` path never has the route.
+   */
+  private serviceWorkerRouted: BrowserContext | null = null;
   /** Page-lifecycle faults compiled once at construction time. */
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
   /** Compiled runtime faults — installed once at context level via init script. */
@@ -761,6 +770,13 @@ export class ChaosCrawler {
         });
       }
 
+      // After `routeFromHAR`: a context's routes run newest first, so a fault
+      // on a service worker's request wins over the HAR too. Not on an
+      // attached browser, whose context — every tab in it — is the user's.
+      if (!this.cdpPage && this.compiledFaultRules.length > 0) {
+        await this.installServiceWorkerFaultRoute(this.context);
+      }
+
       if (this.options.traceReplay) {
         // Replay: iterate every recorded (visit, actions) group. The trace
         // itself defines the scope — applying maxPages here would silently
@@ -827,6 +843,10 @@ export class ChaosCrawler {
         }
       }
     } finally {
+      this.serviceWorkerRouted = null;
+      // Each page drains its own on the way out, but a service worker can
+      // make a request between two pages, or after the last one.
+      await this.drainHeldRoutes();
       if (this.cdpPage) {
         await this.releaseCdpPageInterception(this.cdpPage);
         this.cdpPage = null;
@@ -893,6 +913,11 @@ export class ChaosCrawler {
     // caller is least likely to release it themselves.
     try {
       const result = await this.crawlPageWithExistingPage(page, url);
+      // As `crawlPage` does. The faults have fired on this path since they
+      // were installed on the caller's page, but their counters were only
+      // ever read on the crawl's own, so every row said they had not.
+      await this.collectRuntimeFaultStats(page);
+      await this.collectIframeFaultStats(page);
       this.events.onPageComplete?.(result);
       this.logger.logPageComplete(result);
       this.results.push(result);
@@ -1585,6 +1610,65 @@ export class ChaosCrawler {
   }
 
   /**
+   * The network faults, on the requests a service worker makes.
+   *
+   * A request the page makes and a service worker's `fetch` handler takes
+   * never reaches the page's route. What goes to the network is the worker's
+   * own request, and Playwright hands that to the context's routes only. So
+   * on a PWA the rules saw nothing: a `faults.status(500)` on `/api/data`
+   * matched 0 behind a pass-through worker while the server answered every
+   * request, and the run-end warning blamed the pattern.
+   *
+   * The same rules decide here, through the same `pickFaultRule`, so the
+   * occurrence numbering, the stats and the held routes are the page route's.
+   * Any other request was the page route's to decide, and passes through. It
+   * stays out of `perf.routed`, whose numbers have to line up with the page's
+   * captured requests, and a worker's are not among them: its fault tags the
+   * spans open now, as one with no captured request to match does.
+   *
+   * Blocking service workers would make the faults land too, by taking the
+   * worker away: no cache, no offline path. This keeps it, so what it answers
+   * from its own cache still reaches no network fault; `serviceWorkerReach`
+   * records the pages where that can happen.
+   */
+  private async installServiceWorkerFaultRoute(context: BrowserContext): Promise<void> {
+    // Playwright's opt-out of service-worker network events: with it set, a
+    // worker's requests reach no route at all.
+    if (process.env.PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK) return;
+    const rules = this.compiledFaultRules;
+    await context.route("**/*", async (route) => {
+      const request = route.request();
+      if (!request.serviceWorker()) {
+        await route.fallback();
+        return;
+      }
+      const winner = pickFaultRule(rules, request.url(), request.method().toUpperCase(), this.rng, request.resourceType());
+      if (!winner) {
+        await route.fallback();
+        return;
+      }
+      this.perf.noteFault(winner.rule.name ?? winner.pattern.toString());
+      await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
+    });
+    this.serviceWorkerRouted = context;
+  }
+
+  /**
+   * Whether a service worker controls the page, and if so whether the network
+   * faults see the requests it makes: `PageResult.serviceWorker`. Asked only
+   * when there are network faults for it to explain.
+   */
+  private async serviceWorkerReach(page: Page): Promise<PageResult["serviceWorker"]> {
+    if (this.compiledFaultRules.length === 0) return undefined;
+    try {
+      if (!(await page.evaluate(() => !!navigator.serviceWorker?.controller))) return undefined;
+    } catch {
+      return undefined;
+    }
+    return page.context() === this.serviceWorkerRouted ? "routed" : "unrouted";
+  }
+
+  /**
    * Reclassify a 404 / 5xx page as recovered (navigating back to the last
    * good URL when recovery is on), or remember a clean 200 as the next
    * recovery target. Runs after the failure bundle and fault stats are
@@ -2016,6 +2100,10 @@ export class ChaosCrawler {
         screenshot = filename;
       }
 
+      // At the end of the visit rather than at load: a worker that installs
+      // on this visit and claims the page controls it from then on.
+      const serviceWorker = await this.serviceWorkerReach(page);
+
       result = {
         url,
         status: "success",
@@ -2027,6 +2115,7 @@ export class ChaosCrawler {
         metrics,
         links,
         screenshot,
+        ...(serviceWorker ? { serviceWorker } : {}),
         ...this.blockedNavigationsField(),
       };
     } catch (err) {
@@ -3076,24 +3165,8 @@ export class ChaosCrawler {
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
           : undefined,
-      runtimeFaults:
-        this.compiledRuntimeFaults.length > 0
-          ? this.compiledRuntimeFaults.map((c) => ({
-              rule: c.name,
-              matched: c.matched,
-              fired: c.fired,
-            }))
-          : undefined,
-      iframeFaults:
-        this.compiledIframeFaults.length > 0
-          ? this.compiledIframeFaults.map((c) => ({
-              rule: c.name,
-              selector: c.fault.selector,
-              action: c.fault.action.kind,
-              matched: c.matched,
-              fired: c.fired,
-            }))
-          : undefined,
+      runtimeFaults: this.compiledRuntimeFaults.length > 0 ? this.getRuntimeFaultStats() : undefined,
+      iframeFaults: this.compiledIframeFaults.length > 0 ? this.getIframeFaultStats() : undefined,
       coverage: this.coverageFeedback
         ? summarizeCoverage({
             globalCovered: this.globalCoverage,
@@ -3134,6 +3207,29 @@ export class ChaosCrawler {
       matched: c.matched,
       injected: c.injected,
       ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
+    }));
+  }
+
+  /**
+   * Per-fault runtime-fault stats, as `report.runtimeFaults` carries them.
+   * The way to read them after `testPage()`, which returns no report.
+   */
+  getRuntimeFaultStats(): RuntimeFaultStats[] {
+    return this.compiledRuntimeFaults.map((c) => ({
+      rule: c.name,
+      matched: c.matched,
+      fired: c.fired,
+    }));
+  }
+
+  /** Per-fault iframe-fault stats, as `report.iframeFaults` carries them. */
+  getIframeFaultStats(): IframeFaultStats[] {
+    return this.compiledIframeFaults.map((c) => ({
+      rule: c.name,
+      selector: c.fault.selector,
+      action: c.fault.action.kind,
+      matched: c.matched,
+      fired: c.fired,
     }));
   }
 

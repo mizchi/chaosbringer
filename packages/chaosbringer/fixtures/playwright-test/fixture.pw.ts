@@ -126,11 +126,41 @@ chaosTest.describe("chaosOptions reach the crawler", () => {
     const result = await chaos.testPage(page, "/stock");
     expect(chaos.crawler.getSeed()).toBe(7);
     expect(chaos.crawler.getFaultStats()).toEqual([{ rule: "stock-down", matched: 1, injected: 1 }]);
+    // It fired on this path before, and was counted only on crawl()'s.
+    expect(chaos.crawler.getRuntimeFaultStats().map((f) => [f.rule, f.fired])).toEqual([["skew", 1]]);
     expect(result.errors.map((e) => e.message)).toContain("[stock-shown] no stock count");
     await expect(page.getByRole("status")).toHaveText("Stock unavailable");
 
     // The rule is routed on this page, and stays routed after testPage().
     await page.goto("/stock");
     await expect(page.getByRole("status")).toHaveText("Stock unavailable");
+  });
+});
+
+// Each of these was accepted and dropped: the fixture copies the keys it
+// knows into the crawler's options, so the crawler's own near-miss check never
+// saw them, and the test ran with 5 actions a page and no strict. The fixture
+// refuses them as it is set up, so the test fails with the error — which
+// `fixture.e2e.test.ts` reads.
+chaosTest.describe("a misspelled chaosOptions key", () => {
+  chaosTest.describe("maxActionPerPage", () => {
+    chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxActionPerPage: 0 } as ChaosTestOptions });
+    chaosTest.fail("is refused by name", async ({ chaos }) => {
+      await chaos.crawl("/");
+    });
+  });
+
+  chaosTest.describe("stirct", () => {
+    chaosTest.use({ chaosOptions: { ...LOAD_ONLY, stirct: true } as ChaosTestOptions });
+    chaosTest.fail("is refused by name", async ({ chaos }) => {
+      await chaos.crawl("/boom");
+    });
+  });
+
+  chaosTest("is refused by runChaosTest() too", async ({ page }) => {
+    await page.goto("/about");
+    await expect(runChaosTest(page, { maxActionsPerPage: 0, stirct: true } as ChaosTestOptions)).rejects.toThrow(
+      /unknown chaosOptions key "stirct" — did you mean "strict"/,
+    );
   });
 });

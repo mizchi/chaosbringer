@@ -1056,6 +1056,25 @@ export interface PageResult {
    * measurement; under `networkidle` there is nothing to count.
    */
   settleCapped?: number;
+  /**
+   * A service worker controlled the page when its visit ended. Recorded only
+   * when `faultInjection` rules are configured, because it is what decides
+   * whether they could see the page's requests. A request the worker takes
+   * never reaches the page's route; what reaches the network is the worker's
+   * own request (`resourceType` `"fetch"`).
+   *
+   * - `"routed"` — the crawl's own context, where the rules see the worker's
+   *   requests too. Only what it answers from its own cache, without a
+   *   request, escapes them.
+   * - `"unrouted"` — the rules see none of the requests the worker takes:
+   *   `testPage()` on a page in your context, which the crawler does not
+   *   route, or an attached browser.
+   *
+   * `unfiredFaults` and the run-end warning name it for a network rule that
+   * matched nothing, rather than blaming the pattern. `runtimeFaults` patch
+   * `fetch` in the page, ahead of the worker, and fire either way.
+   */
+  serviceWorker?: "routed" | "unrouted";
 }
 
 export interface RecoveryInfo {
