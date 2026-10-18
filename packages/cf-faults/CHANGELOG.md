@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2](https://github.com/mizchi/chaosbringer/compare/cf-faults-v0.2.1...cf-faults-v0.2.2) (2026-10-18)
+
+### Documentation
+
+* The README says the observer attrs use the `fault.*` names that `@mizchi/server-faults`'s `toOtelAttrs()` produces; server-faults' own `onFault` attrs are flat camelCase ([#188](https://github.com/mizchi/chaosbringer/pull/188)). No code changes.
+
 ## [0.2.1](https://github.com/mizchi/chaosbringer/compare/cf-faults-v0.2.0...cf-faults-v0.2.1) (2026-10-10)
 
 ### Packaging
