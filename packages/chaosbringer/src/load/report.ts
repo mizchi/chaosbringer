@@ -15,6 +15,7 @@ import type { WorkerSamples } from "./worker.js";
 import type {
   EndpointReport,
   LoadReport,
+  LoadStop,
   ScenarioReport,
   ScenarioSpec,
   StepReport,
@@ -49,6 +50,8 @@ export interface BuildLoadReportInput {
    * seen" rather than looking unmeasured.
    */
   perf?: { level: "light"; sampledWorkers: number };
+  /** Why the run ended early, when it did (`LoadReport.stopped`). */
+  stopped?: LoadStop;
 }
 
 export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
@@ -70,10 +73,13 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
     const name = plan.spec.scenario.name;
     const entry = byScenario.get(name) ?? { workerCount: 0, iterations: [], steps: [], perf: [], truncated: 0 };
     entry.workerCount += 1;
-    entry.iterations.push(...samples.iterations);
+    // One by one, not `push(...samples.x)`: a spread passes every sample as
+    // an argument, and a long or fast-failing run's few hundred thousand
+    // overflow the call stack, losing the report the run was for.
+    for (const it of samples.iterations) entry.iterations.push(it);
     entry.truncated += samples.truncatedIterations ?? 0;
-    entry.steps.push(...samples.steps);
-    if (samples.perf) entry.perf.push(...samples.perf);
+    for (const s of samples.steps) entry.steps.push(s);
+    for (const p of samples.perf ?? []) entry.perf.push(p);
     byScenario.set(name, entry);
     seenScenarioNames.add(name);
   }
@@ -220,6 +226,7 @@ export function buildLoadReport(input: BuildLoadReportInput): LoadReport {
       durationMs: input.plannedDurationMs,
       ...(input.perf ? { perf: input.perf } : {}),
     },
+    ...(input.stopped ? { stopped: input.stopped } : {}),
     totals,
     scenarios,
     workers,
@@ -339,6 +346,7 @@ export function formatLoadReport(report: LoadReport): string {
   lines.push(
     `  network: ${report.totals.networkRequests} reqs / ${report.totals.networkErrors} errors`,
   );
+  if (report.stopped) lines.push(`  stopped early: ${report.stopped.reason}`);
   lines.push("");
   for (const s of report.scenarios) {
     lines.push(

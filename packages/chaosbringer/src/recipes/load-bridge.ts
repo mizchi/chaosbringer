@@ -7,8 +7,8 @@
  *
  *   - `recipeStoreScenario({ store, ... })` — builds a single
  *     `Scenario` that, each iteration, picks one verified recipe
- *     from the store and replays it (composition + templating
- *     respected).
+ *     (or one of `status`) from the store and replays it
+ *     (composition + templating respected).
  *
  *   - `scenarioLoadFromStore({ baseUrl, store, workers, ... })` —
  *     thin wrapper that calls `scenarioLoad` with the scenario above.
@@ -21,6 +21,11 @@
  *
  * Per-worker / per-iteration variables flow through `vars`:
  *   `vars: (workerIndex, iteration) => ({ email: ... })`
+ *
+ * Replays are not recorded into the store unless `record` is set: a load
+ * test measures the site, and recording puts the failures of a site under
+ * load, or of a host that is down, into the team's store, where they can
+ * demote its verified recipes.
  */
 import { defineScenario, type Scenario, type ScenarioContext } from "../load/index.js";
 import { scenarioLoad } from "../load/index.js";
@@ -36,7 +41,7 @@ import { aggregateFirings, type RecipeRunStats } from "./recipe-driver.js";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
 import type { RecipeVars } from "./templating.js";
-import type { ActionRecipe } from "./types.js";
+import type { ActionRecipe, RecipeStatus } from "./types.js";
 
 export type RecipeSelection =
   | "uniform"
@@ -50,11 +55,19 @@ export interface SelectionContext {
 
 export interface RecipeStoreScenarioOptions {
   store: RecipeStore;
+  /** The status a recipe needs to be eligible. Default: `"verified"`. */
+  status?: RecipeStatus;
   /**
-   * Filter applied on top of `status: "verified"`. Default: every
-   * verified recipe is eligible.
+   * Filter applied on top of `status`. Default: every recipe of that
+   * status is eligible.
    */
   filter?: (recipe: ActionRecipe) => boolean;
+  /**
+   * Record each replay's outcome into the store (`recordSuccess` /
+   * `recordFailure`, as `recipeDriver` does), which promotes and demotes
+   * recipes. Default: false — the store is left as it was.
+   */
+  record?: boolean;
   /** Default: `"uniform"`. */
   selection?: RecipeSelection;
   /**
@@ -108,7 +121,6 @@ export function recipeStoreScenarioWithStats(
 ): RecipeStoreScenarioBundle {
   const chain = opts.chainRequires !== false;
   const selection = opts.selection ?? "uniform";
-  const filter = opts.filter ?? (() => true);
   const name = opts.scenarioName ?? "recipe-mix";
 
   // Per-worker memo: track which recipes already ran on this Page so
@@ -131,11 +143,15 @@ export function recipeStoreScenarioWithStats(
       {
         name: "pick-and-replay",
         run: async (ctx) => {
-          const candidates = candidatesOf(opts.store, filter);
+          // Read each iteration, so a recipe whose status a recorded replay
+          // changed (`record`) stops being picked. When none is left the run
+          // stops: failing every iteration until the deadline would only
+          // bury the reason.
+          const candidates = candidatesOf(opts);
           if (candidates.length === 0) {
-            throw new Error(
-              `${name}: no verified recipes match filter — nothing to replay`,
-            );
+            const reason = `${name}: ${noCandidates(opts, true)}`;
+            ctx.stopRun?.(reason);
+            throw new Error(reason);
           }
           const selCtx: SelectionContext = {
             workerIndex: ctx.workerIndex,
@@ -162,12 +178,14 @@ export function recipeStoreScenarioWithStats(
               alreadyRan: memo,
               vars,
               baseUrl,
-              // Record stats for each link in the chain so the
-              // store reflects every replay — mirrors recipeDriver.
+              // With `record`, stats go in for each link in the chain so
+              // the store reflects every replay — mirrors recipeDriver.
               onProgress: (ev) => {
                 if (ev.kind !== "complete") return;
-                if (ev.result.ok) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
-                else opts.store.recordFailure(ev.recipe);
+                if (opts.record) {
+                  if (ev.result.ok) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
+                  else opts.store.recordFailure(ev.recipe);
+                }
                 firings.push({
                   name: ev.recipe,
                   succeeded: ev.result.ok,
@@ -185,7 +203,7 @@ export function recipeStoreScenarioWithStats(
           }
           const result = await runRecipe(ctx.page, recipe, { vars, baseUrl });
           if (result.ok) {
-            opts.store.recordSuccess(recipe.name, result.durationMs);
+            if (opts.record) opts.store.recordSuccess(recipe.name, result.durationMs);
             firings.push({
               name: recipe.name,
               succeeded: true,
@@ -193,7 +211,7 @@ export function recipeStoreScenarioWithStats(
               timestamp: Date.now(),
             });
           } else {
-            opts.store.recordFailure(recipe.name);
+            if (opts.record) opts.store.recordFailure(recipe.name);
             firings.push({
               name: recipe.name,
               succeeded: false,
@@ -230,6 +248,7 @@ export interface ScenarioLoadFromStoreOptions extends RecipeStoreScenarioOptions
   headless?: boolean;
   timelineBucketMs?: number;
   maxIterationsPerWorker?: number;
+  stopOnUnreachable?: ScenarioLoadOptions["stopOnUnreachable"];
   viewport?: ScenarioLoadOptions["viewport"];
   storageState?: string | ((workerIndex: number) => string | undefined);
 }
@@ -244,10 +263,15 @@ export interface ScenarioLoadFromStoreResult extends ScenarioLoadResult {
  * `scenarioLoad` with the given concurrency / duration. Returns the
  * usual `ScenarioLoadResult` — chaos / SLO / timeline / fault stats
  * all work as normal — plus a per-recipe firing summary (issue #92).
+ *
+ * Throws, before launching a browser, when no recipe is eligible.
  */
 export async function scenarioLoadFromStore(
   opts: ScenarioLoadFromStoreOptions,
 ): Promise<ScenarioLoadFromStoreResult> {
+  if (candidatesOf(opts).length === 0) {
+    throw new Error(`scenarioLoadFromStore: ${noCandidates(opts)}`);
+  }
   const bundle = recipeStoreScenarioWithStats(opts);
   const result = await scenarioLoad({
     baseUrl: opts.baseUrl,
@@ -266,6 +290,7 @@ export async function scenarioLoadFromStore(
     headless: opts.headless,
     timelineBucketMs: opts.timelineBucketMs,
     maxIterationsPerWorker: opts.maxIterationsPerWorker,
+    stopOnUnreachable: opts.stopOnUnreachable,
     viewport: opts.viewport,
   });
   return { ...result, recipes: bundle.getRunStats() };
@@ -278,10 +303,10 @@ export async function scenarioLoadFromStore(
  * fail in the run, where it is reported.
  */
 export function storeScenarioRecipes(
-  opts: Pick<RecipeStoreScenarioOptions, "store" | "filter" | "chainRequires">,
+  opts: Pick<RecipeStoreScenarioOptions, "store" | "status" | "filter" | "chainRequires">,
 ): ActionRecipe[] {
   const out = new Map<string, ActionRecipe>();
-  for (const recipe of candidatesOf(opts.store, opts.filter ?? (() => true))) {
+  for (const recipe of candidatesOf(opts)) {
     let chain = [recipe];
     if (opts.chainRequires !== false) {
       try {
@@ -295,8 +320,18 @@ export function storeScenarioRecipes(
 
 // -------- internals --------
 
-function candidatesOf(store: RecipeStore, filter: (recipe: ActionRecipe) => boolean): ActionRecipe[] {
-  return store.verified().filter(filter);
+type CandidateOptions = Pick<RecipeStoreScenarioOptions, "store" | "status" | "filter">;
+
+function candidatesOf(opts: CandidateOptions): ActionRecipe[] {
+  const status = opts.status ?? "verified";
+  const filter = opts.filter ?? (() => true);
+  return opts.store.list().filter((r) => r.status === status && filter(r));
+}
+
+/** Why there is nothing to replay; `midRun` when there was at the start. */
+function noCandidates(opts: CandidateOptions, midRun = false): string {
+  const what = `${opts.status ?? "verified"} recipes ${opts.filter ? "match the filter" : "in the store"}`;
+  return midRun ? `no ${what} any more — nothing left to replay` : `no ${what} — nothing to replay`;
 }
 
 function pickRecipe(

@@ -79,6 +79,8 @@ describe("scenarioLoadFromStore against fixture", () => {
       duration: "3s",
       timelineBucketMs: 1000,
       vars: { base: server.url },
+      // Off by default: a load run leaves the store as it was.
+      record: true,
     });
     const { report } = result;
 
@@ -100,7 +102,7 @@ describe("scenarioLoadFromStore against fixture", () => {
     // success count is timing-dependent.)
     expect(mix.iterations).toBeGreaterThanOrEqual(2);
 
-    // Stats updated through the store — verified count must climb.
+    // With `record`, stats updated through the store — verified count must climb.
     const reloaded = new RecipeStore({ localDir: storeDir, globalDir: false, silent: true });
     const a = reloaded.get("nav/about");
     const b = reloaded.get("nav/form");

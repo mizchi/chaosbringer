@@ -103,8 +103,14 @@ pnpm chaosbringer recipes verify auth/login --base-url https://staging.example.t
 The warning goes to stderr, so it never mixes into `--json` output, and
 `--quiet` drops it. `verify` and `repair` print their progress lines to
 stdout, though: pair `--json` with `--quiet` for output a parser reads.
-A `--base-url` that does not answer fails the replay: `verify` does not
-promote, `load` counts the failures and exits 1.
+A `--base-url` that does not answer is reported as that, not as a broken
+recipe. A replay whose navigation to it fails to connect
+(`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, …) stops
+`verify` at once: it exits 2 with `verify: base URL unreachable: …` and
+leaves the recipe's stats and status as they were. `load` stops once 3
+iterations in a row could not connect, writes its report, and exits 2
+with `load: base URL unreachable: …`. A replay that reached the site and
+failed there still counts against the recipe.
 
 ## Auto-repair (CLI form)
 
@@ -145,7 +151,23 @@ pnpm chaosbringer load --global \
   --output load-report.json
 ```
 
+`--filter-status candidate` (or `demoted`) replays the recipes of that
+status instead of the verified ones.
+
+`load` reads the store and leaves it as it was: a load test measures the
+site, and the failures of a site under load, or of a host that is down,
+would otherwise go into the stats of the store the team reads and can
+demote its verified recipes. `--record` records each replay's outcome
+into the recipes' stats, as the crawler's recipe driver does, so the run
+promotes and demotes them.
+
 Exit code is 1 on any iteration / step failure — wire it straight into CI.
+It is 2 when the run could not do its job, with the reason as the last
+line on stderr: no recipe of `--filter-status` in the store (refused
+before a browser starts), a base URL that does not answer (above), or the
+recipes running out mid-run — with `--record`, a candidate its replays
+promoted is no longer a candidate. A run that started prints its report,
+and writes it to `--output`, either way.
 
 For fault injection or SLO assertions, drop to the programmatic
 `scenarioLoadFromStore()` API (see [`load-from-recipe-store.md`](./load-from-recipe-store.md)).

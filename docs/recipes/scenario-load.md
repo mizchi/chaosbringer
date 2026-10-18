@@ -82,7 +82,10 @@ A `Scenario` is a list of `ScenarioStep`s the worker runs in order, repeating fr
 Each step:
 - has a stable `name` (used as a key in the latency rollup),
 - gets a `ScenarioContext` with `page`, `workerIndex`, `iteration`, `baseUrl`,
-- runs to completion or throws — a thrown error fails the step *and* aborts the iteration (set `optional: true` to keep going).
+- runs to completion or throws — a thrown error fails the step *and* aborts the iteration (set `optional: true` to keep going). The worker then waits the failed step's think time, at least 100ms, before the next iteration, so a step that fails at once does not spin,
+- can end the whole run with `ctx.stopRun?.(reason)` when there is nothing left to do (every worker stops at its next step boundary; the reason lands in `report.stopped`). It does not fail the calling step — throw too for that.
+
+A run whose navigations cannot reach `baseUrl` stops by itself: once 3 iterations in a row failed with a connection-level net error on a navigation to its origin (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, `ERR_ADDRESS_UNREACHABLE`, `ERR_CONNECTION_RESET`, …), `report.stopped` says `base URL unreachable: …` instead of the run failing for its whole duration. A success, or a failure the site answered for, starts the count over. `stopOnUnreachable: N` changes it; `false` never stops.
 
 **Think time** between steps is configurable at three levels (step > scenario > runner default). Pass `{ distribution: "none" }` for batch traffic, `{ distribution: "gaussian" }` for clustered around the midpoint, or the default `uniform` between `minMs` and `maxMs` (defaults: 1000–3000ms).
 
@@ -122,6 +125,7 @@ scenarios: [
 | `workers[]` | Per-worker iteration counts (debugging). |
 | `timeline[]` | Per-bucket counts (`iterations`, `iterationFailures`, `networkRequests`, `networkErrors`, **`faults: Record<ruleName, count>`**). Default bucket: 1000ms. Configure with `timelineBucketMs`. `formatLoadReport` renders this as a sparkline with one row per fired fault rule. |
 | `errors[]` | Capped flat error list (200 max) — first errors win. |
+| `stopped` | `{ cause, reason, at }` when the run ended before its `duration` / iteration cap: `cause: "unreachable"` (see `stopOnUnreachable` above) or `"scenario"` (a step called `ctx.stopRun`). Absent when it ran to the end. `formatLoadReport` prints it as `stopped early: <reason>`. |
 
 ## Recipe: chaos + scenario load
 

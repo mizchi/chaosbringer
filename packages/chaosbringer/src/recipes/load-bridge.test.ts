@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { recipeStoreScenario, storeScenarioRecipes } from "./load-bridge.js";
+import { recipeStoreScenario, scenarioLoadFromStore, storeScenarioRecipes } from "./load-bridge.js";
 import { RecipeStore } from "./store.js";
 import type { ActionRecipe } from "./types.js";
 import { emptyStats } from "./types.js";
@@ -95,6 +95,91 @@ describe("recipeStoreScenario meta", () => {
       }),
     ).rejects.toThrow(/no verified recipes/);
   });
+
+  it("stops the run when nothing is eligible any more, instead of failing every iteration", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert({ ...recipe("auth/login"), status: "demoted" });
+    const scenario = recipeStoreScenario({ store });
+    const stops: string[] = [];
+    await expect(
+      scenario.steps[0].run({
+        page: { url: () => "https://x/" } as never,
+        workerIndex: 0,
+        iteration: 3,
+        baseUrl: "https://x/",
+        stopRun: (reason) => stops.push(reason),
+      }),
+    ).rejects.toThrow("recipe-mix: no verified recipes in the store any more — nothing left to replay");
+    expect(stops).toEqual(["recipe-mix: no verified recipes in the store any more — nothing left to replay"]);
+  });
+
+  it("picks from the recipes of `status`, not only the verified ones", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert({ ...recipe("auth/login"), status: "candidate" });
+    store.upsert(recipe("shop/buy"));
+    store.upsert({ ...recipe("blog/read"), status: "demoted" });
+    const seen = async (status?: "candidate" | "demoted"): Promise<string[]> => {
+      let names: string[] = [];
+      const scenario = recipeStoreScenario({
+        store,
+        status,
+        selection: (cs) => {
+          names = cs.map((r) => r.name);
+          throw new Error("picked");
+        },
+      });
+      await scenario.steps[0]
+        .run({ page: { url: () => "https://x/" } as never, workerIndex: 0, iteration: 0, baseUrl: "https://x/" })
+        .catch(() => {});
+      return names;
+    };
+    expect(await seen()).toEqual(["shop/buy"]);
+    expect(await seen("candidate")).toEqual(["auth/login"]);
+    expect(await seen("demoted")).toEqual(["blog/read"]);
+    expect(storeScenarioRecipes({ store, status: "candidate" }).map((r) => r.name)).toEqual(["auth/login"]);
+  });
+});
+
+// A load run reads the team's store; writing to it is opt-in. It used to
+// record every replay, so a run against a host that was down demoted every
+// verified recipe it touched.
+describe("recipeStoreScenario and the store's stats", () => {
+  // No `page.click`, so the replay fails at its click step.
+  const failingPage = { url: () => "https://x/" } as never;
+
+  async function replayOnce(opts: { record?: boolean }): Promise<ActionRecipe | null> {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert(recipe("shop/buy", { successCount: 5 }));
+    const scenario = recipeStoreScenario({ store, ...opts });
+    await expect(
+      scenario.steps[0].run({ page: failingPage, workerIndex: 0, iteration: 0, baseUrl: "https://x/" }),
+    ).rejects.toThrow(/shop\/buy failed at step 0/);
+    // Read back from disk: what the next run, or a teammate, sees.
+    return new RecipeStore({ localDir: dir, globalDir: false, silent: true }).get("shop/buy");
+  }
+
+  it("leaves the store as it was by default", async () => {
+    expect((await replayOnce({}))?.stats).toMatchObject({ successCount: 5, failCount: 0 });
+  });
+
+  it("records the outcome with `record: true`", async () => {
+    expect((await replayOnce({ record: true }))?.stats).toMatchObject({ successCount: 5, failCount: 1 });
+  });
+});
+
+describe("scenarioLoadFromStore", () => {
+  it("throws before launching a browser when no recipe is eligible", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert({ ...recipe("auth/login"), status: "candidate" });
+    const run = (opts: Partial<Parameters<typeof scenarioLoadFromStore>[0]>) =>
+      scenarioLoadFromStore({ baseUrl: "http://127.0.0.1:9", store, workers: 1, duration: "30s", ...opts });
+    await expect(run({})).rejects.toThrow(
+      "scenarioLoadFromStore: no verified recipes in the store — nothing to replay",
+    );
+    await expect(run({ status: "candidate", filter: () => false })).rejects.toThrow(
+      "scenarioLoadFromStore: no candidate recipes match the filter — nothing to replay",
+    );
+  }, 10_000);
 });
 
 describe("recipeStoreScenario selection strategies", () => {

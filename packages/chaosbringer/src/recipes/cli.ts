@@ -35,8 +35,10 @@ import { diffRecipes, formatRecipeDiff } from "./diff.js";
 import { lintRecipe, lintStore, summarise } from "./lint.js";
 import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
-import { verifyAndPromote } from "./verify.js";
+import { verifyAndPromote, type VerifyResult } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
+import { errorMessage } from "../errors.js";
+import { unreachableNavigation } from "../load/unreachable.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { newIsolatedPage } from "../browser-session.js";
 
@@ -393,7 +395,9 @@ async function verifyCmd(argv: string[]): Promise<void> {
     console.log(
       "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]\n\n" +
         "  Replays on --base-url's origin: the recipe's navigations to the origin it\n" +
-        "  was recorded on go there instead, path and query kept (with a warning).",
+        "  was recorded on go there instead, path and query kept (with a warning).\n" +
+        "  Exit: 0 promoted, 1 not promoted, 2 base URL unreachable — a replay could\n" +
+        "  not connect to it, and the recipe's stats and status are left as they were.",
     );
     return;
   }
@@ -413,7 +417,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
 
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
-    const result = await verifyAndPromote(store, recipe, {
+    const verifying = verifyAndPromote(store, recipe, {
       runs,
       minSuccessRate,
       baseUrl,
@@ -430,14 +434,26 @@ async function verifyCmd(argv: string[]): Promise<void> {
         return { page, cleanup: close };
       },
     });
+    const result: VerifyResult = await verifying.catch((err: unknown) => {
+      // The goto above meets a host that is down before any replay does.
+      // It throws out of verifyAndPromote, which has recorded nothing yet.
+      const unreachable = unreachableNavigation(errorMessage(err), baseUrl);
+      if (!unreachable) throw err;
+      return { promoted: false, demoted: false, successRate: 0, runs, outcomes: [], unreachable };
+    });
     if (values.json) {
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    } else {
+    } else if (!result.unreachable) {
       console.log(
         `${name}: promoted=${result.promoted} demoted=${result.demoted} rate=${result.successRate.toFixed(2)} (${runs} runs)`,
       );
     }
-    if (!result.promoted) process.exitCode = 1;
+    if (result.unreachable) {
+      console.error(
+        `verify: base URL unreachable: ${baseUrl} (${result.unreachable}); ${name} left as it was`,
+      );
+      process.exitCode = 2;
+    } else if (!result.promoted) process.exitCode = 1;
   } finally {
     await browser.close().catch(() => {});
   }

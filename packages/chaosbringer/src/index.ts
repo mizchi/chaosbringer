@@ -419,6 +419,7 @@ export {
   type EndpointReport,
   type LatencyStats,
   type LoadReport,
+  type LoadStop,
   type NetworkSample,
   type Scenario,
   type ScenarioContext,
