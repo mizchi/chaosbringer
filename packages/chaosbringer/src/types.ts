@@ -1595,9 +1595,9 @@ export interface ChaosTestOptions {
   /** Page-lifecycle faults; see `CrawlerOptions.lifecycleFaults`. */
   lifecycleFaults?: LifecycleFault[];
   /**
-   * JS-runtime faults; see `CrawlerOptions.runtimeFaults`. `crawl()` only:
-   * they are an init script on the browser context the crawl opens, and
-   * `testPage()` runs on your page, which does not get it.
+   * JS-runtime faults; see `CrawlerOptions.runtimeFaults`. On `testPage()`
+   * they are an init script installed on your page before it navigates, and
+   * stay on it for the rest of the test.
    */
   runtimeFaults?: RuntimeFault[];
 }
