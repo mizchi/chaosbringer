@@ -276,7 +276,7 @@ If you reverse the order, the catch-all swallows every request and `fulfill-api`
 
 A request a service worker's `fetch` handler takes never reaches the page's route: what goes to the network is the worker's own request, and Playwright hands that to the context's routes only. So when `faultInjection` is set, the crawl also routes the context it launched, and a rule sees the worker's requests — the ones it forwards to the network, and the worker script itself — with the same first-match-wins order, counters and occurrence numbering as the page's own, ahead of `--har-replay`. The worker stays in place, so the app keeps its cache and offline path.
 
-Two things still escape every network rule:
+Three things still escape every network rule:
 
 - what the worker answers from its own cache, which makes no request;
 - every request the worker takes where the crawler does not own the context: `testPage()` on your page (the crawler leaves your context alone), or an attached browser;

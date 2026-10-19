@@ -33,7 +33,9 @@ export interface ScenarioContext {
    * the report records `reason` as `stopped` (cause `"scenario"`). For a
    * step that finds nothing left to do — `recipeStoreScenario` calls it
    * when no recipe is eligible any more. It does not fail the step that
-   * calls it; throw as well for that. Always set by `scenarioLoad`.
+   * calls it; throw as well for that. It does fail the run's SLO gate:
+   * `evaluateSlo` / `assertSlo` count any stopped run as a violation. Always
+   * set by `scenarioLoad`.
    */
   stopRun?: (reason: string) => void;
 }
