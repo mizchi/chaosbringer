@@ -298,11 +298,19 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<number> {
   // Imported on demand, like perf-cli in cli.ts: the library's
   // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
   // imports `parseShardArg` from it.
-  const { crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs } = await import("./cli-crawl-options.js");
+  const { crawlCliExtras, crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, readCrawlPerfBudgets } = await import(
+    "./cli-crawl-options.js"
+  );
   const { validateOptions } = await import("./validate.js");
   try {
+    // The main CLI's checks, in its order, so whatever a worker would refuse
+    // before its browser starts is refused here, once.
     const { values, positionals } = parseCrawlArgs([...args.forward, "--shard", `0/${args.count}`]);
     const options = crawlerOptionsFromCli(values, crawlUrlFromArgs(values, positionals));
+    crawlCliExtras(values);
+    const budgets = await readCrawlPerfBudgets(values, options.settle);
+    if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
+    if (budgets) options.perfBudgets = budgets.rules;
     validateOptions(options);
     return options.seed ?? randomSeed();
   } catch (err) {

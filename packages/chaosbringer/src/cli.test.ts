@@ -139,6 +139,19 @@ describe("usage errors", () => {
     // instead of letting each of N workers refuse it.
     [["shard", "--count", "2", ...URL_ARG, "--bogus"], "shard", "unknown option --bogus"],
     [["shard", "--count", "2", ...URL_ARG, "--max-pages", "abc"], "shard", '--max-pages must be a finite number (got "abc")'],
+    // The main CLI's own checks past the crawler's options: each worker
+    // refused these, and the run ended in "no reports produced" and exit 1.
+    [["shard", "--count", "2", ...URL_ARG, "--heatmap-top", "abc"], "shard", '--heatmap-top must be a finite number (got "abc")'],
+    [
+      ["shard", "--count", "2", ...URL_ARG, "--cluster-artifacts"],
+      "shard",
+      "--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles",
+    ],
+    [
+      ["shard", "--count", "2", ...URL_ARG, "--perf-budgets", "missing-budgets.json"],
+      "shard",
+      "ENOENT: no such file or directory, open 'missing-budgets.json'",
+    ],
     [["shard", "--count", "2"], "shard", "--url is required"],
     [["shard", ...URL_ARG], "shard", "--count <N> is required and must be an integer >= 1"],
     [["recipes", "frob"], "recipes", `unknown subcommand "frob" (expected ${RECIPES_SUBS.join(", ")})`],

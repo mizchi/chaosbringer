@@ -178,8 +178,11 @@ describe("main CLI output on a pipe", () => {
 
   it("shard removes its temp dir when no worker wrote a report", async () => {
     const { env, leaked } = shardEnv();
-    // Every worker refuses the file (exit 2) before a browser starts.
-    const r = await cli(["shard", "--count", "2", ...crawl, "--perf-budgets", join(dir, "missing.json")], env);
+    // Every worker fails to connect to the browser it is told to attach to,
+    // which the coordinator cannot check for them.
+    const closed = await startTestServer(() => {});
+    await closed.close();
+    const r = await cli(["shard", "--count", "2", ...crawl, "--cdp", closed.url], env);
     expect(r.stderr).toContain("shard: no reports produced");
     expect(r.status).toBe(1);
     expect(leaked()).toEqual([]);

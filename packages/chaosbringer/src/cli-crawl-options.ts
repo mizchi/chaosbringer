@@ -12,9 +12,9 @@ import { SUBCOMMANDS } from "./cli-usage.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
-import { parseSettleArg } from "./settle.js";
+import { parseSettleArg, resolveSettle } from "./settle.js";
 import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant, ReproFlag } from "./types.js";
+import type { CrawlerOptions, Invariant, PerfBudgetRule, ReproFlag } from "./types.js";
 import { visualRegression } from "./visual.js";
 
 export const CRAWL_CLI_OPTIONS = {
@@ -155,11 +155,76 @@ export function parseNumberFlag(
   return n;
 }
 
+/** What the main CLI reads off its flags besides the crawler's options. */
+export interface CrawlCliExtras {
+  /** `--heatmap-top`, 20 without it. */
+  heatmapTop: number;
+  clusterMinCount: number | undefined;
+}
+
+/**
+ * The flags the main CLI applies itself, after the crawl, checked before it
+ * starts: a bad `--heatmap-top` used to fail only once the whole crawl had
+ * run, and a `--cluster-artifacts` without `--failure-artifacts` exited before
+ * the report was saved. Throws with the message the CLI prints after
+ * `chaosbringer: `. `shard` runs it on its workers' arguments too, as it does
+ * `crawlerOptionsFromCli`: a value only the workers refused failed in each of
+ * them, and the run ended in "no reports produced" and exit 1.
+ */
+export function crawlCliExtras(values: CrawlCliValues): CrawlCliExtras {
+  const heatmapTop = parseNumberFlag("--heatmap-top", values["heatmap-top"], { min: 0, integer: true }) ?? 20;
+  const clusterMinCount = parseNumberFlag("--cluster-min-count", values["cluster-min-count"], {
+    min: 0,
+    integer: true,
+  });
+  if (values["cluster-artifacts"] && !values["failure-artifacts"]) {
+    throw new Error("--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles");
+  }
+  return { heatmapTop, clusterMinCount };
+}
+
+/**
+ * `--perf-budgets`, read by the CLI rather than the crawler, so a bad file
+ * fails before a browser starts and the error names the flag. The rules'
+ * contents are validated by the crawler (validatePerfBudgets), the same as for
+ * the programmatic option. Throws on a file it cannot read; `undefined`
+ * without the flag.
+ *
+ * A file `perf emit-budgets` wrote records the settle mode it was measured
+ * under. Enforcing it on a crawl settled another way fails (or passes) every
+ * action budget on the settle, not the app, so it is refused like `perf gate`
+ * does: `refusal` is the message (after `chaosbringer: `) and the exit code,
+ * or, with `--allow-settle-mismatch`, `warning` is what to print instead.
+ */
+export async function readCrawlPerfBudgets(
+  values: CrawlCliValues,
+  settle: CrawlerOptions["settle"],
+): Promise<{ rules: PerfBudgetRule[]; warning?: string; refusal?: { message: string; exitCode: number } } | undefined> {
+  const file = values["perf-budgets"];
+  if (file === undefined) return undefined;
+  // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
+  const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
+  const read = readPerfBudgetsForCrawl(file, resolveSettle(settle), `--perf-budgets ${file}`);
+  if (!read.settleMismatch) return { rules: read.rules };
+  if (values["allow-settle-mismatch"]) {
+    return { rules: read.rules, warning: `[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.` };
+  }
+  return {
+    rules: read.rules,
+    refusal: {
+      message:
+        `--perf-budgets ${file}: refusing to enforce: ${read.settleMismatch}. ` +
+        `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
+        `or pass --allow-settle-mismatch to enforce anyway.`,
+      exitCode: read.exitCode,
+    },
+  };
+}
+
 /**
  * The crawl `values` ask for. Throws on a value the CLI refuses, with the
  * message it prints after `chaosbringer: `. `--perf-budgets` is only named here
- * (`perfBudgetsFile`): the CLI reads the rules itself, so a bad file fails
- * with its own exit code.
+ * (`perfBudgetsFile`): `readCrawlPerfBudgets` reads the rules.
  */
 export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): CrawlerOptions {
   // Build ignore patterns

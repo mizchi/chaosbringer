@@ -29,7 +29,13 @@
 
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
+import {
+  crawlCliExtras,
+  crawlerOptionsFromCli,
+  crawlUrlFromArgs,
+  parseCrawlArgs,
+  readCrawlPerfBudgets,
+} from "./cli-crawl-options.js";
 import {
   formatSubcommandList,
   isUsageError,
@@ -46,7 +52,6 @@ import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { resolveSettle } from "./settle.js";
 import type { CrawlerOptions } from "./types.js";
 import { validateOptions } from "./validate.js";
 
@@ -237,53 +242,27 @@ try {
 }
 
 let options: CrawlerOptions;
-// Parsed before the crawl, not after it: a bad --heatmap-top used to fail
-// only once the whole crawl had run, and a --cluster-artifacts without
-// --failure-artifacts exited before the report was saved.
 let heatmapTop: number;
 let clusterMinCount: number | undefined;
 try {
   options = crawlerOptionsFromCli(values, baseUrl);
-  heatmapTop = parseNumberFlag("--heatmap-top", values["heatmap-top"], { min: 0, integer: true }) ?? 20;
-  clusterMinCount = parseNumberFlag("--cluster-min-count", values["cluster-min-count"], {
-    min: 0,
-    integer: true,
-  });
-  if (values["cluster-artifacts"] && !values["failure-artifacts"]) {
-    throw new Error("--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles");
-  }
+  ({ heatmapTop, clusterMinCount } = crawlCliExtras(values));
 } catch (err) {
   exitWithUsageError(err);
 }
 
-// Read here, not by the crawler, so a bad file fails before a browser starts
-// and the error names the flag. The rules' contents are validated by the
-// crawler (validatePerfBudgets), the same as for the programmatic option.
-const perfBudgetsFile = values["perf-budgets"];
-if (perfBudgetsFile !== undefined) {
-  try {
-    // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-    const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(options.settle), `--perf-budgets ${perfBudgetsFile}`);
-    options.perfBudgets = read.rules;
-    // An emit-budgets file records the settle mode it was measured under;
-    // enforcing it on a crawl settled another way fails (or passes) every
-    // action budget on the settle, not the app — refused like `perf gate`.
-    if (read.settleMismatch) {
-      if (values["allow-settle-mismatch"]) {
-        console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
-      } else {
-        console.error(
-          `chaosbringer: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
-            `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
-            `or pass --allow-settle-mismatch to enforce anyway.`,
-        );
-        process.exit(read.exitCode);
-      }
+try {
+  const budgets = await readCrawlPerfBudgets(values, options.settle);
+  if (budgets) {
+    options.perfBudgets = budgets.rules;
+    if (budgets.warning) console.error(budgets.warning);
+    if (budgets.refusal) {
+      console.error(`chaosbringer: ${budgets.refusal.message}`);
+      process.exit(budgets.refusal.exitCode);
     }
-  } catch (err) {
-    exitWithUsageError(err);
   }
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 // The crawler validates again; this is so a refused option is a usage error
