@@ -265,10 +265,11 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
   // The main crawl's parser, not `Number`: `--max-pages abc` was NaN, which
   // the first run refused as `"maxPages" must be an integer >= 1 (got null)`
   // after `Run 1/3...`, with exit 1 — and chaos-flake.yml reads exit 1 as
-  // "flakes were found".
+  // "flakes were found". An empty value is unset, as in the main crawl
+  // (`--max-pages "$MAX"` with MAX unset runs with the default).
   const crawlNumber = (flag: string, raw: string | undefined, min: number): number | undefined => {
     try {
-      return parseNumberFlag(flag, raw, { min, integer: true });
+      return raw ? parseNumberFlag(flag, raw, { min, integer: true }) : undefined;
     } catch (err) {
       fail(errorMessage(err));
     }
