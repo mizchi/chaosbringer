@@ -26,7 +26,7 @@ import {
 import { parseDurationMs } from "./histogram.js";
 import { resolveLoadPerf, sampledWorkerIndexes } from "./perf-stats.js";
 import { buildLoadReport } from "./report.js";
-import { UnreachableStreak } from "./unreachable.js";
+import { type DocumentRequest, UnreachableStreak, watchDocumentRequests } from "./unreachable.js";
 import { cancellableSleep, ScenarioWorker, type WorkerSamples } from "./worker.js";
 import type { ScenarioLoadOptions, ScenarioSpec, LoadReport, LoadStop } from "./types.js";
 
@@ -148,8 +148,8 @@ export async function scenarioLoad(
     stopped ??= { cause, reason, at: Date.now() };
   };
   const shouldStop = () => stopped !== undefined || Date.now() >= deadline;
-  const onIterationEnd = (failure: string | null) => {
-    const reason = unreachable?.record(failure);
+  const onIterationEnd = (failure: string | null, sent: DocumentRequest | null) => {
+    const reason = unreachable?.record(failure, sent);
     if (reason) stopRun("unreachable", reason);
   };
 
@@ -163,6 +163,16 @@ export async function scenarioLoad(
       // seconds while the host is up. Such an iteration neither counts
       // toward the streak nor resets it.
       let faultedNavigation = false;
+      // The last document request of the worker's page, set with its context.
+      let lastDocument: () => DocumentRequest | null = () => null;
+      const contextHook = makeContextHook(
+        compiledFaultRules,
+        runtimeFaultScript,
+        sampled.has(p.workerIndex),
+        () => {
+          faultedNavigation = true;
+        },
+      );
       return new ScenarioWorker({
         workerIndex: p.workerIndex,
         scenario: p.spec.scenario,
@@ -177,17 +187,13 @@ export async function scenarioLoad(
         onIterationEnd: (failure) => {
           const injected = faultedNavigation;
           faultedNavigation = false;
-          if (failure === null || !injected) onIterationEnd(failure);
+          if (failure === null || !injected) onIterationEnd(failure, lastDocument());
         },
         perf: sampled.has(p.workerIndex),
-        onContextCreated: makeContextHook(
-          compiledFaultRules,
-          runtimeFaultScript,
-          sampled.has(p.workerIndex),
-          () => {
-            faultedNavigation = true;
-          },
-        ),
+        onContextCreated: async (context) => {
+          lastDocument = watchDocumentRequests(context);
+          await contextHook(context);
+        },
       });
     });
 

@@ -15,7 +15,7 @@
  * recipe, so verification stops there and records nothing at all.
  */
 import type { Page } from "playwright";
-import { unreachableNavigation } from "../load/unreachable.js";
+import { unreachableNavigation, watchDocumentRequests } from "../load/unreachable.js";
 import { recipeOrigin, runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
 import type { ActionRecipe } from "./types.js";
@@ -78,6 +78,7 @@ export async function verifyAndPromote(
 
   for (let i = 0; i < runs && !unreachable; i++) {
     const { page, cleanup } = await opts.setupPage();
+    const lastDocument = watchDocumentRequests(page);
     try {
       const result = await runRecipe(page, recipe, { baseUrl: opts.baseUrl });
       outcomes.push({
@@ -89,7 +90,7 @@ export async function verifyAndPromote(
         successes += 1;
         log(`run ${i + 1}/${runs}: ok (${result.durationMs.toFixed(0)}ms)`);
       } else {
-        unreachable = site ? unreachableNavigation(result.failedAt?.reason ?? "", site) : null;
+        unreachable = site ? unreachableNavigation(result.failedAt?.reason ?? "", site, lastDocument()) : null;
         log(
           unreachable
             ? `run ${i + 1}/${runs}: cannot connect — ${result.failedAt?.reason}`

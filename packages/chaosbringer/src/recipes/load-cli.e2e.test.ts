@@ -43,7 +43,18 @@ describe("load and recipes verify on the command line", () => {
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "load-cli-e2e-"));
-    server = await startTestServer((_req, res) => {
+    server = await startTestServer((req, res) => {
+      // The site answers: with a redirect to a host that is down (a payment
+      // provider, an SSO page), and by resetting the connection (shedding load).
+      if (req.url?.startsWith("/checkout")) {
+        res.writeHead(302, { location: `${down}/pay` });
+        res.end();
+        return;
+      }
+      if (req.url?.startsWith("/reset")) {
+        req.socket.resetAndDestroy();
+        return;
+      }
       res.writeHead(200, { "content-type": "text/html" });
       res.end("<!doctype html><title>About</title><h1>About</h1>");
     });
@@ -80,6 +91,23 @@ describe("load and recipes verify on the command line", () => {
   }
 
   const recipeFile = (store: string) => readFileSync(join(store, FILE), "utf8");
+
+  /** `storeWith`'s site/about, and shop/broken: /about, then `path`, which fails. */
+  function storeWithBroken(path: string): string {
+    const store = storeWith("verified", server.url);
+    const broken: ActionRecipe = {
+      ...(JSON.parse(recipeFile(store)) as ActionRecipe),
+      name: "shop/broken",
+      steps: [
+        { kind: "navigate", url: `${server.url}/about` },
+        { kind: "navigate", url: `${server.url}${path}`, expectAfter: { hasSelector: "h1" } },
+      ],
+    };
+    writeFileSync(join(store, "shop__broken.json"), `${JSON.stringify(broken, null, 2)}\n`);
+    return store;
+  }
+  const brokenStats = (store: string) =>
+    (JSON.parse(readFileSync(join(store, "shop__broken.json"), "utf8")) as ActionRecipe).stats;
 
   it("load refuses a store with nothing to replay, before a browser starts", async () => {
     const empty = join(dir, "empty");
@@ -150,6 +178,29 @@ describe("load and recipes verify on the command line", () => {
     expect(r.status).toBe(2);
     expect(r.stderr.trim()).toBe("load: recipe-mix: no candidate recipes in the store any more — nothing left to replay");
     expect(JSON.parse(recipeFile(candidate))).toMatchObject({ status: "verified", stats: { successCount: 6 } });
+  }, 60_000);
+
+  it("load records a replay the site answered with a redirect to a dead host, or reset, and does not stop", async () => {
+    // Both fail as `net::ERR_… at <base URL>/…`: the run used to read them as
+    // the base URL being down, stop with exit 2 while it served /about, and
+    // leave shop/broken verified at 5 successes after 10 failed replays.
+    for (const path of ["/checkout", "/reset"]) {
+      const store = storeWithBroken(path);
+      const output = join(dir, `broken${path.slice(1)}.json`);
+      const r = await live(store, "--output", output);
+      expect(r.stderr).not.toContain("unreachable");
+      expect(r.status).toBe(1);
+      expect(JSON.parse(readFileSync(output, "utf8")).report.stopped).toBeUndefined();
+      expect(brokenStats(store).failCount).toBeGreaterThan(0);
+    }
+  }, 90_000);
+
+  it("recipes verify records a replay the site answered with a redirect to a dead host", async () => {
+    const store = storeWithBroken("/checkout");
+    const r = await cli(["recipes", "verify", "shop/broken", "--base-url", server.url, "--dir", store, "--quiet"]);
+    expect(r.stderr).not.toContain("unreachable");
+    expect(r.status).toBe(1);
+    expect(brokenStats(store)).toMatchObject({ successCount: 5, failCount: 5 });
   }, 60_000);
 
   it("recipes verify exits 2 on a base URL nobody answers, and leaves the recipe as it was", async () => {

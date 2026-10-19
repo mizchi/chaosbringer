@@ -40,7 +40,7 @@ import { repairRecipe } from "./repair.js";
 import { verifyAndPromote, type VerifyResult } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
 import { errorMessage } from "../errors.js";
-import { unreachableNavigation } from "../load/unreachable.js";
+import { type DocumentRequest, unreachableNavigation, watchDocumentRequests } from "../load/unreachable.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { newIsolatedPage } from "../browser-session.js";
 
@@ -415,6 +415,8 @@ async function verifyCmd(argv: string[]): Promise<void> {
   if (!values.quiet) warnRebased("verify", [recipe], baseUrl);
 
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
+  // The document requests of the page the goto below runs on.
+  let setupDocument: () => DocumentRequest | null = () => null;
   try {
     const verifying = verifyAndPromote(store, recipe, {
       runs,
@@ -423,6 +425,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
       verbose: !values.quiet,
       setupPage: async () => {
         const { page, close } = await newIsolatedPage(browser);
+        setupDocument = watchDocumentRequests(page);
         // verifyAndPromote does NOT navigate for you — caller's setupPage
         // owns the start state. The recipe's first step (if it's a
         // navigate, rebased onto baseUrl) drives the page; otherwise we
@@ -436,7 +439,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
     const result: VerifyResult = await verifying.catch((err: unknown) => {
       // The goto above meets a host that is down before any replay does.
       // It throws out of verifyAndPromote, which has recorded nothing yet.
-      const unreachable = unreachableNavigation(errorMessage(err), baseUrl);
+      const unreachable = unreachableNavigation(errorMessage(err), baseUrl, setupDocument());
       if (!unreachable) throw err;
       return { promoted: false, demoted: false, successRate: 0, runs, outcomes: [], unreachable };
     });

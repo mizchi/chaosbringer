@@ -7,7 +7,6 @@ describe("unreachableNavigation", () => {
       "ERR_CONNECTION_REFUSED",
       "ERR_NAME_NOT_RESOLVED",
       "ERR_ADDRESS_UNREACHABLE",
-      "ERR_CONNECTION_RESET",
       // What Chromium says for http://127.0.0.1:1: it will not dial port 1.
       "ERR_UNSAFE_PORT",
     ]) {
@@ -30,9 +29,33 @@ describe("unreachableNavigation", () => {
     // The server answered, badly: a broken site, not a down one.
     expect(unreachableNavigation("page.goto: net::ERR_EMPTY_RESPONSE at https://shop.test/", site)).toBeNull();
     expect(unreachableNavigation("page.goto: net::ERR_ABORTED at https://shop.test/", site)).toBeNull();
+    // It accepted the connection: a host shedding load resets some and serves the rest.
+    expect(unreachableNavigation("page.goto: net::ERR_CONNECTION_RESET at https://shop.test/", site)).toBeNull();
     // A payment provider being down says nothing about the site under test.
     expect(unreachableNavigation("page.goto: net::ERR_NAME_NOT_RESOLVED at https://pay.test/", site)).toBeNull();
     expect(unreachableNavigation("page.goto: net::ERR_CONNECTION_REFUSED at https://shop.test:8443/", site)).toBeNull();
+  });
+});
+
+describe("unreachableNavigation and the page's last document request", () => {
+  const site = "http://127.0.0.1:4000";
+  // What Chromium says both when the site refuses /checkout and when it
+  // answers it with a redirect to a host that refuses.
+  const refused = "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4000/checkout#pay";
+
+  it("is null when the site answered the navigation with a redirect", () => {
+    expect(unreachableNavigation(refused, site, { url: "http://127.0.0.1:4000/checkout", redirected: true })).toBeNull();
+  });
+
+  it("names the failure when the request to the site itself failed", () => {
+    expect(unreachableNavigation(refused, site, { url: "http://127.0.0.1:4000/checkout", redirected: false })).toBe(
+      "net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4000/checkout#pay",
+    );
+  });
+
+  it("goes by the message when the last request was another navigation's", () => {
+    expect(unreachableNavigation(refused, site, { url: "http://127.0.0.1:4000/about", redirected: true })).not.toBeNull();
+    expect(unreachableNavigation(refused, site, null)).not.toBeNull();
   });
 });
 
@@ -56,5 +79,12 @@ describe("UnreachableStreak", () => {
     expect(streak.record("page.click: Timeout 5000ms exceeded.")).toBeNull();
     expect(streak.record(down)).toBeNull();
     expect(streak.record(down)).not.toBeNull();
+  });
+
+  it("starts over on a navigation the site answered with a redirect", () => {
+    const streak = new UnreachableStreak("http://127.0.0.1:4000", 2);
+    expect(streak.record(down)).toBeNull();
+    expect(streak.record(down, { url: "http://127.0.0.1:4000/", redirected: true })).toBeNull();
+    expect(streak.record(down)).toBeNull();
   });
 });

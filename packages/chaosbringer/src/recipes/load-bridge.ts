@@ -30,7 +30,7 @@
  */
 import { defineScenario, type Scenario, type ScenarioContext } from "../load/index.js";
 import { scenarioLoad } from "../load/index.js";
-import { unreachableNavigation } from "../load/unreachable.js";
+import { type DocumentRequest, unreachableNavigation, watchDocumentRequests } from "../load/unreachable.js";
 import { weightedPick, type Rng } from "../random.js";
 import type {
   DurationInput,
@@ -128,10 +128,17 @@ export function recipeStoreScenarioWithStats(
   const name = opts.scenarioName ?? "recipe-mix";
   const record = opts.record !== false;
   // A failure counts against the recipe unless the site never answered, as
-  // `verifyAndPromote` decides it.
-  const recordFailure = (recipe: string, reason: string | undefined, baseUrl: string) => {
-    if (record && !unreachableNavigation(reason ?? "", baseUrl)) opts.store.recordFailure(recipe);
+  // `verifyAndPromote` decides it: `sent` is the page's last document request.
+  const recordFailure = (
+    recipe: string,
+    reason: string | undefined,
+    baseUrl: string,
+    sent: DocumentRequest | null,
+  ) => {
+    if (record && !unreachableNavigation(reason ?? "", baseUrl, sent)) opts.store.recordFailure(recipe);
   };
+  // Each worker page's document requests, watched from its first iteration.
+  const documents = new WeakMap<ScenarioContext["page"], () => DocumentRequest | null>();
 
   // Per-worker memo: track which recipes already ran on this Page so
   // `requires` chains dedupe across iterations within the same worker.
@@ -175,6 +182,11 @@ export function recipeStoreScenarioWithStats(
             memo = new Set();
             workerMemo.set(ctx.page, memo);
           }
+          let lastDocument = documents.get(ctx.page);
+          if (!lastDocument) {
+            lastDocument = watchDocumentRequests(ctx.page);
+            documents.set(ctx.page, lastDocument);
+          }
 
           // Every replay goes to the load run's base URL: a recipe keeps
           // the origin it was recorded on, and a load test of staging
@@ -192,7 +204,7 @@ export function recipeStoreScenarioWithStats(
               // store reflects every replay — mirrors recipeDriver.
               onProgress: (ev) => {
                 if (ev.kind !== "complete") return;
-                if (!ev.result.ok) recordFailure(ev.recipe, ev.result.failedAt?.reason, baseUrl);
+                if (!ev.result.ok) recordFailure(ev.recipe, ev.result.failedAt?.reason, baseUrl, lastDocument());
                 else if (record) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
                 firings.push({
                   name: ev.recipe,
@@ -219,7 +231,7 @@ export function recipeStoreScenarioWithStats(
               timestamp: Date.now(),
             });
           } else {
-            recordFailure(recipe.name, result.failedAt?.reason, baseUrl);
+            recordFailure(recipe.name, result.failedAt?.reason, baseUrl, lastDocument());
             firings.push({
               name: recipe.name,
               succeeded: false,
