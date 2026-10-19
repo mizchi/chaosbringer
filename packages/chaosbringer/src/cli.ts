@@ -368,9 +368,12 @@ async function main() {
 
     // What reproduces a failure was written by the crawl, and no line said
     // where: under --quiet, whose help promises the paths written, the
-    // verdict and `Report saved to:` were all a CI log showed.
+    // verdict and `Report saved to:` were all a CI log showed. Only when
+    // there is one: a passing run named a directory it never made.
     const failureDir = values["failure-artifacts"];
-    if (failureDir) announce(`Wrote ${failureBundles} failure bundle(s) to ${failureDir}/`);
+    // `<dir>/`, also for a --failure-artifacts that ended in `/` (`<dir>//`).
+    const asDir = (path: string) => `${path.replace(/\/+$/, "")}/`;
+    if (failureDir && failureBundles > 0) announce(`Wrote ${failureBundles} failure bundle(s) to ${asDir(failureDir)}`);
     if (values["trace-out"]) announce(`Trace saved to: ${values["trace-out"]}`);
     if (values["log-file"]) announce(`Log saved to: ${values["log-file"]}`);
 
@@ -381,7 +384,7 @@ async function main() {
         bundleDir: failureDir,
         minCount: clusterMinCount,
       });
-      announce(`Wrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
+      announce(`Wrote ${results.length} cluster bundle(s) to ${asDir(failureDir)}clusters/`);
     }
 
     saveReport(report, outputPath);

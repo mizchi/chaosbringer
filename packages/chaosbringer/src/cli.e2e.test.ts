@@ -86,13 +86,17 @@ describe("main CLI output on a pipe", () => {
   it("--quiet prints the verdict line and the paths written, nothing else", async () => {
     const output = join(dir, "quiet.json");
     const junit = join(dir, "quiet.xml");
-    const r = await cli([...crawl, "--quiet", "--output", output, "--junit", junit]);
+    const bundles = join(dir, "no-bundles");
+    // No page failed, so no bundle: it printed `Wrote 0 failure bundle(s) to`
+    // a directory it never made.
+    const r = await cli([...crawl, "--quiet", "--output", output, "--junit", junit, "--failure-artifacts", bundles]);
     expect(r.status).toBe(0);
     expect(r.stdout.trimEnd().split("\n")).toEqual([
       expect.stringMatching(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=1\)$/),
       `Report saved to: ${output}`,
       `JUnit XML saved to: ${junit}`,
     ]);
+    expect(existsSync(bundles)).toBe(false);
   }, 120_000);
 
   it("--quiet says why a run failed in one line, and nothing more of the report", async () => {
@@ -119,7 +123,8 @@ describe("main CLI output on a pipe", () => {
     const r = await cli(
       ["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"].concat(
         ["--strict", "--quiet", "--output", output],
-        ["--failure-artifacts", bundles, "--trace-out", trace, "--log-file", log],
+        // A trailing slash read `…/bundles//`.
+        ["--failure-artifacts", `${bundles}/`, "--trace-out", trace, "--log-file", log],
       ),
     );
     expect(r.status).toBe(1);

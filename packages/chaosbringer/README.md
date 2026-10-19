@@ -952,7 +952,7 @@ failures/0000__checkout_review__a91c2f0e/
 
 `repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Fault rules and invariants set in code are not replayed, and a comment line in the script names them, as on the `Repro:` line. Add `--baseline` to gate CI on the same shape of failure.
 
-The CLI says where they went and how many there are, in every output mode: `Wrote 3 failure bundle(s) to ./failures/`, next to `Report saved to:`. The `--trace-out` and `--log-file` files get a line each too (`Trace saved to: …`, `Log saved to: …`).
+When a run wrote any, the CLI says where they went and how many there are, in every output mode: `Wrote 3 failure bundle(s) to ./failures/`, next to `Report saved to:`. The `--trace-out` and `--log-file` files get a line each too (`Trace saved to: …`, `Log saved to: …`).
 
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 
