@@ -24,6 +24,7 @@ import { axe } from "../invariants.js";
 import { attachHint } from "../browser-bind.js";
 import { saveReport } from "../reporter.js";
 import { formatReproFlags, ignoreReproFlags, withUnreplayedNote } from "../repro-command.js";
+import { PERF_BUDGET_KEYS } from "../types.js";
 import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions, ReproFlag } from "../types.js";
 import {
   analyzeScan,
@@ -120,7 +121,11 @@ export const DEFAULT_SCAN_MAX_ACTIONS = 5;
  * only change what is shown (`--quiet`, `--no-headless`, `--bind`), and
  * `--fail-on`, which sets the exit code from the findings. What the options
  * set in code (`crawler.invariants`, the other fault layers) ends the
- * command as a comment, as in `buildReproCommand`.
+ * command as a comment, as in `buildReproCommand`, and so does every other
+ * option that shapes the crawls and has no scan flag (`scanUnflaggedOptions`):
+ * `crawler.spaPatterns`, a HAR replay, `perf.memory`, … The plain crawl's
+ * command carried several as flags (`--spa`, `--har-replay`), and this one
+ * dropped them without a word.
  */
 export function scanReproCommand(options: ScanOptions, seed: number, kind: ScanFaultKind): string {
   const c = options.crawler ?? {};
@@ -148,7 +153,109 @@ export function scanReproCommand(options: ScanOptions, seed: number, kind: ScanF
   if (c.network) push("--network", c.network);
   if (c.device) push("--device", c.device);
   if (c.timeout !== undefined && c.timeout !== DEFAULT_OPTIONS.timeout) push("--timeout", String(c.timeout));
-  return withUnreplayedNote(["chaosbringer", "scan", ...formatReproFlags(flags)].join(" "), c);
+  return withUnreplayedNote(["chaosbringer", "scan", ...formatReproFlags(flags)].join(" "), c, scanUnflaggedOptions(options));
+}
+
+type ScanCrawlerOptions = NonNullable<ScanOptions["crawler"]>;
+type ScanPerfOptions = NonNullable<ScanOptions["perf"]>;
+
+/**
+ * What `scanReproCommand` does with each crawler option `runScan` takes:
+ * `"flag"`, a scan flag carries it; `"note"`, `unreplayedNote` counts it
+ * already (the fault layers, the invariants); `"output"`, it only changes
+ * what is shown or written; else a test of the value set, true when it
+ * changes the crawls from what the scan does without it. No scan flag
+ * carries those, so the command's note names them. Every option has an
+ * entry, so a new one does not compile until it gets one.
+ */
+const SCAN_CRAWLER_REPRO: {
+  [K in keyof ScanCrawlerOptions]-?: "flag" | "note" | "output" | ((value: NonNullable<ScanCrawlerOptions[K]>) => boolean);
+} = {
+  timeout: "flag",
+  excludePatterns: "flag",
+  ignoreErrorPatterns: "flag",
+  ariaTargets: "flag",
+  seedFromSitemap: "flag",
+  storageState: "flag",
+  network: "flag",
+  device: "flag",
+  invariants: "note",
+  lifecycleFaults: "note",
+  runtimeFaults: "note",
+  iframeFaults: "note",
+  headless: "output",
+  bind: "output",
+  screenshots: "output",
+  screenshotDir: "output",
+  logFile: "output",
+  logLevel: "output",
+  logToConsole: "output",
+  recoveryHistorySize: "output",
+  failureArtifacts: "output",
+  traceOut: "output",
+  // What the main CLI sets for its own repro command.
+  cliReproFlags: "output",
+  perfBudgetsFile: "output",
+  // `runScan` settles adaptively unless told otherwise.
+  settle: (v) => v !== "adaptive",
+  spaPatterns: (v) => v.length > 0,
+  // Recording only writes a file.
+  har: (v) => v.mode === "replay",
+  performanceBudget: (v) => PERF_BUDGET_KEYS.some((k) => typeof v[k] === "number"),
+  perfBudgets: (v) => v.length > 0,
+  httpCache: (v) => v === false,
+  blockExternalNavigation: (v) => v === false,
+  enableRecovery: (v) => v === false,
+  viewport: (v) => v.width !== DEFAULT_OPTIONS.viewport.width || v.height !== DEFAULT_OPTIONS.viewport.height,
+  userAgent: (v) => v !== "",
+  actionWeights: (v) => Object.keys(v).length > 0,
+  initScripts: (v) => v.length > 0,
+  traceparent: (v) => v !== false,
+  coverageFeedback: (v) => v.enabled,
+  launchOptions: (v) => Object.keys(v).length > 0,
+  cdpEndpoint: () => true,
+  cdpTargetId: () => true,
+  terminalBrowser: (v) => v,
+  traceReplay: () => true,
+  shardCount: (v) => v > 1,
+  // Only with `shardCount`, which is named.
+  shardIndex: () => false,
+  advisor: () => true,
+  driver: () => true,
+  driverGoal: () => true,
+  server: () => true,
+};
+
+/** `SCAN_CRAWLER_REPRO`'s tests for `perf`: no scan flag carries any of it. */
+const SCAN_PERF_REPRO: {
+  [K in keyof ScanPerfOptions]-?: (value: NonNullable<ScanPerfOptions[K]>, options: ScanOptions) => boolean;
+} = {
+  level: (v) => v === "trace",
+  memory: (v) => v.forceGc === true,
+  // `--no-coverage` carries `coverage`, which this one overrides (`runScan`).
+  coverage: (v, o) => v !== (o.coverage ?? true),
+  cssSelectorStats: (v) => v,
+  actions: (v) => v === false,
+};
+
+/**
+ * The options set in `options` that change the crawls and that no scan flag
+ * carries, as `crawler.<name>` / `perf.<name>`; `scanReproCommand` names
+ * them in its note.
+ */
+export function scanUnflaggedOptions(options: ScanOptions): string[] {
+  const names: string[] = [];
+  const crawler: Record<string, unknown> = options.crawler ?? {};
+  for (const [key, how] of Object.entries(SCAN_CRAWLER_REPRO)) {
+    const value = crawler[key];
+    if (typeof how === "function" && value !== undefined && (how as (v: unknown) => boolean)(value)) names.push(`crawler.${key}`);
+  }
+  const perf: Record<string, unknown> = options.perf ?? {};
+  for (const [key, changes] of Object.entries(SCAN_PERF_REPRO)) {
+    const value = perf[key];
+    if (value !== undefined && (changes as (v: unknown, o: ScanOptions) => boolean)(value, options)) names.push(`perf.${key}`);
+  }
+  return names;
 }
 
 /** The one rule of the chaos crawl for `kind`: every API request gets the fault. */

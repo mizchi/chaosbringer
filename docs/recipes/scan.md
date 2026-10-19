@@ -101,7 +101,10 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   `chaosbringer scan --url … --seed 7 --faults 500` plus the other flags
   that shaped it. It reruns the clean crawl, which finds the endpoints, then
   that one fault's crawl. A plain `chaosbringer` crawl has no flag for the
-  fault, so it would rerun clean and pass.
+  fault, so it would rerun clean and pass. What a `runScan` call set that no
+  scan flag carries, from the fault layers and invariants to
+  `crawler.spaPatterns`, a HAR replay or `perf.memory`, is named in a
+  trailing `# + …` comment instead.
 - **See why a step is slow.** Re-run the clean crawl's `reproCommand` with
   `--perf-trace`, then run `chaosbringer perf drilldown <report> "<perfKey>"`.
 - **Turn a resilience finding into a test.** Write the fault the scan used

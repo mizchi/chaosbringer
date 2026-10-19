@@ -57,9 +57,12 @@ seed: number,
   return withUnreplayedNote(["chaosbringer", ...formatReproFlags(reproFlags(options, seed))].join(" "), options);
 }
 
-/** `command`, ending in a `# + …` comment when `options` set something it cannot carry. */
-export function withUnreplayedNote(command: string, options: UnreplayedOptions): string {
-  const note = unreplayedNote(options);
+/**
+ * `command`, ending in a `# + …` comment when `options` set something it
+ * cannot carry. `unflagged` names other options it cannot carry (`scan`'s).
+ */
+export function withUnreplayedNote(command: string, options: UnreplayedOptions, unflagged: readonly string[] = []): string {
+  const note = unreplayedNote(options, unflagged);
   return note ? `${command} # + ${note}` : command;
 }
 
@@ -81,8 +84,10 @@ const NOTE_NAMES = 5;
  * What a run set that no flag of its repro command carries, counted and
  * named, e.g. `1 fault rule not expressible on the CLI: scan:api-500`;
  * `undefined` when there is nothing. The fault layers and the invariants
- * other than the ones `--axe` / `--visual-baseline` built. A rule is named
- * as its stats name it, an unnamed network rule by its pattern.
+ * other than the ones `--axe` / `--visual-baseline` built, then `unflagged`,
+ * the other options the caller found no flag for (`scanReproCommand`'s
+ * `crawler.spaPatterns`). A rule is named as its stats name it, an unnamed
+ * network rule by its pattern.
  *
  * It follows a `#` on the repro line and in `repro.sh`, so it stays a plain
  * comment: control characters (a newline would start a command) become
@@ -90,7 +95,7 @@ const NOTE_NAMES = 5;
  * inert in a shell that reads `#` as a word (zsh without
  * `interactivecomments`).
  */
-export function unreplayedNote(options: UnreplayedOptions): string | undefined {
+export function unreplayedNote(options: UnreplayedOptions, unflagged: readonly string[] = []): string | undefined {
   const invariants = (options.invariants ?? []).map((i) => i.name);
   for (const { flag } of options.cliReproFlags ?? []) {
     const built = CLI_INVARIANTS.get(flag);
@@ -103,6 +108,7 @@ export function unreplayedNote(options: UnreplayedOptions): string | undefined {
     ["runtime fault", (options.runtimeFaults ?? []).map(runtimeFaultName)],
     ["iframe fault", (options.iframeFaults ?? []).map(iframeFaultName)],
     ["invariant", invariants],
+    ["option", [...unflagged]],
   ];
   const present = groups.filter(([, names]) => names.length > 0);
   if (present.length === 0) return undefined;

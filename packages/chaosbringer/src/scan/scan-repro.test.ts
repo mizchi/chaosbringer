@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { faults } from "../faults.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind } from "./analyze.js";
 import { parseScanArgs, SCAN_CLI_OPTIONS, scanOptionsFromCli } from "./cli.js";
-import { scanReproCommand, type ScanOptions } from "./run.js";
+import { scanReproCommand, scanUnflaggedOptions, type ScanOptions } from "./run.js";
 
 const URL = "http://127.0.0.1:4455/";
 
@@ -74,6 +74,8 @@ describe("a scan chaos report's reproCommand", () => {
     const before = scanOptions(["--url", URL, ...argv]);
     // A sample that changed nothing would pass without testing anything.
     expect(before).not.toEqual(scanOptions(["--url", URL]));
+    // What a flag sets is carried by the flag, never named in the note.
+    expect(scanUnflaggedOptions(before)).toEqual([]);
     for (const kind of SCAN_FAULT_KINDS) {
       const command = scanReproCommand(before, 42, kind);
       const words = shellWords(command);
@@ -103,5 +105,59 @@ describe("a scan chaos report's reproCommand", () => {
       `chaosbringer scan --url ${URL} --seed 7 --faults abort # + 1 runtime fault, 1 invariant not expressible on the CLI: clock-skew:60000ms, cart-total`,
     );
     expect(shellWords(command)).toEqual(["chaosbringer", "scan", "--url", URL, "--seed", "7", "--faults", "abort"]);
+  });
+
+  // The plain crawl's command carried most of these as flags (--spa,
+  // --har-replay, --budget, --no-http-cache, --settle, --perf-mem); scan has
+  // none, and its command dropped them without a word.
+  it("names the options no scan flag carries", () => {
+    const o: ScanOptions = {
+      url: URL,
+      perf: { memory: { forceGc: true }, level: "trace" },
+      crawler: {
+        spaPatterns: ["/app/"],
+        har: { mode: "replay", path: "site.har" },
+        performanceBudget: { lcp: 2500 },
+        httpCache: false,
+        settle: "networkidle",
+        runtimeFaults: [faults.clockSkew(60_000)],
+      },
+    };
+    const command = scanReproCommand(o, 7, "status");
+    expect(command).toBe(
+      `chaosbringer scan --url ${URL} --seed 7 --faults 500 # + 1 runtime fault, 7 options not expressible on the CLI: ` +
+        "clock-skew:60000ms, crawler.settle, crawler.spaPatterns, crawler.har, crawler.performanceBudget, +3 more",
+    );
+    expect(shellWords(command)).toEqual(["chaosbringer", "scan", "--url", URL, "--seed", "7", "--faults", "500"]);
+    expect(scanUnflaggedOptions(o)).toEqual([
+      "crawler.settle",
+      "crawler.spaPatterns",
+      "crawler.har",
+      "crawler.performanceBudget",
+      "crawler.httpCache",
+      "perf.level",
+      "perf.memory",
+    ]);
+  });
+
+  it("names none of them when they are what the scan does anyway", () => {
+    const o: ScanOptions = {
+      url: URL,
+      coverage: false,
+      perf: { level: "light", memory: { forceGc: false }, coverage: false, actions: true },
+      crawler: {
+        spaPatterns: [],
+        har: { mode: "record", path: "site.har" },
+        performanceBudget: {},
+        httpCache: true,
+        settle: "adaptive",
+        viewport: { width: 1280, height: 720 },
+        shardCount: 1,
+        headless: false,
+        logFile: "scan.log",
+      },
+    };
+    expect(scanUnflaggedOptions(o)).toEqual([]);
+    expect(scanReproCommand(o, 7, "abort")).toBe(`chaosbringer scan --url ${URL} --seed 7 --faults abort --no-coverage`);
   });
 });
