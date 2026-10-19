@@ -1446,7 +1446,7 @@ chaosbringer --url http://localhost:3000 \
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
 | `--compact` | Compact output | false |
-| `--strict` | Fail on console errors + JS exceptions | false |
+| `--strict` | Fail on console errors, JS exceptions and unhandled rejections | false |
 | `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
 | `--help`, `-h` | Show help, with a line for every subcommand | — |
 | `--version`, `-V` | Print the installed version | — |

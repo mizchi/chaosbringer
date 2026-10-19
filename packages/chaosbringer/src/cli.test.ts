@@ -56,6 +56,14 @@ describe("--help", () => {
   });
 });
 
+describe("--help on --strict", () => {
+  it("names all three kinds it fails on", () => {
+    // It said "any console errors"; JS exceptions and unhandled rejections fail it too.
+    const line = cli(["-h"]).stdout.split("\n").find((l) => l.trimStart().startsWith("--strict "));
+    expect(line).toBe("  --strict              Fail on console errors, JS exceptions and unhandled rejections");
+  });
+});
+
 describe("--version", () => {
   it.each([["--version"], ["-V"]])("%s prints the package.json version and exits 0", (flag) => {
     const { version } = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { version: string };

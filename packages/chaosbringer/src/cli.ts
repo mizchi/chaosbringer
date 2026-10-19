@@ -21,7 +21,7 @@
  *   --output <path>       Output report path (default: chaos-report.json)
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
- *   --strict              Exit with error on console errors
+ *   --strict              Fail on console errors, JS exceptions and unhandled rejections
  *   --quiet               Print only the verdict, why a run failed, and the paths written
  *   --help, -h            Show this help
  *   --version, -V         Print the version
@@ -189,7 +189,7 @@ OPTIONS:
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
-  --strict              Exit with error on any console errors
+  --strict              Fail on console errors, JS exceptions and unhandled rejections
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
