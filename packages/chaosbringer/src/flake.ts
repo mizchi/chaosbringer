@@ -10,7 +10,9 @@
 
 import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
+import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
+import { errorMessage } from "./errors.js";
 import type { CrawlReport, PageError } from "./types.js";
 
 export interface ClusterOccurrence {
@@ -260,7 +262,24 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     fail(`--runs must be an integer >= 2 (got ${JSON.stringify(values.runs)})`);
   }
 
-  const maxActionsRaw = values["max-actions"] ?? values["max-actions-per-page"];
+  // The main crawl's parser, not `Number`: `--max-pages abc` was NaN, which
+  // the first run refused as `"maxPages" must be an integer >= 1 (got null)`
+  // after `Run 1/3...`, with exit 1 — and chaos-flake.yml reads exit 1 as
+  // "flakes were found".
+  const crawlNumber = (flag: string, raw: string | undefined, min: number): number | undefined => {
+    try {
+      return parseNumberFlag(flag, raw, { min, integer: true });
+    } catch (err) {
+      fail(errorMessage(err));
+    }
+  };
+  const maxPages = crawlNumber("--max-pages", values["max-pages"], 1);
+  const maxActions = crawlNumber(
+    values["max-actions"] !== undefined ? "--max-actions" : "--max-actions-per-page",
+    values["max-actions"] ?? values["max-actions-per-page"],
+    0,
+  );
+  const timeout = crawlNumber("--timeout", values.timeout, 1);
 
   let seed: number | undefined;
   if (values.seed !== undefined) {
@@ -275,9 +294,9 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     baseUrl: values.url!,
     runs,
     seed,
-    maxPages: values["max-pages"] ? Number(values["max-pages"]) : undefined,
-    maxActions: maxActionsRaw !== undefined ? Number(maxActionsRaw) : undefined,
-    timeout: values.timeout ? Number(values.timeout) : undefined,
+    maxPages,
+    maxActions,
+    timeout,
     ignoreAnalytics: values["ignore-analytics"] ?? false,
     harReplay: values["har-replay"],
     traceReplay: values["trace-replay"],

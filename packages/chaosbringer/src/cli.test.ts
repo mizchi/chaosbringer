@@ -162,6 +162,11 @@ describe("usage errors", () => {
     [["scan", ...URL_ARG, "--max-pages", "abc"], "scan", '--max-pages must be an integer >= 1 (got "abc")'],
     [["flake"], "flake", "--url is required"],
     [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
+    // These started Run 1/3 and failed inside the crawler with exit 1, which
+    // chaos-flake.yml reads as "flakes were found".
+    [["flake", ...URL_ARG, "--max-pages", "abc"], "flake", '--max-pages must be a finite number (got "abc")'],
+    [["flake", ...URL_ARG, "--max-actions-per-page", "1.5"], "flake", "--max-actions-per-page must be an integer (got 1.5)"],
+    [["flake", ...URL_ARG, "--timeout", "5s"], "flake", '--timeout must be a finite number (got "5s")'],
     [["minimize"], "minimize", "--url is required"],
     [["diff", "a.json"], "diff", "expected exactly two report paths, got 1"],
     [["cluster-artifacts", "r.json"], "cluster-artifacts", "--bundle-dir is required"],
