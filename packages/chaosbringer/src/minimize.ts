@@ -105,7 +105,11 @@ export async function minimizeActions<T>(
 ): Promise<{ reproduced: boolean; minimized: T[] }> {
   if (!(await reproduces([...items]))) return { reproduced: false, minimized: [...items] };
   if (items.length === 0 || (await reproduces([]))) return { reproduced: true, minimized: [] };
-  return { reproduced: true, minimized: await ddmin(items, reproduces, onStep) };
+  // ddmin counts its own calls; the two replays above come first, so its
+  // progress lines number replays as the summary's total does.
+  const offset = (info: { iteration: number; size: number; keptAfter: number }) =>
+    onStep?.({ ...info, iteration: info.iteration + 2 });
+  return { reproduced: true, minimized: await ddmin(items, reproduces, onStep && offset) };
 }
 
 /**
@@ -275,7 +279,11 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
     // Exit 1, not 2: the replay ran and found no failure, which is a result
     // about the run, not a refused invocation.
     console.error(
-      `chaosbringer minimize: the failure did not reproduce: a replay of all ${result.originalActions.length} actions matched no error cluster against ${args.match}, so there is nothing to minimize and ${args.traceOut} was not written. ` +
+      `chaosbringer minimize: the failure did not reproduce: a replay of ${
+        result.originalActions.length > 0
+          ? `all ${result.originalActions.length} actions`
+          : "the trace's page loads (it has no actions)"
+      } matched no error cluster against ${args.match}, so there is nothing to minimize and ${args.traceOut} was not written. ` +
         "Check --match against the trace's report, and run `chaosbringer flake` first for a failure that only happens sometimes."
     );
     process.exitCode = 1;

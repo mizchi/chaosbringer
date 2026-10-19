@@ -101,6 +101,24 @@ describe("minimizeActions", () => {
     expect(await minimizeActions([], async () => false)).toEqual({ reproduced: false, minimized: [] });
   });
 
+  it("numbers ddmin's progress by replay, counting the full and empty replays", async () => {
+    const steps: number[] = [];
+    let replays = 0;
+    await minimizeActions(
+      [1, 2, 3, 4, 5, 6, 7, 8],
+      async (s) => {
+        replays++;
+        return s.includes(3);
+      },
+      (info) => steps.push(info.iteration),
+    );
+    // Each reported iteration is the replay that kept the subset, so the last
+    // one is never later than the total.
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps[0]).toBeGreaterThan(2);
+    expect(Math.max(...steps)).toBeLessThanOrEqual(replays);
+  });
+
   it("runs ddmin once the full set reproduces and the empty one does not", async () => {
     const out = await minimizeActions([1, 2, 3, 4, 5, 6, 7, 8], async (s) => s.includes(3) && s.includes(7));
     expect(out).toEqual({ reproduced: true, minimized: [3, 7] });
