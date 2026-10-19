@@ -100,10 +100,14 @@ describe("runScan", () => {
 
     // A chaos crawl's report reruns the scan with its fault. It held the
     // plain crawl's command, which has no flag for the fault: it reran clean.
-    const status = `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults 500 --no-coverage`;
+    // No scan flag sets `actionWeights`, which the command dropped without a word.
+    const note = "# + 1 option not expressible on the CLI: crawler.actionWeights";
+    const status = `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults 500 --no-coverage ${note}`;
     const saved = (kind: ScanFaultKind) => JSON.parse(readFileSync(result.files.chaos[kind] ?? "", "utf-8")) as CrawlReport;
     expect(saved("status").reproCommand).toBe(status);
-    expect(saved("hang").reproCommand).toBe(`chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults hang --hang-ms 1500 --no-coverage`);
+    expect(saved("hang").reproCommand).toBe(
+      `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults hang --hang-ms 1500 --no-coverage ${note}`,
+    );
     expect(file.chaos.find((c) => c.fault === "status")?.reproCommand).toBe(status);
     expect(md).toContain(`, rerun with \`${status}\``);
     expect(result.baseline.reproCommand).toMatch(new RegExp(`^chaosbringer --url ${base}/ --seed 7 `));

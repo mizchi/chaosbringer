@@ -152,6 +152,7 @@ describe("a scan chaos report's reproCommand", () => {
         httpCache: true,
         settle: "adaptive",
         viewport: { width: 1280, height: 720 },
+        actionWeights: { buttons: 2, scroll: 0.5 },
         shardCount: 1,
         headless: false,
         logFile: "scan.log",

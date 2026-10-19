@@ -18,14 +18,14 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
-import { DEFAULT_OPTIONS } from "../defaults.js";
+import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "../defaults.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
 import { attachHint } from "../browser-bind.js";
 import { saveReport } from "../reporter.js";
 import { formatReproFlags, ignoreReproFlags, withUnreplayedNote } from "../repro-command.js";
 import { PERF_BUDGET_KEYS } from "../types.js";
-import type { CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions, ReproFlag } from "../types.js";
+import type { ActionWeights, CrawlerEvents, CrawlerOptions, CrawlReport, FaultRule, Invariant, PerfOptions, ReproFlag } from "../types.js";
 import {
   analyzeScan,
   SCAN_FAULT_KINDS,
@@ -208,7 +208,7 @@ const SCAN_CRAWLER_REPRO: {
   enableRecovery: (v) => v === false,
   viewport: (v) => v.width !== DEFAULT_OPTIONS.viewport.width || v.height !== DEFAULT_OPTIONS.viewport.height,
   userAgent: (v) => v !== "",
-  actionWeights: (v) => Object.keys(v).length > 0,
+  actionWeights: (v) => Object.entries(v).some(([k, w]) => w !== undefined && w !== DEFAULT_ACTION_WEIGHTS[k as keyof ActionWeights]),
   initScripts: (v) => v.length > 0,
   traceparent: (v) => v !== false,
   coverageFeedback: (v) => v.enabled,
