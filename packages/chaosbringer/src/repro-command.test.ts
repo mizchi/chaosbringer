@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { CRAWL_CLI_OPTIONS, crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
 import { DEFAULT_OPTIONS } from "./defaults.js";
+import { compileFaultRules, faultStatsOf } from "./fault-router.js";
 import { faults } from "./faults.js";
 import { buildReproCommand, formatReproFlags, shellQuote, unreplayedNote } from "./repro-command.js";
 import type { CrawlerOptions } from "./types.js";
@@ -171,6 +172,17 @@ describe("reproCommand of a run with faults and invariants set in code", () => {
         `not expressible on the CLI: '/\\/api\\/(cart|items)/', cpu-throttle:4x, reject-body:json, iframe-never-load, cart-total`,
     );
     expect(shellWords(command)).toEqual([...plain, "--axe"]);
+  });
+
+  // The note named it "/api/" and the stats `/\/api\//`, so the two did not
+  // read as the same rule.
+  it("names an unnamed rule with a string pattern as its stats do", () => {
+    const rules = [faults.status(500, { urlPattern: "/api/" }), faults.abort({ urlPattern: /\/img\//g })];
+    const stats = faultStatsOf(compileFaultRules(rules)).map((s) => s.rule);
+    expect(stats).toEqual(["/\\/api\\//", "/\\/img\\//"]);
+    expect(unreplayedNote({ faultInjection: rules })).toBe(
+      `2 fault rules not expressible on the CLI: ${stats.map(shellQuote).join(", ")}`,
+    );
   });
 
   it("keeps a name a shell would act on inside the comment", () => {

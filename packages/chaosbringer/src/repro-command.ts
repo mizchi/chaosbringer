@@ -18,6 +18,7 @@
  * passed, and said nothing.
  */
 import { DEFAULT_OPTIONS } from "./defaults.js";
+import { toRegExp } from "./fault-router.js";
 import { iframeFaultName } from "./iframe-faults.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS } from "./ignore-presets.js";
 import { lifecycleFaultName } from "./lifecycle-faults.js";
@@ -103,7 +104,9 @@ export function unreplayedNote(options: UnreplayedOptions, unflagged: readonly s
     if (at >= 0) invariants.splice(at, 1);
   }
   const groups: Array<[string, string[]]> = [
-    ["fault rule", (options.faultInjection ?? []).map((r) => r.name ?? String(r.urlPattern))],
+    // An unnamed rule as `faultInjections[].rule` names it: by its compiled
+    // pattern, so `"/api/"` is `/\/api\//` in both.
+    ["fault rule", (options.faultInjection ?? []).map((r) => r.name ?? String(toRegExp(r.urlPattern) ?? r.urlPattern))],
     ["lifecycle fault", (options.lifecycleFaults ?? []).map(lifecycleFaultName)],
     ["runtime fault", (options.runtimeFaults ?? []).map(runtimeFaultName)],
     ["iframe fault", (options.iframeFaults ?? []).map(iframeFaultName)],
