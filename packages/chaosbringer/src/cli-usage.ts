@@ -96,6 +96,15 @@ export function packageVersion(): string {
 }
 
 /**
+ * The refusal of a stray `#` argument: a repro command's trailing `# + …`
+ * note, pasted into zsh, which reads `#` as a word unless
+ * `interactivecomments` is set. The main command and `scan` both print it.
+ */
+export const PASTED_COMMENT =
+  'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+  "`setopt interactivecomments`); drop the `#` and everything after it";
+
+/**
  * A subcommand refusing its arguments: a missing flag or operand, a value it
  * cannot use. `cli.ts` reports it as the main command reports its own, in one
  * `chaosbringer <sub>: …` line with exit 2: nothing ran. Thrown as a plain

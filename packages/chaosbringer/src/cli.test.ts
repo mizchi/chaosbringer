@@ -168,6 +168,16 @@ describe("usage errors", () => {
     // Missing operands, missing required flags, malformed values.
     [["scan"], "scan", "--url is required"],
     [["scan", ...URL_ARG, "--max-pages", "abc"], "scan", '--max-pages must be an integer >= 1 (got "abc")'],
+    // A chaos report's reproCommand with its `# + …` note, pasted into a zsh
+    // without interactivecomments: parseArgs' "Unexpected argument '#'. This
+    // command does not take positional arguments" did not say to drop it.
+    [
+      ["scan", ...URL_ARG, "--seed", "7", "--faults", "abort", "#", "+", "1", "invariant", "not", "expressible", "on", "the", "CLI:", "cart-total"],
+      "scan",
+      'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+        "`setopt interactivecomments`); drop the `#` and everything after it",
+    ],
+    [["scan", ...URL_ARG, "crawl"], "scan", 'unexpected argument "crawl": scan takes no positional arguments'],
     [["flake"], "flake", "--url is required"],
     [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
     // These started Run 1/3 and failed inside the crawler with exit 1, which

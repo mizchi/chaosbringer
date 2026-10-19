@@ -4,7 +4,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { UsageError } from "../cli-usage.js";
+import { PASTED_COMMENT, UsageError } from "../cli-usage.js";
 import { errorMessage } from "../errors.js";
 import { COMMON_IGNORE_PATTERNS, resolveIgnorePresets } from "../ignore-presets.js";
 import { NETWORK_PROFILES, type NetworkProfile } from "../types.js";
@@ -102,7 +102,13 @@ export const SCAN_CLI_OPTIONS = {
 } as const;
 
 export function parseScanArgs(argv: string[]) {
-  return parseArgs({ args: argv, options: SCAN_CLI_OPTIONS });
+  const parsed = parseArgs({ args: argv, options: SCAN_CLI_OPTIONS, allowPositionals: true });
+  // A chaos report's reproCommand can end in a `# + …` note, which zsh
+  // passes on as arguments; parseArgs' own refusal did not say so.
+  const [first] = parsed.positionals;
+  if (first === "#") throw new UsageError(PASTED_COMMENT);
+  if (first !== undefined) throw new UsageError(`unexpected argument "${first}": scan takes no positional arguments`);
+  return parsed;
 }
 
 export type ScanCliValues = ReturnType<typeof parseScanArgs>["values"];

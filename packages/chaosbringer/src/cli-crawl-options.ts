@@ -8,7 +8,7 @@
  */
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
-import { SUBCOMMANDS } from "./cli-usage.js";
+import { PASTED_COMMENT, SUBCOMMANDS } from "./cli-usage.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
@@ -116,11 +116,8 @@ export function crawlUrlFromArgs(values: CrawlCliValues, positionals: readonly s
       first === "crawl"
         ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
             "so drop the word: `chaosbringer --url <url>`"
-        : // A Repro: line's trailing `# + …` note, pasted into zsh, which reads
-          // `#` as a word unless `interactivecomments` is set.
-          first === "#"
-          ? 'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
-              "`setopt interactivecomments`); drop the `#` and everything after it"
+        : first === "#"
+          ? PASTED_COMMENT
           : `unexpected argument "${first}"; known subcommands: ${known}`,
     );
   }
