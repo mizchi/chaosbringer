@@ -524,6 +524,7 @@ export {
   unfiredFaults,
   type Firing,
   type FaultLayer,
+  type FaultStatsReport,
   type FaultWarning,
   type ServiceWorkerReach,
 } from "./firings.js";

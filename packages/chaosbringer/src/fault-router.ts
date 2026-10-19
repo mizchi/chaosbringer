@@ -485,7 +485,7 @@ export async function applyFaults(
       faultFirings({
         faultInjections: faultStatsOf(compiled),
         runtimeFaults: await readRuntime(),
-      } as never),
+      }),
     heldRequests: () => heldCount,
     release: drain,
     dispose: async () => {

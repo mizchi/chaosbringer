@@ -19,6 +19,17 @@ import type { CrawlReport } from "./types.js";
 /** Which layer produced a firing row. */
 export type FaultLayer = "network" | "runtime" | "lifecycle" | "iframe";
 
+/**
+ * The part of a report these readers look at. A whole `CrawlReport` is one;
+ * so is a report built by hand from the stats getters — after `testPage()`,
+ * which returns none, or off a `faults` session:
+ * `{ faultInjections: crawler.getFaultStats(), pages: [result] }`. A field
+ * left out reads as that layer reporting nothing.
+ */
+export type FaultStatsReport = Partial<
+  Pick<CrawlReport, "faultInjections" | "runtimeFaults" | "lifecycleFaults" | "iframeFaults" | "pages">
+>;
+
 export interface Firing {
   /** The rule's `name`, or the label the layer derived for it. */
   name: string;
@@ -55,7 +66,7 @@ export interface Firing {
  * missing row means the layer reported no stats at all, which happens when the
  * crawl died before the routes went on.
  */
-export function faultFirings(report: CrawlReport): Firing[] {
+export function faultFirings(report: FaultStatsReport): Firing[] {
   // One builder, four layers. The counters are coerced rather than trusted:
   // a row missing `matched` produced `matched: undefined`, and
   // `unfiredFaults` then reported `matched undefinedx and never fired` — a
@@ -107,7 +118,7 @@ export interface ServiceWorkerReach {
  * from the pages' `serviceWorker`. One `"unrouted"` page outweighs any number
  * of `"routed"` ones: on it the rule saw none of the requests the worker took.
  */
-function serviceWorkerReach(report: CrawlReport): ServiceWorkerReach | null {
+function serviceWorkerReach(report: FaultStatsReport): ServiceWorkerReach | null {
   const pages = Array.isArray(report.pages) ? report.pages : [];
   const unrouted = pages.filter((p) => p?.serviceWorker === "unrouted").length;
   if (unrouted > 0) return { reach: "unrouted", pages: unrouted };
@@ -154,7 +165,7 @@ function unmatchedBehindServiceWorker(name: string, sw: ServiceWorkerReach): str
  * `only` restricts the check to the names you care about, for a run that
  * deliberately configures a fault it does not expect to fire.
  */
-export function unfiredFaults(report: CrawlReport, only?: readonly string[]): string[] {
+export function unfiredFaults(report: FaultStatsReport, only?: readonly string[]): string[] {
   const wanted = only ? new Set(only) : null;
   const problems: string[] = [];
   const sw = serviceWorkerReach(report);
@@ -250,7 +261,7 @@ export interface FaultWarning {
  * module exists to end: a check reporting nothing rather than reporting what it
  * could not check.
  */
-export function faultWarnings(report: CrawlReport): FaultWarning[] {
+export function faultWarnings(report: FaultStatsReport): FaultWarning[] {
   const out: FaultWarning[] = [];
   const sw = serviceWorkerReach(report);
   for (const f of faultFirings(report)) {
