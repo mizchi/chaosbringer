@@ -125,13 +125,18 @@ describe("the load path shares the crawler's fault decision", () => {
         handler = h;
       },
     } as never;
-    const send = async (url: string, method = "GET") => {
+    const send = async (url: string, method = "GET", navigation = false) => {
       const route = {
         fulfill: async () => void served.push("fulfilled"),
         abort: async () => void served.push("aborted"),
         fallback: async () => void served.push("fallback"),
       };
-      await handler?.(route, { url: () => url, method: () => method, resourceType: () => "fetch" });
+      await handler?.(route, {
+        url: () => url,
+        method: () => method,
+        resourceType: () => (navigation ? "document" : "fetch"),
+        isNavigationRequest: () => navigation,
+      });
     };
     return { context, send, served };
   }
@@ -175,6 +180,31 @@ describe("the load path shares the crawler's fault decision", () => {
     await send("http://x/api/x");
     expect(served).toEqual(["fallback"]);
     expect(faultStatsFrom(compiled)).toEqual([{ rule: "only", matched: 0, injected: 0 }]);
+  });
+
+  it("tells the runner when a rule aborts a navigation, and only then", async () => {
+    // The runner leaves such an iteration out of its unreachable-host count:
+    // an injected ERR_CONNECTION_REFUSED is not the host being down.
+    const compiled = compileLoadFaultRules([
+      { name: "refuse", urlPattern: /\/page$/, fault: { kind: "abort", errorCode: "connectionrefused" } },
+      { name: "slow", urlPattern: /\/slow$/, fault: { kind: "status", status: 503 } },
+      { name: "api", urlPattern: /\/api$/, fault: { kind: "abort", errorCode: "connectionrefused" } },
+    ]);
+    const { context, send, served } = fakeContext();
+    const aborted: string[] = [];
+    let current = "";
+    await installFaultRoutes(context, compiled, () => aborted.push(current));
+    for (const [url, navigation] of [
+      ["http://x/page", true],
+      ["http://x/slow", true],
+      ["http://x/api", false],
+      ["http://x/other", true],
+    ] as const) {
+      current = url;
+      await send(url, "GET", navigation);
+    }
+    expect(served).toEqual(["aborted", "fulfilled", "aborted", "fallback"]);
+    expect(aborted).toEqual(["http://x/page"]);
   });
 
   it("timestamps only the rule that acted", async () => {

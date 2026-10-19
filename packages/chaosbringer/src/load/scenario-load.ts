@@ -155,28 +155,41 @@ export async function scenarioLoad(
 
   const browser = await chromium.launch({ headless: options.headless ?? true });
   try {
-    const workers = planned.map(
-      (p) =>
-        new ScenarioWorker({
-          workerIndex: p.workerIndex,
-          scenario: p.spec.scenario,
-          baseUrl: options.baseUrl,
-          defaultThinkTime: options.thinkTime,
-          viewport: options.viewport,
-          storageState: p.storageState,
-          invariants: options.invariants,
-          maxIterations: options.maxIterationsPerWorker,
-          shouldStop,
-          stopRun,
-          onIterationEnd,
-          perf: sampled.has(p.workerIndex),
-          onContextCreated: makeContextHook(
-            compiledFaultRules,
-            runtimeFaultScript,
-            sampled.has(p.workerIndex),
-          ),
-        }),
-    );
+    const workers = planned.map((p) => {
+      // Set when a `faultInjection` rule aborts one of this worker's
+      // navigations. The net error that then fails the iteration is the
+      // fault's, not the host's: a chaos run aborting the document with
+      // `connectionrefused` would otherwise stop as "unreachable" within
+      // seconds while the host is up. Such an iteration neither counts
+      // toward the streak nor resets it.
+      let faultedNavigation = false;
+      return new ScenarioWorker({
+        workerIndex: p.workerIndex,
+        scenario: p.spec.scenario,
+        baseUrl: options.baseUrl,
+        defaultThinkTime: options.thinkTime,
+        viewport: options.viewport,
+        storageState: p.storageState,
+        invariants: options.invariants,
+        maxIterations: options.maxIterationsPerWorker,
+        shouldStop,
+        stopRun,
+        onIterationEnd: (failure) => {
+          const injected = faultedNavigation;
+          faultedNavigation = false;
+          if (failure === null || !injected) onIterationEnd(failure);
+        },
+        perf: sampled.has(p.workerIndex),
+        onContextCreated: makeContextHook(
+          compiledFaultRules,
+          runtimeFaultScript,
+          sampled.has(p.workerIndex),
+          () => {
+            faultedNavigation = true;
+          },
+        ),
+      });
+    });
 
     const runs: Promise<WorkerSamples>[] = workers.map(async (w, i) => {
       const delay = planned[i]!.startOffsetMs;
@@ -236,6 +249,7 @@ function makeContextHook(
   compiledFaults: ReturnType<typeof compileLoadFaultRules>,
   runtimeScript: string | null,
   perf: boolean,
+  onNavigationAbort: () => void,
 ): (context: BrowserContext) => Promise<void> {
   return async (context) => {
     // The collector goes first: init scripts run in registration order and it
@@ -248,7 +262,7 @@ function makeContextHook(
     if (runtimeScript) {
       await context.addInitScript(runtimeScript);
     }
-    await installFaultRoutes(context, compiledFaults);
+    await installFaultRoutes(context, compiledFaults, onNavigationAbort);
   };
 }
 

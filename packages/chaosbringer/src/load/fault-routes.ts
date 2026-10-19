@@ -102,10 +102,15 @@ export function compileLoadFaultRules(rules: ReadonlyArray<FaultRule | Fault> | 
  * "occurrence 3" means. Rules on the probability path stay lazy. This used to
  * be single-pass — `return` on the first injection — which made `decisions`
  * mean something different here than on the crawler's layers, silently.
+ *
+ * `onNavigationAbort` is called when a rule aborts a navigation request, as
+ * the abort is sent: the runner's unreachable-host check must not read an
+ * injected `connectionrefused` as the host being down.
  */
 export async function installFaultRoutes(
   context: BrowserContext,
   compiled: ReadonlyArray<CompiledRule>,
+  onNavigationAbort?: () => void,
 ): Promise<void> {
   if (compiled.length === 0) return;
   await context.route("**/*", async (route: Route, request: Request) => {
@@ -120,6 +125,7 @@ export async function installFaultRoutes(
       return;
     }
     winner.firings.push(Date.now());
+    if (winner.rule.fault.kind === "abort" && request.isNavigationRequest()) onNavigationAbort?.();
     await applyFault(route, boundedForLoad(winner.rule.fault));
   });
 }
