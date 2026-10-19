@@ -1185,7 +1185,7 @@ The browser's "Failed to load resource" message names no file, so its console er
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
-Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value of a flag the subcommand checks, such as `scan --max-pages abc`, `flake --runs 1` or `load --workers abc`. Not every value is checked yet: some numeric flags still take a malformed number without a word, for example `cluster-artifacts --max-clusters` and `--min-count`, and the `--timeout`, `--perf-delta-ms` and `--perf-ratio` of `parity` and `journey`. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value of a flag the subcommand checks, such as `scan --max-pages abc`, `flake --runs 1` or `load --workers abc`. Not every value is checked yet: some numeric flags still take a malformed number without a word, for example `cluster-artifacts --max-clusters` and `--min-count`, and the `--timeout`, `--perf-delta-ms` and `--perf-ratio` of `parity` and `journey`. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
 
 > **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
 > Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
@@ -1294,7 +1294,7 @@ chaosbringer minimize \
   --trace-out min.trace.jsonl
 ```
 
-`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
 
 ### `flake`
 

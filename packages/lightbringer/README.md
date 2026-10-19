@@ -197,7 +197,7 @@ auto-span: a span is one action's own cost, not "until the next assertion".
 pnpm add -D lightbringer @playwright/test
 ```
 
-`web-vitals` is pulled in automatically.
+`web-vitals` is pulled in automatically. `@playwright/test` must be 1.59 or later (`^1.59.0`), the floor of the `playwright` lightbringer depends on. Below it, npm refuses the install (`ERESOLVE`); pnpm and yarn only warn about the peer range and install lightbringer's own `playwright` beside yours. Even inside the range, the package manager can resolve the two to different versions, depending on install order. Only the `lightbringer` CLI runs its own `playwright` (the fixture uses yours), so a second copy matters when its browser build is one you have not installed. Check with `npm ls playwright` or `pnpm why playwright`, and pin one version with `overrides` (npm) or `pnpm.overrides` if they differ.
 
 ## Usage
 

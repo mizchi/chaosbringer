@@ -4,7 +4,7 @@ name: chaos-flake
 # then open or close GitHub issues for each persistent flaky cluster.
 on:
   schedule:
-    - cron: "33 19 * * 1"  # Mon 04:33 JST
+    - cron: "33 19 * * 1"  # Mon 19:33 UTC = Tue 04:33 JST
   workflow_dispatch:
     inputs:
       runs:

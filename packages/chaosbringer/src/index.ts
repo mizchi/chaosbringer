@@ -461,6 +461,7 @@ export {
 } from "./trace.js";
 export {
   ddmin,
+  minimizeActions,
   minimizeTrace,
   reportMatches,
   traceWithActions,
