@@ -95,6 +95,7 @@ describe("load and recipes verify on the command line", () => {
   }, 60_000);
 
   it("load stops on a base URL nobody answers: exit 2, the report written, the store untouched", async () => {
+    // Recording is on: the refused replays are what it leaves out.
     const store = storeWith("verified", down);
     const before = recipeFile(store);
     const output = join(dir, "down-report.json");
@@ -120,26 +121,32 @@ describe("load and recipes verify on the command line", () => {
       "--duration", "2s", "--workers", "1", "--think-time", "50-100", "--quiet", ...extra,
     ]);
 
-  it("load --filter-status candidate replays the candidates, and leaves them as they were", async () => {
+  it("load --filter-status candidate --no-record replays the candidates, and leaves them as they were", async () => {
     // It used to pick from the verified recipes whatever the status, and
     // fail every iteration with "no verified recipes match filter".
     const store = storeWith("candidate", server.url);
     const before = recipeFile(store);
-    const r = await live(store, "--filter-status", "candidate");
+    const r = await live(store, "--filter-status", "candidate", "--no-record");
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(recipeFile(store)).toBe(before);
   }, 60_000);
 
-  it("load --record writes each replay into the store, and stops when the candidates run out", async () => {
+  it("load records each replay into the store by default, and stops when the candidates run out", async () => {
+    // As 0.13.0 did and the cookbook says ("Stats land back on the store").
     const verified = storeWith("verified", server.url);
-    expect((await live(verified, "--record")).status).toBe(0);
+    expect((await live(verified)).status).toBe(0);
     expect((JSON.parse(recipeFile(verified)) as ActionRecipe).stats.successCount).toBeGreaterThan(5);
+
+    const untouched = storeWith("verified", server.url);
+    const before = recipeFile(untouched);
+    expect((await live(untouched, "--no-record")).status).toBe(0);
+    expect(recipeFile(untouched)).toBe(before);
 
     // The first recorded success promotes the only candidate (6 runs, all
     // passed), so the next iteration has nothing to pick.
     const candidate = storeWith("candidate", server.url);
-    const r = await live(candidate, "--record", "--filter-status", "candidate");
+    const r = await live(candidate, "--filter-status", "candidate");
     expect(r.status).toBe(2);
     expect(r.stderr.trim()).toBe("load: recipe-mix: no candidate recipes in the store any more — nothing left to replay");
     expect(JSON.parse(recipeFile(candidate))).toMatchObject({ status: "verified", stats: { successCount: 6 } });

@@ -78,9 +78,9 @@ lands on one is undone with a history back.
   kept, and warn that they did. Navigations to another origin are left
   alone. A host that does not answer is not held against the recipe:
   `verify` exits 2 with `base URL unreachable` and leaves its stats and
-  status as they were. A run that acted on
-  a control with no role and no name cannot be replayed, so it produces no
-  recipe, and the summary says which step.
+  status as they were, and `load` records none of those replays. A run
+  that acted on a control with no role and no name cannot be replayed, so
+  it produces no recipe, and the summary says which step.
 - **A video** with `--video`, recorded with Playwright's `page.screencast`.
   It shows each action annotated on screen and opens with the goal as a
   title card.

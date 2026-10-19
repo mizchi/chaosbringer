@@ -22,13 +22,15 @@
  * Per-worker / per-iteration variables flow through `vars`:
  *   `vars: (workerIndex, iteration) => ({ email: ... })`
  *
- * Replays are not recorded into the store unless `record` is set: a load
- * test measures the site, and recording puts the failures of a site under
- * load, or of a host that is down, into the team's store, where they can
- * demote its verified recipes.
+ * Each replay's outcome is recorded into the store, as `recipeDriver`
+ * does, unless `record: false`. A replay whose navigation could not connect
+ * to the run's base URL is not: a host that is down says nothing about the
+ * recipe, and recording those failures demoted every verified recipe of a
+ * store a load run pointed at a mistyped host.
  */
 import { defineScenario, type Scenario, type ScenarioContext } from "../load/index.js";
 import { scenarioLoad } from "../load/index.js";
+import { unreachableNavigation } from "../load/unreachable.js";
 import { weightedPick, type Rng } from "../random.js";
 import type {
   DurationInput,
@@ -65,7 +67,9 @@ export interface RecipeStoreScenarioOptions {
   /**
    * Record each replay's outcome into the store (`recordSuccess` /
    * `recordFailure`, as `recipeDriver` does), which promotes and demotes
-   * recipes. Default: false — the store is left as it was.
+   * recipes. Default: true. `false` leaves the store as it was. A replay
+   * that failed because its navigation could not connect to the run's base
+   * URL is never recorded.
    */
   record?: boolean;
   /** Default: `"uniform"`. */
@@ -122,6 +126,12 @@ export function recipeStoreScenarioWithStats(
   const chain = opts.chainRequires !== false;
   const selection = opts.selection ?? "uniform";
   const name = opts.scenarioName ?? "recipe-mix";
+  const record = opts.record !== false;
+  // A failure counts against the recipe unless the site never answered, as
+  // `verifyAndPromote` decides it.
+  const recordFailure = (recipe: string, reason: string | undefined, baseUrl: string) => {
+    if (record && !unreachableNavigation(reason ?? "", baseUrl)) opts.store.recordFailure(recipe);
+  };
 
   // Per-worker memo: track which recipes already ran on this Page so
   // `requires` chains dedupe across iterations within the same worker.
@@ -144,9 +154,9 @@ export function recipeStoreScenarioWithStats(
         name: "pick-and-replay",
         run: async (ctx) => {
           // Read each iteration, so a recipe whose status a recorded replay
-          // changed (`record`) stops being picked. When none is left the run
-          // stops: failing every iteration until the deadline would only
-          // bury the reason.
+          // changed stops being picked. When none is left the run stops:
+          // failing every iteration until the deadline would only bury the
+          // reason.
           const candidates = candidatesOf(opts);
           if (candidates.length === 0) {
             const reason = `${name}: ${noCandidates(opts, true)}`;
@@ -178,14 +188,12 @@ export function recipeStoreScenarioWithStats(
               alreadyRan: memo,
               vars,
               baseUrl,
-              // With `record`, stats go in for each link in the chain so
-              // the store reflects every replay — mirrors recipeDriver.
+              // Record stats for each link in the chain so the
+              // store reflects every replay — mirrors recipeDriver.
               onProgress: (ev) => {
                 if (ev.kind !== "complete") return;
-                if (opts.record) {
-                  if (ev.result.ok) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
-                  else opts.store.recordFailure(ev.recipe);
-                }
+                if (!ev.result.ok) recordFailure(ev.recipe, ev.result.failedAt?.reason, baseUrl);
+                else if (record) opts.store.recordSuccess(ev.recipe, ev.result.durationMs);
                 firings.push({
                   name: ev.recipe,
                   succeeded: ev.result.ok,
@@ -203,7 +211,7 @@ export function recipeStoreScenarioWithStats(
           }
           const result = await runRecipe(ctx.page, recipe, { vars, baseUrl });
           if (result.ok) {
-            if (opts.record) opts.store.recordSuccess(recipe.name, result.durationMs);
+            if (record) opts.store.recordSuccess(recipe.name, result.durationMs);
             firings.push({
               name: recipe.name,
               succeeded: true,
@@ -211,7 +219,7 @@ export function recipeStoreScenarioWithStats(
               timestamp: Date.now(),
             });
           } else {
-            if (opts.record) opts.store.recordFailure(recipe.name);
+            recordFailure(recipe.name, result.failedAt?.reason, baseUrl);
             firings.push({
               name: recipe.name,
               succeeded: false,

@@ -151,23 +151,22 @@ pnpm chaosbringer load --global \
   --output load-report.json
 ```
 
-`--filter-status candidate` (or `demoted`) replays the recipes of that
-status instead of the verified ones.
+Each replay's outcome is recorded into the recipe's stats, as the
+crawler's recipe driver does, so the run promotes and demotes recipes. A
+replay that could not connect to `--base-url` is not recorded.
+`--no-record` leaves the store as it was.
 
-`load` reads the store and leaves it as it was: a load test measures the
-site, and the failures of a site under load, or of a host that is down,
-would otherwise go into the stats of the store the team reads and can
-demote its verified recipes. `--record` records each replay's outcome
-into the recipes' stats, as the crawler's recipe driver does, so the run
-promotes and demotes them.
+`--filter-status candidate` (or `demoted`) replays the recipes of that
+status instead of the verified ones. A candidate the recorded replays
+promote is no longer a candidate, so pass `--no-record` to load-test the
+candidates for the whole `--duration`.
 
 Exit code is 1 on any iteration / step failure — wire it straight into CI.
 It is 2 when the run could not do its job, with the reason as the last
 line on stderr: no recipe of `--filter-status` in the store (refused
 before a browser starts), a base URL that does not answer (above), or the
-recipes running out mid-run — with `--record`, a candidate its replays
-promoted is no longer a candidate. A run that started prints its report,
-and writes it to `--output`, either way.
+recipes running out mid-run (the last candidate promoted, say). A run
+that started prints its report, and writes it to `--output`, either way.
 
 For fault injection or SLO assertions, drop to the programmatic
 `scenarioLoadFromStore()` API (see [`load-from-recipe-store.md`](./load-from-recipe-store.md)).

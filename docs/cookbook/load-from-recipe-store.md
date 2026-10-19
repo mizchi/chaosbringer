@@ -36,17 +36,12 @@ Each worker, on each iteration:
 2. Picks one (selection strategy — default uniform).
 3. If the recipe has non-sentinel `requires`, runs them in topological
    order first, deduping anything already replayed on this Page.
-4. Runs the recipe. With `record: true` its outcome lands back on the
-   store's stats, which promotes and demotes recipes; by default the
-   store is left as it was.
+4. Runs the recipe. Stats land back on the store (`record: false`
+   leaves it as it was). A replay whose navigation could not connect to
+   `baseUrl` is not recorded: a host that is down says nothing about
+   the recipe.
 5. Thinks for the scenario's think-time, then loops. A failed iteration
    waits too, at least 100ms.
-
-Recording is off because a load test measures the site, not the
-recipes: the failures of a site under load, or of a host that is down,
-would otherwise go into the stats of the store the whole team reads,
-and can demote its verified recipes. Turn it on when the run is meant
-to feed the library, as the crawler's `recipeDriver` does.
 
 The `LoadReport` has one scenario named `"recipe-mix"` (configurable
 via `scenarioName`). Latency / fault timeline / throughput all behave
@@ -68,7 +63,7 @@ the result for one recipe.
 - **Nothing to replay at the start** — no recipe of `status` passes the
   filter: `scenarioLoadFromStore` throws before it launches a browser
   (`chaosbringer load` exits 2).
-- **Nothing left mid-run** — with `record`, the replays can change the
+- **Nothing left mid-run** — the recorded replays can change the
   statuses the candidates are read from (a candidate promoted, the last
   verified recipe demoted): the run stops at once, and
   `report.stopped` is `{ cause: "scenario", reason: "recipe-mix: no
@@ -243,8 +238,8 @@ investigation that you want guaranteed concurrency on.
 - **The `recipe-mix` scenario reports one step**: `pick-and-replay`.
   Per-recipe latency is NOT in the LoadReport — it's in the result's
   `recipes` (firings and `avgDurationMs` per recipe), and in the store's
-  per-recipe `stats.avgDurationMs` when the run `record`s. Use both
-  views together when diagnosing.
+  per-recipe `stats.avgDurationMs`. Use both views together when
+  diagnosing.
 - **Recipes captured from one host can't be replayed against another
   without templating.** Make `{{base}}` part of every captured recipe
   if you want cross-environment portability.

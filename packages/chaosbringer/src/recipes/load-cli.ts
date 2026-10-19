@@ -37,9 +37,10 @@ Options:
   --filter-status STATUS  replay recipes of this status: verified (default) |
                           candidate | demoted
   --max-iterations N      hard cap on iterations per worker (default: unbounded)
-  --record                record each replay's outcome into the store, which
-                          promotes and demotes recipes (default: the store is
-                          left as it was)
+  --no-record             leave the store as it was (default: each replay's
+                          outcome is recorded into it, which promotes and
+                          demotes recipes; a replay that could not connect to
+                          --base-url is never recorded)
   --dir PATH              local store directory (default: ./chaosbringer-recipes)
   --global                use global store (~/.chaosbringer/recipes)
   --output PATH           write the JSON report here (default: stdout-only)
@@ -147,7 +148,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
       selection: { type: "string" },
       "filter-status": { type: "string" },
       "max-iterations": { type: "string" },
-      record: { type: "boolean" },
+      "no-record": { type: "boolean" },
       dir: { type: "string" },
       global: { type: "boolean" },
       output: { type: "string" },
@@ -200,7 +201,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     maxIterations: values["max-iterations"]
       ? parsePositiveInt("--max-iterations", values["max-iterations"])
       : undefined,
-    record: Boolean(values.record),
+    record: !values["no-record"],
     store,
     output: values.output,
     headless,

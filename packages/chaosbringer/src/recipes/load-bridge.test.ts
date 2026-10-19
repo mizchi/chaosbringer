@@ -140,30 +140,58 @@ describe("recipeStoreScenario meta", () => {
   });
 });
 
-// A load run reads the team's store; writing to it is opt-in. It used to
-// record every replay, so a run against a host that was down demoted every
-// verified recipe it touched.
+// A load run records its replays into the store, as recipeDriver does, but
+// not a replay that could not connect to the site: those failures demoted
+// every verified recipe of a store a run pointed at a host that was down.
 describe("recipeStoreScenario and the store's stats", () => {
   // No `page.click`, so the replay fails at its click step.
   const failingPage = { url: () => "https://x/" } as never;
+  // `page.goto` as Chromium fails it when nothing listens on `host`.
+  const refusing = (host: string) =>
+    ({
+      url: () => "about:blank",
+      goto: async (url: string) => {
+        if (new URL(url).host !== host) return null;
+        throw new Error(`page.goto: net::ERR_CONNECTION_REFUSED at ${url}\nCall log:\n  - navigating to "${url}"`);
+      },
+    }) as never;
 
-  async function replayOnce(opts: { record?: boolean }): Promise<ActionRecipe | null> {
+  async function replayOnce(
+    opts: { record?: boolean },
+    { page = failingPage, steps }: { page?: never; steps?: ActionRecipe["steps"] } = {},
+  ): Promise<ActionRecipe | null> {
     const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
-    store.upsert(recipe("shop/buy", { successCount: 5 }));
+    store.upsert({ ...recipe("shop/buy", { successCount: 5 }), ...(steps ? { steps } : {}) });
     const scenario = recipeStoreScenario({ store, ...opts });
     await expect(
-      scenario.steps[0].run({ page: failingPage, workerIndex: 0, iteration: 0, baseUrl: "https://x/" }),
-    ).rejects.toThrow(/shop\/buy failed at step 0/);
+      scenario.steps[0].run({ page, workerIndex: 0, iteration: 0, baseUrl: "https://x/" }),
+    ).rejects.toThrow(/shop\/buy failed at step \d/);
     // Read back from disk: what the next run, or a teammate, sees.
     return new RecipeStore({ localDir: dir, globalDir: false, silent: true }).get("shop/buy");
   }
 
-  it("leaves the store as it was by default", async () => {
-    expect((await replayOnce({}))?.stats).toMatchObject({ successCount: 5, failCount: 0 });
+  it("records the outcome by default", async () => {
+    expect((await replayOnce({}))?.stats).toMatchObject({ successCount: 5, failCount: 1 });
   });
 
-  it("records the outcome with `record: true`", async () => {
-    expect((await replayOnce({ record: true }))?.stats).toMatchObject({ successCount: 5, failCount: 1 });
+  it("leaves the store as it was with `record: false`", async () => {
+    expect((await replayOnce({ record: false }))?.stats).toMatchObject({ successCount: 5, failCount: 0 });
+  });
+
+  it("does not record a replay that could not connect to the base URL", async () => {
+    const steps: ActionRecipe["steps"] = [
+      { kind: "navigate", url: "https://x/cart" },
+      { kind: "navigate", url: "https://pay.example/checkout" },
+    ];
+    expect((await replayOnce({}, { page: refusing("x"), steps }))?.stats).toMatchObject({
+      successCount: 5,
+      failCount: 0,
+    });
+    // Another origin not answering is the recipe's problem: it goes there.
+    expect((await replayOnce({}, { page: refusing("pay.example"), steps }))?.stats).toMatchObject({
+      successCount: 5,
+      failCount: 1,
+    });
   });
 });
 
