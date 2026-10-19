@@ -82,6 +82,30 @@ export interface MinimizeResult {
   minimizedTrace: TraceEntry[];
   /** Total replay runs executed. */
   iterations: number;
+  /**
+   * Whether a replay of the whole trace matched the predicate. `false` means
+   * there was no failure to shrink: nothing was minimized, and
+   * `minimizedTrace` is the source trace.
+   */
+  reproduced: boolean;
+}
+
+/**
+ * The search `minimizeTrace` runs, without the crawler. A replay of every
+ * action has to reproduce first: ddmin assumes it, and without the check a
+ * predicate that never matched kept every action through the whole search and
+ * read as a successful minimization. Then no actions at all, which ddmin
+ * never tries (a failure on the page loads alone needs none of them), then
+ * ddmin.
+ */
+export async function minimizeActions<T>(
+  items: readonly T[],
+  reproduces: (subset: T[]) => Promise<boolean>,
+  onStep?: (info: { iteration: number; size: number; keptAfter: number }) => void
+): Promise<{ reproduced: boolean; minimized: T[] }> {
+  if (!(await reproduces([...items]))) return { reproduced: false, minimized: [...items] };
+  if (items.length === 0 || (await reproduces([]))) return { reproduced: true, minimized: [] };
+  return { reproduced: true, minimized: await ddmin(items, reproduces, onStep) };
 }
 
 /**
@@ -90,23 +114,15 @@ export interface MinimizeResult {
  * predicate against the resulting report.
  *
  * Visit entries are preserved in full so URLs in the replay match the
- * original — only action removal is attempted. A source trace with no actions
- * returns unchanged.
+ * original — only action removal is attempted. When a replay of the whole
+ * trace does not match, the result says `reproduced: false` and keeps every
+ * action (see `minimizeActions`).
  */
 export async function minimizeTrace(options: MinimizeOptions): Promise<MinimizeResult> {
   const source = options.trace;
   const originalActions: TraceAction[] = source.filter(
     (e): e is TraceAction => e.kind === "action"
   );
-
-  if (originalActions.length === 0) {
-    return {
-      originalActions,
-      minimizedActions: [],
-      minimizedTrace: [...source],
-      iterations: 0,
-    };
-  }
 
   const workdir = mkdtempSync(join(options.tmpDir ?? tmpdir(), "chaos-min-"));
   let iterationCounter = 0;
@@ -126,14 +142,13 @@ export async function minimizeTrace(options: MinimizeOptions): Promise<MinimizeR
       return Boolean(await options.predicate(report));
     };
 
-    const minimizedActions = await ddmin(originalActions, predicate, options.onStep);
-    const keep = new Set(minimizedActions);
-    const minimizedTrace = traceWithActions(source, keep);
+    const { reproduced, minimized } = await minimizeActions(originalActions, predicate, options.onStep);
     return {
       originalActions,
-      minimizedActions,
-      minimizedTrace,
+      minimizedActions: minimized,
+      minimizedTrace: reproduced ? traceWithActions(source, new Set(minimized)) : [...source],
       iterations: iterationCounter,
+      reproduced,
     };
   } finally {
     rmSync(workdir, { recursive: true, force: true });
@@ -255,6 +270,17 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
             `  iter=${info.iteration} size=${info.size} kept=${info.keptAfter}`
           ),
   });
+
+  if (!result.reproduced) {
+    // Exit 1, not 2: the replay ran and found no failure, which is a result
+    // about the run, not a refused invocation.
+    console.error(
+      `chaosbringer minimize: the failure did not reproduce: a replay of all ${result.originalActions.length} actions matched no error cluster against ${args.match}, so there is nothing to minimize and ${args.traceOut} was not written. ` +
+        "Check --match against the trace's report, and run `chaosbringer flake` first for a failure that only happens sometimes."
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   writeTrace(args.traceOut, result.minimizedTrace);
   if (!args.quiet) {

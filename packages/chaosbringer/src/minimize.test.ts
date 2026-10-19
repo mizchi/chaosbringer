@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
-import { ddmin, reportMatches, traceWithActions } from "./minimize.js";
+import { ddmin, minimizeActions, reportMatches, traceWithActions } from "./minimize.js";
 import {
   TRACE_FORMAT_VERSION,
   type TraceAction,
@@ -74,6 +74,36 @@ describe("ddmin", () => {
     for (let i = 1; i < steps.length; i++) {
       expect(steps[i]!.keptAfter).toBeLessThanOrEqual(steps[i - 1]!.keptAfter);
     }
+  });
+});
+
+describe("minimizeActions", () => {
+  it("says the failure did not reproduce, and keeps every item, when the full set does not match", async () => {
+    // ddmin used to run anyway: a never-matching --match kept all 8 actions
+    // over 28 replays and printed "Reduced 8 → 8".
+    const calls: number[][] = [];
+    const out = await minimizeActions([1, 2, 3, 4, 5, 6, 7, 8], async (s) => {
+      calls.push(s);
+      return false;
+    });
+    expect(out).toEqual({ reproduced: false, minimized: [1, 2, 3, 4, 5, 6, 7, 8] });
+    expect(calls).toEqual([[1, 2, 3, 4, 5, 6, 7, 8]]);
+  });
+
+  it("returns no items when the failure reproduces without any", async () => {
+    // ddmin never tries the empty set, so a failure on load alone kept one action.
+    const out = await minimizeActions([1, 2, 3, 4], async () => true);
+    expect(out).toEqual({ reproduced: true, minimized: [] });
+  });
+
+  it("checks an empty set once, and reports whether it reproduced", async () => {
+    expect(await minimizeActions([], async () => true)).toEqual({ reproduced: true, minimized: [] });
+    expect(await minimizeActions([], async () => false)).toEqual({ reproduced: false, minimized: [] });
+  });
+
+  it("runs ddmin once the full set reproduces and the empty one does not", async () => {
+    const out = await minimizeActions([1, 2, 3, 4, 5, 6, 7, 8], async (s) => s.includes(3) && s.includes(7));
+    expect(out).toEqual({ reproduced: true, minimized: [3, 7] });
   });
 });
 

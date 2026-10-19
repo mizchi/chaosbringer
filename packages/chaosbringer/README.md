@@ -1294,7 +1294,7 @@ chaosbringer minimize \
   --trace-out min.trace.jsonl
 ```
 
-`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
 
 ### `flake`
 
