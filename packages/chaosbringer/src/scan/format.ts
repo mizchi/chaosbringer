@@ -128,11 +128,14 @@ export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
 /**
  * The first place and how many other places: `places`, not `occurrences`,
  * which for an error finding counts errors. Four throws on one page read
- * `/multi (+3)`, as if four pages had thrown.
+ * `/multi (+3)`, as if four pages had thrown. Without `places` (a finding
+ * built by hand, a 0.13.0 report) the places listed: never more than there
+ * were.
  */
 function shortWhere(f: ScanFinding): string {
   const first = f.where[0] ?? "";
-  return f.places > 1 ? `${first} (+${f.places - 1})` : first;
+  const places = f.places ?? f.where.length;
+  return places > 1 ? `${first} (+${places - 1})` : first;
 }
 
 function anchor(i: number): string {

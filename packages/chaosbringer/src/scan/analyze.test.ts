@@ -4,7 +4,16 @@ import { fakeAction, fakePage, fakeReport, fakeRequest, fakeSpan } from "../perf
 import type { PagePerfSummary, PerfSpanReport } from "../types.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { analyzeScan, assetIdentity, RULE_PATTERNS, SCAN_FAULT_NAMES, SCAN_THRESHOLDS, SCAN_WHERE_CAP } from "./analyze.js";
+import {
+  analyzeScan,
+  assetIdentity,
+  RULE_PATTERNS,
+  SCAN_FAULT_NAMES,
+  SCAN_THRESHOLDS,
+  SCAN_WHERE_CAP,
+  type ScanAnalysis,
+  type ScanFinding,
+} from "./analyze.js";
 import { withSidecarRequests } from "./sidecars.js";
 import { deriveScanEndpoints, endpointsPattern } from "./endpoints.js";
 import { formatScanMarkdown, formatScanSummary } from "./format.js";
@@ -826,6 +835,26 @@ describe("format", () => {
     const fragile = analyzeScan(clean, [{ fault: "status", report: chaos }]);
     expect(fragile.findings[0]).toMatchObject({ rule: "fault-new-error", places: 2, occurrences: 3 });
     expect(formatScanMarkdown(fragile, summary)).toContain(`| ${U}/ (+1) | 3 |`);
+  });
+
+  // `places` was required: a finding built by hand no longer typechecked, and
+  // one read from a 0.13.0 scan-report.json, which has no `places`, lost its (+N).
+  it("counts a finding without places by the places it lists", () => {
+    const files = { baseline: "a", chaos: {}, perfDir: "b" };
+    const summary = { url: U, startedAt: "", durationMs: 0, pagesVisited: 1, actions: 0, files };
+    const finding: ScanFinding = {
+      rule: "js-exception",
+      severity: "high",
+      category: "bug",
+      title: "boom",
+      where: [`${U}/a`, `${U}/b`, `${U}/c`],
+      occurrences: 5,
+      evidence: [],
+      hint: "",
+    };
+    const analysis: ScanAnalysis = { findings: [finding], counts: { high: 1, medium: 0, low: 0 }, environment: [], coverageWarnings: [] };
+    expect(formatScanSummary(analysis)).toMatch(new RegExp(`— ${U}/a \\(\\+2\\)$`, "m"));
+    expect(formatScanMarkdown(analysis, summary)).toContain(`| ${U}/a (+2) | 5 |`);
   });
 
   it("gives each chaos crawl's report the command that reruns it", () => {

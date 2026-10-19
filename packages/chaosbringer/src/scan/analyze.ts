@@ -44,8 +44,13 @@ export interface ScanFinding {
    * `places` counts all of them.
    */
   where: string[];
-  /** How many distinct places it was seen at: `where` before the cap. */
-  places: number;
+  /**
+   * How many distinct places it was seen at: `where` before the cap.
+   * `analyzeScan` always sets it; optional for a finding built elsewhere or
+   * read from an older `scan-report.json`, which the formatters count by
+   * `where` instead.
+   */
+  places?: number;
   /**
    * How often it was seen: the errors for an error finding (four throws on
    * one page are 4, in 1 place), else the places.
