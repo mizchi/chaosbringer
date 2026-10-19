@@ -126,7 +126,8 @@ export interface ScenarioLoadOptions {
    * to its origin failed with a connection-level net error
    * (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, …). The report
    * says so in `stopped`, so a down or mistyped host reads as that rather
-   * than as a run of failures. Default 3; `false` never stops.
+   * than as a run of failures. Default 3; `false` never stops. A stopped
+   * run fails `evaluateSlo` / `assertSlo`.
    */
   stopOnUnreachable?: number | false;
   /**

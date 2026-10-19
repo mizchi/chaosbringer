@@ -85,7 +85,7 @@ Each step:
 - runs to completion or throws — a thrown error fails the step *and* aborts the iteration (set `optional: true` to keep going). The worker then waits the failed step's think time, at least 100ms, before the next iteration, so a step that fails at once does not spin,
 - can end the whole run with `ctx.stopRun?.(reason)` when there is nothing left to do (every worker stops at its next step boundary; the reason lands in `report.stopped`). It does not fail the calling step — throw too for that.
 
-A run whose navigations cannot reach `baseUrl` stops by itself: once 3 iterations in a row failed with a connection-level net error on a navigation to its origin (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, `ERR_ADDRESS_UNREACHABLE`, `ERR_CONNECTION_RESET`, …), `report.stopped` says `base URL unreachable: …` instead of the run failing for its whole duration. A success, or a failure the site answered for, starts the count over. `stopOnUnreachable: N` changes it; `false` never stops.
+A run whose navigations cannot reach `baseUrl` stops by itself: once 3 iterations in a row failed with a connection-level net error on a navigation to its origin (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, `ERR_ADDRESS_UNREACHABLE`, `ERR_CONNECTION_RESET`, …), `report.stopped` says `base URL unreachable: …` instead of the run failing for its whole duration. A success, or a failure the site answered for, starts the count over. `stopOnUnreachable: N` changes it; `false` never stops. A run that stopped, for any reason, fails `evaluateSlo` / `assertSlo` (below).
 
 **Think time** between steps is configurable at three levels (step > scenario > runner default). Pass `{ distribution: "none" }` for batch traffic, `{ distribution: "gaussian" }` for clustered around the midpoint, or the default `uniform` between `minMs` and `maxMs` (defaults: 1000–3000ms).
 
@@ -324,6 +324,13 @@ Comparisons are inclusive: `p95Ms: 800` passes if actual ≤ 800.
 else is a max). Missing targets (e.g. a step the report didn't see)
 are themselves violations — the point of an SLO is to express
 expectations, so a silently-skipped check defeats the purpose.
+
+A run that stopped early (`report.stopped`: the base URL stopped answering,
+or a step called `ctx.stopRun`) is a violation whatever the thresholds,
+listed first as `[totals] run stopped early: <reason>`. Its numbers cover
+less than the run the SLO was written for, and they can pass: a server that
+dies mid-run stops it after 3 refused iterations, and those few failures
+are an error rate no threshold catches.
 
 A `perf` threshold on a step that has no `perf` (perf off, or no sampled
 worker ran the step) is a violation with `actual: null`, and so is an

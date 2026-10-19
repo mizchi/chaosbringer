@@ -132,6 +132,49 @@ describe("evaluateSlo", () => {
   });
 });
 
+// A server that died mid-run stopped it after 3 refused iterations, and the
+// handful of failures before the stop passed an error-rate SLO: the gate went
+// green on a crash.
+describe("a run that stopped early", () => {
+  const stopped = (): LoadReport => ({
+    ...makeReport(),
+    stopped: {
+      cause: "unreachable",
+      reason: "base URL unreachable: https://x (net::ERR_CONNECTION_REFUSED at https://x/, 3 iterations in a row)",
+      at: 3_000,
+    },
+  });
+
+  it("is a violation whatever the thresholds", () => {
+    for (const slo of [{}, { scenarios: { shop: { errorRate: 0.2 } } }]) {
+      const r = evaluateSlo(stopped(), slo);
+      expect(r.ok).toBe(false);
+      expect(r.violations).toEqual([
+        {
+          scope: "totals",
+          target: "totals",
+          metric: "stopped",
+          threshold: NaN,
+          actual: null,
+          message:
+            "[totals] run stopped early: base URL unreachable: https://x (net::ERR_CONNECTION_REFUSED at https://x/, 3 iterations in a row)",
+        },
+      ]);
+    }
+  });
+
+  it("is listed first, ahead of the breached thresholds", () => {
+    const r = evaluateSlo({ ...stopped(), stopped: { cause: "scenario", reason: "nothing left", at: 1 } }, {
+      totals: { maxNetworkErrors: 0 },
+    });
+    expect(r.violations.map((v) => v.message)).toEqual([
+      "[totals] run stopped early: nothing left",
+      "[totals] totals maxNetworkErrors=5 exceeds 0",
+    ]);
+    expect(() => assertSlo(stopped(), {})).toThrow(/run stopped early: base URL unreachable/);
+  });
+});
+
 describe("assertSlo", () => {
   it("does not throw when ok", () => {
     expect(() => assertSlo(makeReport(), { totals: { maxIterationFailures: 100 } })).not.toThrow();
