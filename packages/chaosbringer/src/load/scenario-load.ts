@@ -26,8 +26,14 @@ import {
 import { parseDurationMs } from "./histogram.js";
 import { resolveLoadPerf, sampledWorkerIndexes } from "./perf-stats.js";
 import { buildLoadReport } from "./report.js";
-import { ScenarioWorker, type WorkerSamples } from "./worker.js";
-import type { ScenarioLoadOptions, ScenarioSpec, LoadReport } from "./types.js";
+import {
+  abortedNavigation,
+  type DocumentRequest,
+  UnreachableStreak,
+  watchDocumentRequests,
+} from "./unreachable.js";
+import { cancellableSleep, ScenarioWorker, type WorkerSamples } from "./worker.js";
+import type { ScenarioLoadOptions, ScenarioSpec, LoadReport, LoadStop } from "./types.js";
 
 export interface ScenarioLoadResult {
   report: LoadReport;
@@ -36,6 +42,13 @@ export interface ScenarioLoadResult {
 }
 
 const DEFAULT_DURATION_MS = 60_000;
+/**
+ * Iterations in a row that could not connect to `baseUrl` before the run
+ * stops. Few: five workers of a run pointed at a down host fail their first
+ * iterations together, and the run says so at once instead of failing for
+ * its whole duration.
+ */
+const DEFAULT_STOP_ON_UNREACHABLE = 3;
 
 interface PlannedWorker {
   workerIndex: number;
@@ -119,42 +132,85 @@ export async function scenarioLoad(
     ? buildRuntimeFaultsScript(compiledRuntimeFaults.map((c) => c.fault), runtimeSeed)
     : null;
 
+  const unreachableLimit = options.stopOnUnreachable ?? DEFAULT_STOP_ON_UNREACHABLE;
+  if (
+    unreachableLimit !== false &&
+    (!Number.isInteger(unreachableLimit) || unreachableLimit < 1)
+  ) {
+    throw new Error(
+      `scenarioLoad: stopOnUnreachable must be a positive integer or false, got ${unreachableLimit}`,
+    );
+  }
+  const unreachable = unreachableLimit === false
+    ? null
+    : new UnreachableStreak(options.baseUrl, unreachableLimit);
+
   const startTime = Date.now();
   const deadline = startTime + durationMs;
-  const shouldStop = () => Date.now() >= deadline;
+  // The first stop asked for wins; workers see it at their next step boundary.
+  let stopped = undefined as LoadStop | undefined;
+  const stopRun = (cause: LoadStop["cause"], reason: string) => {
+    stopped ??= { cause, reason, at: Date.now() };
+  };
+  const shouldStop = () => stopped !== undefined || Date.now() >= deadline;
+  const onIterationEnd = (failure: string | null, sent: DocumentRequest | null) => {
+    const reason = unreachable?.record(failure, sent);
+    if (reason) stopRun("unreachable", reason);
+  };
 
   const browser = await chromium.launch({ headless: options.headless ?? true });
   try {
-    const workers = planned.map(
-      (p) =>
-        new ScenarioWorker({
-          workerIndex: p.workerIndex,
-          scenario: p.spec.scenario,
-          baseUrl: options.baseUrl,
-          defaultThinkTime: options.thinkTime,
-          viewport: options.viewport,
-          storageState: p.storageState,
-          invariants: options.invariants,
-          maxIterations: options.maxIterationsPerWorker,
-          shouldStop,
-          perf: sampled.has(p.workerIndex),
-          onContextCreated: makeContextHook(
-            compiledFaultRules,
-            runtimeFaultScript,
-            sampled.has(p.workerIndex),
-          ),
-        }),
-    );
+    const workers = planned.map((p) => {
+      // The URLs of the navigations a `faultInjection` rule aborted during
+      // this worker's iteration. A net error at one of them is the fault's,
+      // not the host's: a chaos run aborting the document with
+      // `connectionrefused` would otherwise stop as "unreachable" within
+      // seconds while the host is up. Such an iteration neither counts
+      // toward the streak nor resets it. Only that URL: one that went on
+      // past an aborted provider page and then met a down host counts.
+      const aborted: string[] = [];
+      // The last document request of the worker's page, set with its context.
+      let lastDocument: () => DocumentRequest | null = () => null;
+      const contextHook = makeContextHook(
+        compiledFaultRules,
+        runtimeFaultScript,
+        sampled.has(p.workerIndex),
+        (url) => aborted.push(url),
+      );
+      return new ScenarioWorker({
+        workerIndex: p.workerIndex,
+        scenario: p.spec.scenario,
+        baseUrl: options.baseUrl,
+        defaultThinkTime: options.thinkTime,
+        viewport: options.viewport,
+        storageState: p.storageState,
+        invariants: options.invariants,
+        maxIterations: options.maxIterationsPerWorker,
+        shouldStop,
+        stopRun,
+        onIterationEnd: (failure) => {
+          const injected = aborted.splice(0);
+          if (failure !== null && abortedNavigation(failure, injected)) return;
+          onIterationEnd(failure, lastDocument());
+        },
+        perf: sampled.has(p.workerIndex),
+        onContextCreated: async (context) => {
+          lastDocument = watchDocumentRequests(context);
+          await contextHook(context);
+        },
+      });
+    });
 
     const runs: Promise<WorkerSamples>[] = workers.map(async (w, i) => {
       const delay = planned[i]!.startOffsetMs;
       if (delay > 0) {
-        // Cancel the wait early if the deadline already fires during ramp-up.
+        // Cancel the wait early if the deadline already fires during ramp-up,
+        // or the run stopped: a worker due in 30s would hold its report back.
         const waitFor = Math.min(delay, Math.max(0, deadline - Date.now()));
-        if (waitFor > 0) await sleep(waitFor);
+        if (waitFor > 0) await cancellableSleep(waitFor, shouldStop);
       }
       if (shouldStop()) {
-        // Deadline fired before this worker could start — return empty samples.
+        // The run ended before this worker could start — return empty samples.
         return { steps: [], iterations: [], network: [], errors: [], runtimeFaultStats: {} };
       }
       return w.run(browser);
@@ -174,6 +230,7 @@ export async function scenarioLoad(
       timelineBucketMs: options.timelineBucketMs,
       faultFirings: faultFiringsFrom(compiledFaultRules),
       ...(perf ? { perf: { level: perf.level, sampledWorkers: sampled.size } } : {}),
+      ...(stopped ? { stopped } : {}),
     });
     const faultStats = faultStatsFrom(compiledFaultRules);
     // Surface runtime fault stats in a side channel — runtime faults
@@ -202,6 +259,7 @@ function makeContextHook(
   compiledFaults: ReturnType<typeof compileLoadFaultRules>,
   runtimeScript: string | null,
   perf: boolean,
+  onNavigationAbort: (url: string) => void,
 ): (context: BrowserContext) => Promise<void> {
   return async (context) => {
     // The collector goes first: init scripts run in registration order and it
@@ -214,12 +272,8 @@ function makeContextHook(
     if (runtimeScript) {
       await context.addInitScript(runtimeScript);
     }
-    await installFaultRoutes(context, compiledFaults);
+    await installFaultRoutes(context, compiledFaults, onNavigationAbort);
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Workaround for circular import — Browser type only needed for runner glue.

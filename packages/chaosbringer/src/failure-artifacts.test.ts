@@ -21,7 +21,8 @@ import {
   writeFailureBundle,
   type FailureBundleInfo,
 } from "./failure-artifacts.js";
-import { reproFlags } from "./repro-command.js";
+import { faults } from "./faults.js";
+import { reproFlags, unreplayedNote } from "./repro-command.js";
 import type { CrawlerOptions, PageError, PageResult, TraceEntry } from "./types.js";
 
 function page(url: string, overrides: Partial<PageResult> = {}): PageResult {
@@ -173,6 +174,15 @@ describe("buildReproScript", () => {
     const command = s.split("\n").find((l) => l.startsWith("chaosbringer ")) ?? "";
     const argv = execFileSync("sh", ["-c", `printf '%s\\0' ${command}`], { encoding: "utf8" }).split("\0");
     expect(argv.filter((_, i) => argv[i - 1] === flag)).toEqual([expected]);
+  });
+
+  // A run with a fault set in code replayed clean, and the script said nothing.
+  it("says in a comment what the run set that no flag carries", () => {
+    const note = unreplayedNote({ faultInjection: [faults.status(500, { urlPattern: "/api/", name: "api-500" })] });
+    const s = buildReproScript({ baseUrl: "http://localhost:3000", tracePath: "./trace.jsonl", note });
+    expect(s.split("\n")).toContain("# + 1 fault rule not expressible on the CLI: api-500");
+    execFileSync("sh", ["-n"], { input: s });
+    expect(buildReproScript({ baseUrl: "http://localhost:3000", tracePath: "./trace.jsonl" })).not.toContain("# +");
   });
 
   it("runs from its own directory, wherever it is started", () => {

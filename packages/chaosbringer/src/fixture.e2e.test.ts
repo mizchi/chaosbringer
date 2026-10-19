@@ -145,4 +145,14 @@ describe("chaosbringer/fixture under Playwright Test", () => {
   it("passes seed, faults and invariants through to the crawler", () => {
     expectPassed("chaosOptions reach the crawler");
   });
+
+  it("refuses a misspelled chaosOptions key, naming the one meant", () => {
+    // `chaosTest.fail`: those two pass only by failing, so read why they did.
+    expectPassed("a misspelled chaosOptions key");
+    const error = (title: string) => ran.find((t) => t.title === `a misspelled chaosOptions key › ${title}`)?.error;
+    expect(error("maxActionPerPage › is refused by name")).toMatch(
+      /unknown chaosOptions key "maxActionPerPage" — did you mean "maxActionsPerPage"/,
+    );
+    expect(error("stirct › is refused by name")).toMatch(/unknown chaosOptions key "stirct" — did you mean "strict"/);
+  });
 });

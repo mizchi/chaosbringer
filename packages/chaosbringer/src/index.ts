@@ -419,6 +419,7 @@ export {
   type EndpointReport,
   type LatencyStats,
   type LoadReport,
+  type LoadStop,
   type NetworkSample,
   type Scenario,
   type ScenarioContext,
@@ -523,7 +524,9 @@ export {
   unfiredFaults,
   type Firing,
   type FaultLayer,
+  type FaultStatsReport,
   type FaultWarning,
+  type ServiceWorkerReach,
 } from "./firings.js";
 
 // The network fault layer, applied to a page you drive yourself. Everything

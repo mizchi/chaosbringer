@@ -21,7 +21,7 @@
  *   --output <path>       Output report path (default: chaos-report.json)
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
- *   --strict              Exit with error on console errors
+ *   --strict              Fail on console errors, JS exceptions and unhandled rejections
  *   --quiet               Print only the verdict, why a run failed, and the paths written
  *   --help, -h            Show this help
  *   --version, -V         Print the version
@@ -29,8 +29,22 @@
 
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { crawlerOptionsFromCli, parseCrawlArgs, parseNumberFlag } from "./cli-crawl-options.js";
-import { formatSubcommandList, packageVersion, progressText, SUBCOMMANDS, usageErrorMessage } from "./cli-usage.js";
+import {
+  crawlCliExtras,
+  crawlerOptionsFromCli,
+  crawlUrlFromArgs,
+  parseCrawlArgs,
+  readCrawlPerfBudgets,
+} from "./cli-crawl-options.js";
+import {
+  formatSubcommandList,
+  isUsageError,
+  packageVersion,
+  progressText,
+  SUBCOMMANDS,
+  type UsageError,
+  usageErrorMessage,
+} from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
@@ -38,7 +52,6 @@ import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { resolveSettle } from "./settle.js";
 import type { CrawlerOptions } from "./types.js";
 import { validateOptions } from "./validate.js";
 
@@ -48,9 +61,12 @@ import { validateOptions } from "./validate.js";
 //
 // The handler is expected to set `process.exitCode` on a non-fatal failure;
 // thrown errors are surfaced with the subcommand name and an exit code of 1.
-// Legacy handlers (minimize / flake / shard) call `process.exit` directly
-// inside themselves and never return, so the final `process.exit` here is
-// only reached by the newer handlers that opt into exitCode-based signalling.
+// A refused invocation — what `parseArgs` throws for an unknown flag, or a
+// `UsageError` for a missing operand or a bad value — is reported like the
+// main command's own (`exitWithUsageError`): one line, exit 2. It used to be
+// `<sub> failed: Unknown option …` and exit 1, which a CI step reads as "the
+// run found something". `flake` still calls `process.exit(1)` itself on a
+// flaky run, and `minimize` / `flake` `process.exit(0)` on --help.
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
 if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
@@ -59,6 +75,10 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
+    if (isUsageError(err)) {
+      console.error(usageErrorMessage(err, `chaosbringer ${(err as UsageError).command ?? subcommand}`));
+      process.exit(2);
+    }
     console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
     process.exit(1);
   }
@@ -169,7 +189,7 @@ OPTIONS:
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
   --compact             Compact output format
-  --strict              Exit with error on any console errors
+  --strict              Fail on console errors, JS exceptions and unhandled rejections
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
@@ -214,83 +234,35 @@ EXAMPLES:
   process.exit(0);
 }
 
-// A positional that is not a URL used to be dropped on the floor, which made
-// every wrong invocation look like a working one: `chaosbringer crawl --url X`
-// ran the default crawl and ignored the word `crawl`, so documentation that
-// invented a subcommand never got caught by anyone running it. There is no
-// `crawl` subcommand — crawling is what this binary does with no subcommand at
-// all.
-const looksLikeUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
-const strays = positionals.filter((p) => !looksLikeUrl(p));
-if (strays.length > 0) {
-  const first = strays[0]!;
-  const known = Object.keys(SUBCOMMANDS).sort().join(", ");
-  exitWithUsageError(
-    first === "crawl"
-      ? 'unexpected argument "crawl": there is no `crawl` subcommand — crawling is the default, ' +
-          "so drop the word: `chaosbringer --url <url>`"
-      : `unexpected argument "${first}"; known subcommands: ${known}`,
-  );
-}
-if (positionals.length > 1) {
-  exitWithUsageError(`expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
-}
-
-// URL from --url or first positional
-const baseUrl = values.url || positionals[0];
-
-if (!baseUrl) {
-  exitWithUsageError("--url is required");
-}
-
-let options: CrawlerOptions;
-// Parsed before the crawl, not after it: a bad --heatmap-top used to fail
-// only once the whole crawl had run, and a --cluster-artifacts without
-// --failure-artifacts exited before the report was saved.
-let heatmapTop: number;
-let clusterMinCount: number | undefined;
+let baseUrl: string;
 try {
-  options = crawlerOptionsFromCli(values, baseUrl);
-  heatmapTop = parseNumberFlag("--heatmap-top", values["heatmap-top"], { min: 0, integer: true }) ?? 20;
-  clusterMinCount = parseNumberFlag("--cluster-min-count", values["cluster-min-count"], {
-    min: 0,
-    integer: true,
-  });
-  if (values["cluster-artifacts"] && !values["failure-artifacts"]) {
-    throw new Error("--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles");
-  }
+  baseUrl = crawlUrlFromArgs(values, positionals);
 } catch (err) {
   exitWithUsageError(err);
 }
 
-// Read here, not by the crawler, so a bad file fails before a browser starts
-// and the error names the flag. The rules' contents are validated by the
-// crawler (validatePerfBudgets), the same as for the programmatic option.
-const perfBudgetsFile = values["perf-budgets"];
-if (perfBudgetsFile !== undefined) {
-  try {
-    // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-    const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(options.settle), `--perf-budgets ${perfBudgetsFile}`);
-    options.perfBudgets = read.rules;
-    // An emit-budgets file records the settle mode it was measured under;
-    // enforcing it on a crawl settled another way fails (or passes) every
-    // action budget on the settle, not the app — refused like `perf gate`.
-    if (read.settleMismatch) {
-      if (values["allow-settle-mismatch"]) {
-        console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
-      } else {
-        console.error(
-          `chaosbringer: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
-            `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
-            `or pass --allow-settle-mismatch to enforce anyway.`,
-        );
-        process.exit(read.exitCode);
-      }
+let options: CrawlerOptions;
+let heatmapTop: number;
+let clusterMinCount: number | undefined;
+try {
+  options = crawlerOptionsFromCli(values, baseUrl);
+  ({ heatmapTop, clusterMinCount } = crawlCliExtras(values));
+} catch (err) {
+  exitWithUsageError(err);
+}
+
+try {
+  const budgets = await readCrawlPerfBudgets(values, options.settle);
+  if (budgets) {
+    options.perfBudgets = budgets.rules;
+    if (budgets.warning) console.error(budgets.warning);
+    if (budgets.refusal) {
+      console.error(`chaosbringer: ${budgets.refusal.message}`);
+      process.exit(budgets.refusal.exitCode);
     }
-  } catch (err) {
-    exitWithUsageError(err);
   }
+} catch (err) {
+  exitWithUsageError(err);
 }
 
 // The crawler validates again; this is so a refused option is a usage error
@@ -318,8 +290,12 @@ async function main() {
     console.log("");
   }
 
+  let failureBundles = 0;
   const crawler = new ChaosCrawler(options, {
     onBind: (b) => console.log(attachHint(b)),
+    onFailureBundle: () => {
+      failureBundles++;
+    },
     onPageStart: (url) => {
       if (!isQuiet && !isCompact) {
         process.stdout.write(`Crawling: ${url}...`);
@@ -390,15 +366,25 @@ async function main() {
       }
     }
 
-    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
+    // What reproduces a failure was written by the crawl, and no line said
+    // where: under --quiet, whose help promises the paths written, the
+    // verdict and `Report saved to:` were all a CI log showed. Only when
+    // there is one: a passing run named a directory it never made.
     const failureDir = values["failure-artifacts"];
+    // `<dir>/`, also for a --failure-artifacts that ended in `/` (`<dir>//`).
+    const asDir = (path: string) => `${path.replace(/\/+$/, "")}/`;
+    if (failureDir && failureBundles > 0) announce(`Wrote ${failureBundles} failure bundle(s) to ${asDir(failureDir)}`);
+    if (values["trace-out"]) announce(`Trace saved to: ${values["trace-out"]}`);
+    if (values["log-file"]) announce(`Log saved to: ${values["log-file"]}`);
+
+    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
     if (values["cluster-artifacts"] && failureDir) {
       const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
       const results = writeClusterArtifacts(report, {
         bundleDir: failureDir,
         minCount: clusterMinCount,
       });
-      announce(`Wrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
+      announce(`Wrote ${results.length} cluster bundle(s) to ${asDir(failureDir)}clusters/`);
     }
 
     saveReport(report, outputPath);

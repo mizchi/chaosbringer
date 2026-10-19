@@ -39,6 +39,11 @@ await chaos({
   in the timeline `fault:<name>` sparkline row. **Set it** — the defaults
   (the pattern's source in the report, `fault-0` / `fault-1` on the
   timeline) are unreadable in CI logs.
+- Behind a service worker, a rule sees the worker's own request (`resourceType`
+  `"fetch"`) on a crawl's context, but nothing the worker answers from its
+  cache, and nothing it takes on `testPage()` in your context. A page's
+  `serviceWorker` field says which; a runtime fault fires ahead of the worker
+  either way.
 
 ## Runtime — `runtimeFaults` (in-page monkey patches)
 

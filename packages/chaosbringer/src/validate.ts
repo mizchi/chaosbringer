@@ -9,7 +9,7 @@ import { BUDGET_METRIC } from "lightbringer/core";
 import { devices } from "playwright";
 import { validateFaultSchedule } from "./schedule.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
-import type { CrawlerOptions, UrlMatcher } from "./types.js";
+import type { ChaosTestOptions, CrawlerOptions, UrlMatcher } from "./types.js";
 import { cdpEndpointUrl } from "./cdp.js";
 import { validateSettle } from "./settle.js";
 import { validatePerf } from "./perf-options.js";
@@ -59,6 +59,21 @@ type UnlistedOptionNames = Exclude<keyof CrawlerOptions, (typeof KNOWN_OPTION_NA
 const _allOptionsListed: UnlistedOptionNames extends never ? true : UnlistedOptionNames = true;
 void _allOptionsListed;
 
+/**
+ * The Playwright Test fixture's option names (`ChaosTestOptions`), guarded the
+ * same way. The fixture builds its crawler from these keys alone, so a
+ * misspelled one never reaches `validateOptions` to be refused there.
+ */
+export const CHAOS_TEST_OPTION_NAMES = [
+  "baseUrl", "maxPages", "maxActionsPerPage", "ignoreErrorPatterns", "blockExternalNavigation",
+  "strict", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
+  "lifecycleFaults", "runtimeFaults",
+] as const;
+
+type UnlistedTestOptionNames = Exclude<keyof ChaosTestOptions, (typeof CHAOS_TEST_OPTION_NAMES)[number]>;
+const _allTestOptionsListed: UnlistedTestOptionNames extends never ? true : UnlistedTestOptionNames = true;
+void _allTestOptionsListed;
+
 /** Levenshtein distance, capped: we only care whether it is 1 or 2. */
 function editDistance(a: string, b: string, cap = 3): number {
   if (Math.abs(a.length - b.length) > cap) return cap + 1;
@@ -77,8 +92,12 @@ function editDistance(a: string, b: string, cap = 3): number {
   return prev[b.length]!;
 }
 
-function rejectNearMissOptions(options: object): void {
-  const known: ReadonlySet<string> = new Set<string>(KNOWN_OPTION_NAMES);
+function rejectNearMissOptions(
+  options: object,
+  names: readonly string[] = KNOWN_OPTION_NAMES,
+  what = "option",
+): void {
+  const known: ReadonlySet<string> = new Set<string>(names);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
     const lower = key.toLowerCase();
@@ -88,7 +107,7 @@ function rejectNearMissOptions(options: object): void {
     // smaller edit distance.
     let suggestion: string | undefined;
     let best = Number.POSITIVE_INFINITY;
-    for (const name of KNOWN_OPTION_NAMES as readonly string[]) {
+    for (const name of names) {
       const n = name.toLowerCase();
       // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
       // plural/singular slip (`faultInjections` for `faultInjection`).
@@ -102,12 +121,37 @@ function rejectNearMissOptions(options: object): void {
     }
     if (suggestion !== undefined) {
       throw new Error(
-        `chaosbringer: unknown option "${key}" — did you mean "${suggestion}"? ` +
+        `chaosbringer: unknown ${what} "${key}" — did you mean "${suggestion}"? ` +
           `A misspelled option is accepted and ignored by JavaScript, so it fails as ` +
           `"my fault never fired" rather than as an error.`,
       );
     }
   }
+}
+
+/**
+ * The near-miss check, over the fixture's `chaosOptions` (merged with
+ * `withChaos()` defaults) or `runChaosTest`'s options. The fixture copies
+ * the keys it knows into the crawler's options, so `maxActionPerPage: 0` ran
+ * with the default 5 actions and `stirct: true` failed nothing, silently.
+ *
+ * A key that is a crawler option the fixture does not take (`timeout`,
+ * `iframeFaults`) is refused too, by its own message: it was dropped all the
+ * same, and it is no typo, so the near-miss check would have offered a wrong
+ * fixture name for it (`seed` for `seedFromSitemap`).
+ */
+export function validateChaosTestOptions(options: ChaosTestOptions): void {
+  const taken: ReadonlySet<string> = new Set<string>(CHAOS_TEST_OPTION_NAMES);
+  const crawlerOnly = Object.keys(options).find(
+    (key) => !taken.has(key) && (KNOWN_OPTION_NAMES as readonly string[]).includes(key),
+  );
+  if (crawlerOnly !== undefined) {
+    throw new Error(
+      `chaosbringer: chaosOptions "${crawlerOnly}" is a ChaosCrawler option the fixture does not ` +
+        `take, so it would be ignored. The fixture takes: ${CHAOS_TEST_OPTION_NAMES.join(", ")}.`,
+    );
+  }
+  rejectNearMissOptions(options, CHAOS_TEST_OPTION_NAMES, "chaosOptions key");
 }
 
 export function validateOptions(options: CrawlerOptions): void {

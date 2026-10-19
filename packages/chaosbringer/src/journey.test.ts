@@ -387,7 +387,7 @@ describe("runJourney", () => {
         if (url.endsWith("/login")) {
           return new Response(JSON.stringify({ token: "abc123" }), { status: 200 });
         }
-        const auth = (init?.headers as Headers).get("authorization") ?? "";
+        const auth = (init?.headers as Headers | undefined)?.get("authorization") ?? "";
         seen.push(auth);
         return new Response("{}", { status: 200 });
       }) as typeof fetch;
@@ -459,7 +459,7 @@ describe("runJourney", () => {
             headers: { "x-trace-id": "trace-42" },
           });
         }
-        const traceHeader = (init?.headers as Headers).get("x-trace") ?? "";
+        const traceHeader = (init?.headers as Headers | undefined)?.get("x-trace") ?? "";
         seen.push(traceHeader);
         return new Response("{}", { status: 200 });
       }) as typeof fetch;
@@ -513,7 +513,7 @@ describe("runJourney", () => {
       const seenCookies: string[] = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
-        const cookie = (init?.headers as Headers).get("cookie") ?? "";
+        const cookie = (init?.headers as Headers | undefined)?.get("cookie") ?? "";
         if (url.endsWith("/login/alice")) {
           return new Response("", { status: 200, headers: { "set-cookie": "u=alice; Path=/" } });
         }
@@ -575,7 +575,7 @@ describe("runJourney", () => {
         const byUser = new Map<string, Array<{ title: string }>>();
         return (url: string, init: RequestInit | undefined): Response => {
           const u = new URL(url);
-          const cookie = (init?.headers as Headers).get("cookie") ?? "";
+          const cookie = (init?.headers as Headers | undefined)?.get("cookie") ?? "";
           const userMatch = cookie.match(/u=(\w+)/);
           const user = userMatch ? userMatch[1] : "anon";
           const method = (init?.method ?? "GET").toUpperCase();

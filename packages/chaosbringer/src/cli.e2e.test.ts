@@ -1,32 +1,33 @@
 /**
  * The main CLI's output when its stdout is not a terminal — a pipe, as in a
- * CI log or a script — over a real crawl of a three-page site.
+ * CI log or a script — over a real crawl of a three-page site, and what a run
+ * of `src/` through tsx (as `pnpm crawl` runs it) finds on the fixture site.
  */
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { startFixtureServer } from "../fixtures/site/server.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
+import type { CrawlReport } from "./types.js";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 
-/**
- * tsx compiles `src/` with esbuild's keepNames, so a function the crawler
- * hands to `page.evaluate` calls a `__name` helper the page does not have,
- * and every page reports it as an exception. dist/ (tsc) does not.
- */
-const IGNORE_TSX_NAME = ["--ignore-error", "__name is not defined"];
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Async, not spawnSync: the test server answers from this process's event loop. */
-function cli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function cli(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
       ["--import", "tsx", CLI, ...args],
-      { cwd: PACKAGE_DIR, timeout: 90_000 },
+      { cwd: PACKAGE_DIR, timeout: 90_000, env },
       (err, stdout, stderr) => {
         const status = err ? (typeof err.code === "number" ? err.code : null) : 0;
         resolve({ status, stdout, stderr });
@@ -59,8 +60,8 @@ describe("main CLI output on a pipe", () => {
     const locs = ["/", "/a", "/b"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
     writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
     crawl = [
-      ...["--url", `${server.url}/`, "--seed-from-sitemap", sitemap, "--max-pages", "3", "--max-actions", "0"],
-      ...["--seed", "1", ...IGNORE_TSX_NAME],
+      "--url", `${server.url}/`, "--seed-from-sitemap", sitemap, "--max-pages", "3", "--max-actions", "0",
+      "--seed", "1",
     ];
   }, 30_000);
 
@@ -85,20 +86,24 @@ describe("main CLI output on a pipe", () => {
   it("--quiet prints the verdict line and the paths written, nothing else", async () => {
     const output = join(dir, "quiet.json");
     const junit = join(dir, "quiet.xml");
-    const r = await cli([...crawl, "--quiet", "--output", output, "--junit", junit]);
+    const bundles = join(dir, "no-bundles");
+    // No page failed, so no bundle: it printed `Wrote 0 failure bundle(s) to`
+    // a directory it never made.
+    const r = await cli([...crawl, "--quiet", "--output", output, "--junit", junit, "--failure-artifacts", bundles]);
     expect(r.status).toBe(0);
     expect(r.stdout.trimEnd().split("\n")).toEqual([
       expect.stringMatching(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=1\)$/),
       `Report saved to: ${output}`,
       `JUnit XML saved to: ${junit}`,
     ]);
+    expect(existsSync(bundles)).toBe(false);
   }, 120_000);
 
   it("--quiet says why a run failed in one line, and nothing more of the report", async () => {
     const output = join(dir, "quiet-reject.json");
     const r = await cli([
-      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
-      ...[...IGNORE_TSX_NAME, "--strict", "--quiet", "--output", output],
+      "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
+      "--strict", "--quiet", "--output", output,
     ]);
     expect(r.status).toBe(1);
     expect(r.stdout.trimEnd().split("\n")).toEqual([
@@ -108,10 +113,162 @@ describe("main CLI output on a pipe", () => {
     ]);
   }, 120_000);
 
+  // The bundles, the trace and the log are what reproduce a failure, and
+  // --quiet (like the full report) named none of them.
+  it("--quiet names the failure bundles, the trace and the log it wrote", async () => {
+    const output = join(dir, "quiet-paths.json");
+    const bundles = join(dir, "bundles");
+    const trace = join(dir, "quiet.trace.jsonl");
+    const log = join(dir, "quiet.log");
+    const r = await cli(
+      ["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"].concat(
+        ["--strict", "--quiet", "--output", output],
+        // A trailing slash read `…/bundles//`.
+        ["--failure-artifacts", `${bundles}/`, "--trace-out", trace, "--log-file", log],
+      ),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] 1 pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Wrote 1 failure bundle(s) to ${bundles}/`,
+      `Trace saved to: ${trace}`,
+      `Log saved to: ${log}`,
+      `Report saved to: ${output}`,
+    ]);
+    expect(readdirSync(bundles)).toHaveLength(1);
+    expect(existsSync(trace) && existsSync(log)).toBe(true);
+  }, 120_000);
+
+  /** `shard`'s workers in a TMPDIR of their own, so a leaked chaos-shard-* is this run's. */
+  function shardEnv(): { env: NodeJS.ProcessEnv; leaked: () => string[] } {
+    const tmp = mkdtempSync(join(dir, "tmp-"));
+    return {
+      env: { ...process.env, TMPDIR: tmp },
+      leaked: () => readdirSync(tmp).filter((name) => name.startsWith("chaos-shard-")),
+    };
+  }
+
+  it("shard --quiet prints the merged verdict and its path, and a Repro line for the whole run", async () => {
+    const output = join(dir, "shard-quiet.json");
+    const { env, leaked } = shardEnv();
+    // No --seed: the coordinator draws one for every worker.
+    const unseeded = crawl.filter((_, i) => crawl[i] !== "--seed" && crawl[i - 1] !== "--seed");
+    const r = await cli(["shard", "--count", "2", ...unseeded, "--quiet", "--output", output], env);
+    expect(r.status).toBe(0);
+    // It printed the whole merged report, 80-odd lines.
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=\d+\)$/),
+      `Merged report saved to: ${output}`,
+    ]);
+    // A process.exit inside the try skipped the finally that removes it.
+    expect(leaked()).toEqual([]);
+    const merged = JSON.parse(readFileSync(output, "utf8")) as { seed: number; reproCommand: string };
+    // It was shard 0's line, which reran shard 0 alone.
+    expect(merged.reproCommand).toMatch(
+      new RegExp(`^chaosbringer shard --count 2 --url ${escapeRegExp(server.url)}/ --seed ${merged.seed} `),
+    );
+    expect(merged.reproCommand).not.toContain("--shard");
+  }, 180_000);
+
+  // The workers' output is silenced, and theirs were the only lines naming
+  // the bundles and the log, which --quiet promises.
+  it("shard --quiet names the bundles and the log its workers wrote", async () => {
+    const output = join(dir, "shard-paths.json");
+    const bundles = join(dir, "shard-bundles");
+    const log = join(dir, "shard.log");
+    // The rejecting page is not the base URL, which every shard crawls, so
+    // one worker writes its bundle.
+    const sitemap = join(dir, "reject-sitemap.xml");
+    const locs = ["/", "/reject"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
+    writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
+    const { env, leaked } = shardEnv();
+    const r = await cli(
+      ["shard", "--count", "2", "--url", `${server.url}/`, "--seed-from-sitemap", sitemap].concat(
+        ["--max-pages", "2", "--max-actions", "0", "--seed", "1", "--strict", "--quiet", "--output", output],
+        ["--failure-artifacts", bundles, "--log-file", log],
+      ),
+      env,
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] \d+ pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Wrote 1 failure bundle(s) to ${bundles}/`,
+      `Log saved to: ${log}`,
+      `Merged report saved to: ${output}`,
+      "1/2 shard(s) exited non-zero",
+    ]);
+    expect(readdirSync(bundles)).toHaveLength(1);
+    expect(existsSync(log)).toBe(true);
+    expect(leaked()).toEqual([]);
+  }, 180_000);
+
+  // Every worker wrote these to the same paths: the JUnit file held one
+  // shard's pages, and the cluster count summed the shards that bundled the
+  // base URL's cluster, which has one directory.
+  it("shard writes --junit, --heatmap-out and the cluster bundles from the merged report", async () => {
+    const output = join(dir, "shard-files.json");
+    const bundles = join(dir, "shard-cluster-bundles");
+    const junit = join(dir, "shard.xml");
+    const heatmap = join(dir, "shard-heatmap.json");
+    // The rejecting page is the base URL, which every shard crawls.
+    const sitemap = join(dir, "reject-base-sitemap.xml");
+    const locs = ["/reject", "/", "/a", "/b"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
+    writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
+    const { env, leaked } = shardEnv();
+    const r = await cli(
+      ["shard", "--count", "2", "--url", `${server.url}/reject`, "--seed-from-sitemap", sitemap].concat(
+        ["--max-pages", "4", "--max-actions", "0", "--seed", "1", "--strict", "--quiet", "--output", output],
+        ["--failure-artifacts", bundles, "--cluster-artifacts", "--junit", junit, "--heatmap-out", heatmap],
+      ),
+      env,
+    );
+    expect(r.status).toBe(1);
+    const merged = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(merged.pages).toHaveLength(4);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] 4 pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Heatmap saved to: ${heatmap}`,
+      expect.stringMatching(new RegExp(`^Wrote \\d failure bundle\\(s\\) to ${escapeRegExp(bundles)}/$`)),
+      `Wrote 1 cluster bundle(s) to ${bundles}/clusters/`,
+      `Merged report saved to: ${output}`,
+      `JUnit XML saved to: ${junit}`,
+      "2/2 shard(s) exited non-zero",
+    ]);
+    expect(readdirSync(join(bundles, "clusters"))).toHaveLength(merged.errorClusters.length);
+    expect(readFileSync(junit, "utf8")).toContain(`tests="4"`);
+    expect(JSON.parse(readFileSync(heatmap, "utf8"))).toEqual([]);
+    expect(leaked()).toEqual([]);
+  }, 180_000);
+
+  it("shard --compact prints the merged compact report, not each worker's", async () => {
+    const { env, leaked } = shardEnv();
+    const r = await cli(["shard", "--count", "2", ...crawl, "--compact", "--output", join(dir, "shard-compact.json")], env);
+    expect(r.status).toBe(0);
+    expect(leaked()).toEqual([]);
+    expect(r.stdout.match(/^\[PASS\] /gm)).toEqual(["[PASS] "]);
+    expect(r.stdout).toMatch(/^\[PASS\] 3 pages, 0 errors, [\d.]+s \(seed=1\)$/m);
+    expect(r.stdout).not.toContain("Progress:");
+  }, 180_000);
+
+  it("shard removes its temp dir when no worker wrote a report", async () => {
+    const { env, leaked } = shardEnv();
+    // Every worker fails to connect to the browser it is told to attach to,
+    // which the coordinator cannot check for them.
+    const closed = await startTestServer(() => {});
+    await closed.close();
+    const r = await cli(["shard", "--count", "2", ...crawl, "--cdp", closed.url], env);
+    expect(r.stderr).toContain("shard: no reports produced");
+    expect(r.status).toBe(1);
+    expect(leaked()).toEqual([]);
+  }, 120_000);
+
   it("--strict --compact says why a run whose only finding is a rejection failed", async () => {
     const r = await cli([
-      ...["--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1"],
-      ...[...IGNORE_TSX_NAME, "--strict", "--compact", "--output", join(dir, "reject.json")],
+      "--url", `${server.url}/reject`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
+      "--strict", "--compact", "--output", join(dir, "reject.json"),
     ]);
     expect(r.status).toBe(1);
     // It printed `[FAIL] 1 pages, 0 errors` and nothing else about the run.
@@ -119,5 +276,40 @@ describe("main CLI output on a pipe", () => {
     expect(r.stdout).toContain("\n  Failed: --strict: 1 unhandled rejection\n");
     expect(r.stdout).toContain("\n    [unhandled-rejection] boom\n");
     expect(r.stdout).toMatch(/^ {2}Repro: chaosbringer --url \S+\/reject .*--strict/m);
+  }, 120_000);
+});
+
+describe("a run of src/ through tsx", () => {
+  let site: { url: string; close: () => Promise<void> };
+  let dir: string;
+
+  beforeAll(async () => {
+    site = await startFixtureServer(0);
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-src-"));
+  });
+
+  afterAll(async () => {
+    await site.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // tsx compiles with esbuild's keepNames, which wrapped the functions the
+  // crawler sends into the page in a `__name` helper the page does not have:
+  // the page reported `__name is not defined`, and the SPA hook, the link
+  // collector and the action-target scan threw instead of finding anything.
+  it("finds what dist/ finds on a clean page: no errors, the SPA route, its buttons", async () => {
+    const output = join(dir, "spa-router.json");
+    const r = await cli([
+      "--url", `${site.url}/spa-router`, "--max-pages", "1", "--max-actions", "3", "--seed", "1",
+      "--quiet", "--output", output,
+    ]);
+    expect(r.status).toBe(0);
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.totalErrors).toBe(0);
+    expect(report.pages[0]?.errors).toEqual([]);
+    // Recorded by the History API hook: the page calls `replaceState` on load.
+    expect(report.pages[0]?.links).toContain(`${site.url}/spa-router/auto`);
+    // The page has no links, so a click can only be one of its buttons.
+    expect(report.actions.some((a) => a.type === "click")).toBe(true);
   }, 120_000);
 });

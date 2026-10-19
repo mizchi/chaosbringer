@@ -184,6 +184,13 @@ describe("flake CLI arguments", () => {
     expect(parseFlakeArgs(base).maxActions).toBeUndefined();
   });
 
+  it("reads an empty number as unset, as the main crawl does", () => {
+    // `flake --max-pages "$MAX"` with MAX unset exited 2 on `--max-pages must
+    // be >= 1 (got 0)`; the main command runs with the default.
+    const args = parseFlakeArgs([...base, "--max-pages", "", "--max-actions", "", "--timeout", ""]);
+    expect(args).toMatchObject({ maxPages: undefined, maxActions: undefined, timeout: undefined });
+  });
+
   it("still refuses a flag no spelling covers", () => {
     // The alias must not become "accept anything": an unknown flag has to stay
     // an error, because being refused is what makes a typo visible at all.

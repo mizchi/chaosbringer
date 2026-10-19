@@ -1056,6 +1056,27 @@ export interface PageResult {
    * measurement; under `networkidle` there is nothing to count.
    */
   settleCapped?: number;
+  /**
+   * A service worker controlled the page when its visit ended. Recorded only
+   * when `faultInjection` rules are configured, because it is what decides
+   * whether they could see the page's requests. A request the worker takes
+   * never reaches the page's route; what reaches the network is the worker's
+   * own request (`resourceType` `"fetch"`).
+   *
+   * - `"routed"` — the crawl's own context, where the rules see the worker's
+   *   requests too. Only what it answers from its own cache, without a
+   *   request, escapes them.
+   * - `"unrouted"` — the rules see none of the requests the worker takes:
+   *   `testPage()` on a page in your context, which the crawler does not
+   *   route, an attached browser, or a crawl run with
+   *   `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` set (Playwright then hands
+   *   a worker's requests to no route at all).
+   *
+   * `unfiredFaults` and the run-end warning name it for a network rule that
+   * matched nothing, rather than blaming the pattern. `runtimeFaults` patch
+   * `fetch` in the page, ahead of the worker, and fire either way.
+   */
+  serviceWorker?: "routed" | "unrouted";
 }
 
 export interface RecoveryInfo {
@@ -1308,8 +1329,12 @@ export interface CrawlReport {
   seed: number;
   /**
    * Copy-pasteable CLI invocation that reproduces this run. Only includes
-   * CLI-expressible options; programmatic-only options (invariants,
-   * faultInjection) cannot be encoded in a shell command and are omitted.
+   * CLI-expressible options. Fault rules (network, lifecycle, runtime,
+   * iframe) and invariants set in code have no flag; the command then ends
+   * in a comment that counts and names them (`# + 1 fault rule not
+   * expressible on the CLI: api-500`), since the command alone reruns
+   * without them. A `chaosbringer scan` chaos crawl's report holds the
+   * `chaosbringer scan … --faults <fault>` command that reruns it instead.
    */
   reproCommand: string;
   startTime: number;
@@ -1517,6 +1542,8 @@ export interface CrawlerEvents {
   onBlockedNavigation?: (url: string) => void;
   /** The browser was bound (`bind`): where clients can attach. */
   onBind?: (bound: import("./browser-bind.js").BoundBrowser) => void;
+  /** A `failureArtifacts` bundle was written for `result`, at `bundleDir`. */
+  onFailureBundle?: (bundleDir: string, result: PageResult) => void;
 }
 
 /**

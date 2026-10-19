@@ -176,10 +176,12 @@ describe("runDiffCli", () => {
     expect(out).not.toContain("console|shared");
   });
 
-  it("exits with code 1 and prints help when positionals are missing", async () => {
-    await runDiffCli(["only-one.json"]);
-    expect(process.exitCode).toBe(1);
-    expect(errSpy).toHaveBeenCalled();
+  // A usage error: cli.ts prints it as one line and exits 2.
+  it("refuses a wrong number of positionals as a usage error", async () => {
+    await expect(runDiffCli(["only-one.json"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: "expected exactly two report paths, got 1",
+    });
   });
 
   it("throws a clear error for a non-report JSON file", async () => {

@@ -124,7 +124,10 @@ console.log(`promoted=${verdict.promoted} rate=${verdict.successRate}`);
 ```
 
 5/5 → `verified`. 1/5 or 2/5 → `demoted`. In between → still
-`candidate`, gather more data on the next run.
+`candidate`, gather more data on the next run. A host that does not
+answer decides nothing: the first run that cannot connect stops
+verification with `verdict.unreachable` set, and the recipe's stats and
+status stay as they were.
 
 ## Phase C: production (`scenarioLoad` + `recipeDriver` + faults)
 

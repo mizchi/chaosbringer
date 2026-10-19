@@ -40,10 +40,21 @@ export interface ScanFinding {
   title: string;
   /**
    * Where it was seen, worst first: page URLs, or perfKeys for a step
-   * (`<urlPattern> :: <kind>`), capped at `SCAN_WHERE_CAP`. `occurrences`
-   * counts all of them.
+   * (`<urlPattern> :: <kind>`), or files, capped at `SCAN_WHERE_CAP`.
+   * `places` counts all of them.
    */
   where: string[];
+  /**
+   * How many distinct places it was seen at: `where` before the cap.
+   * `analyzeScan` always sets it; optional for a finding built elsewhere or
+   * read from an older `scan-report.json`, which the formatters count by
+   * `where` instead.
+   */
+  places?: number;
+  /**
+   * How often it was seen: the errors for an error finding (four throws on
+   * one page are 4, in 1 place), else the places.
+   */
   occurrences: number;
   /** The measured facts, one short line each. */
   evidence: string[];
@@ -51,7 +62,9 @@ export interface ScanFinding {
    * How many items `evidence` leaves out: it lists the first `SCAN_WHERE_CAP`
    * of a finding's pages, steps or files. Absent when it leaves none out. Not
    * `occurrences` less the lines: an error finding's `occurrences` counts
-   * errors, and its first line sums them up.
+   * errors, and its first line sums them up. Not `places` less the cap
+   * either: an error finding's evidence lists the files a failed load is
+   * about (`resource: <url>`), not its pages.
    */
   unlisted?: number;
   /** What usually causes it and where to look. */
@@ -521,7 +534,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       severity: "high",
       category: "bug",
       title: "Pages that did not load",
-      where: capWhere(failed.map((p) => p.url)),
+      ...placesOf(failed.map((p) => p.url)),
       occurrences: failed.length,
       evidence: failed.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: ${p.status}${linkedFrom(p)}`),
       ...unlistedOf(failed.length),
@@ -535,7 +548,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       severity: "high",
       category: "bug",
       title: "Pages answered with a server error",
-      where: capWhere(server.map((p) => p.url)),
+      ...placesOf(server.map((p) => p.url)),
       occurrences: server.length,
       evidence: server.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
       ...unlistedOf(server.length),
@@ -552,7 +565,7 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       severity: "medium",
       category: "bug",
       title: "Links to pages that do not exist",
-      where: capWhere(broken.map((p) => p.url)),
+      ...placesOf(broken.map((p) => p.url)),
       occurrences: broken.length,
       evidence: broken.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
       ...unlistedOf(broken.length),
@@ -643,7 +656,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
       severity: auth ? "low" : thirdParty && r.severity === "high" ? "medium" : r.severity,
       category: isAxe ? "a11y" : r.category,
       title: `${isAxe ? "Accessibility violation" : r.title}: ${truncate(c.sample.message, 120)}`,
-      where: capWhere(c.urls),
+      ...placesOf(c.urls),
       occurrences: c.count,
       evidence: [
         `${c.count}× on ${c.urls.length} page${c.urls.length === 1 ? "" : "s"}`,
@@ -700,7 +713,7 @@ function resilienceFindings(
       severity: severe ? "high" : "low",
       category: "resilience",
       title: `Only when an API request fails: ${ERROR_RULES[c.type].title}: ${truncate(c.sample.message, 100)}`,
-      where: capWhere([...urls]),
+      ...placesOf([...urls]),
       occurrences: count,
       evidence: [
         `${count}× under ${faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")}; never in the clean crawl`,
@@ -731,7 +744,7 @@ function resilienceFindings(
       severity: "high",
       category: "resilience",
       title: "Pages that stop loading when an API request fails",
-      where: capWhere(urls),
+      ...placesOf(urls),
       occurrences: urls.length,
       evidence: urls
         .slice(0, SCAN_WHERE_CAP)
@@ -1031,7 +1044,7 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
       severity: unused >= SCAN_THRESHOLDS.unusedJsPct.poor ? "medium" : "low",
       category: "perf",
       title: `${fmt(unused)}% of the shipped JS never ran during the crawl`,
-      where: capWhere(js.lowUsage.map((f) => f.url)),
+      ...placesOf(js.lowUsage.map((f) => f.url)),
       occurrences: js.lowUsage.length,
       evidence: [
         `${fmt(js.totalBytes / 1024)} KB of JS, ${fmt(js.usedBytes / 1024)} KB executed`,
@@ -1343,6 +1356,10 @@ export function assetIdentity(url: string): string {
   try {
     const u = new URL(url);
     u.hash = "";
+    // A copy, whatever the lint says: the loop deletes from the params it
+    // walks, and a live URLSearchParams iterator skips the entry after each
+    // one it deletes.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     for (const [k, v] of [...u.searchParams]) {
       if (CACHE_BUST_KEYS.has(k.toLowerCase()) || /^\d{8,}$/.test(v) || /^[0-9a-f]{16,}$/i.test(v)) u.searchParams.delete(k);
     }
@@ -1386,7 +1403,7 @@ function sameOrigin(a: string, b: string): boolean {
 function pushLocated(
   out: ScanFinding[],
   hits: Located[],
-  f: Omit<ScanFinding, "where" | "occurrences" | "evidence" | "severity">,
+  f: Omit<ScanFinding, "where" | "places" | "occurrences" | "evidence" | "severity">,
   t: { poor: number },
   warnSeverity: ScanSeverity,
 ): void {
@@ -1399,7 +1416,7 @@ function severityOf(hits: readonly Located[], t: { poor: number }, warnSeverity:
 
 function located(
   hits: Located[],
-  f: Omit<ScanFinding, "where" | "occurrences" | "evidence">,
+  f: Omit<ScanFinding, "where" | "places" | "occurrences" | "evidence">,
 ): ScanFinding {
   const sorted = [...hits].sort((a, b) => b.value - a.value);
   // One entry per location: a document's vitals can be reported by two visits.
@@ -1408,14 +1425,17 @@ function located(
   return {
     ...f,
     where: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.where),
+    places: unique.length,
     occurrences: unique.length,
     evidence: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.line),
     ...unlistedOf(unique.length),
   };
 }
 
-function capWhere(xs: readonly string[]): string[] {
-  return [...new Set(xs)].slice(0, SCAN_WHERE_CAP);
+/** `where` and `places` for `xs`: each place once, the first `SCAN_WHERE_CAP` of them listed. */
+function placesOf(xs: readonly string[]): Pick<ScanFinding, "where" | "places"> {
+  const unique = [...new Set(xs)];
+  return { where: unique.slice(0, SCAN_WHERE_CAP), places: unique.length };
 }
 
 /** `unlisted` for `n` items of which the evidence lists the first `SCAN_WHERE_CAP`. */

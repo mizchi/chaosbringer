@@ -124,7 +124,7 @@ export function collectRawTargets(): RawActionTarget[] {
   };
 
   // Links with priority for navigation
-  document.querySelectorAll("a[href]").forEach((el, i) => {
+  document.querySelectorAll("a[href]").forEach((el) => {
     const anchor = el as HTMLAnchorElement;
     const text = anchor.innerText?.trim() || "";
     const ariaLabel = anchor.getAttribute("aria-label");

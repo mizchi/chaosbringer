@@ -25,6 +25,7 @@ import { summarizePages } from "./filters.js";
 import { COMMON_IGNORE_PATTERNS } from "./ignore-presets.js";
 import { getExitCode } from "./reporter.js";
 import type { ChaosTestOptions, CrawlerOptions, PageError, PageResult, CrawlReport } from "./types.js";
+import { validateChaosTestOptions } from "./validate.js";
 import { runRecipeWithRequires } from "./recipes/composition.js";
 import { investigate as runInvestigate, type InvestigateResult } from "./recipes/investigate.js";
 import { loadPageScenarios } from "./recipes/page-scenarios.js";
@@ -75,6 +76,9 @@ export interface ChaosFixtures {
  * fixture and `runChaosTest`, so an option cannot reach one and not the other.
  */
 function crawlerOptions(options: ChaosTestOptions, baseUrl: string, maxPages: number): CrawlerOptions {
+  // Here rather than left to the crawler's `validateOptions`: a key this
+  // builder does not copy never reaches it.
+  validateChaosTestOptions(options);
   return {
     baseUrl,
     maxPages,
@@ -298,7 +302,7 @@ export interface RecipesFixtures {
  *   });
  */
 export function withRecipes(defaults: RecipesFixtureOptions = {}) {
-  const sharedStore = defaults.storeInstance ?? new RecipeStore({ silent: true, ...(defaults.store ?? {}) });
+  const sharedStore = defaults.storeInstance ?? new RecipeStore({ silent: true, ...defaults.store });
 
   return {
     // Playwright Test inspects the parameter declaration to wire

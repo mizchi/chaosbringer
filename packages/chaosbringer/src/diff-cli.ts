@@ -17,6 +17,7 @@
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { UsageError } from "./cli-usage.js";
 import { diffReports } from "./diff.js";
 import type { CrawlReport } from "./types.js";
 
@@ -206,10 +207,7 @@ export async function runDiffCli(argv: string[]): Promise<void> {
     return;
   }
   if (positionals.length !== 2) {
-    console.error("diff: expected exactly two report paths");
-    console.error(HELP);
-    process.exitCode = 1;
-    return;
+    throw new UsageError(`expected exactly two report paths, got ${positionals.length}`);
   }
   const [leftPath, rightPath] = positionals;
   const summary = buildSummary(leftPath, rightPath);

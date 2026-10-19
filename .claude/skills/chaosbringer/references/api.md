@@ -94,6 +94,8 @@ wrong is silent:
 | `report.iframeFaults[]` | `matched` | **`fired`** |
 | `session.stats()` from `applyFaults` (network) | `matched` | **`injected`** |
 | `session.runtimeStats()` | `matched` | **`fired`** |
+| `crawler.getFaultStats()` after `testPage()` (network) | `matched` | **`injected`** |
+| `crawler.getRuntimeFaultStats()` / `getIframeFaultStats()` | `matched` | **`fired`** |
 
 `injected` and `fired` are the same question under two names — there is no
 object carrying both. So `stats.injected` on what turned out to be a runtime
@@ -338,4 +340,20 @@ ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"]
 
 `testPage` uses a page *you* own, and releases anything a `hang` parked before
 it returns. If you drive the page across several steps of your own, `release()`
-on the crawler drains on demand.
+on the crawler drains on demand. It returns no report, so read the counters
+off the crawler (`chaos.crawler.getFaultStats()`, `getRuntimeFaultStats()`),
+or hand them to `unfiredFaults` with the result:
+`unfiredFaults({ faultInjections: crawler.getFaultStats(), pages: [result] })`.
+The crawler leaves your context alone, so on a page a service worker controls
+the network rules see none of the requests the worker takes:
+`result.serviceWorker` is `"unrouted"` and `unfiredFaults` names the worker
+rather than the pattern. Use runtime faults there, or create the context with
+`serviceWorkers: "block"`. A `crawl()` routes its own context, so there the
+rules do see what the worker forwards — unless
+`PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` is set, which hands a worker's
+requests to no route at all (its pages are `"unrouted"` too).
+
+A misspelled `chaosOptions` key (`maxActionPerPage`, `stirct`) is refused with
+a "did you mean" error as the fixture is set up, and so is a `ChaosCrawler`
+option the fixture does not take (`timeout`, `iframeFaults`). Both used to be
+dropped without a word.

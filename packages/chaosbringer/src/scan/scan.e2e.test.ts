@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runScan } from "./run.js";
 import type { ScanReportFile } from "./run.js";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
+import type { CrawlReport } from "../types.js";
+import type { ScanFaultKind } from "./analyze.js";
 
 /**
  * `runScan` end to end on a small site with one bug of each kind the scan's
@@ -95,5 +97,19 @@ describe("runScan", () => {
     const md = readFileSync(result.files.markdown, "utf-8");
     expect(md).toContain(`# chaosbringer scan: ${base}/`);
     expect(md).toContain("layout-thrash");
+
+    // A chaos crawl's report reruns the scan with its fault. It held the
+    // plain crawl's command, which has no flag for the fault: it reran clean.
+    // No scan flag sets `actionWeights`, which the command dropped without a word.
+    const note = "# + 1 option not expressible on the CLI: crawler.actionWeights";
+    const status = `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults 500 --no-coverage ${note}`;
+    const saved = (kind: ScanFaultKind) => JSON.parse(readFileSync(result.files.chaos[kind] ?? "", "utf-8")) as CrawlReport;
+    expect(saved("status").reproCommand).toBe(status);
+    expect(saved("hang").reproCommand).toBe(
+      `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults hang --hang-ms 1500 --no-coverage ${note}`,
+    );
+    expect(file.chaos.find((c) => c.fault === "status")?.reproCommand).toBe(status);
+    expect(md).toContain(`, rerun with \`${status}\``);
+    expect(result.baseline.reproCommand).toMatch(new RegExp(`^chaosbringer --url ${base}/ --seed 7 `));
   }, 180_000);
 });

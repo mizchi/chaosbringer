@@ -4,11 +4,13 @@
  */
 
 import { parseArgs } from "node:util";
+import { PASTED_COMMENT, UsageError } from "../cli-usage.js";
+import { errorMessage } from "../errors.js";
 import { COMMON_IGNORE_PATTERNS, resolveIgnorePresets } from "../ignore-presets.js";
 import { NETWORK_PROFILES, type NetworkProfile } from "../types.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind, type ScanSeverity } from "./analyze.js";
 import { formatScanSummary } from "./format.js";
-import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan } from "./run.js";
+import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } from "./run.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 
 const HELP = `
@@ -60,7 +62,8 @@ OUTPUT (in --out):
   scan-report.md          The findings, readable
   scan-report.json        The findings, machine-readable
   clean-report.json       The clean crawl's full report
-  chaos-<fault>-report.json  Each chaos crawl's full report
+  chaos-<fault>-report.json  Each chaos crawl's full report; its reproCommand is the
+                          chaosbringer scan … --faults <fault> command that reruns it
   perf/                   Per-page perf sidecars (for \`chaosbringer perf drilldown\`)
 
 Only scan sites you own or are allowed to test: the crawl clicks, types and
@@ -69,88 +72,57 @@ submits forms. Exclude destructive URLs (logout, delete, checkout) with --exclud
 
 const SEVERITIES: ScanSeverity[] = ["high", "medium", "low"];
 
+export const SCAN_CLI_OPTIONS = {
+  url: { type: "string" },
+  "max-pages": { type: "string" },
+  "max-actions": { type: "string" },
+  out: { type: "string" },
+  "no-chaos": { type: "boolean", default: false },
+  faults: { type: "string" },
+  seed: { type: "string" },
+  axe: { type: "boolean", default: false },
+  "aria-targets": { type: "boolean", default: false },
+  bind: { type: "boolean", default: false },
+  "bind-title": { type: "string" },
+  "no-coverage": { type: "boolean", default: false },
+  "hang-ms": { type: "string" },
+  exclude: { type: "string", multiple: true },
+  "ignore-error": { type: "string", multiple: true },
+  "ignore-analytics": { type: "boolean", default: false },
+  "ignore-preset": { type: "string", multiple: true },
+  "storage-state": { type: "string" },
+  sitemap: { type: "string" },
+  network: { type: "string" },
+  device: { type: "string" },
+  timeout: { type: "string" },
+  ...HEADLESS_OPTIONS,
+  "fail-on": { type: "string" },
+  quiet: { type: "boolean", default: false },
+  help: { type: "boolean", default: false },
+} as const;
+
+export function parseScanArgs(argv: string[]) {
+  const parsed = parseArgs({ args: argv, options: SCAN_CLI_OPTIONS, allowPositionals: true });
+  // A chaos report's reproCommand can end in a `# + …` note, which zsh
+  // passes on as arguments; parseArgs' own refusal did not say so.
+  const [first] = parsed.positionals;
+  if (first === "#") throw new UsageError(PASTED_COMMENT);
+  if (first !== undefined) throw new UsageError(`unexpected argument "${first}": scan takes no positional arguments`);
+  return parsed;
+}
+
+export type ScanCliValues = ReturnType<typeof parseScanArgs>["values"];
+
 export async function runScanCli(argv: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      url: { type: "string" },
-      "max-pages": { type: "string" },
-      "max-actions": { type: "string" },
-      out: { type: "string" },
-      "no-chaos": { type: "boolean", default: false },
-      faults: { type: "string" },
-      seed: { type: "string" },
-      axe: { type: "boolean", default: false },
-      "aria-targets": { type: "boolean", default: false },
-      bind: { type: "boolean", default: false },
-      "bind-title": { type: "string" },
-      "no-coverage": { type: "boolean", default: false },
-      "hang-ms": { type: "string" },
-      exclude: { type: "string", multiple: true },
-      "ignore-error": { type: "string", multiple: true },
-      "ignore-analytics": { type: "boolean", default: false },
-      "ignore-preset": { type: "string", multiple: true },
-      "storage-state": { type: "string" },
-      sitemap: { type: "string" },
-      network: { type: "string" },
-      device: { type: "string" },
-      timeout: { type: "string" },
-      ...HEADLESS_OPTIONS,
-      "fail-on": { type: "string" },
-      quiet: { type: "boolean", default: false },
-      help: { type: "boolean", default: false },
-    },
-  });
+  const { values } = parseScanArgs(argv);
   if (values.help) {
     console.log(HELP);
     return;
   }
-  if (!values.url) throw new Error("--url is required (see chaosbringer scan --help)");
-  try {
-    new URL(values.url);
-  } catch {
-    throw new Error(`--url must be an absolute URL (got ${JSON.stringify(values.url)})`);
-  }
+  const options = scanOptionsFromCli(values);
   const failOn = values["fail-on"];
-  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
-    throw new Error(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
-  }
 
-  const network = values.network;
-  if (network !== undefined && (network === "offline" || !NETWORK_PROFILES.includes(network as NetworkProfile))) {
-    throw new Error(`--network must be one of ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")} (got ${JSON.stringify(network)})`);
-  }
-  const faults = values.faults === undefined ? undefined : parseFaults(values.faults);
-
-  const ignoreErrorPatterns = [...(values["ignore-error"] ?? [])];
-  if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
-  for (const spec of values["ignore-preset"] ?? []) ignoreErrorPatterns.push(...resolveIgnorePresets(spec));
-
-  const result = await runScan({
-    url: values.url,
-    maxPages: intFlag("--max-pages", values["max-pages"], 1),
-    maxActionsPerPage: intFlag("--max-actions", values["max-actions"], 0),
-    outDir: values.out,
-    chaos: !values["no-chaos"],
-    ...(faults ? { faults } : {}),
-    seed: intFlag("--seed", values.seed, 0),
-    axe: values.axe,
-    coverage: !values["no-coverage"],
-    hangReleaseMs: intFlag("--hang-ms", values["hang-ms"], 1),
-    crawler: {
-      headless: resolveHeadless(values),
-      ...(values["aria-targets"] ? { ariaTargets: true } : {}),
-      ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
-      ...(values.exclude ? { excludePatterns: values.exclude } : {}),
-      ...(ignoreErrorPatterns.length > 0 ? { ignoreErrorPatterns } : {}),
-      ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),
-      ...(values.sitemap ? { seedFromSitemap: values.sitemap } : {}),
-      ...(network ? { network: network as NetworkProfile } : {}),
-      ...(values.device ? { device: values.device } : {}),
-      ...(values.timeout !== undefined ? { timeout: intFlag("--timeout", values.timeout, 1) } : {}),
-    },
-    onProgress: values.quiet ? undefined : (line) => console.error(line),
-  });
+  const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
 
   console.log(formatScanSummary(result.analysis));
   console.log(`\nreport: ${result.files.markdown}\n        ${result.files.json}`);
@@ -162,23 +134,89 @@ export async function runScanCli(argv: string[]): Promise<void> {
   }
 }
 
+/**
+ * The `runScan` options `values` ask for; throws on a value the CLI refuses.
+ * Apart from `runScanCli` so a test can parse a chaos report's
+ * `reproCommand` (`scanReproCommand`) back into the scan it came from.
+ */
+export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
+  // Every check is a usage error: one `chaosbringer scan: …` line and exit 2
+  // (cli.ts), not `scan failed: …` and exit 1, which --fail-on gates on.
+  if (!values.url) throw new UsageError("--url is required");
+  try {
+    new URL(values.url);
+  } catch {
+    throw new UsageError(`--url must be an absolute URL (got ${JSON.stringify(values.url)})`);
+  }
+  const failOn = values["fail-on"];
+  if (failOn !== undefined && !SEVERITIES.includes(failOn as ScanSeverity)) {
+    throw new UsageError(`--fail-on must be one of ${SEVERITIES.join(", ")} (got ${JSON.stringify(failOn)})`);
+  }
+
+  const network = values.network;
+  if (network !== undefined && (network === "offline" || !NETWORK_PROFILES.includes(network as NetworkProfile))) {
+    throw new UsageError(`--network must be one of ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")} (got ${JSON.stringify(network)})`);
+  }
+  const faults = values.faults === undefined ? undefined : parseFaults(values.faults);
+
+  const ignoreErrorPatterns = [...(values["ignore-error"] ?? [])];
+  if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
+  for (const spec of values["ignore-preset"] ?? []) {
+    try {
+      ignoreErrorPatterns.push(...resolveIgnorePresets(spec));
+    } catch (err) {
+      throw new UsageError(`--ignore-preset: ${errorMessage(err)}`);
+    }
+  }
+  const maxPages = intFlag("--max-pages", values["max-pages"], 1);
+  const maxActionsPerPage = intFlag("--max-actions", values["max-actions"], 0);
+  const seed = intFlag("--seed", values.seed, 0);
+  const hangReleaseMs = intFlag("--hang-ms", values["hang-ms"], 1);
+  const timeout = intFlag("--timeout", values.timeout, 1);
+
+  return {
+    url: values.url,
+    maxPages,
+    maxActionsPerPage,
+    outDir: values.out,
+    chaos: !values["no-chaos"],
+    ...(faults ? { faults } : {}),
+    seed,
+    axe: values.axe,
+    coverage: !values["no-coverage"],
+    hangReleaseMs,
+    crawler: {
+      headless: resolveHeadless(values),
+      ...(values["aria-targets"] ? { ariaTargets: true } : {}),
+      ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true } : {}),
+      ...(values.exclude ? { excludePatterns: values.exclude } : {}),
+      ...(ignoreErrorPatterns.length > 0 ? { ignoreErrorPatterns } : {}),
+      ...(values["storage-state"] ? { storageState: values["storage-state"] } : {}),
+      ...(values.sitemap ? { seedFromSitemap: values.sitemap } : {}),
+      ...(network ? { network: network as NetworkProfile } : {}),
+      ...(values.device ? { device: values.device } : {}),
+      ...(timeout !== undefined ? { timeout } : {}),
+    },
+  };
+}
+
 /** `500,abort,hang` → fault kinds; `500` is the `status` crawl. */
 export function parseFaults(raw: string): ScanFaultKind[] {
   const out: ScanFaultKind[] = [];
   for (const part of raw.split(",").map((x) => x.trim()).filter(Boolean)) {
     const kind = part === "500" ? "status" : part;
     if (!SCAN_FAULT_KINDS.includes(kind as ScanFaultKind)) {
-      throw new Error(`--faults: unknown fault ${JSON.stringify(part)} (known: 500, abort, hang)`);
+      throw new UsageError(`--faults: unknown fault ${JSON.stringify(part)} (known: 500, abort, hang)`);
     }
     if (!out.includes(kind as ScanFaultKind)) out.push(kind as ScanFaultKind);
   }
-  if (out.length === 0) throw new Error("--faults needs at least one of 500, abort, hang (or pass --no-chaos)");
+  if (out.length === 0) throw new UsageError("--faults needs at least one of 500, abort, hang (or pass --no-chaos)");
   return out;
 }
 
 function intFlag(flag: string, raw: string | undefined, min: number): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) throw new Error(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
+  if (!Number.isInteger(n) || n < min) throw new UsageError(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }

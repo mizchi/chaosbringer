@@ -96,11 +96,59 @@ export function packageVersion(): string {
 }
 
 /**
+ * The refusal of a stray `#` argument: a repro command's trailing `# + …`
+ * note, pasted into zsh, which reads `#` as a word unless
+ * `interactivecomments` is set. The main command and `scan` both print it.
+ */
+export const PASTED_COMMENT =
+  'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+  "`setopt interactivecomments`); drop the `#` and everything after it";
+
+/**
+ * A subcommand refusing its arguments: a missing flag or operand, a value it
+ * cannot use. `cli.ts` reports it as the main command reports its own, in one
+ * `chaosbringer <sub>: …` line with exit 2: nothing ran. Thrown as a plain
+ * Error it was `<sub> failed: …` and exit 1, the code of a run that found
+ * something, which is how a CI step read a typo.
+ *
+ * `command` names a sub-subcommand (`perf gate`); see `inSubcommand`.
+ */
+export class UsageError extends Error {
+  command?: string;
+  constructor(message: string, command?: string) {
+    super(message);
+    this.name = "UsageError";
+    if (command !== undefined) this.command = command;
+  }
+}
+
+/** A `UsageError`, or `parseArgs` refusing an argv (an unknown flag, a missing value). */
+export function isUsageError(err: unknown): boolean {
+  if (err instanceof UsageError) return true;
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code.startsWith("ERR_PARSE_ARGS_");
+}
+
+/**
+ * Run a sub-subcommand so that a usage error out of it, `parseArgs`' too,
+ * names it: `chaosbringer perf gate: …`, not `chaosbringer perf: …`.
+ */
+export async function inSubcommand<T>(command: string, run: () => T | Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (isUsageError(err) && (err as UsageError).command === undefined) (err as UsageError).command = command;
+    throw err;
+  }
+}
+
+/**
  * The one line a refused invocation prints. `err` is what `parseArgs`, the
  * flag parsers or `validateOptions` threw; they used to escape as a Node
- * stack trace.
+ * stack trace. `command` is who refused it: `chaosbringer`, or a subcommand
+ * as `chaosbringer scan`.
  */
-export function usageErrorMessage(err: unknown): string {
+export function usageErrorMessage(err: unknown, command = "chaosbringer"): string {
   let message = err instanceof Error ? err.message : String(err);
   // parseArgs goes on to explain `--` for a positional that starts with a
   // "-", which a URL never does.
@@ -108,9 +156,11 @@ export function usageErrorMessage(err: unknown): string {
     const known = /^Unknown option '([^']+)'/.exec(message);
     if (known) message = `unknown option ${known[1]}`;
   }
-  // validateOptions' messages carry the prefix already. parseArgs' advice
-  // for a value that starts with a dash (`--timeout -5`) spans three lines.
-  return `chaosbringer: ${message.replace(/^chaosbringer: /, "").replace(/\s*\n\s*/g, " ")} (see chaosbringer --help)`;
+  // validateOptions' messages carry the prefix already (`chaosbringer: `, or
+  // a subcommand's `chaosbringer shard: `). parseArgs' advice for a value
+  // that starts with a dash (`--timeout -5`) spans three lines.
+  const text = message.replace(/^chaosbringer(?: [a-z-]+)*: /, "").replace(/\s*\n\s*/g, " ");
+  return `${command}: ${text} (see ${command} --help)`;
 }
 
 /**

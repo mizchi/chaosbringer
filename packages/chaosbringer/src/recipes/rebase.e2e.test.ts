@@ -88,6 +88,11 @@ describe("a recipe replayed on another base URL", () => {
     return store;
   }
 
+  /** The store as the next run, or a teammate, reads it: from disk. */
+  function reread(store: RecipeStore): RecipeStore {
+    return new RecipeStore({ localDir: store.writeDir ?? false, globalDir: false, silent: true });
+  }
+
   const setupPage = async () => {
     const { page, close } = await newIsolatedPage(browser);
     return { page, cleanup: close };
@@ -118,6 +123,38 @@ describe("a recipe replayed on another base URL", () => {
     );
     expect(result.promoted).toBe(false);
     expect(result.outcomes[0]?.reason).toContain(`ERR_CONNECTION_REFUSED at ${unreachable}/login`);
+  }, 60_000);
+
+  it("verify leaves a verified recipe as it was when the base URL does not answer", async () => {
+    // A host that is down says nothing about the recipe. Verify used to
+    // count each run as a failure and demote the recipe on disk.
+    const verified: ActionRecipe = {
+      ...login,
+      status: "verified",
+      stats: { ...login.stats, successCount: 5, failCount: 0 },
+    };
+    const store = storeWith(verified);
+    const before = store.get(login.name);
+    const result = await verifyAndPromote(store, verified, { runs: 3, baseUrl: unreachable, setupPage });
+    expect(result).toMatchObject({ promoted: false, demoted: false });
+    expect(result.unreachable).toBe(`net::ERR_CONNECTION_REFUSED at ${unreachable}/login`);
+    // It stopped at the first run that could not connect.
+    expect(result.outcomes).toHaveLength(1);
+    expect(reread(store).get(login.name)).toEqual(before);
+  }, 60_000);
+
+  it("verify still counts a replay the site answered and failed", async () => {
+    const broken: ActionRecipe = {
+      ...login,
+      name: "site/login-gone",
+      steps: [...login.steps.slice(0, 1), { kind: "click", selector: "#no-such-button" }],
+      status: "verified",
+    };
+    const store = storeWith(broken);
+    const result = await verifyAndPromote(store, broken, { runs: 1, baseUrl: other.url, setupPage });
+    expect(result).toMatchObject({ promoted: false, demoted: true });
+    expect(result.unreachable).toBeUndefined();
+    expect(store.get(broken.name)).toMatchObject({ status: "demoted", stats: { failCount: 1 } });
   }, 60_000);
 
   it("load replays every recipe of a requires chain on the base URL's server", async () => {
@@ -158,6 +195,37 @@ describe("a recipe replayed on another base URL", () => {
       }),
     );
     expect(report.totals.iterationFailures).toBe(1);
+  }, 60_000);
+
+  it("load stops, says the base URL is unreachable, and leaves the store alone", async () => {
+    // It used to fail for its whole duration: the replays demoted the recipe
+    // on disk, then every iteration threw on an empty candidate list, tens of
+    // thousands a second, until building the report overflowed the stack.
+    const verified: ActionRecipe = {
+      ...login,
+      status: "verified",
+      stats: { ...login.stats, successCount: 5, failCount: 0 },
+    };
+    const store = storeWith(verified);
+    const before = store.get(login.name);
+    const started = Date.now();
+    const { report } = await scenarioLoadFromStore({
+      baseUrl: unreachable,
+      store,
+      // The second worker is due 30s in: the stop has to end its ramp-up
+      // wait too, or the report waits for it.
+      workers: 2,
+      rampUp: "30s",
+      duration: "40s",
+      thinkTime: { distribution: "none" },
+    });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(report.stopped).toMatchObject({
+      cause: "unreachable",
+      reason: `base URL unreachable: ${unreachable} (net::ERR_CONNECTION_REFUSED at ${unreachable}/login, 3 iterations in a row)`,
+    });
+    expect(report.totals).toMatchObject({ iterations: 3, iterationFailures: 3 });
+    expect(reread(store).get(login.name)).toEqual(before);
   }, 60_000);
 
   it("recipeDriver replays on the server the crawl is on", async () => {

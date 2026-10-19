@@ -156,6 +156,7 @@ chaosbringer/
 ```bash
 pnpm install
 pnpm -F chaosbringer test              # unit + fixture E2E (no API key needed)
+pnpm -F chaosbringer lint              # oxlint over src/, correctness rules as errors (CI runs it)
 PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm -F chaosbringer test       # if you need to point at a shared cache
 ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (issue #95). Costs a few haiku-tier calls per run.
 ```

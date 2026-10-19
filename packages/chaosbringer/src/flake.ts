@@ -10,6 +10,9 @@
 
 import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
+import { parseNumberFlag } from "./cli-crawl-options.js";
+import { UsageError } from "./cli-usage.js";
+import { errorMessage } from "./errors.js";
 import type { CrawlReport, PageError } from "./types.js";
 
 export interface ClusterOccurrence {
@@ -215,9 +218,9 @@ interface FlakeCliArgs {
 /**
  * Exported for tests. The parser is where the workflow bug lived — a real flag
  * of the root command that this subcommand refused — and it is not reachable
- * from `runFlakeCli` without launching browsers. Note that invalid *values*
- * exit the process via `fail()` rather than throwing, so only the
- * unknown-flag path (thrown by `parseArgs` itself) is assertable in-process.
+ * from `runFlakeCli` without launching browsers. Every refusal throws: an
+ * unknown flag from `parseArgs`, an invalid value a `UsageError` (`fail()`),
+ * which cli.ts reports with exit 2.
  */
 export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
   const { values } = parseArgs({
@@ -259,7 +262,25 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     fail(`--runs must be an integer >= 2 (got ${JSON.stringify(values.runs)})`);
   }
 
-  const maxActionsRaw = values["max-actions"] ?? values["max-actions-per-page"];
+  // The main crawl's parser, not `Number`: `--max-pages abc` was NaN, which
+  // the first run refused as `"maxPages" must be an integer >= 1 (got null)`
+  // after `Run 1/3...`, with exit 1 — and chaos-flake.yml reads exit 1 as
+  // "flakes were found". An empty value is unset, as in the main crawl
+  // (`--max-pages "$MAX"` with MAX unset runs with the default).
+  const crawlNumber = (flag: string, raw: string | undefined, min: number): number | undefined => {
+    try {
+      return raw ? parseNumberFlag(flag, raw, { min, integer: true }) : undefined;
+    } catch (err) {
+      fail(errorMessage(err));
+    }
+  };
+  const maxPages = crawlNumber("--max-pages", values["max-pages"], 1);
+  const maxActions = crawlNumber(
+    values["max-actions"] !== undefined ? "--max-actions" : "--max-actions-per-page",
+    values["max-actions"] ?? values["max-actions-per-page"],
+    0,
+  );
+  const timeout = crawlNumber("--timeout", values.timeout, 1);
 
   let seed: number | undefined;
   if (values.seed !== undefined) {
@@ -274,9 +295,9 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     baseUrl: values.url!,
     runs,
     seed,
-    maxPages: values["max-pages"] ? Number(values["max-pages"]) : undefined,
-    maxActions: maxActionsRaw !== undefined ? Number(maxActionsRaw) : undefined,
-    timeout: values.timeout ? Number(values.timeout) : undefined,
+    maxPages,
+    maxActions,
+    timeout,
     ignoreAnalytics: values["ignore-analytics"] ?? false,
     harReplay: values["har-replay"],
     traceReplay: values["trace-replay"],
@@ -312,10 +333,9 @@ OPTIONS:
 `);
 }
 
+/** A usage error: `chaosbringer flake: <msg>` and exit 2, from cli.ts. */
 function fail(msg: string): never {
-  console.error(`Error: ${msg}`);
-  console.error("Run `chaosbringer flake --help` for usage information.");
-  process.exit(1);
+  throw new UsageError(msg);
 }
 
 /** Entry point wired from src/cli.ts when the `flake` subcommand is used. */

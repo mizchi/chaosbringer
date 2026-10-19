@@ -81,7 +81,7 @@ export async function parallelChaos(
     index: i,
   }));
 
-  const results: ParallelShardResult[] = new Array(namedShards.length);
+  const results = Array.from<ParallelShardResult>({ length: namedShards.length });
   let cursor = 0;
 
   async function worker(): Promise<void> {

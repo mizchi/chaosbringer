@@ -22,9 +22,11 @@
 
 import { parseArgs } from "node:util";
 import { chromium } from "playwright";
+import { inSubcommand, UsageError } from "../cli-usage.js";
 import { weightedRandomDriver } from "../drivers/index.js";
 import {
   COMMON_OPTIONS,
+  intFlag,
   openStore,
   requireBaseUrl,
   requireRecipe,
@@ -35,8 +37,10 @@ import { diffRecipes, formatRecipeDiff } from "./diff.js";
 import { lintRecipe, lintStore, summarise } from "./lint.js";
 import { loadPageScenarios } from "./page-scenarios.js";
 import { repairRecipe } from "./repair.js";
-import { verifyAndPromote } from "./verify.js";
+import { verifyAndPromote, type VerifyResult } from "./verify.js";
 import type { ActionRecipe } from "./types.js";
+import { errorMessage } from "../errors.js";
+import { type DocumentRequest, unreachableNavigation, watchDocumentRequests } from "../load/unreachable.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { newIsolatedPage } from "../browser-session.js";
 
@@ -74,38 +78,27 @@ export async function runRecipesCli(argv: string[]): Promise<void> {
     return;
   }
   const rest = argv.slice(1);
-  switch (sub) {
-    case "list":
-      return listCmd(rest);
-    case "show":
-      return showCmd(rest);
-    case "history":
-      return historyCmd(rest);
-    case "promote":
-      return statusCmd(rest, "verified");
-    case "demote":
-      return statusCmd(rest, "demoted");
-    case "delete":
-      return deleteCmd(rest);
-    case "prune":
-      return pruneCmd(rest);
-    case "rollback":
-      return rollbackCmd(rest);
-    case "harvest":
-      return harvestCmd(rest);
-    case "verify":
-      return verifyCmd(rest);
-    case "diff":
-      return diffCmd(rest);
-    case "lint":
-      return lintCmd(rest);
-    case "repair":
-      return repairCmd(rest);
-    default:
-      console.error(`Unknown subcommand: ${sub}\n\n${HELP}`);
-      process.exit(2);
-  }
+  const cmd = Object.hasOwn(SUBS, sub) ? SUBS[sub] : undefined;
+  if (!cmd) throw new UsageError(`unknown subcommand "${sub}" (expected ${Object.keys(SUBS).join(", ")})`);
+  // A usage error names the sub: `chaosbringer recipes show: …`.
+  await inSubcommand(`recipes ${sub}`, () => cmd(rest));
 }
+
+const SUBS: Record<string, (argv: string[]) => Promise<void>> = {
+  list: listCmd,
+  show: showCmd,
+  history: historyCmd,
+  promote: (argv) => statusCmd(argv, "verified"),
+  demote: (argv) => statusCmd(argv, "demoted"),
+  delete: deleteCmd,
+  prune: pruneCmd,
+  rollback: rollbackCmd,
+  harvest: harvestCmd,
+  verify: verifyCmd,
+  diff: diffCmd,
+  lint: lintCmd,
+  repair: repairCmd,
+};
 
 // -------- list --------
 
@@ -177,14 +170,14 @@ async function showCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log("recipes show <name> [--version N]");
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
+  const version = intFlag("--version", values.version, 1);
   const store = openStore(values);
-  const recipe = values.version !== undefined
-    ? requireVersion(store, name, Number(values.version))
-    : requireRecipe(store, name);
+  const recipe = version !== undefined ? requireVersion(store, name, version) : requireRecipe(store, name);
   process.stdout.write(JSON.stringify(recipe, null, 2) + "\n");
 }
 
@@ -198,10 +191,11 @@ async function historyCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log("recipes history <name>");
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
   const store = openStore(values);
   const current = requireRecipe(store, name);
   const history = store.history(name);
@@ -236,10 +230,11 @@ async function statusCmd(argv: string[], target: "verified" | "demoted"): Promis
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log(`recipes ${target === "verified" ? "promote" : "demote"} <name>`);
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
   const store = openStore(values);
   requireRecipe(store, name);
   store.setStatus(name, target);
@@ -259,10 +254,11 @@ async function deleteCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log("recipes delete <name> [--force]");
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
   const store = openStore(values);
   requireRecipe(store, name);
   const history = store.history(name);
@@ -296,11 +292,12 @@ async function pruneCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  const keepLast = Number(values["keep-last"] ?? "5");
-  if (values.help || !name) {
+  if (values.help) {
     console.log("recipes prune <name> [--keep-last N]   (default: 5)");
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
+  const keepLast = intFlag("--keep-last", values["keep-last"], 0) ?? 5;
   const store = openStore(values);
   const deleted = store.pruneHistory(name, { keepLast });
   if (!values.quiet) console.log(`${name}: pruned ${deleted} historical version(s)`);
@@ -319,11 +316,15 @@ async function rollbackCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  const toVersion = Number(values["to-version"] ?? "");
-  if (values.help || !name || !Number.isFinite(toVersion)) {
+  if (values.help) {
     console.log("recipes rollback <name> --to-version N");
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
+  // `Number("")` is 0: a missing --to-version used to ask for v0 and fail
+  // as `@v0 not found`, and a non-number printed this usage line and exit 0.
+  const toVersion = intFlag("--to-version", values["to-version"], 1);
+  if (toVersion === undefined) throw new UsageError("--to-version N is required");
   const store = openStore(values);
   const rolled = store.rollback(name, { toVersion });
   if (!rolled) {
@@ -347,10 +348,11 @@ async function harvestCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const url = positionals[0];
-  if (values.help || !url) {
+  if (values.help) {
     console.log("recipes harvest <url> [--trust]");
     return;
   }
+  if (!url) throw new UsageError("expected a URL to harvest");
   const store = openStore(values);
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
@@ -389,37 +391,41 @@ async function verifyCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log(
       "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]\n\n" +
         "  Replays on --base-url's origin: the recipe's navigations to the origin it\n" +
-        "  was recorded on go there instead, path and query kept (with a warning).",
+        "  was recorded on go there instead, path and query kept (with a warning).\n" +
+        "  Exit: 0 promoted, 1 not promoted, 2 base URL unreachable — a replay could\n" +
+        "  not connect to it, and the recipe's stats and status are left as they were.",
     );
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
   const baseUrl = values["base-url"];
-  if (!baseUrl) {
-    console.error("verify: --base-url is required");
-    process.exit(2);
+  if (!baseUrl) throw new UsageError("--base-url is required");
+  requireBaseUrl(baseUrl);
+  const runs = intFlag("--runs", values.runs, 1) ?? 5;
+  const minSuccessRate = values["min-success-rate"] !== undefined ? Number(values["min-success-rate"]) : 0.8;
+  if (!(minSuccessRate >= 0 && minSuccessRate <= 1)) {
+    throw new UsageError(`--min-success-rate must be a number in 0..1, got ${JSON.stringify(values["min-success-rate"])}`);
   }
-  requireBaseUrl("verify", baseUrl);
   const store = openStore(values);
   const recipe = requireRecipe(store, name);
-  const runs = Number(values.runs ?? "5");
-  const minSuccessRate = values["min-success-rate"]
-    ? Number(values["min-success-rate"])
-    : 0.8;
   if (!values.quiet) warnRebased("verify", [recipe], baseUrl);
 
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
+  // The document requests of the page the goto below runs on.
+  let setupDocument: () => DocumentRequest | null = () => null;
   try {
-    const result = await verifyAndPromote(store, recipe, {
+    const verifying = verifyAndPromote(store, recipe, {
       runs,
       minSuccessRate,
       baseUrl,
       verbose: !values.quiet,
       setupPage: async () => {
         const { page, close } = await newIsolatedPage(browser);
+        setupDocument = watchDocumentRequests(page);
         // verifyAndPromote does NOT navigate for you — caller's setupPage
         // owns the start state. The recipe's first step (if it's a
         // navigate, rebased onto baseUrl) drives the page; otherwise we
@@ -430,14 +436,26 @@ async function verifyCmd(argv: string[]): Promise<void> {
         return { page, cleanup: close };
       },
     });
+    const result: VerifyResult = await verifying.catch((err: unknown) => {
+      // The goto above meets a host that is down before any replay does.
+      // It throws out of verifyAndPromote, which has recorded nothing yet.
+      const unreachable = unreachableNavigation(errorMessage(err), baseUrl, setupDocument());
+      if (!unreachable) throw err;
+      return { promoted: false, demoted: false, successRate: 0, runs, outcomes: [], unreachable };
+    });
     if (values.json) {
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    } else {
+    } else if (!result.unreachable) {
       console.log(
         `${name}: promoted=${result.promoted} demoted=${result.demoted} rate=${result.successRate.toFixed(2)} (${runs} runs)`,
       );
     }
-    if (!result.promoted) process.exitCode = 1;
+    if (result.unreachable) {
+      console.error(
+        `verify: base URL unreachable: ${baseUrl} (${result.unreachable}); ${name} left as it was`,
+      );
+      process.exitCode = 2;
+    } else if (!result.promoted) process.exitCode = 1;
   } finally {
     await browser.close().catch(() => {});
   }
@@ -459,7 +477,7 @@ async function diffCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const target = positionals[0];
-  if (values.help || !target) {
+  if (values.help) {
     console.log(
       "recipes diff <name> [--from-version M] [--to-version N]\n" +
         "recipes diff <nameA>..<nameB>\n\n" +
@@ -468,11 +486,12 @@ async function diffCmd(argv: string[]): Promise<void> {
     );
     return;
   }
+  if (!target) throw new UsageError("expected a recipe name, or <nameA>..<nameB>");
+  const fromVersion = intFlag("--from-version", values["from-version"], 1);
+  const toVersion = intFlag("--to-version", values["to-version"], 1);
+  const context = intFlag("--context", values.context, 0) ?? 1;
   const store = openStore(values);
-  const [left, right] = resolveDiffOperands(store, target, {
-    fromVersion: values["from-version"],
-    toVersion: values["to-version"],
-  });
+  const [left, right] = resolveDiffOperands(store, target, { fromVersion, toVersion });
   const diff = diffRecipes(left, right);
   if (values.json) {
     process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
@@ -482,7 +501,6 @@ async function diffCmd(argv: string[]): Promise<void> {
     if (!values.quiet) console.log("(recipes are identical)");
     return;
   }
-  const context = values.context ? Number(values.context) : 1;
   const isTty = Boolean(process.stdout.isTTY);
   process.stdout.write(
     formatRecipeDiff(diff, { context, color: values.color ?? isTty }) + "\n",
@@ -553,7 +571,7 @@ async function repairCmd(argv: string[]): Promise<void> {
     strict: true,
   });
   const name = positionals[0];
-  if (values.help || !name) {
+  if (values.help) {
     console.log(
       "recipes repair <name> --base-url URL [--start-url URL] [--repair-budget N] [--seed N]\n\n" +
         "  Uses the weighted-random driver to discover a working tail after the\n" +
@@ -563,22 +581,20 @@ async function repairCmd(argv: string[]): Promise<void> {
     );
     return;
   }
+  if (!name) throw new UsageError("expected a recipe name");
+  const seed = intFlag("--seed", values.seed, 0);
+  const budget = intFlag("--repair-budget", values["repair-budget"], 1);
   const store = openStore(values);
   const recipe = requireRecipe(store, name);
   const baseUrl = values["base-url"];
   const startUrl = values["start-url"];
   if (!baseUrl && !startUrl && recipe.steps[0]?.kind !== "navigate") {
-    console.error(
-      "repair: --base-url (or --start-url) is required when the recipe does not start with a navigate step",
-    );
-    process.exit(2);
+    throw new UsageError("--base-url (or --start-url) is required when the recipe does not start with a navigate step");
   }
   if (baseUrl) {
-    requireBaseUrl("repair", baseUrl);
+    requireBaseUrl(baseUrl);
     if (!values.quiet) warnRebased("repair", [recipe], baseUrl);
   }
-  const seed = values.seed ? Number(values.seed) : undefined;
-  const budget = values["repair-budget"] ? Number(values["repair-budget"]) : undefined;
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
   try {
     const result = await repairRecipe({
@@ -614,7 +630,7 @@ async function repairCmd(argv: string[]): Promise<void> {
 function resolveDiffOperands(
   store: ReturnType<typeof openStore>,
   target: string,
-  opts: { fromVersion?: string; toVersion?: string },
+  opts: { fromVersion?: number; toVersion?: number },
 ): [ActionRecipe, ActionRecipe] {
   if (target.includes("..")) {
     const [a, b] = target.split("..", 2);
@@ -622,8 +638,8 @@ function resolveDiffOperands(
   }
   const current = requireRecipe(store, target);
   const history = store.history(target);
-  const toVersion = opts.toVersion ? Number(opts.toVersion) : current.version;
-  const fromVersion = opts.fromVersion ? Number(opts.fromVersion) : history[0]?.version;
+  const toVersion = opts.toVersion ?? current.version;
+  const fromVersion = opts.fromVersion ?? history[0]?.version;
   if (fromVersion === undefined) {
     console.error(
       `${target}: no history to diff against — pass --from-version, or use the \`name..other\` form`,

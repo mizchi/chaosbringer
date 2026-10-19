@@ -11,9 +11,11 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * second `testPage()` applied its lifecycle faults to the previous page.
  */
 
-// An uncaught fetch: a rejected one surfaces as an unhandled rejection.
+// An uncaught fetch: a rejected one surfaces as an unhandled rejection. The
+// iframe's `src` is assigned by script, which is where iframe faults act.
 const PAGE = `<!doctype html><title>t</title><body>
   <script>fetch("/api/data").then((r) => r.text()).then((t) => { document.title = "ok:" + t; });</script>
+  <script>const f = document.createElement("iframe"); f.className = "widget"; f.src = "/frame"; document.body.append(f);</script>
 </body>`;
 
 describe("testPage() on a caller's page", () => {
@@ -28,7 +30,7 @@ describe("testPage() on a caller's page", () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-      res.end(PAGE);
+      res.end(req.url === "/frame" ? "<!doctype html><p>frame</p>" : PAGE);
     });
     browser = await chromium.launch();
   }, 60_000);
@@ -50,6 +52,29 @@ describe("testPage() on a caller's page", () => {
       const result = await crawler.testPage(page, `${server.url}/`);
       expect(result.errors.some((e) => e.type === "unhandled-rejection" && e.message.includes("injected"))).toBe(true);
       expect(await page.title()).not.toMatch(/^ok:/);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  it("counts the runtime and iframe faults it injected", async () => {
+    // They fired on this path, and every counter said they had not: the
+    // in-page counters were read on the crawl's own pages only.
+    const crawler = new ChaosCrawler({
+      baseUrl: server.url,
+      maxActionsPerPage: 0,
+      runtimeFaults: [
+        { name: "api-rejects", urlPattern: "/api/data", action: { kind: "reject-fetch", rejectionMessage: "injected" } },
+      ],
+      iframeFaults: [{ name: "widget-blank", selector: "iframe.widget", action: { kind: "never-load" } }],
+    });
+    const context = await browser.newContext();
+    try {
+      await crawler.testPage(await context.newPage(), `${server.url}/`);
+      expect(crawler.getRuntimeFaultStats()).toEqual([{ rule: "api-rejects", matched: 1, fired: 1 }]);
+      expect(crawler.getIframeFaultStats()).toEqual([
+        { rule: "widget-blank", selector: "iframe.widget", action: "never-load", matched: 1, fired: 1 },
+      ]);
     } finally {
       await context.close();
     }

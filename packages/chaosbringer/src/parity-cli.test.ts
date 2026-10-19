@@ -126,10 +126,12 @@ describe("runParityCli", () => {
     expect(seen).toEqual(["http://l/foo", "http://r/foo"]);
   });
 
-  it("exits 1 with a helpful error when required flags are missing", async () => {
-    await runParityCli(["--left", "http://l"]);
-    expect(process.exitCode).toBe(1);
-    expect(errSpy).toHaveBeenCalled();
+  // A usage error: cli.ts prints it as one line and exits 2.
+  it("refuses missing required flags as a usage error", async () => {
+    await expect(runParityCli(["--left", "http://l"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: "--left, --right, and --paths are all required",
+    });
   });
 
   it("exits 1 when the paths file has no usable entries", async () => {
@@ -169,30 +171,28 @@ describe("runParityCli", () => {
 
     it("rejects --perf-percentile values not in the allow-list", async () => {
       const pathsFile = writePaths("paths.txt", ["/foo"]);
-      await runParityCli([
+      await expect(runParityCli([
         "--left", "http://l",
         "--right", "http://r",
         "--paths", pathsFile,
         "--perf-percentile", "p50", // not in the allow-list (we expose median, not p50)
-      ]);
-      expect(process.exitCode).toBe(1);
-      expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining("--perf-percentile must be one of"),
-      );
+      ])).rejects.toMatchObject({
+        name: "UsageError",
+        message: "--perf-percentile must be one of min, median, p95, p99 (got p50)",
+      });
     });
 
     it("rejects --perf-samples that aren't positive integers", async () => {
-      const pathsFile = writePaths("paths.txt", ["/foo"]);
-      await runParityCli([
+      // Refused before --paths is read: the flags are checked first.
+      await expect(runParityCli([
         "--left", "http://l",
         "--right", "http://r",
-        "--paths", pathsFile,
+        "--paths", join(dir, "missing.txt"),
         "--perf-samples", "0",
-      ]);
-      expect(process.exitCode).toBe(1);
-      expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining("--perf-samples must be a positive integer"),
-      );
+      ])).rejects.toMatchObject({
+        name: "UsageError",
+        message: "--perf-samples must be a positive integer (got 0)",
+      });
     });
 
     it("PERF line in CLI output shows the percentile + sample count when N>1", async () => {

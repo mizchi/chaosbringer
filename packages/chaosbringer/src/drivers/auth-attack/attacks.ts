@@ -671,7 +671,7 @@ async function captureTokenFromResponse(
     if (!ct.includes("text") && !ct.includes("json")) return;
     try {
       const body = await resp.text();
-      const m = /(?:token|reset|code)[=:"']\s*["']?([A-Za-z0-9_\-]{8,})/i.exec(body);
+      const m = /(?:token|reset|code)[=:"']\s*["']?([A-Za-z0-9_-]{8,})/i.exec(body);
       if (m) token = m[1]!;
     } catch {
       // ignore
@@ -689,10 +689,10 @@ async function captureTokenFromResponse(
 
 async function scanInlineToken(page: Page): Promise<string | null> {
   const body = await page.locator("body").innerText({ timeout: 500 }).catch(() => "");
-  const m = /[?&](?:token|reset|code)=([A-Za-z0-9_\-]{8,})/.exec(body);
+  const m = /[?&](?:token|reset|code)=([A-Za-z0-9_-]{8,})/.exec(body);
   if (m) return m[1]!;
   // Generic opaque-token shape: 16+ chars of base64/url-safe alphabet.
-  const m2 = /\b([A-Za-z0-9_\-]{16,})\b/.exec(body);
+  const m2 = /\b([A-Za-z0-9_-]{16,})\b/.exec(body);
   return m2 ? m2[1]! : null;
 }
 

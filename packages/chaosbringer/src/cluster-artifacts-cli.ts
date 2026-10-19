@@ -6,6 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { UsageError } from "./cli-usage.js";
 import { writeClusterArtifacts } from "./cluster-artifacts.js";
 import type { CrawlReport } from "./types.js";
 
@@ -52,16 +53,9 @@ export async function runClusterArtifactsCli(argv: string[]): Promise<void> {
     return;
   }
   if (positionals.length !== 1) {
-    console.error("cluster-artifacts: expected exactly one report path");
-    console.error(HELP);
-    process.exitCode = 1;
-    return;
+    throw new UsageError(`expected exactly one report path, got ${positionals.length}`);
   }
-  if (!values["bundle-dir"]) {
-    console.error("cluster-artifacts: --bundle-dir is required");
-    process.exitCode = 1;
-    return;
-  }
+  if (!values["bundle-dir"]) throw new UsageError("--bundle-dir is required");
 
   const reportPath = positionals[0];
   let report: CrawlReport;

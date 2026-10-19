@@ -74,8 +74,11 @@ describe("crawl through an existing CDP browser", () => {
       "--cdp", new URL(cdpEndpoint).port, "--cdp-target", targetInfo.targetId,
       "--max-pages", "1", "--max-actions", "0", "--output", output, "--quiet",
     ], { cwd: process.cwd(), timeout: 30_000 });
-    const cliReport = JSON.parse(readFileSync(output, "utf8")) as { pagesVisited: number };
+    const cliReport = JSON.parse(readFileSync(output, "utf8")) as { pagesVisited: number; totalErrors: number };
     expect(cliReport.pagesVisited).toBe(1);
+    // A clean page, run from src/ through tsx: nothing the crawler itself put
+    // into the tab (see `installKeepNamesHelper`) may throw there.
+    expect(cliReport.totalErrors).toBe(0);
     expect(target.isClosed()).toBe(false);
     expect(browser.isConnected()).toBe(true);
 
@@ -97,8 +100,13 @@ describe("crawl through an existing CDP browser", () => {
       env: { ...process.env, PATH: `${commandDir}${delimiter}${process.env.PATH ?? ""}` },
       timeout: 30_000,
     });
-    const autoReport = JSON.parse(readFileSync(autoOutput, "utf8")) as { pagesVisited: number; reproCommand: string };
+    const autoReport = JSON.parse(readFileSync(autoOutput, "utf8")) as {
+      pagesVisited: number;
+      totalErrors: number;
+      reproCommand: string;
+    };
     expect(autoReport.pagesVisited).toBe(1);
+    expect(autoReport.totalErrors).toBe(0);
     expect(autoReport.reproCommand).toContain("--terminal-browser");
     expect(target.isClosed()).toBe(false);
     expect(browser.isConnected()).toBe(true);

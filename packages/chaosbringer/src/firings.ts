@@ -19,6 +19,17 @@ import type { CrawlReport } from "./types.js";
 /** Which layer produced a firing row. */
 export type FaultLayer = "network" | "runtime" | "lifecycle" | "iframe";
 
+/**
+ * The part of a report these readers look at. A whole `CrawlReport` is one;
+ * so is a report built by hand from the stats getters — after `testPage()`,
+ * which returns none, or off a `faults` session:
+ * `{ faultInjections: crawler.getFaultStats(), pages: [result] }`. A field
+ * left out reads as that layer reporting nothing.
+ */
+export type FaultStatsReport = Partial<
+  Pick<CrawlReport, "faultInjections" | "runtimeFaults" | "lifecycleFaults" | "iframeFaults" | "pages">
+>;
+
 export interface Firing {
   /** The rule's `name`, or the label the layer derived for it. */
   name: string;
@@ -55,7 +66,7 @@ export interface Firing {
  * missing row means the layer reported no stats at all, which happens when the
  * crawl died before the routes went on.
  */
-export function faultFirings(report: CrawlReport): Firing[] {
+export function faultFirings(report: FaultStatsReport): Firing[] {
   // One builder, four layers. The counters are coerced rather than trusted:
   // a row missing `matched` produced `matched: undefined`, and
   // `unfiredFaults` then reported `matched undefinedx and never fired` — a
@@ -94,6 +105,46 @@ export function faultFirings(report: CrawlReport): Firing[] {
   return out;
 }
 
+/** The pages a service worker controlled, by what the network faults could see there. */
+export interface ServiceWorkerReach {
+  /** `PageResult.serviceWorker`: `"unrouted"` when any page was, the worse case. */
+  reach: "routed" | "unrouted";
+  /** How many pages had that reach. */
+  pages: number;
+}
+
+/**
+ * Whether a service worker can explain a network rule that matched nothing,
+ * from the pages' `serviceWorker`. One `"unrouted"` page outweighs any number
+ * of `"routed"` ones: on it the rule saw none of the requests the worker took.
+ */
+function serviceWorkerReach(report: FaultStatsReport): ServiceWorkerReach | null {
+  const pages = Array.isArray(report.pages) ? report.pages : [];
+  const unrouted = pages.filter((p) => p?.serviceWorker === "unrouted").length;
+  if (unrouted > 0) return { reach: "unrouted", pages: unrouted };
+  const routed = pages.filter((p) => p?.serviceWorker === "routed").length;
+  return routed > 0 ? { reach: "routed", pages: routed } : null;
+}
+
+/** The `matched: 0` diagnosis for a network rule on a run a service worker was part of. */
+function unmatchedBehindServiceWorker(name: string, sw: ServiceWorkerReach): string {
+  const runtime = "`runtimeFaults` patch `fetch` in the page, ahead of the worker, and fire either way";
+  if (sw.reach === "unrouted") {
+    return (
+      `network fault "${name}" never matched anything, and a service worker controlled ${sw.pages} ` +
+      `page(s) where no network fault sees the requests it takes (\`testPage()\` on a context the ` +
+      `crawler does not route, an attached browser, or a crawl with ` +
+      `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set) — so this says nothing about the pattern. ` +
+      `${runtime}; or create your context with \`serviceWorkers: "block"\`, or unset that variable`
+    );
+  }
+  return (
+    `network fault "${name}" never matched anything — the pattern did not see the request you ` +
+    `expected, or a service worker answered it from its own cache, which no network fault reaches ` +
+    `(one controlled ${sw.pages} page(s)). ${runtime}`
+  );
+}
+
 /**
  * The faults that never took effect, with the reason visible in the message.
  *
@@ -102,7 +153,11 @@ export function faultFirings(report: CrawlReport): Firing[] {
  * two very different problems you have:
  *
  * - `matched: 0` — nothing ever matched the pattern. Usually the pattern is
- *   wrong, or the app does not make the request you think it does.
+ *   wrong, or the app does not make the request you think it does. On a page
+ *   a service worker controlled (`PageResult.serviceWorker`), a network rule
+ *   can also have missed a request the worker took, and the message says so
+ *   instead of blaming the pattern. Pass `pages` with the stats to get that
+ *   on a hand-built report: `{ faultInjections, pages: [result] }`.
  * - matched but never fired — the pattern is right and the firing policy said
  *   no. A schedule shorter than the number of calls, a `probability` that did
  *   not roll, or (with `suppressed` non-zero) a rule ahead of this one
@@ -111,9 +166,10 @@ export function faultFirings(report: CrawlReport): Firing[] {
  * `only` restricts the check to the names you care about, for a run that
  * deliberately configures a fault it does not expect to fire.
  */
-export function unfiredFaults(report: CrawlReport, only?: readonly string[]): string[] {
+export function unfiredFaults(report: FaultStatsReport, only?: readonly string[]): string[] {
   const wanted = only ? new Set(only) : null;
   const problems: string[] = [];
+  const sw = serviceWorkerReach(report);
   for (const f of faultFirings(report)) {
     if (wanted && !wanted.has(f.name)) continue;
     if (f.fired > 0) continue;
@@ -127,7 +183,9 @@ export function unfiredFaults(report: CrawlReport, only?: readonly string[]): st
       );
       continue;
     }
-    if (f.matched === 0) {
+    if (f.matched === 0 && f.layer === "network" && sw) {
+      problems.push(unmatchedBehindServiceWorker(f.name, sw));
+    } else if (f.matched === 0) {
       problems.push(
         `${f.layer} fault "${f.name}" never matched anything — the pattern did not see the ` +
           `request (or page, or iframe) you expected`,
@@ -179,6 +237,12 @@ export interface FaultWarning {
     layer: FaultLayer;
     matched?: number;
     suppressed?: number;
+    /**
+     * On a network `fault_rule_unmatched` only, when a service worker
+     * controlled a page of the run: it may have taken the requests the rule
+     * was waiting for (see `PageResult.serviceWorker`).
+     */
+    serviceWorker?: ServiceWorkerReach;
   };
 }
 
@@ -198,8 +262,9 @@ export interface FaultWarning {
  * module exists to end: a check reporting nothing rather than reporting what it
  * could not check.
  */
-export function faultWarnings(report: CrawlReport): FaultWarning[] {
+export function faultWarnings(report: FaultStatsReport): FaultWarning[] {
   const out: FaultWarning[] = [];
+  const sw = serviceWorkerReach(report);
   for (const f of faultFirings(report)) {
     if (f.fired > 0) continue;
     if (!f.counted) {
@@ -208,7 +273,10 @@ export function faultWarnings(report: CrawlReport): FaultWarning[] {
     }
     const data = { rule: f.name, layer: f.layer, matched: f.matched };
     if (f.matched === 0) {
-      out.push({ event: "fault_rule_unmatched", data });
+      out.push({
+        event: "fault_rule_unmatched",
+        data: f.layer === "network" && sw ? { ...data, serviceWorker: sw } : data,
+      });
     } else {
       out.push({
         event: "fault_rule_unfired",

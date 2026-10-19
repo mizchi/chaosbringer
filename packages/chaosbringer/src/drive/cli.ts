@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
+import { UsageError } from "../cli-usage.js";
 import { recipeOrigin } from "../recipes/replay.js";
 import { RecipeStore } from "../recipes/store.js";
 import type { ActionRecipe } from "../recipes/types.js";
@@ -72,7 +73,8 @@ OPTIONS:
   --quiet                   Only print the summary
   --help                    Show this help
 
-Exit code: 0 when the goal was reached (or the model said done), 1 otherwise.
+Exit code: 0 when the goal was reached (or the model said done), 1 otherwise,
+2 when it refuses to start (no --url or --goal, no model, a bad value).
 Only drive sites you own or are allowed to test.
 `;
 
@@ -112,11 +114,12 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     console.log(HELP);
     return;
   }
-  if (!values.url || !values.goal) {
-    console.error("drive: --url and --goal are required (see --help)");
-    process.exitCode = 2;
-    return;
-  }
+  if (!values.url || !values.goal) throw new UsageError("--url and --goal are required");
+  // Parsed before the drive, not when --chaos replays after it: a typo in
+  // --faults or --hang-ms was found only once the whole drive had run.
+  const maxSteps = values["max-steps"] ? positiveInt(values["max-steps"], "--max-steps") : undefined;
+  const faults = values.chaos ? parseFaults(values.faults ?? "all") : undefined;
+  const hangReleaseMs = values["hang-ms"] ? positiveInt(values["hang-ms"], "--hang-ms") : undefined;
 
   const decider = values.plan ? planFrom(values.plan) : modelDecider(values.provider, values.model, values.vision ?? false);
   const until: DriveUntil = {
@@ -130,7 +133,7 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     goal: values.goal,
     decider,
     ...(Object.keys(until).length > 0 ? { until } : {}),
-    ...(values["max-steps"] ? { maxSteps: positiveInt(values["max-steps"], "--max-steps") } : {}),
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(values.exclude ? { excludePatterns: values.exclude } : {}),
     ...(values.video ? { video: values.video } : {}),
     ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
@@ -171,18 +174,17 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     }
   }
   let chaos: RecipeChaosResult | undefined;
-  if (values.chaos) {
+  if (faults) {
     if (!result.recipe) {
       console.log(`chaos replay skipped: ${result.recipeSkipped ?? "the goal was not reached"}`);
     } else {
-      const faults = parseFaults(values.faults ?? "all");
       console.log(`[chaos] replaying ${result.recipe.name} clean, then with ${faults.join(", ")}`);
       chaos = await recipeChaos({
         recipe: result.recipe,
         ...(Object.keys(until).length > 0 ? { until } : {}),
         faults,
         ...(values.exclude ? { exclude: values.exclude } : {}),
-        ...(values["hang-ms"] ? { hangReleaseMs: positiveInt(values["hang-ms"], "--hang-ms") } : {}),
+        ...(hangReleaseMs !== undefined ? { hangReleaseMs } : {}),
         ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
         headless: resolveHeadless(values),
         onRun: quiet
@@ -227,7 +229,7 @@ function parseFaults(v: string): ScanFaultKind[] {
   const names: Record<string, ScanFaultKind> = { "500": "status", status: "status", abort: "abort", hang: "hang" };
   return v.split(",").map((f) => {
     const k = names[f.trim()];
-    if (!k) throw new Error(`--chaos: unknown fault ${f} (500, abort, hang)`);
+    if (!k) throw new UsageError(`--faults: unknown fault ${f} (500, abort, hang)`);
     return k;
   });
 }
@@ -261,16 +263,17 @@ function modelDecider(provider: string | undefined, model: string | undefined, v
   const openRouterKey = process.env.OPENROUTER_API_KEY;
   const which = provider ?? (anthropicKey ? "anthropic" : openRouterKey ? "openrouter" : undefined);
   const common = { ...(model ? { model } : {}), vision };
+  // Refused before a browser starts, like a missing --url: nothing ran.
   if (which === "anthropic") {
-    if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY is not set");
+    if (!anthropicKey) throw new UsageError("ANTHROPIC_API_KEY is not set");
     return anthropicDecider({ apiKey: anthropicKey, ...common });
   }
   if (which === "openrouter") {
-    if (!openRouterKey) throw new Error("OPENROUTER_API_KEY is not set");
+    if (!openRouterKey) throw new UsageError("OPENROUTER_API_KEY is not set");
     return openRouterDecider({ apiKey: openRouterKey, ...common });
   }
-  if (which !== undefined) throw new Error(`unknown --provider ${which} (anthropic | openrouter)`);
-  throw new Error("no model: set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, or pass --plan <file.json>");
+  if (which !== undefined) throw new UsageError(`unknown --provider ${which} (anthropic | openrouter)`);
+  throw new UsageError("no model: set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, or pass --plan <file.json>");
 }
 
 /** A plan file: `DrivePlanStep`s, with `"/re/flags"` strings read as regexes. */
@@ -294,6 +297,6 @@ export function planFrom(path: string): DriveDecider {
 
 function positiveInt(v: string, flag: string): number {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`${flag} must be a positive integer`);
+  if (!Number.isInteger(n) || n <= 0) throw new UsageError(`${flag} must be a positive integer (got ${JSON.stringify(v)})`);
   return n;
 }

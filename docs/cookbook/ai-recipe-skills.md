@@ -138,7 +138,10 @@ await browser.close();
 
 5/5 success → promoted to `verified`, immediately usable by `recipeDriver`.
 2/5 or fewer → demoted. In between → stays a candidate (probably needs more
-data or a tighter precondition).
+data or a tighter precondition). A run whose navigation cannot connect to
+the site (the host is down, the URL is wrong) is no verdict on the recipe:
+verification stops there, records nothing, and returns `unreachable` with
+the net error.
 
 ## Recipe step format
 

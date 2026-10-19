@@ -208,7 +208,7 @@ describe("generateReport joins serverFaults onto pages and actions", () => {
       attrs: { kind: "5xx", path: "/api/y", method: "GET", targetStatus: 500, traceId: "cc".repeat(16) },
     });
 
-    const report = callGenerateReport(crawler);
+    callGenerateReport(crawler);
     expect(action.serverFaultEvents?.map((e) => e.attrs.path)).toEqual(["/api/x"]);
   });
 
@@ -227,7 +227,7 @@ describe("generateReport joins serverFaults onto pages and actions", () => {
       observedAt: 100,
       attrs: { kind: "5xx", path: "/api/x", method: "GET", targetStatus: 503, traceId: "ee".repeat(16) },
     });
-    const report = callGenerateReport(crawler);
+    callGenerateReport(crawler);
     expect(noTraceAction.serverFaultEvents).toBeUndefined();
   });
 

@@ -29,6 +29,7 @@ export type {
   EndpointReport,
   LatencyStats,
   LoadReport,
+  LoadStop,
   PerfQuantiles,
   Scenario,
   ScenarioContext,

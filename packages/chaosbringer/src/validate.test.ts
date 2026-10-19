@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateOptions } from "./validate.js";
+import { CHAOS_TEST_OPTION_NAMES, validateChaosTestOptions, validateOptions } from "./validate.js";
 
 function base(extra: Record<string, unknown> = {}): any {
   return { baseUrl: "http://localhost:3000", ...extra };
@@ -541,6 +541,38 @@ describe("a misspelled option is an error, not silence", () => {
     // punished for it.
     for (const key of ["strict", "baseline", "baselineStrict", "setup", "server"]) {
       expect(() => validateOptions({ ...base, [key]: 1 } as never)).not.toThrow();
+    }
+  });
+});
+
+describe("a misspelled chaosOptions key is an error too", () => {
+  it("refuses a near miss of a fixture option, naming the one meant", () => {
+    // The fixture copies the keys it knows into the crawler's options, so the
+    // crawler's own check never saw these: `maxActionPerPage: 0` ran 5 actions
+    // and `stirct: true` failed nothing.
+    expect(() => validateChaosTestOptions({ maxActionPerPage: 0 } as never)).toThrow(
+      /unknown chaosOptions key "maxActionPerPage" — did you mean "maxActionsPerPage"/,
+    );
+    expect(() => validateChaosTestOptions({ stirct: true } as never)).toThrow(/did you mean "strict"/);
+    expect(() => validateChaosTestOptions({ faultInjections: [] } as never)).toThrow(
+      /did you mean "faultInjection"/,
+    );
+  });
+
+  it("refuses a crawler option the fixture does not take, rather than suggesting a fixture one", () => {
+    // Not typos, and dropped all the same. The near-miss check alone would
+    // have offered `seed` for `seedFromSitemap`.
+    expect(() => validateChaosTestOptions({ seedFromSitemap: "/sitemap.xml" } as never)).toThrow(
+      /chaosOptions "seedFromSitemap" is a ChaosCrawler option the fixture does not take/,
+    );
+    expect(() => validateChaosTestOptions({ timeout: 1 } as never)).toThrow(/"timeout"/);
+  });
+
+  it("accepts every fixture option, and leaves a caller's own keys alone", () => {
+    const all = Object.fromEntries(CHAOS_TEST_OPTION_NAMES.map((k) => [k, undefined]));
+    expect(() => validateChaosTestOptions(all)).not.toThrow();
+    for (const key of ["myAppPort", "dbUrl", "baseline", "setup"]) {
+      expect(() => validateChaosTestOptions({ [key]: 1 } as never)).not.toThrow();
     }
   });
 });

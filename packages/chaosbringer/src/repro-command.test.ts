@@ -2,7 +2,9 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { CRAWL_CLI_OPTIONS, crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
 import { DEFAULT_OPTIONS } from "./defaults.js";
-import { buildReproCommand, formatReproFlags, shellQuote } from "./repro-command.js";
+import { compileFaultRules, faultStatsOf } from "./fault-router.js";
+import { faults } from "./faults.js";
+import { buildReproCommand, formatReproFlags, shellQuote, unreplayedNote } from "./repro-command.js";
 import type { CrawlerOptions } from "./types.js";
 
 const URL = "http://127.0.0.1:4455/";
@@ -133,12 +135,71 @@ describe("reproCommand covers the main CLI's flags", () => {
     expect(comparable(before)).not.toEqual(base);
 
     const command = buildReproCommand(before, before.seed);
+    // The --axe / --visual-* invariants are the flags': nothing is left to note.
+    expect(unreplayedNote(before)).toBeUndefined();
     const words = shellWords(command);
     expect(words[0]).toBe("chaosbringer");
     // parseArgs is strict: an unknown or malformed flag throws here.
     const after = resolved(cliOptions(words.slice(1)));
     expect(comparable(after)).toEqual(comparable(before));
     expect(buildReproCommand(after, after.seed)).toBe(command);
+  });
+});
+
+describe("reproCommand of a run with faults and invariants set in code", () => {
+  const plain = ["chaosbringer", "--url", URL, "--seed", "1"];
+
+  it("ends in a comment that counts and names them, which a shell skips", () => {
+    // What scan's 500 crawl set: its repro reran clean and passed, and said nothing.
+    const o = resolved({ baseUrl: URL, faultInjection: [faults.status(500, { urlPattern: "/api/", name: "scan:api-500" })] });
+    const command = buildReproCommand(o, 1);
+    expect(command).toBe(`chaosbringer --url ${URL} --seed 1 # + 1 fault rule not expressible on the CLI: scan:api-500`);
+    expect(shellWords(command)).toEqual(plain);
+  });
+
+  it("covers every fault layer and the invariants no flag built", () => {
+    const o = resolved({
+      ...cliOptions(["--url", URL, "--axe"]),
+      faultInjection: [faults.abort({ urlPattern: /\/api\/(cart|items)/ })],
+      lifecycleFaults: [faults.cpu(4)],
+      runtimeFaults: [faults.rejectBody({ urlPattern: "/api/" })],
+      iframeFaults: [faults.iframeNeverLoad({ selector: "iframe" })],
+      invariants: [...(cliOptions(["--url", URL, "--axe"]).invariants ?? []), { name: "cart-total", check: () => true }],
+    });
+    const command = buildReproCommand(o, 1);
+    expect(command).toBe(
+      `chaosbringer --url ${URL} --seed 1 --axe # + 1 fault rule, 1 lifecycle fault, 1 runtime fault, 1 iframe fault, 1 invariant ` +
+        `not expressible on the CLI: '/\\/api\\/(cart|items)/', cpu-throttle:4x, reject-body:json, iframe-never-load, cart-total`,
+    );
+    expect(shellWords(command)).toEqual([...plain, "--axe"]);
+  });
+
+  // The note named it "/api/" and the stats `/\/api\//`, so the two did not
+  // read as the same rule.
+  it("names an unnamed rule with a string pattern as its stats do", () => {
+    const rules = [faults.status(500, { urlPattern: "/api/" }), faults.abort({ urlPattern: /\/img\//g })];
+    const stats = faultStatsOf(compileFaultRules(rules)).map((s) => s.rule);
+    expect(stats).toEqual(["/\\/api\\//", "/\\/img\\//"]);
+    expect(unreplayedNote({ faultInjection: rules })).toBe(
+      `2 fault rules not expressible on the CLI: ${stats.map(shellQuote).join(", ")}`,
+    );
+  });
+
+  it("keeps a name a shell would act on inside the comment", () => {
+    const o = resolved({
+      baseUrl: URL,
+      invariants: [1, 2, 3, 4, 5].map((i) => ({ name: `inv-${i}`, check: () => true })),
+      faultInjection: [faults.status(500, { urlPattern: "/x", name: "x\necho INJECTED; $(echo also)" })],
+    });
+    const command = buildReproCommand(o, 1);
+    expect(command).not.toContain("\n");
+    // The rule's name first, then five names and the count of the rest.
+    expect(command).toMatch(/: 'x echo INJECTED; \$\(echo also\)', inv-1, inv-2, inv-3, inv-4, \+1 more$/);
+    expect(shellWords(command)).toEqual(plain);
+  });
+
+  it("says nothing for a run with none", () => {
+    expect(buildReproCommand(resolved({ baseUrl: URL }), 1)).toBe(`chaosbringer --url ${URL} --seed 1`);
   });
 });
 

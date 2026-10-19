@@ -168,7 +168,7 @@ function formatErrorBody(page: PageResult): string {
  * dropped rather than escaped: XML 1.0 has no escape for them.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
-const NOT_XML = /\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g;
+const NOT_XML = /\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g; // oxlint-disable-line no-control-regex
 
 /** XML attribute / text escape. */
 function esc(s: string): string {

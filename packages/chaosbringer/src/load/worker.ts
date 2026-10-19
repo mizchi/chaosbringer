@@ -16,9 +16,17 @@ import type { WorkerPerfSample } from "./perf-stats.js";
 import { NetworkSampler, type NetworkSample } from "./sampler.js";
 import { StepPerf } from "./step-perf.js";
 import { pickThinkTimeMs } from "./scenario.js";
-import type { Scenario, ScenarioContext, ThinkTime } from "./types.js";
+import type { LoadStop, Scenario, ScenarioContext, ScenarioStep, ThinkTime } from "./types.js";
 import type { Invariant } from "../types.js";
-import { contextOptions } from "../browser-session.js";
+import { contextOptions, installKeepNamesHelper } from "../browser-session.js";
+
+/**
+ * The least a worker waits after a failed iteration, whatever the think time
+ * says (`distribution: "none"` says 0). A step that fails at once — a host
+ * that refuses the connection, a store with nothing left to replay — would
+ * otherwise loop as fast as it can throw, tens of thousands of times a second.
+ */
+const FAILED_ITERATION_BACKOFF_MS = 100;
 
 export interface WorkerStepSample {
   scenarioName: string;
@@ -81,8 +89,19 @@ export interface WorkerOptions {
   storageState?: string;
   invariants?: ReadonlyArray<Invariant>;
   maxIterations?: number;
-  /** Stop ASAP when this resolves (deadline reached). */
+  /** Stop ASAP when this resolves (deadline reached, or the run stopped). */
   shouldStop: () => boolean;
+  /**
+   * Ends the run for every worker: the runner records the stop and
+   * `shouldStop` turns true. Steps reach it as `ctx.stopRun`.
+   */
+  stopRun?: (cause: LoadStop["cause"], reason: string) => void;
+  /**
+   * Called as each finished iteration is recorded: the message of the error
+   * that failed it, or `null` when it succeeded. Not called for an iteration
+   * the deadline cut short.
+   */
+  onIterationEnd?: (failure: string | null) => void;
   /**
    * Pre-context hook — lets the runner wire in network fault routes /
    * runtime fault init-scripts before any scenario code runs. Called
@@ -124,6 +143,7 @@ export class ScenarioWorker {
         ...(this.opts.storageState ? { storageState: this.opts.storageState } : {}),
       }),
     );
+    await installKeepNamesHelper(this.context);
     if (this.opts.onContextCreated) {
       await this.opts.onContextCreated(this.context);
     }
@@ -136,18 +156,15 @@ export class ScenarioWorker {
     }
 
     try {
-      while (!this.opts.shouldStop()) {
-        if (
-          this.opts.maxIterations !== undefined &&
-          this.iteration >= this.opts.maxIterations
-        ) {
-          break;
-        }
-        await this.runIteration();
+      while (!this.opts.shouldStop() && !this.capped()) {
+        const backoffMs = await this.runIteration();
         this.iteration += 1;
+        if (backoffMs > 0 && !this.capped()) {
+          await cancellableSleep(backoffMs, this.opts.shouldStop);
+        }
       }
     } finally {
-      this.samples.network.push(...this.sampler.drain());
+      this.pushNetwork();
       this.sampler.stop();
       // Capture runtime fault stats from the in-page counter before
       // tearing down the context. Best-effort: page may already be in
@@ -178,7 +195,21 @@ export class ScenarioWorker {
     return this.samples;
   }
 
-  private async runIteration(): Promise<void> {
+  private capped(): boolean {
+    return this.opts.maxIterations !== undefined && this.iteration >= this.opts.maxIterations;
+  }
+
+  /**
+   * Moves the sampler's buffer into the samples one by one: a spread passes
+   * every sample as an argument, and the buffer of a long run whose steps
+   * kept failing (only a passing step drains it) overflows the call stack.
+   */
+  private pushNetwork(): void {
+    for (const sample of this.sampler.drain()) this.samples.network.push(sample);
+  }
+
+  /** Runs one iteration; returns how long to wait before the next (0 after a success). */
+  private async runIteration(): Promise<number> {
     const scenario = this.opts.scenario;
     const page = this.page!;
     const ctx: ScenarioContext = {
@@ -186,9 +217,14 @@ export class ScenarioWorker {
       workerIndex: this.opts.workerIndex,
       iteration: this.iteration,
       baseUrl: this.opts.baseUrl,
+      stopRun: (reason) => this.opts.stopRun?.("scenario", reason),
     };
     const iterStart = performance.now();
     let iterationFailed = false;
+    // What failed the iteration: the error's message, and the step (absent
+    // for `beforeIteration`) whose think time the backoff starts from.
+    let failure: string | null = null;
+    let failedStep: ScenarioStep | undefined;
     // The deadline fired with steps of this iteration still to run.
     let truncated = false;
 
@@ -196,7 +232,7 @@ export class ScenarioWorker {
       try {
         await scenario.beforeIteration(ctx);
       } catch (err) {
-        this.recordError("beforeIteration", err);
+        failure = this.recordError("beforeIteration", err);
         iterationFailed = true;
       }
     }
@@ -214,18 +250,18 @@ export class ScenarioWorker {
           ? await this.stepPerf.begin(step.name).catch(() => null)
           : null;
         const stepStart = performance.now();
-        let stepFailed = false;
+        let stepError: string | null = null;
         try {
           await step.run(ctx);
           // Drain network samples accumulated during the step. Doing it
           // per-step (rather than per-iteration) keeps the buffer small
           // and lets the runner correlate samples to step boundaries.
-          this.samples.network.push(...this.sampler.drain());
+          this.pushNetwork();
           await this.runInvariants(ctx);
         } catch (err) {
-          this.recordError(step.name, err);
-          stepFailed = true;
+          stepError = this.recordError(step.name, err);
         }
+        const stepFailed = stepError !== null;
         const stepEnd = performance.now();
         const timestamp = Date.now();
         this.samples.steps.push({
@@ -245,6 +281,8 @@ export class ScenarioWorker {
         }
         if (stepFailed && !step.optional) {
           iterationFailed = true;
+          failure = stepError;
+          failedStep = step;
           break;
         }
         // pickThinkTimeMs applies arguments left-to-right, so most-general
@@ -273,7 +311,7 @@ export class ScenarioWorker {
       // its duration covers only part of the scenario and its success says
       // nothing about the steps that never ran.
       this.samples.truncatedIterations = (this.samples.truncatedIterations ?? 0) + 1;
-      return;
+      return 0;
     }
 
     const iterEnd = performance.now();
@@ -284,6 +322,15 @@ export class ScenarioWorker {
       iteration: this.iteration,
       timestamp: Date.now(),
     });
+    this.opts.onIterationEnd?.(failure);
+    if (!iterationFailed) return 0;
+    // The think time the failed step would have waited, and at least the
+    // floor. Waited between iterations, so the failed one's duration does
+    // not include it.
+    return Math.max(
+      FAILED_ITERATION_BACKOFF_MS,
+      pickThinkTimeMs(this.opts.defaultThinkTime, scenario.thinkTime, failedStep?.thinkTime),
+    );
   }
 
   private invariantState = new Map<string, unknown>();
@@ -306,14 +353,17 @@ export class ScenarioWorker {
     }
   }
 
-  private recordError(stepName: string, err: unknown): void {
+  /** Records `err` against the current iteration; returns its message. */
+  private recordError(stepName: string, err: unknown): string {
+    const message = err instanceof Error ? err.message : String(err);
     this.samples.errors.push({
       scenarioName: this.opts.scenario.name,
       stepName,
       iteration: this.iteration,
       timestamp: Date.now(),
-      message: err instanceof Error ? err.message : String(err),
+      message,
     });
+    return message;
   }
 }
 
@@ -322,8 +372,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Sleep that exits early when the deadline fires. Polls in short
- * chunks so a worker doesn't continue thinking past the configured
+ * Sleep that exits early when the deadline fires or the run stops. Polls
+ * in short chunks so a worker doesn't continue thinking past the configured
  * `duration` — without this, total run time can overshoot by up to
  * `thinkTime.maxMs` per worker, skewing throughput / error stats.
  *
@@ -331,7 +381,7 @@ function sleep(ms: number): Promise<void> {
  * (deadline detection latency ≤ 50ms) without burning CPU on small
  * thinkTimes.
  */
-async function cancellableSleep(ms: number, shouldStop: () => boolean): Promise<void> {
+export async function cancellableSleep(ms: number, shouldStop: () => boolean): Promise<void> {
   const CHUNK = 50;
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {

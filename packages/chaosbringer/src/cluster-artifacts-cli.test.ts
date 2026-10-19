@@ -162,16 +162,20 @@ describe("runClusterArtifactsCli", () => {
     expect(parsed.results.map((r: { clusterKey: string }) => r.clusterKey)).toEqual(["console|hi"]);
   });
 
-  it("exits 1 when --bundle-dir is missing", async () => {
+  // A usage error: cli.ts prints it as one line and exits 2.
+  it("refuses a missing --bundle-dir as a usage error", async () => {
     const reportPath = writeReportFile("report.json", makeReport());
-    await runClusterArtifactsCli([reportPath]);
-    expect(process.exitCode).toBe(1);
-    expect(errSpy).toHaveBeenCalled();
+    await expect(runClusterArtifactsCli([reportPath])).rejects.toMatchObject({
+      name: "UsageError",
+      message: "--bundle-dir is required",
+    });
   });
 
-  it("exits 1 when no positional report is given", async () => {
-    await runClusterArtifactsCli(["--bundle-dir", dir]);
-    expect(process.exitCode).toBe(1);
+  it("refuses a missing positional report as a usage error", async () => {
+    await expect(runClusterArtifactsCli(["--bundle-dir", dir])).rejects.toMatchObject({
+      name: "UsageError",
+      message: "expected exactly one report path, got 0",
+    });
   });
 
   it("--help prints usage", async () => {
