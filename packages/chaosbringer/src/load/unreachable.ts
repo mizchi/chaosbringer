@@ -91,6 +91,16 @@ export function unreachableNavigation(
   return net.text;
 }
 
+/**
+ * Whether `message` is the connection-level failure of a navigation to one
+ * of `aborted`, the URLs a fault rule aborted: the run's own fault, not the
+ * host.
+ */
+export function abortedNavigation(message: string, aborted: ReadonlyArray<string>): boolean {
+  const net = netFailure(message);
+  return net !== null && aborted.some((url) => sameDocument(url, net.url));
+}
+
 function netFailure(message: string): { text: string; url: string } | null {
   const m = /net::(ERR_[A-Z_]+) at (\S+)/.exec(message);
   return m && UNREACHABLE_NET_ERRORS.has(m[1]) ? { text: m[0], url: m[2] } : null;

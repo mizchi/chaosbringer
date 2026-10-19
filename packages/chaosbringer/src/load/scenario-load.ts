@@ -26,7 +26,12 @@ import {
 import { parseDurationMs } from "./histogram.js";
 import { resolveLoadPerf, sampledWorkerIndexes } from "./perf-stats.js";
 import { buildLoadReport } from "./report.js";
-import { type DocumentRequest, UnreachableStreak, watchDocumentRequests } from "./unreachable.js";
+import {
+  abortedNavigation,
+  type DocumentRequest,
+  UnreachableStreak,
+  watchDocumentRequests,
+} from "./unreachable.js";
 import { cancellableSleep, ScenarioWorker, type WorkerSamples } from "./worker.js";
 import type { ScenarioLoadOptions, ScenarioSpec, LoadReport, LoadStop } from "./types.js";
 
@@ -156,22 +161,21 @@ export async function scenarioLoad(
   const browser = await chromium.launch({ headless: options.headless ?? true });
   try {
     const workers = planned.map((p) => {
-      // Set when a `faultInjection` rule aborts one of this worker's
-      // navigations. The net error that then fails the iteration is the
-      // fault's, not the host's: a chaos run aborting the document with
+      // The URLs of the navigations a `faultInjection` rule aborted during
+      // this worker's iteration. A net error at one of them is the fault's,
+      // not the host's: a chaos run aborting the document with
       // `connectionrefused` would otherwise stop as "unreachable" within
       // seconds while the host is up. Such an iteration neither counts
-      // toward the streak nor resets it.
-      let faultedNavigation = false;
+      // toward the streak nor resets it. Only that URL: one that went on
+      // past an aborted provider page and then met a down host counts.
+      const aborted: string[] = [];
       // The last document request of the worker's page, set with its context.
       let lastDocument: () => DocumentRequest | null = () => null;
       const contextHook = makeContextHook(
         compiledFaultRules,
         runtimeFaultScript,
         sampled.has(p.workerIndex),
-        () => {
-          faultedNavigation = true;
-        },
+        (url) => aborted.push(url),
       );
       return new ScenarioWorker({
         workerIndex: p.workerIndex,
@@ -185,9 +189,9 @@ export async function scenarioLoad(
         shouldStop,
         stopRun,
         onIterationEnd: (failure) => {
-          const injected = faultedNavigation;
-          faultedNavigation = false;
-          if (failure === null || !injected) onIterationEnd(failure, lastDocument());
+          const injected = aborted.splice(0);
+          if (failure !== null && abortedNavigation(failure, injected)) return;
+          onIterationEnd(failure, lastDocument());
         },
         perf: sampled.has(p.workerIndex),
         onContextCreated: async (context) => {
@@ -255,7 +259,7 @@ function makeContextHook(
   compiledFaults: ReturnType<typeof compileLoadFaultRules>,
   runtimeScript: string | null,
   perf: boolean,
-  onNavigationAbort: () => void,
+  onNavigationAbort: (url: string) => void,
 ): (context: BrowserContext) => Promise<void> {
   return async (context) => {
     // The collector goes first: init scripts run in registration order and it

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UnreachableStreak, unreachableNavigation } from "./unreachable.js";
+import { abortedNavigation, UnreachableStreak, unreachableNavigation } from "./unreachable.js";
 
 describe("unreachableNavigation", () => {
   it("names the net error of a navigation that could not connect to the site", () => {
@@ -56,6 +56,21 @@ describe("unreachableNavigation and the page's last document request", () => {
   it("goes by the message when the last request was another navigation's", () => {
     expect(unreachableNavigation(refused, site, { url: "http://127.0.0.1:4000/about", redirected: true })).not.toBeNull();
     expect(unreachableNavigation(refused, site, null)).not.toBeNull();
+  });
+});
+
+describe("abortedNavigation", () => {
+  const message = "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4000/#top";
+
+  it("is true when the failed navigation is one a fault rule aborted", () => {
+    expect(abortedNavigation(message, ["http://127.0.0.1:5000/pay", "http://127.0.0.1:4000/"])).toBe(true);
+  });
+
+  it("is false for a navigation no rule aborted, and for a failure that is not a net error", () => {
+    // A tolerated provider outage before the site refused the next goto.
+    expect(abortedNavigation(message, ["http://127.0.0.1:5000/pay"])).toBe(false);
+    expect(abortedNavigation(message, [])).toBe(false);
+    expect(abortedNavigation("page.click: Timeout 5000ms exceeded.", ["http://127.0.0.1:4000/"])).toBe(false);
   });
 });
 

@@ -97,4 +97,39 @@ describe("scenarioLoad on a host that stops answering", () => {
     expect(report.stopped).toMatchObject({ cause: "unreachable" });
     expect(report.totals.iterations).toBeGreaterThanOrEqual(3);
   }, 60_000);
+
+  it("still stops on a host that is down after a fault aborted another navigation of the iteration", async () => {
+    // A provider outage the scenario copes with, then the site's own page.
+    // Any aborted navigation used to leave the iteration out of the count,
+    // so the run failed for its whole duration against a host that was down.
+    const closed = await serve();
+    const provider = await serve();
+    servers.splice(0);
+    await Promise.all([closed.close(), provider.close()]);
+    const checkout = defineScenario({
+      name: "checkout",
+      steps: [
+        {
+          name: "pay",
+          run: async ({ page, baseUrl }) => {
+            await page.goto(`${provider.url}/pay`).catch(() => {});
+            await page.goto(`${baseUrl}/`);
+          },
+        },
+      ],
+    });
+    const { report, faultStats } = await scenarioLoad({
+      baseUrl: closed.url,
+      scenarios: [{ scenario: checkout, workers: 1 }],
+      duration: "30s",
+      thinkTime: { distribution: "none" },
+      faultInjection: [faults.abort({ urlPattern: /\/pay$/, errorCode: "connectionrefused", name: "provider-down" })],
+    });
+    expect(report.stopped).toMatchObject({
+      cause: "unreachable",
+      reason: `base URL unreachable: ${closed.url} (net::ERR_CONNECTION_REFUSED at ${closed.url}/, 3 iterations in a row)`,
+    });
+    expect(report.totals.iterations).toBe(3);
+    expect(faultStats).toEqual([expect.objectContaining({ rule: "provider-down", injected: 3 })]);
+  }, 60_000);
 });
