@@ -303,8 +303,17 @@ describe("shard CLI", () => {
   });
 
   it("gives every worker the seed given, or one drawn for the run", async () => {
-    expect(await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--seed", "42"]))).toBe(42);
-    expect(Number.isInteger(await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/"])))).toBe(true);
+    expect((await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--seed", "42"]))).seed).toBe(42);
+    expect(Number.isInteger((await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/"]))).seed)).toBe(true);
+  });
+
+  it("names the files the coordinator writes again from the merged report", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    expect((await run([])).files).toEqual({});
+    expect(
+      (await run(["--junit", "j.xml", "--heatmap-out", "h.json", "--failure-artifacts", "fa", "--cluster-artifacts", "--cluster-min-count", "2"]))
+        .files,
+    ).toEqual({ junit: "j.xml", heatmapOut: "h.json", clusterBundles: { bundleDir: "fa", minCount: 2 } });
   });
 
   it("reruns the whole sharded run from the merged Repro line", () => {
@@ -338,13 +347,12 @@ describe("shard CLI", () => {
       "Report saved to: /tmp/chaos-shard-x/shard-1.json",
       "JUnit XML saved to: junit.xml",
     ].join("\n");
+    // The heatmap, the cluster bundles and the JUnit file are the coordinator's,
+    // written again from the merged report.
     expect(mergeWorkerPaths([worker0, worker1, "Wrote 1 failure bundle(s) to out/\n"])).toEqual([
-      "Heatmap saved to: heat.json",
       "Wrote 3 failure bundle(s) to out/",
       "Trace saved to: run.trace.jsonl",
       "Log saved to: run.log",
-      "Wrote 1 cluster bundle(s) to out/clusters/",
-      "JUnit XML saved to: junit.xml",
     ]);
     expect(mergeWorkerPaths(["[PASS] 1 pages, 0 errors\nReport saved to: /tmp/x.json\n"])).toEqual([]);
   });

@@ -11,11 +11,14 @@
  * processes and merges their reports.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isUsageError, UsageError } from "./cli-usage.js";
+import { writeClusterArtifacts } from "./cluster-artifacts.js";
 import { errorMessage } from "./errors.js";
+import { buildActionHeatmap } from "./heatmap.js";
+import { buildJunitXml } from "./junit.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
@@ -292,9 +295,11 @@ export function parseShardCliArgs(argv: string[]): ShardCliArgs | null {
  * be forwarded, refused by each of the N workers, and end in `could not read
  * …/shard-0.json` and exit 1. Returns the seed the workers share: the one
  * given, or a fresh one, so that every shard runs with it and the merged
- * report's seed and Repro line hold for the whole run.
+ * report's seed and Repro line hold for the whole run. And the files the
+ * main command writes from its report, which the coordinator writes again
+ * from the merged one.
  */
-export async function checkWorkerArgs(args: ShardCliArgs): Promise<number> {
+export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: number; files: ShardReportFiles }> {
   // Imported on demand, like perf-cli in cli.ts: the library's
   // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
   // imports `parseShardArg` from it.
@@ -307,15 +312,34 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<number> {
     // before its browser starts is refused here, once.
     const { values, positionals } = parseCrawlArgs([...args.forward, "--shard", `0/${args.count}`]);
     const options = crawlerOptionsFromCli(values, crawlUrlFromArgs(values, positionals));
-    crawlCliExtras(values);
+    const { clusterMinCount } = crawlCliExtras(values);
     const budgets = await readCrawlPerfBudgets(values, options.settle);
     if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
     if (budgets) options.perfBudgets = budgets.rules;
     validateOptions(options);
-    return options.seed ?? randomSeed();
+    const bundleDir = values["failure-artifacts"];
+    const files: ShardReportFiles = {
+      ...(values.junit ? { junit: values.junit } : {}),
+      ...(values["heatmap-out"] ? { heatmapOut: values["heatmap-out"] } : {}),
+      ...(values["cluster-artifacts"] && bundleDir ? { clusterBundles: { bundleDir, minCount: clusterMinCount } } : {}),
+    };
+    return { seed: options.seed ?? randomSeed(), files };
   } catch (err) {
     throw isUsageError(err) ? err : new UsageError(errorMessage(err));
   }
+}
+
+/**
+ * What the main command writes from its report: `--junit`, `--heatmap-out`
+ * and `--cluster-artifacts`' bundles. Every worker writes them to the same
+ * paths, so the file held one shard's pages and a cluster's bundle one
+ * shard's errors; the coordinator writes them again from the merged report.
+ */
+export interface ShardReportFiles {
+  junit?: string;
+  heatmapOut?: string;
+  /** `--failure-artifacts`, which holds the per-page bundles, and `--cluster-min-count`. */
+  clusterBundles?: { bundleDir: string; minCount?: number };
 }
 
 /**
@@ -346,9 +370,11 @@ All other options are the main crawl's (chaosbringer --help), checked before
 any worker starts and forwarded verbatim to each shard worker (e.g. --url,
 --max-pages, --seed, --seed-from-sitemap, --baseline, --strict). Each worker
 receives an additional --shard i/N flag, and the same --seed: the given one,
-or one drawn for the run. --quiet and --compact print the merged report the
-way the main command prints its own, without the workers' output but with
-the paths they wrote (failure bundles, --trace-out, --log-file, ...).
+or one drawn for the run. --junit, --heatmap-out and the --cluster-artifacts
+bundles are written again from the merged report. --quiet and --compact
+print the merged report the way the main command prints its own, without
+the workers' output but with the paths they wrote (failure bundles,
+--trace-out, --log-file, ...).
 
 For full URL-space coverage, combine with --seed-from-sitemap: each shard
 filters the sitemap URLs by hash so every URL is processed by exactly one
@@ -359,16 +385,14 @@ owned links — some pages may go unvisited.
 
 /**
  * The lines of the main CLI's output that name a file or directory it wrote,
- * in the order it prints them, but its `Report saved to:`: a worker's report
- * is a temp file, which the merged report replaces.
+ * in the order it prints them, but those of what the coordinator writes
+ * again from the merged report (ShardReportFiles, and `Report saved to:`, a
+ * worker's temp report).
  */
 const WORKER_PATH_LINES = [
-  /^Heatmap saved to: /,
   /^Wrote \d+ failure bundle\(s\) to /,
   /^Trace saved to: /,
   /^Log saved to: /,
-  /^Wrote \d+ cluster bundle\(s\) to /,
-  /^JUnit XML saved to: /,
 ];
 
 /**
@@ -443,7 +467,7 @@ function runShardWorker(args: {
 export async function runShardCli(argv: string[]): Promise<void> {
   const args = parseShardCliArgs(argv);
   if (!args) return;
-  const seed = await checkWorkerArgs(args);
+  const { seed, files } = await checkWorkerArgs(args);
   const workdir = mkdtempSync(join(tmpdir(), "chaos-shard-"));
 
   try {
@@ -507,7 +531,6 @@ export async function runShardCli(argv: string[]): Promise<void> {
     if (merged.reproCommand) merged.reproCommand = shardReproCommand(merged.reproCommand, args.count);
 
     // Persist merged report.
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(args.output, JSON.stringify(merged, null, 2));
 
     // The main CLI's output modes: --quiet is the verdict, why it failed
@@ -516,9 +539,25 @@ export async function runShardCli(argv: string[]): Promise<void> {
     if (args.quiet) console.log(formatQuietReport(merged, exitOptions));
     else printReport(merged, args.compact, exitOptions);
     const announce = (line: string) => console.log(args.quiet ? line : `\n${line}`);
+    // The main command's path lines, in its order.
+    if (files.heatmapOut) {
+      mkdirSync(dirname(files.heatmapOut), { recursive: true });
+      writeFileSync(files.heatmapOut, JSON.stringify(buildActionHeatmap(merged.actions), null, 2));
+      announce(`Heatmap saved to: ${files.heatmapOut}`);
+    }
     // The silenced workers' bundles, trace, log, … had no line at all.
     if (silenced) for (const line of mergeWorkerPaths(results.map((r) => r.stdout))) announce(line);
+    if (files.clusterBundles) {
+      const written = writeClusterArtifacts(merged, files.clusterBundles);
+      const dir = `${files.clusterBundles.bundleDir.replace(/\/+$/, "")}/`;
+      announce(`Wrote ${written.length} cluster bundle(s) to ${dir}clusters/`);
+    }
     announce(`Merged report saved to: ${args.output}`);
+    if (files.junit) {
+      mkdirSync(dirname(files.junit), { recursive: true });
+      writeFileSync(files.junit, buildJunitXml(merged));
+      console.log(`JUnit XML saved to: ${files.junit}`);
+    }
     const failed = results.filter((r) => r.exitCode !== 0).length;
     if (failed > 0) {
       console.log(`${failed}/${args.count} shard(s) exited non-zero`);

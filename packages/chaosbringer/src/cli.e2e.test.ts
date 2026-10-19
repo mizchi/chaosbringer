@@ -204,6 +204,45 @@ describe("main CLI output on a pipe", () => {
     expect(leaked()).toEqual([]);
   }, 180_000);
 
+  // Every worker wrote these to the same paths: the JUnit file held one
+  // shard's pages, and the cluster count summed the shards that bundled the
+  // base URL's cluster, which has one directory.
+  it("shard writes --junit, --heatmap-out and the cluster bundles from the merged report", async () => {
+    const output = join(dir, "shard-files.json");
+    const bundles = join(dir, "shard-cluster-bundles");
+    const junit = join(dir, "shard.xml");
+    const heatmap = join(dir, "shard-heatmap.json");
+    // The rejecting page is the base URL, which every shard crawls.
+    const sitemap = join(dir, "reject-base-sitemap.xml");
+    const locs = ["/reject", "/", "/a", "/b"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
+    writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
+    const { env, leaked } = shardEnv();
+    const r = await cli(
+      ["shard", "--count", "2", "--url", `${server.url}/reject`, "--seed-from-sitemap", sitemap].concat(
+        ["--max-pages", "4", "--max-actions", "0", "--seed", "1", "--strict", "--quiet", "--output", output],
+        ["--failure-artifacts", bundles, "--cluster-artifacts", "--junit", junit, "--heatmap-out", heatmap],
+      ),
+      env,
+    );
+    expect(r.status).toBe(1);
+    const merged = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(merged.pages).toHaveLength(4);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] 4 pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Heatmap saved to: ${heatmap}`,
+      expect.stringMatching(new RegExp(`^Wrote \\d failure bundle\\(s\\) to ${escapeRegExp(bundles)}/$`)),
+      `Wrote 1 cluster bundle(s) to ${bundles}/clusters/`,
+      `Merged report saved to: ${output}`,
+      `JUnit XML saved to: ${junit}`,
+      "2/2 shard(s) exited non-zero",
+    ]);
+    expect(readdirSync(join(bundles, "clusters"))).toHaveLength(merged.errorClusters.length);
+    expect(readFileSync(junit, "utf8")).toContain(`tests="4"`);
+    expect(JSON.parse(readFileSync(heatmap, "utf8"))).toEqual([]);
+    expect(leaked()).toEqual([]);
+  }, 180_000);
+
   it("shard --compact prints the merged compact report, not each worker's", async () => {
     const { env, leaked } = shardEnv();
     const r = await cli(["shard", "--count", "2", ...crawl, "--compact", "--output", join(dir, "shard-compact.json")], env);
