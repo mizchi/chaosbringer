@@ -197,7 +197,7 @@ auto-span: a span is one action's own cost, not "until the next assertion".
 pnpm add -D lightbringer @playwright/test
 ```
 
-`web-vitals` is pulled in automatically.
+`web-vitals` is pulled in automatically. `@playwright/test` must be 1.59 or later, the same floor as the `playwright` that lightbringer depends on, so the two resolve to one Playwright. With an older `@playwright/test`, the package manager reports the peer range instead of installing a second Playwright beside it, whose browser build your installed browsers would not match.
 
 ## Usage
 
