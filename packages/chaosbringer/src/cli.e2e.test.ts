@@ -171,6 +171,39 @@ describe("main CLI output on a pipe", () => {
     expect(merged.reproCommand).not.toContain("--shard");
   }, 180_000);
 
+  // The workers' output is silenced, and theirs were the only lines naming
+  // the bundles and the log, which --quiet promises.
+  it("shard --quiet names the bundles and the log its workers wrote", async () => {
+    const output = join(dir, "shard-paths.json");
+    const bundles = join(dir, "shard-bundles");
+    const log = join(dir, "shard.log");
+    // The rejecting page is not the base URL, which every shard crawls, so
+    // one worker writes its bundle.
+    const sitemap = join(dir, "reject-sitemap.xml");
+    const locs = ["/", "/reject"].map((p) => `<url><loc>${server.url}${p}</loc></url>`).join("");
+    writeFileSync(sitemap, `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`);
+    const { env, leaked } = shardEnv();
+    const r = await cli(
+      ["shard", "--count", "2", "--url", `${server.url}/`, "--seed-from-sitemap", sitemap].concat(
+        ["--max-pages", "2", "--max-actions", "0", "--seed", "1", "--strict", "--quiet", "--output", output],
+        ["--failure-artifacts", bundles, "--log-file", log],
+      ),
+      env,
+    );
+    expect(r.status).toBe(1);
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[FAIL\] \d+ pages, 1 errors, [\d.]+s \(seed=1\)$/),
+      "  Failed: --strict: 1 unhandled rejection",
+      `Wrote 1 failure bundle(s) to ${bundles}/`,
+      `Log saved to: ${log}`,
+      `Merged report saved to: ${output}`,
+      "1/2 shard(s) exited non-zero",
+    ]);
+    expect(readdirSync(bundles)).toHaveLength(1);
+    expect(existsSync(log)).toBe(true);
+    expect(leaked()).toEqual([]);
+  }, 180_000);
+
   it("shard --compact prints the merged compact report, not each worker's", async () => {
     const { env, leaked } = shardEnv();
     const r = await cli(["shard", "--count", "2", ...crawl, "--compact", "--output", join(dir, "shard-compact.json")], env);

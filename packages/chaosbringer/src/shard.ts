@@ -347,7 +347,8 @@ any worker starts and forwarded verbatim to each shard worker (e.g. --url,
 --max-pages, --seed, --seed-from-sitemap, --baseline, --strict). Each worker
 receives an additional --shard i/N flag, and the same --seed: the given one,
 or one drawn for the run. --quiet and --compact print the merged report the
-way the main command prints its own, without the workers' output.
+way the main command prints its own, without the workers' output but with
+the paths they wrote (failure bundles, --trace-out, --log-file, ...).
 
 For full URL-space coverage, combine with --seed-from-sitemap: each shard
 filters the sitemap URLs by hash so every URL is processed by exactly one
@@ -356,7 +357,50 @@ owned links — some pages may go unvisited.
 `);
 }
 
-/** Spawn one worker and resolve with {exitCode, reportPath}. */
+/**
+ * The lines of the main CLI's output that name a file or directory it wrote,
+ * in the order it prints them, but its `Report saved to:`: a worker's report
+ * is a temp file, which the merged report replaces.
+ */
+const WORKER_PATH_LINES = [
+  /^Heatmap saved to: /,
+  /^Wrote \d+ failure bundle\(s\) to /,
+  /^Trace saved to: /,
+  /^Log saved to: /,
+  /^Wrote \d+ cluster bundle\(s\) to /,
+  /^JUnit XML saved to: /,
+];
+
+/**
+ * The paths the silenced workers wrote, from their stdout, merged in the main
+ * CLI's order: a directory's bundle counts summed (each worker counts its
+ * own; the base URL, which every shard crawls, counts once per shard that
+ * bundled it), any other line once.
+ */
+export function mergeWorkerPaths(outputs: readonly string[]): string[] {
+  const merged = new Map<string, { rank: number; count?: number }>();
+  for (const output of outputs) {
+    for (const line of output.split("\n")) {
+      const rank = WORKER_PATH_LINES.findIndex((re) => re.test(line));
+      if (rank < 0) continue;
+      const bundles = /^Wrote (\d+) (.+)$/.exec(line);
+      if (bundles?.[1] !== undefined && bundles[2] !== undefined) {
+        const count = (merged.get(bundles[2])?.count ?? 0) + Number(bundles[1]);
+        merged.set(bundles[2], { rank, count });
+      } else if (!merged.has(line)) {
+        merged.set(line, { rank });
+      }
+    }
+  }
+  return [...merged]
+    .sort(([, a], [, b]) => a.rank - b.rank)
+    .map(([line, { count }]) => (count === undefined ? line : `Wrote ${count} ${line}`));
+}
+
+/**
+ * Spawn one worker and resolve with {exitCode, reportPath}, and with what it
+ * printed when `quiet` keeps that off the terminal.
+ */
 function runShardWorker(args: {
   nodeBin: string;
   scriptPath: string;
@@ -365,22 +409,28 @@ function runShardWorker(args: {
   reportPath: string;
   quiet: boolean;
   index: number;
-}): Promise<{ exitCode: number; reportPath: string }> {
+}): Promise<{ exitCode: number; reportPath: string; stdout: string }> {
   return new Promise((resolve) => {
     const child = spawn(
       args.nodeBin,
       [...args.execArgv, args.scriptPath, ...args.workerArgs],
       {
-        stdio: args.quiet ? ["ignore", "ignore", "inherit"] : "inherit",
+        stdio: args.quiet ? ["ignore", "pipe", "inherit"] : "inherit",
         env: { ...process.env, CHAOS_SHARD_INDEX: String(args.index) },
       }
     );
-    child.on("exit", (code) => {
-      resolve({ exitCode: code ?? 1, reportPath: args.reportPath });
+    let stdout = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    // `close`, not `exit`: the stdout pipe may still hold the last lines.
+    child.on("close", (code) => {
+      resolve({ exitCode: code ?? 1, reportPath: args.reportPath, stdout });
     });
     child.on("error", (err) => {
       console.error(`shard ${args.index}: spawn failed — ${err.message}`);
-      resolve({ exitCode: 1, reportPath: args.reportPath });
+      resolve({ exitCode: 1, reportPath: args.reportPath, stdout });
     });
   });
 }
@@ -405,6 +455,9 @@ export async function runShardCli(argv: string[]): Promise<void> {
       console.log(`Running ${args.count} shard(s) in parallel...`);
     }
 
+    // --compact shows the merged report: N workers' progress lines and
+    // compact reports, interleaved, are not that.
+    const silenced = args.quiet || args.compact;
     const workers = Array.from({ length: args.count }, (_, i) => {
       const reportPath = join(workdir, `shard-${i}.json`);
       // A later --seed wins in parseArgs, so this is the given one or the
@@ -425,9 +478,7 @@ export async function runShardCli(argv: string[]): Promise<void> {
         execArgv,
         workerArgs,
         reportPath,
-        // --compact shows the merged report: N workers' progress lines and
-        // compact reports, interleaved, are not that.
-        quiet: args.quiet || args.compact,
+        quiet: silenced,
         index: i,
       });
     });
@@ -464,7 +515,10 @@ export async function runShardCli(argv: string[]): Promise<void> {
     const exitOptions = { strict: args.strict, baselineStrict: args.baselineStrict };
     if (args.quiet) console.log(formatQuietReport(merged, exitOptions));
     else printReport(merged, args.compact, exitOptions);
-    console.log(args.quiet ? `Merged report saved to: ${args.output}` : `\nMerged report saved to: ${args.output}`);
+    const announce = (line: string) => console.log(args.quiet ? line : `\n${line}`);
+    // The silenced workers' bundles, trace, log, … had no line at all.
+    if (silenced) for (const line of mergeWorkerPaths(results.map((r) => r.stdout))) announce(line);
+    announce(`Merged report saved to: ${args.output}`);
     const failed = results.filter((r) => r.exitCode !== 0).length;
     if (failed > 0) {
       console.log(`${failed}/${args.count} shard(s) exited non-zero`);

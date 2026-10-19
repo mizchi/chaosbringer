@@ -5,6 +5,7 @@ import {
   checkWorkerArgs,
   fnv1a,
   mergeReports,
+  mergeWorkerPaths,
   parseShardArg,
   parseShardCliArgs,
   shardOwns,
@@ -313,5 +314,38 @@ describe("shard CLI", () => {
     expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --shard 0/2", 2)).toBe(
       "chaosbringer shard --count 2 --url http://x.test/ --seed 7",
     );
+  });
+
+  // `shard --quiet` silences the workers, whose lines were the only ones to
+  // name the bundles, trace and log they wrote.
+  it("merges the paths the silenced workers wrote, in the main command's order", () => {
+    const worker0 = [
+      "[PASS] 2 pages, 0 errors, 1.0s (seed=7)",
+      "Log saved to: run.log",
+      "Wrote 0 cluster bundle(s) to out/clusters/",
+      "Report saved to: /tmp/chaos-shard-x/shard-0.json",
+      "JUnit XML saved to: junit.xml",
+    ].join("\n");
+    const worker1 = [
+      "[FAIL] 2 pages, 3 errors, 1.0s (seed=7)",
+      "  Failed: --strict: 1 unhandled rejection",
+      "",
+      "Heatmap saved to: heat.json",
+      "Wrote 2 failure bundle(s) to out/",
+      "Trace saved to: run.trace.jsonl",
+      "Log saved to: run.log",
+      "Wrote 1 cluster bundle(s) to out/clusters/",
+      "Report saved to: /tmp/chaos-shard-x/shard-1.json",
+      "JUnit XML saved to: junit.xml",
+    ].join("\n");
+    expect(mergeWorkerPaths([worker0, worker1, "Wrote 1 failure bundle(s) to out/\n"])).toEqual([
+      "Heatmap saved to: heat.json",
+      "Wrote 3 failure bundle(s) to out/",
+      "Trace saved to: run.trace.jsonl",
+      "Log saved to: run.log",
+      "Wrote 1 cluster bundle(s) to out/clusters/",
+      "JUnit XML saved to: junit.xml",
+    ]);
+    expect(mergeWorkerPaths(["[PASS] 1 pages, 0 errors\nReport saved to: /tmp/x.json\n"])).toEqual([]);
   });
 });
