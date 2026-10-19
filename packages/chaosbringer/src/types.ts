@@ -1068,7 +1068,9 @@ export interface PageResult {
    *   request, escapes them.
    * - `"unrouted"` — the rules see none of the requests the worker takes:
    *   `testPage()` on a page in your context, which the crawler does not
-   *   route, or an attached browser.
+   *   route, an attached browser, or a crawl run with
+   *   `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` set (Playwright then hands
+   *   a worker's requests to no route at all).
    *
    * `unfiredFaults` and the run-end warning name it for a network rule that
    * matched nothing, rather than blaming the pattern. `runtimeFaults` patch

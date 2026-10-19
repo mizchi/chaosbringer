@@ -133,8 +133,9 @@ function unmatchedBehindServiceWorker(name: string, sw: ServiceWorkerReach): str
     return (
       `network fault "${name}" never matched anything, and a service worker controlled ${sw.pages} ` +
       `page(s) where no network fault sees the requests it takes (\`testPage()\` on a context the ` +
-      `crawler does not route, or an attached browser) — so this says nothing about the pattern. ` +
-      `${runtime}; or create the context with \`serviceWorkers: "block"\``
+      `crawler does not route, an attached browser, or a crawl with ` +
+      `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set) — so this says nothing about the pattern. ` +
+      `${runtime}; or create your context with \`serviceWorkers: "block"\`, or unset that variable`
     );
   }
   return (

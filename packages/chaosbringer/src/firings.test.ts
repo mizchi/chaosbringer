@@ -108,6 +108,10 @@ describe("unfiredFaults", () => {
     expect(problem).toContain('network fault "api-down" never matched anything');
     expect(problem).toContain("a service worker controlled 1 page(s)");
     expect(problem).toContain("runtimeFaults");
+    // A crawl's pages are "unrouted" too when Playwright's opt-out is set, and
+    // the context advice alone was nothing a crawl could act on.
+    expect(problem).toContain("a crawl with PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set");
+    expect(problem).toContain("or unset that variable");
     expect(problem).not.toContain("the pattern did not see");
     // A runtime fault patches `fetch` ahead of the worker: its diagnosis stands.
     expect(rest).toEqual([expect.stringContaining('runtime fault "rt" never matched anything — the pattern')]);

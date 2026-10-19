@@ -309,8 +309,9 @@ export class ChaosCrawler {
   /**
    * The context `installServiceWorkerFaultRoute` routed, so that the network
    * faults see the requests its service workers make. Null with no network
-   * faults, with an attached browser (its context is the user's), and outside
-   * `start()`: a caller's context on the `testPage()` path never has the route.
+   * faults, with an attached browser (its context is the user's), with
+   * PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set, and outside `start()`: a
+   * caller's context on the `testPage()` path never has the route.
    */
   private serviceWorkerRouted: BrowserContext | null = null;
   /** Page-lifecycle faults compiled once at construction time. */

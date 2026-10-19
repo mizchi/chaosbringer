@@ -349,7 +349,9 @@ the network rules see none of the requests the worker takes:
 `result.serviceWorker` is `"unrouted"` and `unfiredFaults` names the worker
 rather than the pattern. Use runtime faults there, or create the context with
 `serviceWorkers: "block"`. A `crawl()` routes its own context, so there the
-rules do see what the worker forwards.
+rules do see what the worker forwards — unless
+`PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` is set, which hands a worker's
+requests to no route at all (its pages are `"unrouted"` too).
 
 A misspelled `chaosOptions` key (`maxActionPerPage`, `stirct`) is refused with
 a "did you mean" error as the fixture is set up, and so is a `ChaosCrawler`

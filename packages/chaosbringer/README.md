@@ -279,7 +279,8 @@ A request a service worker's `fetch` handler takes never reaches the page's rout
 Two things still escape every network rule:
 
 - what the worker answers from its own cache, which makes no request;
-- every request the worker takes where the crawler does not own the context: `testPage()` on your page (the crawler leaves your context alone), or an attached browser.
+- every request the worker takes where the crawler does not own the context: `testPage()` on your page (the crawler leaves your context alone), or an attached browser;
+- every request the worker takes when `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` is set: Playwright then hands a worker's requests to no route at all, the crawl's included.
 
 A page a worker controlled carries `serviceWorker: "routed"` or `"unrouted"` in its result (recorded when network rules are configured), and a network rule that matched nothing then says the worker may be why — in `unfiredFaults` and in `fault_rule_unmatched`'s `serviceWorker` field — instead of blaming the pattern. `runtimeFaults` patch `fetch` in the page, ahead of the worker, and fire either way; on your own context, `serviceWorkers: "block"` takes the worker out. A forwarded request has `resourceType` `"fetch"` whatever the page asked for, so a rule limited to `resourceTypes: ["document"]` or `["script"]` does not match it.
 
@@ -1532,7 +1533,7 @@ One event per configured fault that did not take effect, on any of the four laye
 - A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
 - The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
 - For a `runtimeFaults` rule: the app makes the call from a context the init-script patch does not cover, or issues no client-side call at all.
-- For a network rule on a PWA: a service worker took the request. The event then carries `serviceWorker: { reach, pages }` and `unfiredFaults` says so instead of blaming the pattern. `reach: "routed"` is the crawl's own context, where the rule does see what the worker forwards (as a `resourceType: "fetch"` request) and misses only what it answers from its own cache; `"unrouted"` is `testPage()` on your context or an attached browser, where the rule sees nothing the worker takes. See [Service workers](#service-workers).
+- For a network rule on a PWA: a service worker took the request. The event then carries `serviceWorker: { reach, pages }` and `unfiredFaults` says so instead of blaming the pattern. `reach: "routed"` is the crawl's own context, where the rule does see what the worker forwards (as a `resourceType: "fetch"` request) and misses only what it answers from its own cache; `"unrouted"` is `testPage()` on your context, an attached browser, or a crawl with `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` set, where the rule sees nothing the worker takes. See [Service workers](#service-workers).
 
 **`fault_rule_unfired`** — the pattern was right and the firing policy declined: `matched` is non-zero and nothing fired. A `schedule` shorter than the number of matching calls, a `probability` that never rolled, or (when `suppressed` is present on the event) a rule ahead of this one answering the request first.
 
