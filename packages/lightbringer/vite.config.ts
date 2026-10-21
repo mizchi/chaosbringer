@@ -1,4 +1,5 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, lazyPlugins, type Plugin } from "vite-plus";
+import tsdownConfig from "./tsdown.config.js";
 import react from "@vitejs/plugin-react";
 
 // Serves a delayed /api/slow?ms= endpoint for the network-waterfall bench.
@@ -55,9 +56,16 @@ const thirdParty = (): Plugin => ({
 
 // Serves the bench fixture app (fixtures/app) for the local bench specs.
 export default defineConfig({
+  // `vp pack` (the package build) and `vp lint` read these; the rest is the fixture dev server.
+  pack: tsdownConfig,
+  lint: {
+    categories: { correctness: "error" },
+    ignorePatterns: ["node_modules", "perf-results", "dist"],
+    options: { typeAware: false, typeCheck: false },
+  },
   root: "fixtures/app",
   // host: true binds 0.0.0.0 so the page (localhost) and the third-party
   // endpoint (127.0.0.1) resolve to the same server on different hosts.
   server: { host: true },
-  plugins: [react(), slowApi(), thirdParty()],
+  plugins: lazyPlugins(() => [react(), slowApi(), thirdParty()]),
 });

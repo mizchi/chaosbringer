@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Measures a PRODUCTION build (vite build → vite preview) of fixtures/bundle, so
+// Measures a PRODUCTION build (vp build → vp preview) of fixtures/bundle, so
 // the build/serving-dependent axes produce real numbers: JS/CSS coverage over real
 // chunks (PERF_COV=1), render-blocking <link> CSS, and real-byte image over-fetch.
 // Run with: PERF_COV=1 pnpm exec playwright test -c playwright.bundle.config.ts
@@ -16,8 +16,8 @@ export default defineConfig({
   webServer: {
     command:
       `node fixtures/bundle/gen-image.mjs && ` +
-      `pnpm exec vite build -c vite.bundle.config.ts && ` +
-      `pnpm exec vite preview -c vite.bundle.config.ts --port ${port} --strictPort`,
+      `pnpm exec vp build -c vite.bundle.config.ts && ` +
+      `pnpm exec vp preview -c vite.bundle.config.ts --port ${port} --strictPort`,
     url: origin,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

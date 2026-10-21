@@ -31,7 +31,7 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "vitest run",
+    "test": "vp test run",
     "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
   },
   "files": [
@@ -56,6 +56,7 @@
   "devDependencies": {
     "playwright": "^1.63.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -913,7 +913,7 @@ instead of OOMing. Run it with `PERF_TRACE=1`.
 Some axes only produce real numbers against a **production build** — a dev server
 ships unbundled modules (no chunks), injects CSS via JS (no render-blocking
 `<link>`), and the bench fixtures use `data:` images (0 bytes). `fixtures/bundle`
-is a separate Vite project, built and `vite preview`-served by
+is a separate Vite project, built and served (`vp build` + `vp preview`) by
 `playwright.bundle.config.ts`, that makes them concrete:
 
 ```sh
