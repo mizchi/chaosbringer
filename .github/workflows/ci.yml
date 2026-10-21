@@ -25,9 +25,9 @@ jobs:
       - name: Lint — no NUL bytes in source (all workspace packages)
         run: pnpm -r lint:nul
 
-      # oxlint over src/, correctness rules as errors (as lightbringer's own
-      # leg below lints its package). Reads `src/` only, so it does not
-      # depend on the build step.
+      # `vp lint src` (Oxlint, configured in the package's vite.config.ts),
+      # correctness rules as errors (as lightbringer's own leg below lints its
+      # package). Reads `src/` only, so it does not depend on the build step.
       - name: Lint
         run: pnpm -F chaosbringer lint
 
@@ -70,10 +70,11 @@ jobs:
           pnpm -F "@mizchi/chaosbringer-example-perf-patterns" typecheck
 
   lightbringer:
-    # lightbringer is its own published package with its own toolchain (tsdown,
-    # vitest 4, oxlint, Playwright specs), and chaosbringer's `--perf` runs on
-    # its `lightbringer/core` build, so it gets its own leg instead of riding
-    # on build-and-test: a break here names itself in the checks list.
+    # lightbringer is its own published package with its own toolchain
+    # (`vp pack` / tsdown, `vp test` / Vitest 5, `vp lint` / Oxlint, Playwright
+    # specs), and chaosbringer's `--perf` runs on its `lightbringer/core`
+    # build, so it gets its own leg instead of riding on build-and-test: a
+    # break here names itself in the checks list.
     # `lightbringer-perf.yml` is the separate, path-filtered budget gate; this
     # job is correctness, on every PR.
     runs-on: ubuntu-latest

@@ -77,7 +77,7 @@ async function settle(fn, ok = () => true, attempts = SETTLE_ATTEMPTS) {
 }
 
 /** Files under a package that do not end up in what it ships. */
-const NOT_SHIPPED = /(?:^|\/)(?:CHANGELOG\.md|README\.md|tests?\/.*|[^/]*\.(?:test|spec|e2e\.test)\.[cm]?[jt]sx?|vitest\.config\.[cm]?[jt]s|tsconfig[^/]*\.json)$/;
+const NOT_SHIPPED = /(?:^|\/)(?:CHANGELOG\.md|README\.md|tests?\/.*|[^/]*\.(?:test|spec|e2e\.test)\.[cm]?[jt]sx?|(?:vitest|vite|tsdown|playwright(?:\.[^/]+)?)\.config\.[cm]?[jt]s|\.oxlintrc\.json|tsconfig[^/]*\.json)$/;
 
 const deps = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies };
 for (const [name, range] of Object.entries(deps)) {

@@ -156,10 +156,15 @@ chaosbringer/
 ```bash
 pnpm install
 pnpm -F chaosbringer test              # unit + fixture E2E (no API key needed)
-pnpm -F chaosbringer lint              # oxlint over src/, correctness rules as errors (CI runs it)
+pnpm -F chaosbringer lint              # vp lint over src/ (Oxlint, config in packages/chaosbringer/vite.config.ts), correctness rules as errors (CI runs it)
 PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm -F chaosbringer test       # if you need to point at a shared cache
 ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (issue #95). Costs a few haiku-tier calls per run.
 ```
+
+Tests, lint and lightbringer's build run through Vite+ (`vp`, pinned in
+`pnpm-workspace.yaml`'s catalog); point your editor at `vp lint --lsp`, since
+plain oxlint (e.g. the oxc editor extension) does not read the `lint` block in
+`vite.config.ts`.
 
 The `test:ai` smoke exercises the live Anthropic pipeline — Phase A
 discovery + Phase D investigation — that no other test in the repo

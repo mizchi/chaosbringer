@@ -1,4 +1,4 @@
-import { defineConfig } from "tsdown";
+import { defineConfig } from "vite-plus/pack";
 
 // Bundled ESM plus bundled .d.ts. tsdown (rather than tsup) because tsup's
 // declaration bundler needs TypeScript's JS API, which TypeScript 7 no longer

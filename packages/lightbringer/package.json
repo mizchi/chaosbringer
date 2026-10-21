@@ -61,15 +61,15 @@
     "lightbringer-coverage": "scripts/coverage.mjs"
   },
   "scripts": {
-    "build": "tsdown",
-    "prepare": "tsdown",
+    "build": "vp pack",
+    "prepare": "vp pack",
     "test": "playwright test",
-    "test:unit": "vitest run",
+    "test:unit": "vp test run",
     "test:bundle": "playwright test -c playwright.bundle.config.ts",
     "bundle:gen": "node fixtures/bundle/gen-image.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint",
-    "fix": "oxlint --fix",
+    "lint": "vp lint",
+    "fix": "vp lint --fix",
     "median": "node scripts/median.mjs",
     "drilldown": "node scripts/drilldown.mjs",
     "regress": "node scripts/regress.mjs",
@@ -94,12 +94,11 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
-    "oxlint": "^1.87.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.3",
-    "vitest": "^5.0.3"
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

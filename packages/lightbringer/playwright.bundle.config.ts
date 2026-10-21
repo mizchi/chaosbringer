@@ -16,8 +16,8 @@ export default defineConfig({
   webServer: {
     command:
       `node fixtures/bundle/gen-image.mjs && ` +
-      `pnpm exec vite build -c vite.bundle.config.ts && ` +
-      `pnpm exec vite preview -c vite.bundle.config.ts --port ${port} --strictPort`,
+      `pnpm exec vp build -c vite.bundle.config.ts && ` +
+      `pnpm exec vp preview -c vite.bundle.config.ts --port ${port} --strictPort`,
     url: origin,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
