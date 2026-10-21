@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1](https://github.com/mizchi/chaosbringer/compare/lightbringer-v0.5.0...lightbringer-v0.5.1) (2026-10-21)
+
+### Bug Fixes
+
+* **The `@playwright/test` peer is `^1.59.0` (was `>=1.50.0`), the floor of the `playwright` lightbringer depends on.** With `@playwright/test` 1.50–1.58, npm installed a second, nested `playwright` under lightbringer, whose browser build did not match the installed browsers ("Executable doesn't exist"). npm now refuses that install (`ERESOLVE`); pnpm and yarn warn about the peer range. The README says how to check for a second copy and pin one. ([#192](https://github.com/mizchi/chaosbringer/pull/192))
+
+### Build
+
+* Built with `vp pack` (Vite+ 1.3.0, which runs tsdown 0.23.1) instead of tsdown 0.23.0. The output files and their names are unchanged; `dist/analyze/index.js` re-exports the same bindings in one statement instead of an import and an export. ([#193](https://github.com/mizchi/chaosbringer/pull/193))
+
 ## [0.5.0](https://github.com/mizchi/chaosbringer/compare/lightbringer-v0.4.0...lightbringer-v0.5.0) (2026-10-07)
 
 ### ⚠ BREAKING CHANGES
