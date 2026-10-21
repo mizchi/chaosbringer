@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Measures a PRODUCTION build (vite build → vite preview) of fixtures/bundle, so
+// Measures a PRODUCTION build (vp build → vp preview) of fixtures/bundle, so
 // the build/serving-dependent axes produce real numbers: JS/CSS coverage over real
 // chunks (PERF_COV=1), render-blocking <link> CSS, and real-byte image over-fetch.
 // Run with: PERF_COV=1 pnpm exec playwright test -c playwright.bundle.config.ts

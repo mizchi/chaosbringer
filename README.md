@@ -162,9 +162,15 @@ ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (
 ```
 
 Tests, lint and lightbringer's build run through Vite+ (`vp`, pinned in
-`pnpm-workspace.yaml`'s catalog); point your editor at `vp lint --lsp`, since
-plain oxlint (e.g. the oxc editor extension) does not read the `lint` block in
-`vite.config.ts`.
+`pnpm-workspace.yaml`'s catalog). `vp test` runs once; use
+`pnpm -F <pkg> exec vp test watch` for watch mode. `vp lint` reads only the
+`lint` block of the `vite.config.ts` in its own directory (`vp lint --lsp`: in
+the editor's workspace folder), and the repo root has none. So lint through the
+package scripts (`pnpm -F chaosbringer lint`, `pnpm -F lightbringer lint`), and
+for editor diagnostics run `vp lint --lsp` with packages/chaosbringer or
+packages/lightbringer as the workspace folder: at the repo root it falls back
+to Oxlint's defaults, as plain oxlint does everywhere, and correctness findings
+become warnings.
 
 The `test:ai` smoke exercises the live Anthropic pipeline — Phase A
 discovery + Phase D investigation — that no other test in the repo
