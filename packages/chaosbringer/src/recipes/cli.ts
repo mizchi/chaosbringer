@@ -406,8 +406,10 @@ async function verifyCmd(argv: string[]): Promise<void> {
   if (!baseUrl) throw new UsageError("--base-url is required");
   requireBaseUrl(baseUrl);
   const runs = intFlag("--runs", values.runs, 1) ?? 5;
-  const minSuccessRate = values["min-success-rate"] !== undefined ? Number(values["min-success-rate"]) : 0.8;
-  if (!(minSuccessRate >= 0 && minSuccessRate <= 1)) {
+  const rawRate = values["min-success-rate"];
+  const minSuccessRate = rawRate !== undefined ? Number(rawRate) : 0.8;
+  // `Number("")` is 0, which would promote the recipe whatever its success rate.
+  if (rawRate?.trim() === "" || !(minSuccessRate >= 0 && minSuccessRate <= 1)) {
     throw new UsageError(`--min-success-rate must be a number in 0..1, got ${JSON.stringify(values["min-success-rate"])}`);
   }
   const store = openStore(values);

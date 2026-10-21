@@ -196,6 +196,13 @@ describe("usage errors", () => {
     [["recipes", "show"], "recipes show", "expected a recipe name"],
     [["recipes", "rollback", "x"], "recipes rollback", "--to-version N is required"],
     [["recipes", "verify", "x", "--base-url", "staging.test"], "recipes verify", '--base-url must be an absolute http(s) URL, got "staging.test"'],
+    // An empty value (an unset variable in `--min-success-rate "$RATE"`) was
+    // read as 0, which promotes the recipe whatever its success rate.
+    [
+      ["recipes", "verify", "x", "--base-url", "http://a.test", "--min-success-rate", ""],
+      "recipes verify",
+      '--min-success-rate must be a number in 0..1, got ""',
+    ],
     [["model", "compile"], "model compile", "--traces, --out are required"],
     [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--max-runs", "0"], "model shrink", '--max-runs needs a positive integer, got "0"'],
     [["perf", "gate", "r.json"], "perf gate", "--budgets <file> is required"],
