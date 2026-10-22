@@ -1,0 +1,115 @@
+# ai-reviwer policy for this repository — https://github.com/mizchi/ai-reviewer
+#
+# mode: observe — decisions are recorded in the ledger (branch `ai-reviwer-ledger`)
+# and nothing is posted on PRs. Move to `advise` (risk labels + a verdict comment,
+# still never blocking or merging) once enough decisions have been compared with
+# what reviewers actually did. There is no `enforce` merge step in the action.
+#
+# The thresholds are the defaults validated across the ai-reviwer benchmark repos.
+# This repo has no reverts in its history, so `bench run --sweep` has nothing to
+# tune them against yet; revisit once the ledger has real outcomes.
+version: 1
+
+mode: observe
+
+gate:
+  max_auto_surface: S1
+  max_auto_reversibility: R0
+  max_auto_diff:
+    files: 20
+    changed_lines: 400
+  max_auto_reach:
+    modules: 1000000000
+    hops: 1000000000
+  block_at: high
+  evidence:
+    S1: E1
+    S2: E2
+    S3: E3
+
+# Vetoes evaluated before any axis: a change that can loosen the gate itself
+# never gets through the gate. This file is in here on purpose.
+authority:
+  - ".ai-review/**"
+  - "**/.env*"
+  - ".github/workflows/**"
+  - ".github/CODEOWNERS"
+  - "**/*.tf"
+  - "Dockerfile"
+
+# Rules can only raise Surface / Reversibility (monotonic escalation).
+# Unclassified files fall to S2 with low confidence; only S0/S1 rules move the
+# auto-merge rate.
+surface_rules:
+  # S0: never executed
+  - paths:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "**/*.txt"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".editorconfig"
+      - "**/*.{png,jpg,jpeg,gif,ico,webp,avif}"
+      - "**/*.map"
+    surface: S0
+
+  # S1: test assets that change no runtime behaviour by themselves
+  - paths:
+      - "**/*.snap"
+      - "**/__snapshots__/**"
+      - "**/*.svg"
+    surface: S1
+
+  # S2: observable at runtime, not an external contract
+  - paths:
+      - "**/*.{json,json5,jsonc}"
+      - "**/*.{yaml,yml}"
+      - "**/*.toml"
+      - "**/*.{css,scss,sass,less,styl}"
+      - "**/*.{html,htm,ejs,hbs,mustache,pug,jade,njk,liquid}"
+      - "**/*.{vue,svelte,astro}"
+    surface: S2
+
+  # S3: contracts observed outside the repository
+  - paths: ["**/migrations/**", "**/*.sql"]
+    surface: S3
+    reversibility: R2
+  - paths: ["**/*.proto", "**/*.{graphql,gql}", "openapi.{yaml,yml,json}", "**/public/**"]
+    surface: S3
+
+  # S4: build and release infrastructure, which code tests cannot verify
+  - paths:
+      - "package.json"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - "justfile"
+      - "**/tsconfig*.json"
+      - "**/*.{sh,bash,zsh}"
+    surface: S4
+
+mechanical:
+  - paths: ["pnpm-lock.yaml"]
+    verify: "pnpm install --frozen-lockfile"
+
+# Evidence comes from check runs recorded by GitHub, never from anything the PR
+# writes. Verified against the check runs of #180 (14 runs, all github-actions):
+#   build  <- build-and-test
+#   tests  <- build-and-test, example-tests (6 matrix jobs)
+# A pattern that matches nothing does not error; the signal just becomes unknown
+# and every code change falls to HUMAN, so re-check with `signals inspect` when
+# CI job names change.
+signals:
+  build: ["build", "typecheck", "tsc", "compile", "lint"]
+  tests: ["test", "spec", "unit", "e2e", "ci"]
+  trusted_apps: ["github-actions"]
+
+escalation:
+  target_human_rate: 0.35
+  max_auto_rate: 0.60
+
+override:
+  allowed_by: ["CODEOWNERS"]
+  require_reason: true
