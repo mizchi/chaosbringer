@@ -130,7 +130,7 @@ await chaos({
   invariants: [
     {
       name: "no-xss-fired",
-      when: "afterAction",
+      when: "afterActions",
       check: async ({ page }) =>
         (await page.evaluate(() => (window as any).__xss_fired)) ? "XSS payload executed" : true,
     },
