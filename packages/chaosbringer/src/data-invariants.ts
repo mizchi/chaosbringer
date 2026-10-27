@@ -388,9 +388,12 @@ function garbageText(arg: { source: string; ignore: string; selector: string; ma
       if (samples.length >= arg.max) continue;
       // A bare token (`Total: <span>{price}</span>`) reads better with the
       // text around it: take the nearest ancestor below the root that has
-      // some, and find the token in it by its offset.
+      // some, and find the token in it by its offset. Climb only through HTML
+      // elements: an SVG or MathML container's `textContent` folds in text
+      // that isn't rendered (an SVG `<title>`), which would land in the
+      // sample next to the token.
       let context: Node = node;
-      for (let el: Element | null = parent; el && el !== root && context.textContent?.trim() === match[0]; el = el.parentElement) {
+      for (let el: Element | null = parent; el && el !== root && el instanceof HTMLElement && context.textContent?.trim() === match[0]; el = el.parentElement) {
         context = el;
       }
       const text = context.textContent ?? "";

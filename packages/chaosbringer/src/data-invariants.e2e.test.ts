@@ -80,6 +80,8 @@ describe("data-safety invariant presets", () => {
     "/garbage-price": `<h1>Cart</h1><p>Total: $NaN</p>`,
     "/garbage-option": `<h1>x</h1><select aria-label="size"><option>undefined</option></select>`,
     "/garbage-contents": `<h1>x</h1><div style="display:contents">Posted Invalid Date</div>`,
+    // The <title> is not rendered; the sample must not fold it in beside the token.
+    "/garbage-svg": `<h1>x</h1><svg><text>NaN</text><title>undefined</title></svg>`,
     // An in-page editor: `undefined` is the content the user is editing, not
     // the app's own garbage, so `[contenteditable]` is in the default ignore.
     "/editor": `<h1>Editor</h1><div contenteditable><span>let x = undefined;</span></div>`,
@@ -276,6 +278,10 @@ describe("data-safety invariant presets", () => {
 
     it("flags visible text inside a display:contents element", async () => {
       expect(await check(renderedGarbage(), "/garbage-contents")).toBe('rendered garbage: Invalid Date in "Posted Invalid Date"');
+    });
+
+    it("keeps an SVG title out of the sample it builds for the token", async () => {
+      expect(await check(renderedGarbage(), "/garbage-svg")).toBe('rendered garbage: NaN in "NaN"');
     });
 
     it("leaves a token in a contenteditable editor alone", async () => {
