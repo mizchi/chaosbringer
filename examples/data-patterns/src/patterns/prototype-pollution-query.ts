@@ -52,6 +52,6 @@ export default definePattern({
   },
   crawl: { entry: "/settings" },
   expect: {
-    signal: { kind: "invariant", name: "data.prototype-pollution" },
+    signal: { kind: "invariant", name: "data.prototype-pollution", message: /cbPolluted/ },
   },
 });

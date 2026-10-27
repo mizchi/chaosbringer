@@ -15,7 +15,8 @@ import type { DataPattern, Signal, Variant } from "./pattern.js";
 /** What a crawl reported, in the terms a `Signal` is written in. */
 export type ObservedSignal =
   | { kind: "error"; type: string; message: string }
-  | { kind: "invariant"; name: string }
+  /** `messages`: each distinct failure message, without the `[name] ` prefix. */
+  | { kind: "invariant"; name: string; messages: string[] }
   | { kind: "blocked-navigation"; url: string };
 
 /** One crawl of one variant with one kind of data, as `runCase` returns it. */
@@ -38,10 +39,10 @@ export interface CaseRun {
 
 /**
  * Every signal in `report`: one per error cluster that isn't an invariant
- * violation, one per failed invariant, one per off-site navigation the
- * crawler blocked. The browser's own error page for a blocked navigation
- * (`chrome-error://chromewebdata/`) is left out: it is where the page ended
- * up, not where it tried to go.
+ * violation, one per failed invariant (with the messages of all its
+ * clusters), one per off-site navigation the crawler blocked. The browser's
+ * own error page for a blocked navigation (`chrome-error://chromewebdata/`)
+ * is left out: it is where the page ended up, not where it tried to go.
  */
 export function signalsOf(report: Pick<CrawlReport, "errorClusters" | "pages">): ObservedSignal[] {
   const out: ObservedSignal[] = [];
@@ -54,7 +55,13 @@ export function signalsOf(report: Pick<CrawlReport, "errorClusters" | "pages">):
   };
   for (const c of report.errorClusters) {
     if (c.type === "invariant-violation") {
-      for (const name of c.invariantNames ?? []) add({ kind: "invariant", name });
+      for (const name of c.invariantNames ?? []) {
+        // The crawler prefixes the check's message with `[name] `.
+        const message = c.sample.message.replace(`[${name}] `, "");
+        const failed = out.find((s) => s.kind === "invariant" && s.name === name);
+        if (failed?.kind !== "invariant") out.push({ kind: "invariant", name, messages: [message] });
+        else if (!failed.messages.includes(message)) failed.messages.push(message);
+      }
     } else {
       add({ kind: "error", type: c.type, message: c.sample.message });
     }
@@ -72,8 +79,14 @@ export function matches(expected: Signal, observed: ObservedSignal): boolean {
     case "error":
       // `search` ignores a global regex's lastIndex.
       return observed.kind === "error" && observed.message.search(expected.message) !== -1;
-    case "invariant":
-      return observed.kind === "invariant" && observed.name === expected.name;
+    case "invariant": {
+      const message = expected.message;
+      return (
+        observed.kind === "invariant" &&
+        observed.name === expected.name &&
+        (message === undefined || observed.messages.some((m) => m.search(message) !== -1))
+      );
+    }
     case "blocked-navigation":
       return observed.kind === "blocked-navigation" && observed.url.includes(expected.includes);
   }
@@ -84,7 +97,7 @@ export function describeSignal(s: Signal): string {
     case "error":
       return `error ${s.message}`;
     case "invariant":
-      return `invariant ${s.name}`;
+      return s.message ? `invariant ${s.name} ${s.message}` : `invariant ${s.name}`;
     case "blocked-navigation":
       return `blocked navigation to *${s.includes}*`;
   }
@@ -95,7 +108,7 @@ export function describeObserved(s: ObservedSignal): string {
     case "error":
       return `${s.type} "${s.message}"`;
     case "invariant":
-      return `invariant ${s.name}`;
+      return `invariant ${s.name} ${s.messages.map((m) => `"${m}"`).join(", ")}`;
     case "blocked-navigation":
       return `blocked navigation to ${s.url}`;
   }

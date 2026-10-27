@@ -130,8 +130,11 @@ export type Injection =
 export type Signal =
   /** An error cluster (exception, unhandled rejection, console error) whose message matches. */
   | { kind: "error"; message: RegExp }
-  /** An invariant of the catalog suite failed (`data.xss-marker`, …). */
-  | { kind: "invariant"; name: string }
+  /**
+   * An invariant of the catalog suite failed (`data.prototype-pollution`, …),
+   * and, with `message`, one of its failure messages matches.
+   */
+  | { kind: "invariant"; name: string; message?: RegExp }
   /**
    * The crawler kept the page from navigating off-site to a URL containing
    * `includes`. Only `pages[].blockedNavigations` records it: it changes no

@@ -13,7 +13,8 @@
  * A variant is **flagged** when a `bug` finding matches the entry's signal:
  * an error by a `js-exception` / `unhandled-rejection` finding whose title
  * matches the message, an invariant by an `invariant-violation` finding whose
- * title names it (`Invariant violated: [data.xss-marker] …`). A blocked
+ * title names it (`Invariant violated: [data.xss-marker] …`) and matches the
+ * signal's message when it has one. A blocked
  * navigation is in the crawl report only; no scan rule reads it.
  *
  *   pnpm scan-check                     # every entry; rewrites the README section
@@ -87,8 +88,15 @@ function flaggedBy(findings: ScanFinding[], signal: Signal): ScanFinding | undef
   switch (signal.kind) {
     case "error":
       return findings.find((f) => (f.rule === "js-exception" || f.rule === "unhandled-rejection") && f.title.search(signal.message) !== -1);
-    case "invariant":
-      return findings.find((f) => f.rule === "invariant-violation" && f.title.includes(`[${signal.name}]`));
+    case "invariant": {
+      const message = signal.message;
+      return findings.find(
+        (f) =>
+          f.rule === "invariant-violation" &&
+          f.title.includes(`[${signal.name}]`) &&
+          (message === undefined || f.title.search(message) !== -1),
+      );
+    }
     case "blocked-navigation":
       return undefined;
   }

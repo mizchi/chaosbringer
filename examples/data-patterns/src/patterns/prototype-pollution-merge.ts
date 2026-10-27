@@ -74,6 +74,6 @@ export default definePattern({
     benign: '{"theme":"dark"}',
   },
   expect: {
-    signal: { kind: "invariant", name: "data.prototype-pollution" },
+    signal: { kind: "invariant", name: "data.prototype-pollution", message: /cbPolluted/ },
   },
 });

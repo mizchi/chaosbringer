@@ -73,7 +73,7 @@ describe("signalsOf", () => {
     );
     expect(signalsOf(r)).toEqual([
       { kind: "error", type: "unhandled-rejection", message: NULL_READ },
-      { kind: "invariant", name: "data.xss-marker" },
+      { kind: "invariant", name: "data.xss-marker", messages: ["XSS marker set: window.__cb_xss_fired"] },
       { kind: "blocked-navigation", url: "http://localhost:4001/cb-offsite-marker" },
     ]);
   });
@@ -84,14 +84,16 @@ describe("signalsOf", () => {
     expect(signalsOf(report({}, { blockedNavigations: ["chrome-error://chromewebdata/"] }))).toEqual([]);
   });
 
-  it("lists an invariant once however many clusters it failed in", () => {
+  it("lists an invariant once however many clusters it failed in, with each message", () => {
     const r = report({
       errorClusters: [
         cluster("invariant-violation", "[data.rendered-garbage] rendered garbage: NaN", ["data.rendered-garbage"]),
         cluster("invariant-violation", "[data.rendered-garbage] rendered garbage: undefined", ["data.rendered-garbage"]),
       ],
     });
-    expect(signalsOf(r)).toEqual([{ kind: "invariant", name: "data.rendered-garbage" }]);
+    expect(signalsOf(r)).toEqual([
+      { kind: "invariant", name: "data.rendered-garbage", messages: ["rendered garbage: NaN", "rendered garbage: undefined"] },
+    ]);
   });
 });
 
@@ -130,7 +132,7 @@ describe("judgeBuggy", () => {
       errorClusters: [cluster("unhandled-rejection", NULL_READ), cluster("invariant-violation", "[data.not-blank] blank", ["data.not-blank"])],
     });
     // Undeclared: the extra invariant fails the verdict.
-    expect(judgeBuggy(pattern(), run(both, { exitCode: 1 }))).toEqual(["undeclared signal: invariant data.not-blank"]);
+    expect(judgeBuggy(pattern(), run(both, { exitCode: 1 }))).toEqual(['undeclared signal: invariant data.not-blank "blank"']);
     // Declared: passes.
     const declared = pattern({
       signal: { kind: "error", message: /Cannot read properties of null/ },
@@ -142,6 +144,20 @@ describe("judgeBuggy", () => {
     expect(judgeBuggy(declared, run(only, { exitCode: 1 }))).toEqual([
       `expected invariant data.not-blank, saw unhandled-rejection "${NULL_READ}"`,
     ]);
+  });
+
+  it("matches an invariant's message when the signal names one", () => {
+    const polluted = (message: string) =>
+      report({ errorClusters: [cluster("invariant-violation", `[data.prototype-pollution] ${message}`, ["data.prototype-pollution"])] });
+    const p = pattern({ signal: { kind: "invariant", name: "data.prototype-pollution", message: /cbPolluted/ } });
+    expect(judgeBuggy(p, run(polluted("Object.prototype polluted: cbPolluted"), { exitCode: 1 }))).toEqual([]);
+    expect(judgeBuggy(p, run(polluted("Object.prototype polluted: isAdmin"), { exitCode: 1 }))).toEqual([
+      'expected invariant data.prototype-pollution /cbPolluted/, saw invariant data.prototype-pollution "Object.prototype polluted: isAdmin"',
+      'undeclared signal: invariant data.prototype-pollution "Object.prototype polluted: isAdmin"',
+    ]);
+    // Without a message, any failure of the invariant matches.
+    const any = pattern({ signal: { kind: "invariant", name: "data.prototype-pollution" } });
+    expect(judgeBuggy(any, run(polluted("Object.prototype polluted: isAdmin"), { exitCode: 1 }))).toEqual([]);
   });
 
   it("matches a global regex on every call", () => {
@@ -166,7 +182,7 @@ describe("judgeClean", () => {
   it("fails on any signal, of any kind", () => {
     expect(judgeClean(p, run(report({ errorClusters: [cluster("console", "oops")] })))).toEqual(['reported console "oops"']);
     expect(judgeClean(p, run(report({ errorClusters: [cluster("invariant-violation", "[data.xss-marker] x", ["data.xss-marker"])] })))).toEqual([
-      "reported invariant data.xss-marker",
+      'reported invariant data.xss-marker "x"',
     ]);
     expect(judgeClean(p, run(report({}, { blockedNavigations: ["http://localhost:4001/x"] })))).toEqual([
       "reported blocked navigation to http://localhost:4001/x",
