@@ -4,11 +4,14 @@
  * `payloadDriver`, do damage once it reached the page? Each preset is an
  * ordinary `Invariant`, like `axe()`, and nothing turns them on by default.
  *
- * The security presets look for a canary rather than for harm in general: a
- * payload that ran sets a marker on `window`, injected markup carries a
- * marker attribute, a script URL names a marker. A page doesn't produce
- * those by accident, so the presets stay quiet on a site that never received
- * such a payload. See docs/recipes/data-safety.md.
+ * `xssMarker` and `injectedMarkup` look for a canary rather than for harm in
+ * general: a payload that ran sets a marker on `window`, injected markup
+ * carries a marker attribute or an event-handler attribute naming a marker, a
+ * script URL names a marker. A page doesn't produce those by accident, so
+ * those two stay quiet on a site that never received such a payload.
+ * `prototypePollution` and `renderedGarbage` are not canary-scoped: they fail
+ * on any enumerable `Object.prototype` key, or any of the garbage tokens in
+ * visible text, whatever put them there. See docs/recipes/data-safety.md.
  *
  * The in-page halves run through `frame.evaluate`, so they stay
  * self-contained: no imports, no references to module scope. Everything
@@ -61,9 +64,12 @@ export interface RenderedGarbageOptions extends DataInvariantOptions {
    */
   tokens?: readonly string[];
   /**
-   * Elements whose text isn't checked: code samples and the like, where the
-   * tokens are content. Default: `code,pre,kbd,samp,script,style,textarea,noscript`.
-   * `""` checks everything.
+   * Elements whose text isn't checked: code samples, editors and the like,
+   * where the tokens are content. Default:
+   * `code,pre,kbd,samp,script,style,textarea,noscript,[contenteditable]`.
+   * `""` checks everything. Prose and API-reference text are not scoped out
+   * by default — a page that writes about `undefined` or `NaN` needs its own
+   * `ignore`, `selector` or `urlPattern`.
    */
   ignore?: string;
   /** Elements whose text is checked. Default: `body`. */
@@ -96,7 +102,7 @@ export interface DataSafetyOptions {
 /** `__xss_fired` is what the `xss` payload set (drivers/payloads.ts) writes. */
 const DEFAULT_MARKERS: readonly string[] = [XSS_AUTH_MARKER, "__xss_fired"];
 const DEFAULT_GARBAGE_TOKENS: readonly string[] = ["undefined", "NaN", "[object Object]", "Invalid Date"];
-const DEFAULT_GARBAGE_IGNORE = "code,pre,kbd,samp,script,style,textarea,noscript";
+const DEFAULT_GARBAGE_IGNORE = "code,pre,kbd,samp,script,style,textarea,noscript,[contenteditable]";
 
 /** Most samples a failure message lists per frame, and the longest each is. */
 const MAX_SAMPLES = 3;
@@ -142,9 +148,18 @@ async function inEveryFrame<R>(
     evaluation.catch(() => {});
     try {
       const result = await raceTimeout(evaluation, FRAME_PROBE_TIMEOUT_MS);
-      if (result !== TIMED_OUT) out.push({ frame: frame.url(), result });
-    } catch {
-      // Detached or navigated away mid-check: nothing left to look at.
+      // An iframe's url() is "" before its first commit (e.g. the one a
+      // `javascript:` payload leaves); name it so the message doesn't read
+      // "in frame :".
+      if (result !== TIMED_OUT) out.push({ frame: frame.url() || "about:blank", result });
+    } catch (err) {
+      // A frame detached or navigated away mid-check has nothing left to look
+      // at and is skipped. A SyntaxError is a mistake in a probe option (an
+      // invalid `ignore` or `selector`), not a vanished frame, so it is not
+      // swallowed: it must fail the check in every frame, as it does in the
+      // top document.
+      const message = err instanceof Error ? err.message : String(err);
+      if (/SyntaxError|is not a valid selector/.test(message)) throw err;
     }
   }
   return out;
@@ -187,9 +202,15 @@ function base(defaultName: string, options: DataInvariantOptions): Omit<Invarian
   };
 }
 
-/** In-page: the markers set (truthy) on this frame's `window`. */
+/** In-page: the markers set (truthy) as own properties of this frame's `window`. */
 function markersSet(markers: readonly string[]): Hits {
-  const set = markers.filter((m) => Boolean((window as unknown as Record<string, unknown>)[m]));
+  // Named element access (`<b id="__xss_fired">`) and other DOM clobbering
+  // reach `window` through the WindowProperties prototype, not as own
+  // properties, so an own check tells a script that ran from a marker that is
+  // merely named in markup.
+  const set = markers.filter(
+    (m) => Object.prototype.hasOwnProperty.call(window, m) && Boolean((window as unknown as Record<string, unknown>)[m])
+  );
   return { count: set.length, samples: set.map((m) => `window.${m}`) };
 }
 
@@ -247,19 +268,36 @@ function injectedElements(arg: {
       }
     }
   }
+  // An event-handler attribute (`onerror`, `onmouseover`, …) that names a
+  // marker is as clear a canary as a `javascript:` URL: the payload reached
+  // the DOM as an attribute, whether or not the handler has fired. The
+  // crawler never hovers, so this flags the sink, not its execution.
+  for (const el of Array.from(document.querySelectorAll("*"))) {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.length > 2 && name.startsWith("on") && arg.markers.some((m) => attr.value.includes(m))) {
+        hit(`<${el.localName} ${attr.name}="${attr.value}">`);
+      }
+    }
+  }
   return { count, samples };
 }
 
 /**
  * Fails when a payload reached the DOM as markup or as a script URL: an
- * element carries `attribute` (default `data-cb-injected`), or an `href` /
- * `src` / `action` / `formaction` / `xlink:href` holds a `javascript:` URL
- * naming a marker. The crawler never clicks a `javascript:` link, so this
- * flags the sink, not its execution.
+ * element carries `attribute` (default `data-cb-injected`), an `href` / `src`
+ * / `action` / `formaction` / `xlink:href` holds a `javascript:` URL naming a
+ * marker, or an `on*` event-handler attribute names a marker. The crawler
+ * never clicks a `javascript:` link or hovers, so this flags the sink, not
+ * its execution.
  */
 export function injectedMarkup(options: InjectedMarkupOptions = {}): Invariant {
+  const attribute = options.attribute ?? "data-cb-injected";
+  if (attribute === "") {
+    throw new Error('chaosbringer: injectedMarkup "attribute" must not be empty');
+  }
   const arg = {
-    attribute: options.attribute ?? "data-cb-injected",
+    attribute,
     markers: [...(options.markers ?? DEFAULT_MARKERS)],
     anyJavascriptUrl: options.anyJavascriptUrl ?? false,
     max: MAX_SAMPLES,
@@ -293,12 +331,21 @@ export function prototypePollution(options: PrototypePollutionOptions = {}): Inv
 }
 
 /**
- * The regex source that finds any of `tokens` as a whole word: not inside an
- * identifier, so `undefinedBehavior` and `$NaN` don't match.
+ * The regex source that finds any of `tokens` in visible text. A token is
+ * bounded by a word character only on the side it begins or ends with one, so
+ * `undefinedBehavior` and `isNaN` don't match, but `$NaN` (a price) and
+ * `Hello[object Object]` do: visible text is prose, not source, where `$`
+ * reads as a currency symbol and brackets are punctuation, not word edges.
  */
 export function garbagePattern(tokens: readonly string[]): string {
-  const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return `(?<![\\w$])(?:${escaped.join("|")})(?![\\w$])`;
+  const escape = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = /\w/;
+  const parts = tokens.map((t) => {
+    const pre = t.length > 0 && word.test(t[0]!) ? "(?<!\\w)" : "";
+    const post = t.length > 0 && word.test(t.at(-1)!) ? "(?!\\w)" : "";
+    return `${pre}${escape(t)}${post}`;
+  });
+  return `(?:${parts.join("|")})`;
 }
 
 /** In-page: visible text nodes under `selector` that contain a token. */
@@ -306,10 +353,29 @@ function garbageText(arg: { source: string; ignore: string; selector: string; ma
   const re = new RegExp(arg.source);
   const samples: string[] = [];
   let count = 0;
+  // Run the ignore selector once up front, so a mistake in it throws on every
+  // page rather than only on the ones where a token happened to match.
+  if (arg.ignore) document.querySelector(arg.ignore);
+  // `checkVisibility` reports an `<option>` and a `display: contents` element
+  // as not rendered, though the option the select shows and the contents
+  // element's text are on screen. Judge an option by its `<select>`, and a
+  // `display: contents` node by the nearest ancestor that has a box.
+  const shown = (el: Element): boolean => {
+    const option = el.closest("option,optgroup");
+    if (option) {
+      const select = option.closest("select");
+      return !select || select.checkVisibility?.({ visibilityProperty: true }) !== false;
+    }
+    let box: Element | null = el;
+    while (box && getComputedStyle(box).display === "contents") box = box.parentElement;
+    return !box || box.checkVisibility?.({ visibilityProperty: true }) !== false;
+  };
   const roots = Array.from(document.querySelectorAll(arg.selector));
   for (const root of roots) {
-    // A root inside another is walked with it.
-    if (roots.some((r) => r !== root && r.contains(root))) continue;
+    // A root nested in another matched root is walked with the outer one.
+    // Climbing from the parent is O(depth); scanning every other root for one
+    // that contains this one is O(roots²) — minutes on a big table.
+    if (root.parentElement?.closest(arg.selector)) continue;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const own = node.nodeValue ?? "";
@@ -317,7 +383,7 @@ function garbageText(arg: { source: string; ignore: string; selector: string; ma
       const parent = node.parentElement;
       if (!match || !parent) continue;
       if (arg.ignore && parent.closest(arg.ignore)) continue;
-      if (parent.checkVisibility?.({ visibilityProperty: true }) === false) continue;
+      if (!shown(parent)) continue;
       count++;
       if (samples.length >= arg.max) continue;
       // A bare token (`Total: <span>{price}</span>`) reads better with the
@@ -365,11 +431,32 @@ export function renderedGarbage(options: RenderedGarbageOptions = {}): Invariant
   };
 }
 
-/** In-page: the visible text of the elements matching `selector`. */
+/**
+ * In-page: the visible text of the elements matching `selector`, including
+ * text inside open shadow roots. A web-component page (Lit, Stencil, Shoelace)
+ * renders into shadow DOM, which `innerText` does not descend into, so without
+ * this a fully rendered page would read as 0 characters. A closed shadow root
+ * can't be read and is missed.
+ */
 function visibleText(selector: string): string {
-  return Array.from(document.querySelectorAll(selector))
-    .map((el) => (el instanceof HTMLElement ? el.innerText : (el.textContent ?? "")).trim())
-    .join("\n");
+  const parts: string[] = [];
+  const push = (el: Element) => {
+    const text = (el instanceof HTMLElement ? el.innerText : (el.textContent ?? "")).trim();
+    if (text) parts.push(text);
+  };
+  const descendShadows = (root: Element | ShadowRoot) => {
+    for (const el of Array.from(root.querySelectorAll("*"))) {
+      if (el.shadowRoot) {
+        for (const child of Array.from(el.shadowRoot.children)) push(child);
+        descendShadows(el.shadowRoot);
+      }
+    }
+  };
+  for (const el of Array.from(document.querySelectorAll(selector))) {
+    push(el);
+    descendShadows(el);
+  }
+  return parts.join("\n");
 }
 
 /** The first match of `pattern` in `text`, ignoring the regex's `lastIndex`. */

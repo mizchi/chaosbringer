@@ -75,11 +75,32 @@ describe("data-safety invariant presets", () => {
       `<p>Tags: [object Object]</p><p>Posted Invalid Date</p>`,
     "/garbage-long": `<h1>x</h1><p>${"word ".repeat(30)}NaN${" word".repeat(30)}</p>`,
     "/garbage-null": `<h1>x</h1><p>Name: null</p>`,
+    // A `$NaN` price, text inside the shown `<option>` and a `display: contents`
+    // wrapper: all on screen, all flagged.
+    "/garbage-price": `<h1>Cart</h1><p>Total: $NaN</p>`,
+    "/garbage-option": `<h1>x</h1><select aria-label="size"><option>undefined</option></select>`,
+    "/garbage-contents": `<h1>x</h1><div style="display:contents">Posted Invalid Date</div>`,
+    // An in-page editor: `undefined` is the content the user is editing, not
+    // the app's own garbage, so `[contenteditable]` is in the default ignore.
+    "/editor": `<h1>Editor</h1><div contenteditable><span>let x = undefined;</span></div>`,
+    // DOM clobbering: an element whose id is a marker name shows up through
+    // the prototype chain, not as an own property of `window`.
+    "/clobber": `<h2 id="__xss_fired">window.__xss_fired</h2>`,
+    // An event-handler attribute that names a marker, which the crawler never
+    // fires: the sink, not its execution.
+    "/handler-attr": `<h1>x</h1><img alt="avatar" onmouseover="window.__cb_xss_fired=1">`,
+    // A web component renders its whole UI into an open shadow root, which
+    // `innerText` does not descend into: the light DOM has no text of its own.
+    "/shadow":
+      `<my-panel></my-panel><script>` +
+      `const host = document.querySelector("my-panel");` +
+      `host.attachShadow({ mode: "open" }).innerHTML = "<h1>Dashboard</h1><p>Welcome back, Ada.</p>";` +
+      `</script>`,
     "/code-sample":
       `<h1>Docs</h1><pre>let x = undefined;</pre><p>Returns <code>NaN</code>.</p>` +
       `<kbd>[object Object]</kbd><samp>Invalid Date</samp><textarea aria-label="t">undefined</textarea>` +
       `<p hidden>NaN</p><p style="display:none">undefined</p><p style="visibility:hidden">NaN</p>` +
-      `<p>undefinedBehavior is a flag; $NaN and NaN_count are identifiers.</p>` +
+      `<p>undefinedBehavior is a flag and NaN_count is an identifier.</p>` +
       `<template><p>undefined</p></template><noscript>undefined</noscript>`,
     "/blank": `<div id="app"></div>`,
     "/hidden-only": `<div hidden>Loading data</div>`,
@@ -156,6 +177,10 @@ describe("data-safety invariant presets", () => {
     it("stays clean on marker text in attributes, form values and escaped text", async () => {
       expect(await check(xssMarker(), "/safe-links")).toBe(true);
     });
+
+    it("stays clean when an element's id clobbers a marker name", async () => {
+      expect(await check(xssMarker(), "/clobber")).toBe(true);
+    });
   });
 
   describe("injectedMarkup", () => {
@@ -187,6 +212,16 @@ describe("data-safety invariant presets", () => {
       expect(await check(injectedMarkup({ attribute: "data-other" }), "/markup")).toBe(
         'injected markup: <a href="javascript:window.__cb_xss_fired=1">'
       );
+    });
+
+    it("flags an event-handler attribute that names a marker, fired or not", async () => {
+      expect(await check(injectedMarkup(), "/handler-attr")).toBe(
+        'injected markup: <img onmouseover="window.__cb_xss_fired=1">'
+      );
+    });
+
+    it("rejects an empty attribute when it is built", () => {
+      expect(() => injectedMarkup({ attribute: "" })).toThrow(/attribute.*must not be empty/);
     });
   });
 
@@ -230,6 +265,27 @@ describe("data-safety invariant presets", () => {
         'rendered garbage: null in "Name: null"'
       );
     });
+
+    it("flags a token next to a currency symbol", async () => {
+      expect(await check(renderedGarbage(), "/garbage-price")).toBe('rendered garbage: NaN in "Total: $NaN"');
+    });
+
+    it("flags visible text the select shows in an option", async () => {
+      expect(await check(renderedGarbage(), "/garbage-option")).toBe('rendered garbage: undefined in "undefined"');
+    });
+
+    it("flags visible text inside a display:contents element", async () => {
+      expect(await check(renderedGarbage(), "/garbage-contents")).toBe('rendered garbage: Invalid Date in "Posted Invalid Date"');
+    });
+
+    it("leaves a token in a contenteditable editor alone", async () => {
+      expect(await check(renderedGarbage(), "/editor")).toBe(true);
+    });
+
+    it("throws on an invalid ignore selector on every page, matching token or not", async () => {
+      await expect(check(renderedGarbage({ ignore: "pre,<<" }), "/garbage")).rejects.toThrow(/is not a valid selector/);
+      await expect(check(renderedGarbage({ ignore: "pre,<<" }), "/blank")).rejects.toThrow(/is not a valid selector/);
+    });
   });
 
   describe("notBlank", () => {
@@ -254,6 +310,10 @@ describe("data-safety invariant presets", () => {
         'error text shown: "Something went wrong", "try again"'
       );
       expect(await check(notBlank({ errorText: ["Not found"] }), "/error-screen")).toBe(true);
+    });
+
+    it("counts text a web component renders into an open shadow root", async () => {
+      expect(await check(notBlank(), "/shadow")).toBe(true);
     });
   });
 
@@ -296,13 +356,22 @@ describe("data-safety invariant presets", () => {
 
     it("reports a payload that ran as an invariant violation, and fails the run", async () => {
       const report = await crawl(`/search-unsafe${XSS_QUERY}`);
-      expect(report.pages[0]!.errors).toMatchObject([
-        {
-          type: "invariant-violation",
-          invariantName: "data.xss-marker",
-          message: "[data.xss-marker] XSS marker set: window.__cb_xss_fired",
-        },
-      ]);
+      // The payload ran (xss-marker) and its `ontoggle` handler names the
+      // marker in the DOM (injected-markup); both are reported.
+      expect(report.pages[0]!.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "invariant-violation",
+            invariantName: "data.xss-marker",
+            message: "[data.xss-marker] XSS marker set: window.__cb_xss_fired",
+          }),
+          expect.objectContaining({
+            type: "invariant-violation",
+            invariantName: "data.injected-markup",
+            message: '[data.injected-markup] injected markup: <details ontoggle="window.__cb_xss_fired=1">',
+          }),
+        ])
+      );
       expect(getExitCode(report)).toBe(1);
     }, 60_000);
 

@@ -79,14 +79,23 @@ describe("dataSafety", () => {
 describe("garbagePattern", () => {
   const re = new RegExp(garbagePattern(["undefined", "NaN", "[object Object]", "Invalid Date"]));
 
-  it.each(["undefined", "Hello undefined!", "Total: NaN", "NaN%", "Tags: [object Object]", "(Invalid Date)"])(
-    "matches %j",
-    (text) => {
-      expect(re.test(text)).toBe(true);
-    }
-  );
+  it.each([
+    "undefined",
+    "Hello undefined!",
+    "Total: NaN",
+    "NaN%",
+    "Tags: [object Object]",
+    "(Invalid Date)",
+    // `$` is a currency symbol in prose, not a word edge: a `$NaN` price and
+    // an `[object Object]` run against a word both match.
+    "Total: $NaN",
+    "Shipping: $undefined",
+    "Hello[object Object]",
+  ])("matches %j", (text) => {
+    expect(re.test(text)).toBe(true);
+  });
 
-  it.each(["undefinedBehavior", "isNaN", "NaN_count", "$NaN", "NaN$", "nan", "[object Objects]", "Invalid Dates"])(
+  it.each(["undefinedBehavior", "isNaN", "NaN_count", "undefinedundefined", "nan", "[object Objects]", "Invalid Dates"])(
     "leaves %j alone",
     (text) => {
       expect(re.test(text)).toBe(false);
