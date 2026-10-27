@@ -45,5 +45,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /reading 'trim'/ },
+    fixedText: /Unnamed member/,
   },
 });

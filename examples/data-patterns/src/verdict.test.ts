@@ -1,7 +1,7 @@
 import type { CrawlReport } from "chaosbringer";
 import { describe, expect, it } from "vitest";
 import type { DataPattern, Injection, PatternExpect } from "./pattern.js";
-import { type CaseRun, deliveredOf, judgeBuggy, judgeClean, judgeDelivered, signalsOf } from "./verdict.js";
+import { type CaseRun, deliveredOf, judgeBuggy, judgeClean, judgeDelivered, judgeFixedText, signalsOf } from "./verdict.js";
 
 const ORIGIN = "http://127.0.0.1:5000";
 const SUITE = ["data.xss-marker", "data.injected-markup", "data.prototype-pollution", "data.rendered-garbage", "data.not-blank"];
@@ -53,6 +53,7 @@ function run(r: CrawlReport, over: Partial<CaseRun> = {}): CaseRun {
     defaultExit: 0,
     signals: signalsOf(r),
     delivered: 1,
+    bodyText: "",
     invariantRuns: Object.fromEntries(SUITE.map((n) => [n, 1])),
     ...over,
   };
@@ -206,6 +207,21 @@ describe("judgeClean", () => {
   });
 });
 
+describe("judgeFixedText", () => {
+  it("passes when the fixed page's text matches, fails when it doesn't", () => {
+    const p = pattern({ signal: { kind: "error", message: /x/ }, fixedText: /signed out/ });
+    expect(judgeFixedText(p, run(report(), { bodyText: "You are signed out." }))).toEqual([]);
+    expect(judgeFixedText(p, run(report(), { bodyText: "Loading…" }))).toEqual([
+      'fixed page shows "Loading…", not /signed out/',
+    ]);
+  });
+
+  it("is a no-op without fixedText or on an oracle entry", () => {
+    expect(judgeFixedText(pattern(), run(report(), { bodyText: "" }))).toEqual([]);
+    expect(judgeFixedText(pattern({ signal: "none" }, { channel: "none" }), run(report()))).toEqual([]);
+  });
+});
+
 describe("judgeDelivered", () => {
   it("response: the data:<path> rule injected at least once", () => {
     const p = pattern();
@@ -218,11 +234,24 @@ describe("judgeDelivered", () => {
     expect(judgeDelivered(p, run(report({ faultInjections: [{ rule: "data:/api/users", matched: 1, injected: 1 }] })))).not.toEqual([]);
   });
 
-  it("storage: the data:<key> fault fired at least once", () => {
+  it("storage: the fault fired and an action read the key", () => {
     const p = pattern(undefined, { channel: "storage", key: "prefs", bad: "{bad", benign: "{}" });
-    const fired = (n: number) => report({ lifecycleFaults: [{ name: "data:prefs", matched: 1, fired: n, errored: 0 }] });
-    expect(judgeDelivered(p, run(fired(1)))).toEqual([]);
-    expect(judgeDelivered(p, run(fired(0)))).toEqual(["lifecycle fault data:prefs never fired"]);
+    const click = { type: "click", success: true, timestamp: 0 };
+    const stored = (fired: number, actions: unknown[] = []) =>
+      report({ lifecycleFaults: [{ name: "data:prefs", matched: 1, fired, errored: 0 }], actions: actions as CrawlReport["actions"] });
+    // Fired and acted on: delivered.
+    expect(judgeDelivered(p, run(stored(1, [click])))).toEqual([]);
+    expect(deliveredOf(p, stored(1, [click, click]), `${ORIGIN}/`)).toBe(2);
+    // Written but never read (no action): the value never reached the code.
+    expect(judgeDelivered(p, run(stored(1)))).toEqual([
+      "the page never read prefs: no action ran after data:prefs was written",
+    ]);
+    // A scroll isn't a read; the key is read on a click.
+    expect(judgeDelivered(p, run(stored(1, [{ type: "scroll", success: true, timestamp: 0 }])))).toEqual([
+      "the page never read prefs: no action ran after data:prefs was written",
+    ]);
+    // Never written.
+    expect(judgeDelivered(p, run(stored(0, [click])))).toEqual(["lifecycle fault data:prefs never fired"]);
     expect(judgeDelivered(p, run(report()))).toEqual(["lifecycle fault data:prefs never fired"]);
   });
 

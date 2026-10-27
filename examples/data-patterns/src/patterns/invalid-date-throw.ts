@@ -53,5 +53,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /Invalid time value/ },
+    fixedText: /date unknown/,
   },
 });

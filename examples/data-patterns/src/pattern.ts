@@ -164,6 +164,14 @@ export type PatternExpect =
        * fails, so declare a side effect here rather than loosen the check.
        */
       alsoSignals?: Signal[];
+      /**
+       * Text the fixed variant must show on the bad data: its fallback, or
+       * the value rendered safely. A clean run alone doesn't prove the fix —
+       * a page that drops the data and stays blank is clean too — so the fix
+       * must put something on screen that matches this. Omit it where there
+       * is nothing to render (an open redirect sends the user elsewhere).
+       */
+      fixedText?: RegExp;
     }
   /** Oracle entries: nothing may be reported. */
   | { signal: "none" };

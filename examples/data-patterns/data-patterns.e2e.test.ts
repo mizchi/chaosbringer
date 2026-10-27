@@ -17,7 +17,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { runCase } from "./src/detect.js";
 import { loadPatterns, shardPatterns } from "./src/registry.js";
-import { type CaseRun, describeSignal, judgeBuggy, judgeClean, judgeDelivered } from "./src/verdict.js";
+import { type CaseRun, describeSignal, judgeBuggy, judgeClean, judgeDelivered, judgeFixedText } from "./src/verdict.js";
 
 const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 
@@ -59,6 +59,10 @@ describe("data patterns", () => {
 
       it("fixed is clean on the same bad data", () => {
         expect(judgeClean(pattern, fixedBad)).toEqual([]);
+      });
+
+      it("fixed renders its fallback, not a dropped-data blank", () => {
+        expect(judgeFixedText(pattern, fixedBad)).toEqual([]);
       });
 
       it("the data reached every run", () => {

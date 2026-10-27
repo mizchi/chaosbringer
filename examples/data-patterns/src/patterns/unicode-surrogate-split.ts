@@ -59,5 +59,7 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /URI malformed/ },
+    // The fix cuts by grapheme, so the emoji name survives and is shown.
+    fixedText: /Ada/,
   },
 });

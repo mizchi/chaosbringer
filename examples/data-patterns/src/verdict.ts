@@ -33,6 +33,8 @@ export interface CaseRun {
   signals: ObservedSignal[];
   /** `deliveredOf`: how often the data reached the page. */
   delivered: number;
+  /** The page's visible body text after the actions. */
+  bodyText: string;
   /** Times each suite invariant's check ran, by name. */
   invariantRuns: Record<string, number>;
 }
@@ -116,9 +118,12 @@ export function describeObserved(s: ObservedSignal): string {
 
 /**
  * How often the data reached the page, by the channel's own evidence: the
- * response rule's injections, the storage fault's firings, the visited pages
- * whose URL carries the query, the form fills that succeeded. 0 for an
- * oracle entry, which delivers nothing.
+ * response rule's injections, the visited pages whose URL carries the query,
+ * the form fills that succeeded. For storage it is the page reading the
+ * tampered value, not just the fault writing it: the value is written after
+ * load, so a run that never acts on it (the page reads the key on a click)
+ * delivered nothing to the code under test. 0 for an oracle entry, which
+ * delivers nothing.
  */
 export function deliveredOf(
   pattern: DataPattern,
@@ -129,8 +134,13 @@ export function deliveredOf(
   switch (inject.channel) {
     case "response":
       return report.faultInjections?.find((s) => s.rule === `data:${inject.path}`)?.injected ?? 0;
-    case "storage":
-      return report.lifecycleFaults?.find((s) => s.name === `data:${inject.key}`)?.fired ?? 0;
+    case "storage": {
+      const fired = report.lifecycleFaults?.find((s) => s.name === `data:${inject.key}`)?.fired ?? 0;
+      // The write alone proves nothing: the page reads the key on an action,
+      // so a successful action is what carries the tampered value into it.
+      if (fired < 1) return 0;
+      return report.actions.filter((a) => a.success && a.type !== "scroll").length;
+    }
     case "query": {
       const search = new URL(entryUrl).search;
       return search === "" ? 0 : report.pages.filter((p) => new URL(p.url).search === search).length;
@@ -187,6 +197,21 @@ export function judgeClean(_pattern: DataPattern, run: CaseRun): string[] {
   return problems;
 }
 
+/**
+ * The fixed variant on bad data must render its fallback, or the value shown
+ * safely: a fix that drops the data and leaves a blank or still-loading page
+ * is clean too, so cleanliness alone doesn't prove it handled the data. `[]`
+ * when the entry declares no `fixedText` (nothing to render, e.g. a redirect)
+ * or on an oracle entry.
+ */
+export function judgeFixedText(pattern: DataPattern, run: CaseRun): string[] {
+  const expect = pattern.expect;
+  if (expect.signal === "none" || !expect.fixedText) return [];
+  // `search` ignores a global regex's lastIndex.
+  if (run.bodyText.search(expect.fixedText) !== -1) return [];
+  return [`fixed page shows ${JSON.stringify(run.bodyText.replace(/\s+/g, " ").trim().slice(0, 80))}, not ${expect.fixedText}`];
+}
+
 /** The data reached the page (see `deliveredOf`); `[]` for an oracle entry. */
 export function judgeDelivered(pattern: DataPattern, run: CaseRun): string[] {
   const inject = pattern.inject;
@@ -201,8 +226,14 @@ export function judgeDelivered(pattern: DataPattern, run: CaseRun): string[] {
           : `rule data:${inject.path} matched ${matched} times and injected none`,
       ];
     }
-    case "storage":
-      return [`lifecycle fault data:${inject.key} never fired`];
+    case "storage": {
+      const fired = run.report.lifecycleFaults?.find((s) => s.name === `data:${inject.key}`)?.fired ?? 0;
+      return [
+        fired < 1
+          ? `lifecycle fault data:${inject.key} never fired`
+          : `the page never read ${inject.key}: no action ran after data:${inject.key} was written`,
+      ];
+    }
     case "query":
       return [`no visited page carries the query of ${run.entryUrl}`];
     case "form":

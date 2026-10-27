@@ -45,5 +45,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /reading 'title'/ },
+    fixedText: /Nothing published/,
   },
 });

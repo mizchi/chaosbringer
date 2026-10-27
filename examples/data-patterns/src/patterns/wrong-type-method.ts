@@ -45,5 +45,7 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /toFixed is not a function/ },
+    // The bad price is the numeric string "9.99"; the fix coerces it and shows it.
+    fixedText: /\$9\.99/,
   },
 });

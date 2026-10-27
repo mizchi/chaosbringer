@@ -53,5 +53,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "invariant", name: "data.not-blank" },
+    fixedText: /couldn't load your account/,
   },
 });

@@ -49,5 +49,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /JSON/ },
+    fixedText: /Couldn't load your saved items/,
   },
 });

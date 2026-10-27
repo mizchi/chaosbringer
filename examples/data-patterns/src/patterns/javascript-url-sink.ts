@@ -59,5 +59,7 @@ export default definePattern({
   crawl: { maxActionsPerPage: 0 },
   expect: {
     signal: { kind: "invariant", name: "data.injected-markup" },
+    // The fix shows the rejected URL as text, not as a link.
+    fixedText: /Website:/,
   },
 });

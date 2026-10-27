@@ -48,5 +48,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /Invalid array length/ },
+    fixedText: /No results/,
   },
 });

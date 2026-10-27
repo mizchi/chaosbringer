@@ -62,5 +62,7 @@ export default definePattern({
   crawl: { maxActionsPerPage: 0 },
   expect: {
     signal: { kind: "invariant", name: "data.injected-markup" },
+    // The unsafe link is rendered as its plain text, "See site".
+    fixedText: /See site/,
   },
 });

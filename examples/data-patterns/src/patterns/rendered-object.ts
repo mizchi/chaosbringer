@@ -45,5 +45,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "invariant", name: "data.rendered-garbage" },
+    fixedText: /No tags/,
   },
 });

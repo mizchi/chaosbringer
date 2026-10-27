@@ -46,5 +46,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "invariant", name: "data.injected-markup" },
+    fixedText: /Signed in as/,
   },
 });

@@ -9,7 +9,7 @@
  * next case.
  */
 
-import { chaos, getExitCode } from "chaosbringer";
+import { chaos, getExitCode, type Invariant } from "chaosbringer";
 import { type CaseData, toCrawlOptions } from "./inject.js";
 import type { DataPattern, Variant } from "./pattern.js";
 import { servePattern } from "./server.js";
@@ -19,6 +19,20 @@ import { type CaseRun, deliveredOf, signalsOf } from "./verdict.js";
 export async function runCase(pattern: DataPattern, variant: Variant, data: CaseData): Promise<CaseRun> {
   const server = await servePattern(pattern, variant);
   const suite = counted(catalogSuite());
+  // The page's visible text after the actions, so a fix can be held to
+  // rendering its fallback and not just to being clean. Never fails the run.
+  const captured = { text: "" };
+  const captureText: Invariant = {
+    name: "capture.body-text",
+    when: "afterActions",
+    check: async ({ page }) => {
+      try {
+        captured.text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+      } catch {
+        // A blocked or closed page has nothing to read; leave the text empty.
+      }
+    },
+  };
   const c = pattern.crawl ?? {};
   try {
     const injected = toCrawlOptions(pattern, data, server.ctx);
@@ -33,7 +47,7 @@ export async function runCase(pattern: DataPattern, variant: Variant, data: Case
       headless: true,
       strict: true,
       logLevel: "error",
-      invariants: suite.invariants,
+      invariants: [...suite.invariants, captureText],
       ...(c.actionWeights ? { actionWeights: c.actionWeights } : {}),
       ...injected.options,
       ...c.options,
@@ -47,6 +61,7 @@ export async function runCase(pattern: DataPattern, variant: Variant, data: Case
       defaultExit: getExitCode(report, false),
       signals: signalsOf(report),
       delivered: deliveredOf(pattern, report, entryUrl),
+      bodyText: captured.text,
       invariantRuns: suite.runs(),
     };
   } finally {

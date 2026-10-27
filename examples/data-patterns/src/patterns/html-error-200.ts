@@ -54,5 +54,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /is not valid JSON|Unexpected token '<'/ },
+    fixedText: /unavailable/,
   },
 });

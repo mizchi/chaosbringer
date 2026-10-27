@@ -44,5 +44,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /Cannot read properties of null \(reading 'name'\)/ },
+    fixedText: /signed out/,
   },
 });

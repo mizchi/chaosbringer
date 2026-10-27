@@ -75,5 +75,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "invariant", name: "data.prototype-pollution", message: /cbPolluted/ },
+    fixedText: /font size 14/,
   },
 });

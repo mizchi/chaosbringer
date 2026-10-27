@@ -44,5 +44,6 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /reading 'email'/ },
+    fixedText: /No email address/,
   },
 });

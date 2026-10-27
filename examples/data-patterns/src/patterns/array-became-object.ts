@@ -46,5 +46,7 @@ export default definePattern({
   },
   expect: {
     signal: { kind: "error", message: /map is not a function/ },
+    // The lone item is normalized into a one-element list and its title shown.
+    fixedText: /\bA\b/,
   },
 });
