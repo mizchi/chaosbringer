@@ -68,6 +68,7 @@ jobs:
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
           pnpm -F "@mizchi/chaosbringer-example-model-faults" typecheck
           pnpm -F "@mizchi/chaosbringer-example-perf-patterns" typecheck
+          pnpm -F "@mizchi/chaosbringer-example-data-patterns" typecheck
 
   lightbringer:
     # lightbringer is its own published package with its own toolchain
@@ -150,6 +151,9 @@ jobs:
           - cloudflare-worker
           - playwright-test
           - model-faults
+          # One crawl per case and no medians to take, so the whole catalog
+          # fits one runner unsharded (PATTERN_SHARD works if it grows).
+          - data-patterns
         # perf-patterns measures every pattern one after another (parallel
         # browsers on one runner would blur the numbers being compared), so a
         # single job grew to ~7 minutes. It is split over runners instead:

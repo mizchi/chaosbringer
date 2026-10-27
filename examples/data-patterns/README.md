@@ -72,7 +72,33 @@ Measured by `pnpm report` on 2026-10-27: one crawl per case, `strict` on, the ca
 
 | entry | category | data via | buggy + bad data: reported | exit | buggy + benign data | fixed + bad data | fix |
 |---|---|---|---|---|---|---|---|
+| [array-became-object](src/patterns/array-became-object.ts) | bug-data | response `/api/items` | `unhandled-rejection "data.items.map is not a function"` | 1 / 0 | clean | clean | Normalize the field to an array where it enters (Array.isArray, wrapping a lone item, an empty list for a missing one) or reject the shape with a schema, and render the empty state. |
+| [corrupted-storage](src/patterns/corrupted-storage.ts) | bug-data | localStorage `prefs` | `exception "Expected property name or '}' in JSON at position 1 (line 1 column 2)"` | 1 / 0 | clean | clean | Parse stored values defensively: catch the parse error, check the result's shape, and fall back to the defaults. |
+| [empty-list](src/patterns/empty-list.ts) | bug-data | response `/api/items` | `unhandled-rejection "Cannot read properties of undefined (reading 'title')"` | 1 / 0 | clean | clean | Check the list has an element before reading one (destructure and test it, or optional chaining with a fallback) and render the empty state. |
+| [html-error-200](src/patterns/html-error-200.ts) | bug-data | response `/api/stats` | `exception "Unexpected token '<', "<!doctype "... is not valid JSON"` | 1 / 0 | clean | clean | Don't take a 200 as proof of JSON: parse the body in a try (or check Content-Type and fall back safely) and show an error state when it isn't JSON. |
+| [html-injection-markup](src/patterns/html-injection-markup.ts) | malicious-data | response `/api/user` | `invariant data.injected-markup "injected markup: <b data-cb-injected>"` | 1 / 1 | clean | clean | Put user data into the page as text (textContent, a text node, a framework's default interpolation), never into an HTML string. |
+| [invalid-date-throw](src/patterns/invalid-date-throw.ts) | bug-data | response `/api/post` | `unhandled-rejection "Invalid time value"` | 1 / 0 | clean | clean | Check the parsed date is valid (Number.isNaN(date.getTime())) before formatting it, or parse with a library that reports failure, and show a fallback. |
+| [javascript-url-sink](src/patterns/javascript-url-sink.ts) | malicious-data | response `/api/profile` | `invariant data.injected-markup "injected markup: <a href="javascript:window.__cb_xss_fire…` | 1 / 1 | clean | clean | Parse the URL and link it only when its protocol is http: or https: (an allowlist, not a javascript: denylist, which misses java\tscript: and data:); otherwise show it as text. |
+| [markdown-javascript-link](src/patterns/markdown-javascript-link.ts) | malicious-data | response `/api/post` | `invariant data.injected-markup "injected markup: <a href="javascript:window.__cb_xss_fire…` | 1 / 1 | clean | clean | Resolve each link's URL and keep it only when the protocol is on an allowlist (http:, https:, mailto:); render anything else as text. Libraries do this with a sanitizer pass (DOMPurify, or the renderer's own safe-URL check). |
+| [missing-field](src/patterns/missing-field.ts) | bug-data | response `/api/me` | `unhandled-rejection "Cannot read properties of undefined (reading 'email')"` | 1 / 0 | clean | clean | Treat the nested object as optional where it is read (optional chaining with a fallback, or a schema that marks it optional) and say what is missing. |
+| [negative-count](src/patterns/negative-count.ts) | bug-data | response `/api/page` | `unhandled-rejection "Invalid array length"` | 1 / 0 | clean | clean | Check a count is a non-negative integer before sizing anything with it, and render the empty state otherwise. |
+| [null-in-list-item](src/patterns/null-in-list-item.ts) | bug-data | response `/api/items` | `unhandled-rejection "Cannot read properties of null (reading 'trim')"` | 1 / 0 | clean | clean | Treat the field as nullable on every item where it is read (a null check or ?? with a fallback label) and render the item anyway. |
 | [null-relation](src/patterns/null-relation.ts) | bug-data | response `/api/user` | `unhandled-rejection "Cannot read properties of null (reading 'name')"` | 1 / 0 | clean | clean | Model the relation as nullable where it is read (a null check, optional chaining with a fallback, or a type that says User \| null) and render the empty state. |
+| [open-redirect-param](src/patterns/open-redirect-param.ts) | malicious-data | query on `/go` | `blocked navigation to http://localhost:42397/cb-offsite-marker` | 0 / 0 | clean | clean | Resolve next against the site's own origin and follow it only when the origin is unchanged (or the target is on an allowlist); otherwise go to a default page. |
+| [oracle-code-sample](src/patterns/oracle-code-sample.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: renderedGarbage skips code, pre, kbd, samp and textarea, text the user can't see, and a token inside a longer word. |
+| [oracle-escaped-payload](src/patterns/oracle-escaped-payload.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: the presets look for a marker that ran, an element carrying the canary attribute, or a javascript: URL in a URL attribute, not for the marker's text. |
+| [oracle-own-keys](src/patterns/oracle-own-keys.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: prototypePollution reads Object.prototype's enumerable keys, not the keys of objects the page holds. |
+| [oracle-safe-links](src/patterns/oracle-safe-links.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: injectedMarkup counts a javascript: URL only when it names a marker, and never a mailto: or tel: link. |
+| [prototype-pollution-merge](src/patterns/prototype-pollution-merge.ts) | malicious-data | response `/api/preferences` | `invariant data.prototype-pollution "Object.prototype polluted: cbPolluted"` | 1 / 1 | clean | clean | Merge own keys only (Object.keys, not for…in) and skip __proto__, constructor and prototype, as patched merge libraries do; or merge into null-prototype objects (Object.create(null)). |
+| [prototype-pollution-query](src/patterns/prototype-pollution-query.ts) | malicious-data | query on `/settings` | `invariant data.prototype-pollution "Object.prototype polluted: cbPolluted"` | 1 / 1 | clean | clean | Build the parsed result from null-prototype objects (Object.create(null)) or a Map, or skip any segment that names an Object.prototype property (__proto__, constructor), as qs does by default. |
+| [rendered-invalid-date](src/patterns/rendered-invalid-date.ts) | bug-data | response `/api/post` | `invariant data.rendered-garbage "rendered garbage: Invalid Date in "Posted Invalid Date""` | 1 / 1 | clean | clean | Check a parsed Date is valid (Number.isNaN(date.getTime())) before formatting it, and show a fallback when it isn't. |
+| [rendered-nan](src/patterns/rendered-nan.ts) | bug-data | response `/api/cart` | `invariant data.rendered-garbage "rendered garbage: NaN in "Total: NaN EUR""` | 1 / 1 | clean | clean | Check that a computed number is finite (Number.isFinite) before rendering it, and show a fallback when it isn't; parse money at the boundary, not by implicit coercion. |
+| [rendered-object](src/patterns/rendered-object.ts) | bug-data | response `/api/post` | `invariant data.rendered-garbage "rendered garbage: [object Object] in "Tags: [object Obje…` | 1 / 1 | clean | clean | Check the shape before rendering (Array.isArray, and that each item is a string) and join the items yourself; never let concatenation stringify a value whose type you haven't checked. |
+| [rendered-undefined](src/patterns/rendered-undefined.ts) | bug-data | response `/api/user` | `invariant data.rendered-garbage "rendered garbage: undefined in "Hello, undefined!""` | 1 / 1 | clean | clean | Check a field is there before rendering it and show a fallback when it isn't; don't let concatenation or a template literal turn undefined into text. |
+| [swallowed-error-blank](src/patterns/swallowed-error-blank.ts) | bug-data | response `/api/user` | `invariant data.not-blank "blank page: 0 characters of visible text in body, fewer than 1"` | 1 / 1 | clean | clean | A catch that handles an error must show it: render an error state (and report it to your error tracker) instead of returning with nothing on screen. |
+| [truncated-json](src/patterns/truncated-json.ts) | bug-data | response `/api/items` | `exception "Expected ',' or ']' after array element in JSON at position 13 (line 1 column …` | 1 / 0 | clean | clean | Treat a body that doesn't parse as a failed load, like a network error: catch the parse error and show an error state with a way to retry. |
+| [unicode-surrogate-split](src/patterns/unicode-surrogate-split.ts) | bug-data | response `/api/user` | `unhandled-rejection "URI malformed"` | 1 / 0 | clean | clean | Cut user text by grapheme (Intl.Segmenter) or at least by code point (Array.from), never with slice/substring on UTF-16 units, before encoding or storing it. |
+| [wrong-type-method](src/patterns/wrong-type-method.ts) | bug-data | response `/api/product` | `unhandled-rejection "data.price.toFixed is not a function"` | 1 / 0 | clean | clean | Convert the field to the type the page uses where it enters (Number() and a finiteness check, or a schema that coerces) and show a fallback when it isn't one. |
 <!-- results:end -->
 
 ## What `chaosbringer scan` finds
@@ -98,11 +124,35 @@ finding.
 <!-- scan-check:start -->
 Measured by `pnpm scan-check` on 2026-10-27: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data.
 
-**1 of 1** buggy variants are flagged out of the box, **1 of 1** with the catalog suite as `crawler.invariants`; **0** fixed variants are still flagged.
+**12 of 23** buggy variants are flagged out of the box, **22 of 23** with the catalog suite as `crawler.invariants`; **0** fixed variants are still flagged.
 
 | entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | fixed: still flagged | every bug rule on buggy |
 |---|---|---|---|---|---|
+| [array-became-object](src/patterns/array-became-object.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [corrupted-storage](src/patterns/corrupted-storage.ts) | localStorage `prefs` | `js-exception` | `js-exception` | – | `js-exception` |
+| [empty-list](src/patterns/empty-list.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [html-error-200](src/patterns/html-error-200.ts) | response `/api/stats` | `js-exception` | `js-exception` | – | `js-exception` |
+| [html-injection-markup](src/patterns/html-injection-markup.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
+| [invalid-date-throw](src/patterns/invalid-date-throw.ts) | response `/api/post` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [javascript-url-sink](src/patterns/javascript-url-sink.ts) | response `/api/profile` | – | `invariant-violation` | – | `invariant-violation` |
+| [markdown-javascript-link](src/patterns/markdown-javascript-link.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
+| [missing-field](src/patterns/missing-field.ts) | response `/api/me` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [negative-count](src/patterns/negative-count.ts) | response `/api/page` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [null-in-list-item](src/patterns/null-in-list-item.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
 | [null-relation](src/patterns/null-relation.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [open-redirect-param](src/patterns/open-redirect-param.ts) | query on `/go` | – (report field only) | – (report field only) | – | – |
+| [prototype-pollution-merge](src/patterns/prototype-pollution-merge.ts) | response `/api/preferences` | – | `invariant-violation` | – | `invariant-violation` |
+| [prototype-pollution-query](src/patterns/prototype-pollution-query.ts) | query on `/settings` | – | `invariant-violation` | – | `invariant-violation` |
+| [rendered-invalid-date](src/patterns/rendered-invalid-date.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
+| [rendered-nan](src/patterns/rendered-nan.ts) | response `/api/cart` | – | `invariant-violation` | – | `invariant-violation` |
+| [rendered-object](src/patterns/rendered-object.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
+| [rendered-undefined](src/patterns/rendered-undefined.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
+| [swallowed-error-blank](src/patterns/swallowed-error-blank.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
+| [truncated-json](src/patterns/truncated-json.ts) | response `/api/items` | `js-exception` | `js-exception` | – | `js-exception` |
+| [unicode-surrogate-split](src/patterns/unicode-surrogate-split.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [wrong-type-method](src/patterns/wrong-type-method.ts) | response `/api/product` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+
+Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/oracle-code-sample.ts) clean, [oracle-escaped-payload](src/patterns/oracle-escaped-payload.ts) clean, [oracle-own-keys](src/patterns/oracle-own-keys.ts) clean, [oracle-safe-links](src/patterns/oracle-safe-links.ts) clean.
 <!-- scan-check:end -->
 
 ## What this can't see
