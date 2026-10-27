@@ -2,9 +2,9 @@ import { definePattern, html, json, page, type Variant } from "../pattern.js";
 
 // Both pages read the weekly stats. The buggy page takes a 200 as proof the
 // body is JSON; the fixed one parses what came and treats anything that isn't
-// JSON as a failed load. It doesn't gate on Content-Type: the control run
-// sends the good JSON under the same text/html header (an injection has one
-// content type), and a fix should not refuse good data.
+// JSON as a failed load. It parses rather than gating on Content-Type alone:
+// good JSON also arrives under a wrong header, and the parse is what has to
+// succeed.
 const parse: Record<Variant, string> = {
   buggy: `
       const data = await res.json();`,
@@ -48,7 +48,7 @@ export default definePattern({
   inject: {
     channel: "response",
     path: "/api/stats",
-    contentType: "text/html",
+    contentType: { bad: "text/html", benign: "application/json" },
     bad: "<!doctype html><title>502</title><h1>Bad gateway</h1>",
     benign: '{"visits":42}',
   },

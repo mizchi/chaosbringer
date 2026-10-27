@@ -94,8 +94,11 @@ export type Injection =
        */
       channel: "response";
       path: string;
-      /** Default `application/json`. */
-      contentType?: string;
+      /**
+       * Default `application/json`. One per data when they differ: a gateway's
+       * HTML error page as the bad data, the API's own JSON as the benign.
+       */
+      contentType?: string | { bad: string; benign: string };
       bad: string;
       benign: string;
     }

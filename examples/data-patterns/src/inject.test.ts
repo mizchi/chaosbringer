@@ -60,6 +60,20 @@ describe("toCrawlOptions", () => {
   it("response: keeps the entry's content type", () => {
     const p = withInject({ channel: "response", path: "/api/x", contentType: "text/html", bad: "<h1>502</h1>", benign: "{}" });
     expect(toCrawlOptions(p, "bad", ctx).options.faultInjection![0]!.fault).toMatchObject({ contentType: "text/html" });
+    expect(toCrawlOptions(p, "benign", ctx).options.faultInjection![0]!.fault).toMatchObject({ contentType: "text/html" });
+  });
+
+  it("response: a content type per data", () => {
+    const p = withInject({
+      channel: "response",
+      path: "/api/x",
+      contentType: { bad: "text/html", benign: "application/json" },
+      bad: "<h1>502</h1>",
+      benign: "{}",
+    });
+    expect(toCrawlOptions(p, "bad", ctx).options.faultInjection![0]!.fault).toMatchObject({ contentType: "text/html" });
+    expect(toCrawlOptions(p, "benign", ctx).options.faultInjection![0]!.fault).toMatchObject({ contentType: "application/json" });
+    expect(toServedRoutes(p, "buggy", ctx)["/api/x"]).toEqual(raw("<h1>502</h1>", "text/html"));
   });
 
   it("query: the entry URL's suffix, from a string or from the route context", () => {

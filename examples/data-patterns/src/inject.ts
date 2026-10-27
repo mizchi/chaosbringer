@@ -12,7 +12,7 @@
  */
 
 import { type CrawlerOptions, faults, payloadDriver } from "chaosbringer";
-import type { DataPattern, RouteContext, Routes, Variant } from "./pattern.js";
+import type { DataPattern, Injection, RouteContext, Routes, Variant } from "./pattern.js";
 import { raw } from "./pattern.js";
 
 /** Which data a run carries: the entry's bad data, its benign data, or (oracle entries) none. */
@@ -34,6 +34,12 @@ export function pathPattern(path: string): RegExp {
   return new RegExp(`^[a-z]+://[^/]+${escapeRegExp(path)}(?:\\?|$)`);
 }
 
+/** The content type a response entry sends `data` with. */
+export function contentTypeOf(inject: Extract<Injection, { channel: "response" }>, data: "bad" | "benign"): string {
+  const type = inject.contentType;
+  return (typeof type === "object" ? type[data] : type) ?? "application/json";
+}
+
 export function toCrawlOptions(pattern: DataPattern, data: CaseData, ctx: RouteContext): InjectedCrawl {
   const inject = pattern.inject;
   if (data === "none" || inject.channel === "none") {
@@ -52,7 +58,7 @@ export function toCrawlOptions(pattern: DataPattern, data: CaseData, ctx: RouteC
               urlPattern: pathPattern(inject.path),
               resourceTypes: ["fetch", "xhr"],
               body: inject[data],
-              contentType: inject.contentType ?? "application/json",
+              contentType: contentTypeOf(inject, data),
               name: `data:${inject.path}`,
             }),
           ],
@@ -108,5 +114,5 @@ export function toServedRoutes(pattern: DataPattern, variant: Variant, ctx: Rout
   const routes = pattern.routes(variant, ctx);
   const inject = pattern.inject;
   if (inject.channel !== "response") return routes;
-  return { ...routes, [inject.path]: raw(inject.bad, inject.contentType ?? "application/json") };
+  return { ...routes, [inject.path]: raw(inject.bad, contentTypeOf(inject, "bad")) };
 }
