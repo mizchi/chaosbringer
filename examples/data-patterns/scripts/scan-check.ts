@@ -107,7 +107,8 @@ interface Row {
   signal: Signal;
   outOfTheBox?: string;
   withSuite?: string;
-  fixed?: string;
+  /** Every bug rule the fixed variant raised, not only the entry's own signal. */
+  fixed: string[];
   rules: string[];
 }
 
@@ -131,10 +132,13 @@ for (const p of patterns) {
     signal,
     outOfTheBox: flaggedBy(plain, signal)?.rule,
     withSuite: flaggedBy(suite, signal)?.rule,
-    fixed: flaggedBy(fixed, signal)?.rule,
+    // A fix is held to the same bar as an oracle: no bug finding at all, not
+    // just none matching its own signal, so a fix that trades its bug for
+    // another one is caught too.
+    fixed: [...new Set(fixed.map((f) => f.rule))].sort(),
     rules: [...new Set([...plain, ...suite].map((f) => f.rule))].sort(),
   };
-  process.stderr.write(` out of the box: ${row.outOfTheBox ?? "-"} | with the suite: ${row.withSuite ?? "-"} | fixed: ${row.fixed ?? "-"}\n`);
+  process.stderr.write(` out of the box: ${row.outOfTheBox ?? "-"} | with the suite: ${row.withSuite ?? "-"} | fixed: ${row.fixed.join(",") || "-"}\n`);
   rows.push(row);
 }
 
@@ -144,7 +148,7 @@ const codes = (xs: string[]) => (xs.length ? xs.map(code).join(", ") : "–");
 const flagCell = (r: Row, rule: string | undefined) => (r.signal.kind === "blocked-navigation" ? "– (report field only)" : code(rule));
 const outOfTheBox = rows.filter((r) => r.outOfTheBox).length;
 const withSuite = rows.filter((r) => r.withSuite).length;
-const fixedFlagged = rows.filter((r) => r.fixed).length;
+const fixedFlagged = rows.filter((r) => r.fixed.length > 0).length;
 const oraclesFlagged = oracles.filter((o) => o.findings.length > 0);
 const lines = [
   `Measured by \`pnpm scan-check\` on ${new Date().toISOString().slice(0, 10)}: \`runScan\` with \`chaos: false\`, one page, the entry's seed and actions, on the bad data.`,
@@ -155,7 +159,7 @@ const lines = [
   "|---|---|---|---|---|---|",
   ...rows.map(
     (r) =>
-      `| [${r.pattern.id}](src/patterns/${r.pattern.id}.ts) | ${describeInjection(r.pattern)} | ${flagCell(r, r.outOfTheBox)} | ${flagCell(r, r.withSuite)} | ${code(r.fixed)} | ${codes(r.rules)} |`,
+      `| [${r.pattern.id}](src/patterns/${r.pattern.id}.ts) | ${describeInjection(r.pattern)} | ${flagCell(r, r.outOfTheBox)} | ${flagCell(r, r.withSuite)} | ${codes(r.fixed)} | ${codes(r.rules)} |`,
   ),
 ];
 if (oracles.length > 0) {
@@ -180,7 +184,10 @@ if (process.env.PATTERN) {
 }
 if (fixedFlagged > 0 || oraclesFlagged.length > 0) {
   console.error(
-    `scan-check: flagged where nothing is wrong: ${[...rows.filter((r) => r.fixed).map((r) => `${r.pattern.id} (fixed)`), ...oraclesFlagged.map((o) => o.pattern.id)].join(", ")}`,
+    `scan-check: flagged where nothing is wrong: ${[
+      ...rows.filter((r) => r.fixed.length > 0).map((r) => `${r.pattern.id} (fixed: ${r.fixed.join(",")})`),
+      ...oraclesFlagged.map((o) => `${o.pattern.id} (${[...new Set(o.findings.map((f) => f.rule))].join(",")})`),
+    ].join(", ")}`,
   );
   process.exitCode = 1;
 }
