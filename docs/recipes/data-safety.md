@@ -43,8 +43,10 @@ leaves `notBlank` out because a canvas or image-only page is blank by
 design; add it when every page you crawl shows text.
 
 Every preset takes `name`, `urlPattern` and `when` (default
-`"afterActions"`). `dataSafety` takes `when`, `urlPattern` and `markers` for
-all four, and one options object per preset (`xssMarker`, `injectedMarkup`,
+`"afterActions"`). `dataSafety` takes `when` and `urlPattern` for all four,
+and `markers` for `xssMarker` and `injectedMarkup` (the two that read a
+canary); `prototypePollution` and `renderedGarbage` don't take `markers`. It
+also takes one options object per preset (`xssMarker`, `injectedMarkup`,
 `prototypePollution`, `renderedGarbage`) whose values win. The `data.`
 prefix keeps `chaosbringer scan` reporting a failure as an
 `invariant-violation` finding (an `a11y` prefix would make it an
@@ -67,33 +69,52 @@ and lists up to three samples per frame:
 
 ### What `renderedGarbage` leaves alone
 
-The tokens match as whole words: `undefinedBehavior`, `isNaN` and `$NaN`
-don't. Text inside `ignore` (default
-`code,pre,kbd,samp,script,style,textarea,noscript`) isn't checked, so a code
-sample that mentions `undefined` stays clean; `ignore: ""` checks
-everything. Neither is text the user can't see: `hidden`, `display: none`,
-`visibility: hidden`. `null` is not a default token because it is an
-ordinary word in prose; add it with `tokens: [...yourTokens, "null"]`.
+A token is bounded by a word character only on the side it begins or ends
+with one, so `undefinedBehavior` and `isNaN` don't match — but `$NaN` (a
+price) and `Hello[object Object]` do: visible text is prose, where `$` reads
+as a currency symbol and brackets as punctuation, not as word edges. Text
+inside `ignore` (default
+`code,pre,kbd,samp,script,style,textarea,noscript,[contenteditable]`) isn't
+checked, so a code sample or an in-page editor that shows `undefined` stays
+clean; `ignore: ""` checks everything. Neither is text the user can't see:
+`hidden`, `display: none`, `visibility: hidden`. Text the user *can* see is
+checked even when its own element has no box of its own — the option a
+`<select>` shows, and a `display: contents` wrapper. Prose and
+API-reference text are **not** scoped out: a page that writes *about*
+`undefined`, or shows a `find(key): Item | undefined` signature, fails unless
+you scope it out with `selector`, `urlPattern` or `ignore`. `null` is not a
+default token because it is an ordinary word in prose; add it with
+`tokens: [...yourTokens, "null"]`.
 
 ## Canaries
 
-The security presets don't judge whether markup looks malicious. They look
-for a canary that your payload carries, so a site that never received one
-can't trip them.
+`xssMarker` and `injectedMarkup` don't judge whether markup looks malicious.
+They look for a canary that your payload carries, so a site that never
+received one can't trip them. (`prototypePollution` and `renderedGarbage` are
+not canary-scoped: any enumerable `Object.prototype` key, or any garbage token
+in visible text, trips them, whatever put it there.)
 
 - **A script ran**: the payload sets `window.__cb_xss_fired = 1`
   (`XSS_AUTH_MARKER`, what the auth-attack payloads set) or
   `window.__xss_fired = 1` (what `payloadDriver`'s `xss` set sets).
-  `xssMarker` reads both; `markers` replaces them with your own.
+  `xssMarker` reads both; `markers` replaces them with your own. It counts a
+  marker only when it is an *own* property of `window`, so an element whose
+  `id` is a marker name (DOM clobbering) doesn't trip it.
 - **Markup was parsed**: give an element in the payload the
   `data-cb-injected` attribute, `<b data-cb-injected>Admin</b>`. If an element
   with it is in the DOM, the page parsed data as HTML, even when nothing ran.
+- **An event handler was injected**: an `on*` attribute whose value names a
+  marker, `<img ... onerror="window.__cb_xss_fired=1">`. The crawler never
+  hovers or fires it, so `injectedMarkup` flags the attribute as a sink, fired
+  or not.
 - **A script URL landed in a sink**: `javascript:window.__cb_xss_fired=1` as
   a website or link field. The crawler never clicks a `javascript:` link, so
   `injectedMarkup` flags the attribute, not its execution. The value is read
-  the way the URL parser reads it (case, leading spaces and tabs inside the
-  scheme don't hide it). `javascript:void(0)`, `mailto:` and `tel:` never
-  count; `anyJavascriptUrl: true` counts every `javascript:` URL.
+  at least as loosely as the URL parser reads it — case, and spaces, tabs or
+  newlines inside the scheme, don't hide it; it strips those C0 and space
+  characters everywhere, not only at the ends, so it errs towards flagging.
+  `javascript:void(0)`, `mailto:` and `tel:` never count; `anyJavascriptUrl:
+  true` counts every `javascript:` URL.
 - **The prototype was polluted**: a `__proto__` key, e.g.
   `{"__proto__":{"cbPolluted":"1"}}`. Any enumerable key on
   `Object.prototype` fails; the name only makes the message readable. An
@@ -112,19 +133,22 @@ page that renders data on the client. These do run, and log nothing:
 
 | Payload | Runs |
 |---|---|
-| `<details open ontoggle="window.__cb_xss_fired=1"></details>` | on the toggle event, queued as the element is inserted; it lands before the `afterActions` invariants |
-| `<input autofocus onfocus="window.__cb_xss_fired=1">` | when the input takes focus |
+| `<details open ontoggle="window.__cb_xss_fired=1"></details>` | on the toggle event, queued as the element is inserted; it lands before the `afterActions` invariants. The most reliable form |
+| `<input autofocus onfocus="window.__cb_xss_fired=1">` | when the input takes focus — but `autofocus` is honored only while nothing else has focus, so on a page that already focuses a field (a search or login box) it never fires |
 | `<img src="data:,x" onerror="window.__cb_xss_fired=1">` | when the image fails to decode; a `data:` URL needs no request |
 | `<script>…</script>`, `<svg onload=…>` | never, through `innerHTML` |
 
+Prefer the `<details open ontoggle>` form: it doesn't depend on focus state.
 `<img src=x onerror=…>` runs too, but the request for `x` fails, and the
 browser logs that 404 as a console error, which fails `strict` on a page
 that escapes the payload correctly as well. Use a `data:` URL instead.
 
 Most of `payloadDriver`'s built-in `xss` set is `<script>` and
 `<svg/onload>`, which run only when the server renders the value into the
-HTML, and `src=x`, whose 404 fails `strict`. Against a client-rendered page,
-pass your own list.
+HTML, and `src=x`, whose 404 fails `strict`. Its
+`<iframe src="javascript:window.__xss_fired=1">` entry is the exception: it
+runs through `innerHTML`, caught by `xssMarker` (in the iframe) and
+`injectedMarkup`. Against a client-rendered page, pass your own list.
 
 ## Delivering the data
 
@@ -196,7 +220,11 @@ that runs later, on a timer or after the last action, isn't seen.
 - **Markup without a canary**: an inserted `<script>` that never ran,
   attacker HTML without `data-cb-injected`.
 - **Shadow DOM**: `injectedMarkup` and `renderedGarbage` read the document
-  tree, which doesn't descend into shadow roots.
+  tree and don't descend into shadow roots, so a canary or garbage token
+  inside a web component's shadow DOM is missed. `notBlank` does read the text
+  of *open* shadow roots, so a web-component page (Lit, Stencil, Shoelace)
+  isn't a false "blank page"; a *closed* shadow root can't be read and is
+  still missed.
 - **Values that are well-formed but wrong**: an off-by-one total, the wrong
   currency.
 - **Server-side classes** (SQL injection, SSRF, path traversal): only the
