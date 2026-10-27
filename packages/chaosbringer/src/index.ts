@@ -180,6 +180,21 @@ export { candidatePerfKey, compilePerfKeyGlob } from "./perf-key.js";
 export { DEFAULT_SETTLE_QUIET_MS, ACTION_SETTLE_CAP_MS } from "./settle.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
+  dataSafety,
+  injectedMarkup,
+  notBlank,
+  prototypePollution,
+  renderedGarbage,
+  xssMarker,
+  type DataInvariantOptions,
+  type DataSafetyOptions,
+  type InjectedMarkupOptions,
+  type NotBlankOptions,
+  type PrototypePollutionOptions,
+  type RenderedGarbageOptions,
+  type XssMarkerOptions,
+} from "./data-invariants.js";
+export {
   stateMachineCurrent,
   stateMachineInvariant,
   stateMachineKey,

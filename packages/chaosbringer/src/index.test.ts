@@ -31,4 +31,15 @@ describe("public package exports (this branch's additions)", () => {
   it("re-exports parity surface", () => {
     expect(typeof api.runParity).toBe("function");
   });
+
+  it("re-exports the data-safety invariant presets, also on the invariants namespace", () => {
+    expect(typeof api.invariants.xssMarker).toBe("function");
+    expect(typeof api.notBlank).toBe("function");
+    expect(api.invariants.dataSafety().map((i) => i.name)).toEqual([
+      "data.xss-marker",
+      "data.injected-markup",
+      "data.prototype-pollution",
+      "data.rendered-garbage",
+    ]);
+  });
 });
