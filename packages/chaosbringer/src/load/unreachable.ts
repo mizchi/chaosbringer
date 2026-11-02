@@ -47,19 +47,24 @@ export interface DocumentRequest {
  * Watches `target`'s main-frame navigations; the function returned gives the
  * last one sent, `null` before any. A request is announced before it can
  * fail, so the one a failed goto sent is the last when the goto rejects.
+ * Its `stop()` detaches the listener, for a page that outlives the watch
+ * (the crawler's `--cdp` tab, watched once per visit).
  */
-export function watchDocumentRequests(target: Page | BrowserContext): () => DocumentRequest | null {
+export function watchDocumentRequests(
+  target: Page | BrowserContext,
+): (() => DocumentRequest | null) & { stop(): void } {
   let last: DocumentRequest | null = null;
   // A stand-in page without events, as unit tests of a scenario pass, has
   // none to watch: the message alone decides, as it did before.
-  if (typeof target.on !== "function") return () => null;
-  (target as Page).on("request", (request: Request) => {
+  if (typeof target.on !== "function") return Object.assign(() => null, { stop: () => {} });
+  const onRequest = (request: Request) => {
     if (!request.isNavigationRequest() || !inMainFrame(request)) return;
     let first = request;
     for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
     last = { url: first.url(), redirected: first !== request };
-  });
-  return () => last;
+  };
+  (target as Page).on("request", onRequest);
+  return Object.assign(() => last, { stop: () => void (target as Page).off("request", onRequest) });
 }
 
 function inMainFrame(request: Request): boolean {

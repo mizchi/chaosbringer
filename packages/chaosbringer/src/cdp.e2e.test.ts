@@ -19,6 +19,10 @@ describe("crawl through an existing CDP browser", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       res.setHeader("content-type", "text/html");
+      if (req.url === "/hub") {
+        res.end('<a href="/crash">crash</a> <a href="/after">after</a>');
+        return;
+      }
       res.end(req.url === "/one" ? '<a href="/two">next</a>' : "<p>done</p>");
     });
     baseUrl = server.url;
@@ -127,5 +131,49 @@ describe("crawl through an existing CDP browser", () => {
       maxPages: 1,
     }).start()).rejects.toThrow(/missing-target/);
     expect(browser.isConnected()).toBe(true);
+  }, 60_000);
+
+  // The attached tab is the only one, and every call on it fails once its
+  // renderer is gone: the crawl stops at the crash, with the browser left
+  // running, instead of failing every page after it.
+  it("stops at a crash of the attached tab, and records it", async () => {
+    const context = await browser.newContext();
+    const target = await context.newPage();
+    await target.goto(`${baseUrl}/hub`);
+    const session = await context.newCDPSession(target);
+    const { targetInfo } = await session.send("Target.getTargetInfo");
+    await session.detach();
+
+    const report = await new ChaosCrawler({
+      baseUrl: `${baseUrl}/hub`,
+      cdpEndpoint,
+      cdpTargetId: targetInfo.targetId,
+      maxPages: 3,
+      maxActionsPerPage: 0,
+      invariants: [
+        {
+          name: "crash-it",
+          when: "afterLoad",
+          urlPattern: /\/crash$/,
+          check: async ({ page }) => {
+            const cdp = await page.context().newCDPSession(page);
+            const crashed = page.waitForEvent("crash", { timeout: 10_000 });
+            // A renderer that is gone answers no command.
+            void cdp.send("Page.crash").catch(() => {});
+            await crashed;
+            return true;
+          },
+        },
+      ],
+    }).start();
+
+    // `/after` was queued before the crash, and is not visited on the dead tab.
+    expect(report.pages.map((p) => [p.url, p.status, p.errors.map((e) => e.type)])).toEqual([
+      [`${baseUrl}/hub`, "success", []],
+      [`${baseUrl}/crash`, "error", ["crash"]],
+    ]);
+    expect(report.summary.crashes).toBe(1);
+    expect(browser.isConnected()).toBe(true);
+    await context.close();
   }, 60_000);
 });

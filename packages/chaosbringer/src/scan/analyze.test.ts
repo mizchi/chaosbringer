@@ -487,6 +487,33 @@ describe("analyzeScan: false positives seen on real sites", () => {
     expect(rules(analyzeScan(clean, [{ fault: "hang", report: chaos }]))).toEqual(["fault-page-broken"]);
   });
 
+  // `analyzeScan` reads reports already on disk, and an older version
+  // recorded the same failure as an `exception` with the call log in it.
+  it("leaves an older report's page.goto exceptions to the page rules too", () => {
+    const old = cluster(
+      "exception",
+      `page.goto: net::ERR_EMPTY_RESPONSE at ${U}/reset\nCall log:\n\x1b[2m  - navigating to "${U}/reset"\x1b[22m\n`,
+      [`${U}/reset`],
+    );
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/reset`, undefined, { status: "error" })], [], {
+      errorClusters: [old, cluster("exception", "boom 12345")],
+    });
+    expect(analyzeScan(report).findings.map((f) => [f.rule, f.title])).toEqual([
+      ["js-exception", "Uncaught exception: boom 12345"],
+      ["page-load-failed", "Pages that did not load"],
+    ]);
+  });
+
+  // A crashed page has status "error", but it loaded: it was listed as a
+  // page that did not load, with a navigation hint, beside its crash.
+  it("reports a crashed page as a crash only, not as a page that did not load", () => {
+    const crash = { type: "crash" as const, message: "renderer crashed", url: `${U}/a`, timestamp: 0 };
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/a`, undefined, { status: "error", errors: [crash] })], [], {
+      errorClusters: [cluster("crash", "renderer crashed", [`${U}/a`])],
+    });
+    expect(rules(analyzeScan(report))).toEqual(["page-crash"]);
+  });
+
   it("does not blame a fault for a page whose measured load it never touched", () => {
     const clean = fakeReport([fakePage(`${U}/doc`)], []);
     const untouched = fakeReport([fakePage(`${U}/doc`, fakeSpan("/doc :: load"), { status: "timeout" })], []);
@@ -683,6 +710,14 @@ describe("analyzeScan: coverage warnings", () => {
     const slow = fakePage(`${U}/`, undefined, { status: "timeout" });
     expect(analyzeScan(fakeReport([slow], [])).coverageWarnings).toEqual([
       "The start page did not load (timeout), so the crawl had nothing to follow; see the page findings.",
+    ]);
+    // A crashed one did load: it is not called a page that did not load.
+    const crashed = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "crash", message: "renderer crashed", url: `${U}/`, timestamp: 0 }],
+    });
+    expect(analyzeScan(fakeReport([crashed], [])).coverageWarnings).toEqual([
+      "The start page's renderer crashed; see the page-crash finding.",
     ]);
   });
 

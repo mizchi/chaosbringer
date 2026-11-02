@@ -344,6 +344,12 @@ describe("formatReport", () => {
     expect(out).toContain("invariant_violation=1");
   });
 
+  it("counts renderer crashes in the summary when there were any", () => {
+    const lines = (report: CrawlReport) => formatReport(report).split("\n");
+    expect(lines(makeReport({ summary: makeSummary({ errorPages: 1, crashes: 1 }) }))).toContain("Renderer Crashes: 1");
+    expect(formatReport(makeReport())).not.toContain("Renderer Crashes");
+  });
+
   it("omits the advisor section when advisor was never consulted", () => {
     const out = formatReport(makeReport());
     expect(out).not.toContain("VLM ADVISOR");

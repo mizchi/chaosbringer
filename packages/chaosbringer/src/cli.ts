@@ -333,9 +333,11 @@ async function main() {
     }
 
     // Nothing answered at the start URL: no run was made, so no report, no
-    // verdict and no file a later step could take for one (a perf median
-    // over a crawl of nothing, a --baseline of it).
-    const unreachable = unreachableTarget(report);
+    // verdict, no baseline, perf or JUnit file a later step could take for
+    // one (a perf median over a crawl of nothing, a --baseline of it). What
+    // the crawl wrote as it went, its failure bundles and --trace-out, may
+    // already be on disk.
+    const unreachable = unreachableTarget(report, { network: options.network });
     if (unreachable) {
       console.error(`chaosbringer: ${unreachableTargetMessage(unreachable)}`);
       process.exit(2);

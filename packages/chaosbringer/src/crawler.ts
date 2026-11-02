@@ -141,7 +141,8 @@ import { tagServerFaults } from "./perf-faults.js";
 import { attemptedActionType } from "./perf-key.js";
 import { resolvePerfOptions } from "./perf-options.js";
 import { errorMessage } from "./errors.js";
-import { CRASHED_PAGE_ERROR, CRAWLER_NAVIGATION_ERROR, RENDERER_CRASHED, stripAnsi, withoutCallLog } from "./error-text.js";
+import { CRASHED_PAGE_ERROR, crawlerErrorType, RENDERER_CRASHED, stripAnsi, withoutCallLog } from "./error-text.js";
+import { type DocumentRequest, watchDocumentRequests } from "./load/unreachable.js";
 import {
   ACTION_SETTLE_CAP_MS,
   pageSettleEnv,
@@ -549,7 +550,9 @@ export class ChaosCrawler {
           failureReason = result;
         }
       } catch (err) {
-        failureReason = errorMessage(err);
+        // A Playwright call the check made (`locator.waitFor`) colours the
+        // call log it appends; the message reaches annotations and reports.
+        failureReason = stripAnsi(errorMessage(err));
       }
 
       if (failureReason !== null) {
@@ -1826,14 +1829,16 @@ export class ChaosCrawler {
    * `recordCrash()` records the page's renderer crash, once: the `crash`
    * event calls it, and so does the crawl when a Playwright call fails with
    * `Page crashed` before that event has arrived. `crashed()` says whether
-   * it did.
+   * it did. `lastDocument()` is the page's last main-frame document request
+   * (`watchDocumentRequests`): whether a failed `page.goto` followed a
+   * redirect.
    */
   private async attachPageCollectors(
     page: Page,
     errors: PageError[],
     warnings: string[],
     betweenRegistrations: () => Promise<void>,
-  ): Promise<{ stop(): void; recordCrash(): void; crashed(): boolean }> {
+  ): Promise<{ stop(): void; recordCrash(): void; crashed(): boolean; lastDocument(): DocumentRequest | null }> {
     // Set to false once collection is done so spurious events fired during
     // page.close() (in-flight requests getting cancelled as ERR_ABORTED, etc.)
     // don't pollute the PageResult.
@@ -1950,6 +1955,11 @@ export class ChaosCrawler {
     };
     page.on("crash", onCrash);
 
+    // The goto error names the URL navigated to, not the host that failed:
+    // a start URL that redirects to a host that is down (an SSO not up yet)
+    // fails as `net::ERR_CONNECTION_REFUSED at <start URL>` too.
+    const lastDocument = watchDocumentRequests(page);
+
     return {
       stop: () => {
         collecting = false;
@@ -1958,9 +1968,11 @@ export class ChaosCrawler {
         if (onResponse) page.off("response", onResponse);
         page.off("requestfailed", onRequestFailed);
         page.off("crash", onCrash);
+        lastDocument.stop();
       },
       recordCrash,
       crashed: () => crashed,
+      lastDocument,
     };
   }
 
@@ -2187,7 +2199,10 @@ export class ChaosCrawler {
         };
       } else if (collectors.crashed() || CRASHED_PAGE_ERROR.test(stripAnsi(errorMessage(err)))) {
         // What threw is only the first call that met the dead page: the
-        // crash is the page's error, not a timeout or a JS exception.
+        // crash is the page's error, not a timeout or a JS exception. The
+        // message test covers a call that failed before the `crash` event
+        // arrived; no test pins that order (renderer-crash.e2e.test.ts
+        // always awaits the event first), as no trigger makes it reliable.
         collectors.recordCrash();
         result = {
           url,
@@ -2202,19 +2217,23 @@ export class ChaosCrawler {
       } else {
         const raw = stripAnsi(errorMessage(err));
         const isTimeout = raw.includes("Timeout");
-        // The crawler's own call failing: `page.goto` (and the load's
-        // settle), or a navigation call later on. The page threw nothing, so
-        // it is not an `exception`: the page's status is the finding. The
-        // message stops before Playwright's call log, which names the
-        // `waitUntil` of the crawl's --settle and stays in the stack.
-        const navigation = navigating || CRAWLER_NAVIGATION_ERROR.test(raw);
+        // The crawler's own call failing (`crawlerErrorType`) is a
+        // `navigation` error: the page threw nothing, and its status is the
+        // finding. The message stops before Playwright's call log, which
+        // names the `waitUntil` of the crawl's --settle and stays in the
+        // stack.
+        const type = crawlerErrorType(raw, navigating);
         const stack = err instanceof Error && err.stack ? stripAnsi(err.stack) : undefined;
+        // The site answered the navigation with a redirect, and where it
+        // pointed is what failed: not a site that is down.
+        const redirected = type === "navigation" && collectors.lastDocument()?.redirected === true;
         const combinedErrors: PageError[] = [
           ...errors,
           {
-            type: navigation ? "navigation" : "exception",
+            type,
             message: withoutCallLog(raw),
             ...(stack ? { stack } : {}),
+            ...(redirected ? { redirected: true as const } : {}),
             url,
             timestamp: Date.now(),
           },

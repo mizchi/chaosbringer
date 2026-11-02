@@ -25,6 +25,7 @@ import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
 import type { ErrorCluster } from "../clusters.js";
 import { unreachableTarget, unreachableTargetMessage } from "../unreachable-target.js";
+import { CRAWLER_NAVIGATION_ERROR, stripAnsi } from "../error-text.js";
 import { registrableDomain } from "lightbringer/analyze";
 import { escapeRegExp } from "../filters.js";
 import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
@@ -421,6 +422,8 @@ function coverageWarnings(report: CrawlReport): string[] {
     const message = unreachableTargetMessage(unreachable);
     return [message.charAt(0).toUpperCase() + message.slice(1)];
   }
+  // It did load: what it served is unknown past the crash.
+  if (crashed(start)) return ["The start page's renderer crashed; see the page-crash finding."];
   if (start.status === "error" || start.status === "timeout") {
     return [`The start page did not load (${start.status}), so the crawl had nothing to follow; see the page findings.`];
   }
@@ -527,9 +530,14 @@ function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvir
 
 // ---------------------------------------------------------------- bugs
 
+/** A page whose renderer crashed: status `error`, but it loaded, and the `page-crash` rule reports it. */
+function crashed(p: PageResult): boolean {
+  return p.errors.some((e) => e.type === "crash");
+}
+
 function pageFailures(report: CrawlReport): ScanFinding[] {
   const out: ScanFinding[] = [];
-  const failed = report.pages.filter((p) => p.status === "error" || p.status === "timeout");
+  const failed = report.pages.filter((p) => (p.status === "error" || p.status === "timeout") && !crashed(p));
   if (failed.length > 0) {
     out.push({
       rule: "page-load-failed",
@@ -590,7 +598,11 @@ function linkedFrom(p: PageResult): string {
 type SiteErrorCluster = ErrorCluster & { type: Exclude<ErrorCluster["type"], "navigation"> };
 
 function isSiteError(c: ErrorCluster): c is SiteErrorCluster {
-  return c.type !== "navigation";
+  if (c.type === "navigation") return false;
+  // A report an older version wrote recorded the crawler's failed
+  // navigation as an `exception` (`analyzeScan` reads reports already on
+  // disk); `diffReports` reads an older baseline the same way.
+  return !(c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(stripAnsi(c.sample.message)));
 }
 
 /** A rule per type of the site's own errors (`SiteErrorCluster`). */

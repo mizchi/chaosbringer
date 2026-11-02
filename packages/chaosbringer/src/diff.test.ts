@@ -327,4 +327,40 @@ describe("diffReports against a baseline an older version wrote", () => {
     expect(diff.newClusters).toEqual([]);
     expect(diff.resolvedClusters).toEqual([]);
   });
+
+  // Two old clusters that are one now: a crash met by two different calls,
+  // and the same goto failure under two --settle modes' call logs. Kept
+  // apart, the later one overwrote the earlier and `before` lost its count.
+  it("adds up old clusters that are one cluster now", () => {
+    const oldCluster = (type: string, message: string, count: number) => ({
+      key: `${type}|${message}`,
+      type,
+      fingerprint: message,
+      sample: { type, message, url, timestamp: 1 },
+      count,
+      urls: [url],
+    });
+    const log = (waitUntil: string) =>
+      `page.goto: net::ERR_EMPTY_RESPONSE at ${url}\nCall log:\n\u001b[2m  - navigating to "${url}", waiting until "${waitUntil}"\u001b[22m\n`;
+    const merged = {
+      ...oldBaseline,
+      errorClusters: [
+        oldCluster("exception", "page.waitForTimeout: Page crashed", 1),
+        oldCluster("exception", "page.evaluate: Target crashed", 2),
+        oldCluster("exception", log("networkidle"), 1),
+        oldCluster("exception", log("load"), 3),
+      ],
+    } as unknown as CrawlReport;
+    const errors: PageError[] = [
+      { type: "crash", message: "renderer crashed", url, timestamp: 2 },
+      { type: "navigation", message: `page.goto: net::ERR_EMPTY_RESPONSE at ${url}`, url, timestamp: 2 },
+    ];
+    const diff = diffReports(merged, makeReport({ errorClusters: clusterErrors(errors) }));
+    expect(diff.newClusters).toEqual([]);
+    expect(diff.resolvedClusters).toEqual([]);
+    expect(diff.unchangedClusters.map((c) => [c.type, c.before, c.after]).sort()).toEqual([
+      ["crash", 3, 1],
+      ["navigation", 4, 1],
+    ]);
+  });
 });

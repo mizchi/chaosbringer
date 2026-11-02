@@ -11,7 +11,7 @@
  * errors that mean no connection to the host was made.
  */
 import { unreachableNavigation } from "./load/unreachable.js";
-import type { CrawlReport } from "./types.js";
+import type { CrawlReport, NetworkProfile } from "./types.js";
 
 export interface UnreachableTarget {
   /** The start URL the crawl could not reach. */
@@ -25,18 +25,23 @@ export interface UnreachableTarget {
  * page loaded, and the start page's navigation failed because no
  * connection to the site's origin was made. `null` for any other crawl,
  * one where a page loaded, one where the host answered (a reset or empty
- * response is the site's finding), and one where a fault rule fired: an
- * `abort` the run injected fails the same way.
+ * response is the site's finding, and so is a start URL that redirected to
+ * a host that is down: `PageError.redirected`), and one where the run cut
+ * the connection itself: a fault rule fired (an `abort` the run injected
+ * fails the same way), or `run.network` is `offline`
+ * (`ERR_INTERNET_DISCONNECTED` is what that profile is for).
  */
 export function unreachableTarget(
   report: Pick<CrawlReport, "baseUrl" | "pages" | "faultInjections">,
+  run: { network?: NetworkProfile } = {},
 ): UnreachableTarget | null {
   const start = report.pages[0];
   if (!start) return null;
+  if (run.network === "offline") return null;
   if (report.pages.some((p) => p.status !== "error" && p.status !== "timeout")) return null;
   if ((report.faultInjections ?? []).some((f) => f.injected > 0)) return null;
   for (const e of start.errors) {
-    if (e.type !== "navigation") continue;
+    if (e.type !== "navigation" || e.redirected) continue;
     const reason = unreachableNavigation(e.message, report.baseUrl);
     if (reason) return { url: start.url, reason };
   }

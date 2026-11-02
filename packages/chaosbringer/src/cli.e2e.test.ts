@@ -329,6 +329,18 @@ describe("a page whose connection the server drops", () => {
     const diff = (JSON.parse(readFileSync(second, "utf8")) as CrawlReport).diff!;
     expect([diff.newClusters.length, diff.resolvedClusters.length]).toEqual([0, 0]);
   }, 120_000);
+
+  // Under the offline profile every navigation fails as
+  // ERR_INTERNET_DISCONNECTED, which is on `load`'s list: a running server
+  // was refused as "is the server running?", with no report.
+  it("under --network offline is the run's own doing: reported, not refused", async () => {
+    const output = join(dir, "offline.json");
+    const r = await cli(["--url", `${server.url}/`, "--max-pages", "1", "--max-actions", "0", "--network", "offline", "--quiet", "--output", output]);
+    expect(r.stderr).not.toContain("could not reach");
+    expect(r.status).toBe(1);
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.pages[0]!.errors[0]!.message).toContain("net::ERR_INTERNET_DISCONNECTED");
+  }, 120_000);
 });
 
 describe("a target nothing listens on", () => {
@@ -351,10 +363,46 @@ describe("a target nothing listens on", () => {
 
   it("crawl refuses in one stderr line with exit 2, and writes no report", async () => {
     const output = join(dir, "down.json");
-    const r = await cli(["--url", url, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output]);
+    const junit = join(dir, "down.xml");
+    const r = await cli(["--url", url, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output, "--junit", junit]);
     expect(r.status).toBe(2);
     expect(r.stderr.trimEnd().split("\n")).toEqual([refusal("chaosbringer")]);
     expect(existsSync(output)).toBe(false);
+    expect(existsSync(junit)).toBe(false);
+  }, 120_000);
+
+  // The goto error names the URL navigated to, not the host that failed:
+  // a running site whose start URL redirects to a host that is down (an SSO
+  // that is not up yet) was refused as unreachable, with no report.
+  it("crawl reports a start URL that redirects to a host that is down, not refuses it", async () => {
+    const site = await startTestServer((_req, res) => {
+      res.writeHead(302, { location: url });
+      res.end();
+    });
+    try {
+      const output = join(dir, "sso.json");
+      const r = await cli(["--url", `${site.url}/sso`, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output]);
+      expect(r.stderr).not.toContain("could not reach");
+      expect(r.status).toBe(1);
+      const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+      expect(report.pages[0]!.errors.map((e) => [e.type, e.redirected])).toEqual([["navigation", true]]);
+    } finally {
+      await site.close();
+    }
+  }, 120_000);
+
+  it("shard refuses with exit 2 when every worker did, and merges nothing", async () => {
+    const output = join(dir, "shard.json");
+    const tmp = mkdtempSync(join(dir, "tmp-"));
+    const r = await cli(
+      ["shard", "--count", "2", "--url", url, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output],
+      { ...process.env, TMPDIR: tmp },
+    );
+    expect(r.status).toBe(2);
+    // Each worker's own refusal, on the stderr they inherit; nothing more.
+    expect(r.stderr.trimEnd().split("\n")).toEqual([refusal("chaosbringer"), refusal("chaosbringer")]);
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(tmp).filter((name) => name.startsWith("chaos-shard-"))).toEqual([]);
   }, 120_000);
 
   // flake called the one failure every run met a stable cluster, and exited 0.

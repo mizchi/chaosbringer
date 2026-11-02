@@ -893,8 +893,11 @@ export interface PageError {
     | "unhandled-rejection"
     | "invariant-violation";
   /**
-   * The error's text. Free of ANSI colour codes; for a `navigation` error
-   * it stops before Playwright's call log, which stays in `stack`.
+   * The error's text. Free of the ANSI colour codes Playwright puts in its
+   * own errors (a `navigation`, an `invariant-violation` whose check threw
+   * on a Playwright call); what the page itself logged or threw is kept as
+   * it wrote it. A `navigation` error's stops before Playwright's call log,
+   * which stays in `stack`.
    */
   message: string;
   url?: string;
@@ -908,6 +911,14 @@ export interface PageError {
    * the browser wrote it, so the error's cluster is the same with or without.
    */
   resourceUrl?: string;
+  /**
+   * Only on a `navigation` error, when the navigation followed a redirect
+   * and where it pointed is what failed. The message names the URL
+   * navigated to, not the host that failed, so this is what tells a start
+   * URL that redirects to a host that is down (an SSO that is not up) from
+   * a site that is not there.
+   */
+  redirected?: true;
 }
 
 /**

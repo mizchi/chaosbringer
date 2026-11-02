@@ -33,10 +33,24 @@ export function withoutCallLog(message: string): string {
  * exceeded`, `page.goto: net::ERR_EMPTY_RESPONSE at …`): the crawler's own
  * call, not an error the page threw. Before the `navigation` type, the
  * crawler recorded these as `exception`; `diffReports` reads an older
- * baseline's with this.
+ * baseline's with this, and `analyzeScan` an older report's.
  */
 export const CRAWLER_NAVIGATION_ERROR =
   /^(?:page\.(?:goto|reload|goBack|goForward|waitForNavigation|waitForLoadState):|Navigation to .* is interrupted)/;
+
+/**
+ * The type of an error that escaped the crawler's visit of a page:
+ * `navigation` when the crawler's own call failed, `page.goto` and the
+ * load's settle (`navigating`, whatever the message: an adaptive settle's
+ * failure has no `page.goto:` prefix) or a navigation call after the load
+ * (`page.reload:` …); `exception` for anything else (a hook that threw, a
+ * `page.evaluate` that failed after the load). A `navigation` error is not
+ * a JS exception: not in `summary.jsExceptions`, `--strict` or scan's
+ * findings, so a wrong `navigation` hides a real error from all three.
+ */
+export function crawlerErrorType(message: string, navigating: boolean): "navigation" | "exception" {
+  return navigating || CRAWLER_NAVIGATION_ERROR.test(message) ? "navigation" : "exception";
+}
 
 /** The message the crawler records for a renderer crash (`PageError.type: "crash"`). */
 export const RENDERER_CRASHED = "renderer crashed";

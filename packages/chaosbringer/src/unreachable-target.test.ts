@@ -47,4 +47,23 @@ describe("unreachableTarget", () => {
     });
     expect(unreachableTarget(faulted)).toBeNull();
   });
+
+  // The goto error names the URL navigated to: a running site whose start
+  // URL redirects to a host that is down (an SSO not up yet) fails it as
+  // `ERR_CONNECTION_REFUSED at <start URL>` too, and was refused as down.
+  it("is null when the start navigation followed a redirect: the site answered", () => {
+    const message = `page.goto: net::ERR_CONNECTION_REFUSED at ${U}/sso`;
+    const redirected = fakeReport([failed(`${U}/sso`, message)], [], { baseUrl: `${U}/sso` });
+    redirected.pages[0]!.errors[0]!.redirected = true;
+    expect(unreachableTarget(redirected)).toBeNull();
+  });
+
+  // Every navigation fails as ERR_INTERNET_DISCONNECTED under the offline
+  // profile, which is what it is for: the run's own doing, not the server.
+  it("is null under the run's own --network offline", () => {
+    const offline = fakeReport([failed(`${U}/`, `page.goto: net::ERR_INTERNET_DISCONNECTED at ${U}/`)], [], { baseUrl: `${U}/` });
+    expect(unreachableTarget(offline)).not.toBeNull();
+    expect(unreachableTarget(offline, { network: "offline" })).toBeNull();
+    expect(unreachableTarget(offline, { network: "slow-3g" })).not.toBeNull();
+  });
 });

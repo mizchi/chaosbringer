@@ -879,9 +879,9 @@ Mapping is one `<testcase>` per visited page:
 
 - `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"`, and `navigation error` / `navigation timeout` (or `HTTP <code>` when the page has a `statusCode`, `renderer crash` when it crashed) in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0. Dashboards that classify by element, not by `type`, show these pages differently from before: Allure as Failed rather than Broken, GitLab as failed rather than error
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
+- otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
 Each PageError in a failure's body is `[type] message`, then the page's own stack frames: not the stack's first line, which repeats the message, and not the frames of chaosbringer's own code or Node's. A `navigation` error has no stack in the body: its stack is the crawler's own `page.goto` call. (The body used to print the message twice, then chaosbringer's `dist/crawler.js` frames.)
-- otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
 Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped. ANSI colour codes (Playwright's call log has them) and other control characters XML cannot carry are dropped.
 
@@ -1189,7 +1189,7 @@ The browser's "Failed to load resource" message names no file, so its console er
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
 | The CLI refused to run: an unknown flag, a malformed value, no `--url`, a `--perf-budgets` file it cannot use. Nothing ran; stderr has one `chaosbringer: …` line | **2** |
-| Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on). No report is written; stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
+| Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
@@ -1226,6 +1226,10 @@ chaosTest("chaos-test homepage", async ({ page, chaos }) => {
 ```
 
 A relative URL resolves against `baseURL` from the Playwright config's `use` — the one `page.goto` resolves against — unless `chaosOptions.baseUrl` is set, which takes precedence. An absolute URL is used as given.
+
+`toHaveNoExceptions` counts what the page's code threw (`exception`, `unhandled-rejection`). A failed navigation (`navigation`) and a renderer crash (`crash`) are the page's status, not exceptions, and `toLoadWithin` is what fails for them: a page whose status is `error` or `timeout` did not load within any bound, however fast it failed.
+
+> **Behaviour change:** a failed `page.goto` used to be an `exception`, so `toHaveNoExceptions` failed for a page that did not load, and so did a renderer crash (as the `Page crashed` error of the next call). It no longer does. Check the page's status, with `toLoadWithin` (which now fails for an `error` or `timeout` page) or `toHaveNoErrors`, to catch a page that did not load.
 
 Or extend your existing test:
 
