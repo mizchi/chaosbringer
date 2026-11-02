@@ -498,7 +498,9 @@ The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs }
 
 Since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
 
-Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws, and that throw is recorded as a page error of type `exception` — so `summary.jsExceptions` reads 1 and an error cluster appears carrying Playwright's own timeout message. **The page threw nothing.** The classification is the crawler's, not the app's, and it is the expected outcome of the fault rather than a finding. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws. The page is recorded as `status: "timeout"` with a page error of type `navigation` carrying Playwright's own timeout message (`page.goto: Timeout 30000ms exceeded.`), and an error cluster appears for it. It is the expected outcome of the fault rather than a finding. **The page threw nothing**, and the report says so: a `navigation` error is not a JS exception, so it is not in `summary.jsExceptions` and `--strict` does not count it. The timed-out page still fails the run, as every page that did not load does. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+
+> **Behaviour change:** a failed `page.goto` used to be recorded as an `exception`, with Playwright's call log and its ANSI colour codes in the message and the cluster key. It counted in `summary.jsExceptions`, so `--strict` said `2 JS exceptions` for a site that threw nothing, and the call log names the `waitUntil` of `--settle`, so the same failure was a different cluster under `--settle adaptive`. It is now type `navigation`, its message stops before the call log (the stack keeps it), and no message or cluster key carries ANSI codes. A `--baseline` an older version wrote is read with the new keys, so upgrading reports no new or resolved cluster for it.
 
 `never-settle-fetch` honours `init.signal`, which is what makes it a fair test of a bounded request rather than a way to fail every client. Note what the caller sees: under `AbortSignal.timeout(ms)` the rejection is a `TimeoutError`, not an `AbortError` — a `catch` branching only on `err.name === "AbortError"` misses it. An explicit `AbortController.abort()` still gives `AbortError`.
 
@@ -875,8 +877,10 @@ writeFileSync("junit.xml", buildJunitXml(report, { suiteName: "smoke" }));
 
 Mapping is one `<testcase>` per visited page:
 
-- `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"`, and `navigation error` / `navigation timeout` (or `HTTP <code>` when the page has a `statusCode`) in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0. Dashboards that classify by element, not by `type`, show these pages differently from before: Allure as Failed rather than Broken, GitLab as failed rather than error
+- `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"`, and `navigation error` / `navigation timeout` (or `HTTP <code>` when the page has a `statusCode`, `renderer crash` when it crashed) in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0. Dashboards that classify by element, not by `type`, show these pages differently from before: Allure as Failed rather than Broken, GitLab as failed rather than error
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
+
+Each PageError in a failure's body is `[type] message`, then the page's own stack frames: not the stack's first line, which repeats the message, and not the frames of chaosbringer's own code or Node's. A `navigation` error has no stack in the body: its stack is the crawler's own `page.goto` call. (The body used to print the message twice, then chaosbringer's `dist/crawler.js` frames.)
 - otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
 Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped. ANSI colour codes (Playwright's call log has them) and other control characters XML cannot carry are dropped.
@@ -1081,6 +1085,8 @@ for (const c of report.diff?.newClusters ?? []) {
 
 Clusters are matched by the same fingerprint used for `errorClusters` (URL / line:col / long numeric ids stripped), so `HTTP 500 on /api/users/42` and `HTTP 500 on /api/users/99` collapse to the same entry. Pages are matched by URL.
 
+Each side's cluster keys are recomputed from the cluster's `sample.message` with the current fingerprint, so a baseline an older version wrote compares by the keys this version gives the same errors. In particular its failed navigations (`exception|page.goto: … Call log: …`) read as the `navigation` type they are now, and its renderer crashes (`exception|page.waitForTimeout: Page crashed`) as `crash`: upgrading does not show them as new and resolved, nor fail `--baseline-strict`.
+
 ## GitHub Actions annotations
 
 Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster and dead link. GitHub surfaces these on the Checks tab alongside test output.
@@ -1089,7 +1095,7 @@ Opt in with `--github-annotations` and chaosbringer prints a [workflow command](
 chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
-Severity maps from cluster type: invariants / exceptions / network errors / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
+Severity maps from cluster type: invariants / exceptions / network errors / failed navigations / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
 
 ## Model-driven fault coverage
 
@@ -1158,7 +1164,7 @@ Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree
 
 ## Error clustering
 
-`CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
+`CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (ANSI colour codes and Playwright's `Call log:` dropped; URLs, line:col, and long numeric ids stripped).
 
 ```
 ERROR CLUSTERS
@@ -1179,9 +1185,11 @@ The browser's "Failed to load resource" message names no file, so its console er
 | No navigation errors, no invariant violations | **0** |
 | At least one page with `status: "error"` or `"timeout"` | **1** |
 | At least one invariant violation (any mode) | **1** |
+| A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
 | The CLI refused to run: an unknown flag, a malformed value, no `--url`, a `--perf-budgets` file it cannot use. Nothing ran; stderr has one `chaosbringer: …` line | **2** |
+| Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on). No report is written; stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
@@ -1304,7 +1312,7 @@ Run the same crawl N times and separate error clusters into stable (fire every r
 chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
 ```
 
-With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it. `--output <path>` also writes the analysis as JSON.
+With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it, and 2 when nothing answered at `--url` (`chaosbringer flake: could not reach <url>: is the server running? (…)`, after the first run): a site that is down fails the same way every run, which used to read as a stable cluster and exit 0. `--output <path>` also writes the analysis as JSON.
 
 Programmatic equivalent — `chaos()` does **not** throw when `strict: true` triggers a failure; it returns `{ report, passed: false, exitCode: 1 }`. That means you can collect reports across runs even with `strict: true` and pass them to `flakeReport()`:
 
@@ -1333,7 +1341,7 @@ chaosbringer shard \
 
 All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are checked before any worker starts, with every check the main command makes before its browser starts (`--heatmap-top`, `--cluster-artifacts` without `--failure-artifacts`, the `--perf-budgets` file), so an unknown flag, a malformed value or a file it cannot use exits 2 once (`chaosbringer shard: unknown option --bogus`) instead of failing in every worker, and are then forwarded verbatim to each worker. Every worker gets the same `--seed`: the one given, or one drawn for the run. That is what makes the merged report's seed, and its `Repro:` line, hold for the whole run: `chaosbringer shard --count 4 --url … --seed 123 …` reruns every shard (it used to be shard 0's line, which reran shard 0 alone). `--quiet` prints the merged verdict, why it failed, the paths the workers wrote and `Merged report saved to:`, and `--compact` the merged compact report and the same lines, as the main command does; neither mixes in the rest of the workers' own output. The failure bundle line sums what the workers wrote to each directory (`Wrote 3 failure bundle(s) to ./failures/`); every shard crawls the base URL, so a failing base URL counts once per shard. `--junit`, `--heatmap-out` and the `--cluster-artifacts` bundles are written again from the merged report once the workers are done, so they cover the whole run rather than whichever shard wrote the shared path last, and their lines come in the main command's order (`JUnit XML saved to:` after `Merged report saved to:`). For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
 
-Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean.
+Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean. When every worker refused because nothing answered at `--url` (each prints its `could not reach …` line), no report is merged and the exit code is 2.
 
 You can also run shards by hand (e.g. as separate CI matrix jobs):
 
@@ -1482,7 +1490,8 @@ new ChaosCrawler({
 - `exception` — uncaught JS errors
 - `unhandled-rejection` — unhandled promise rejections
 - `invariant-violation` — a declared invariant failed
-- `crash` — the page crashed
+- `navigation` — the crawler's own navigation of the page failed (`page.goto: net::ERR_EMPTY_RESPONSE at …`, a load timeout). The page threw nothing: its `error` / `timeout` status is the finding, and this says why. Not counted as a JS exception
+- `crash` — the page's renderer process died (out of memory, a browser bug). The page gets `status: "error"`, `summary.crashes` counts it, and the run fails in every mode. Under `--cdp` the attached tab is the only one, so the crawl stops there
 
 `PageResult.status` reports the navigation outcome (`success` / `error` / `timeout` / `recovered`), not whether the page was healthy. A page can be `success` with exceptions on it — check `PageResult.hasErrors` or `report.summary.pagesWithErrors` for the full picture.
 
@@ -1514,6 +1523,7 @@ new ChaosCrawler({
     "pagesWithErrors": 1,
     "consoleErrors": 1,
     "jsExceptions": 1,
+    "crashes": 0,
     "unhandledRejections": 0,
     "invariantViolations": 0
   },

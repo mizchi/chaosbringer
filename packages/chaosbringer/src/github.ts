@@ -28,16 +28,19 @@ export interface AnnotationLine {
 }
 
 /**
- * Decide which severity each error cluster deserves. Invariant violations and
- * network errors are errors; console errors / rejections are warnings; anything
- * else is a notice. Strict mode upgrades warnings to errors so the annotation
- * level matches `getExitCode` with `strict=true`.
+ * Decide which severity each error cluster deserves. Invariant violations,
+ * network errors, exceptions, failed navigations and renderer crashes are
+ * errors; console errors / rejections are warnings; anything else is a
+ * notice. Strict mode upgrades warnings to errors so the annotation level
+ * matches `getExitCode` with `strict=true`.
  */
 function levelForClusterType(type: CrawlReport["errorClusters"][number]["type"], strict: boolean): AnnotationLine["level"] {
   switch (type) {
     case "invariant-violation":
     case "network":
     case "exception":
+    // The page failed to load or timed out: it fails the run in every mode.
+    case "navigation":
     case "crash":
       return "error";
     case "console":

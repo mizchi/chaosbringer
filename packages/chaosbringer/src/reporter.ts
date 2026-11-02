@@ -53,6 +53,9 @@ export function formatReport(report: CrawlReport): string {
   lines.push(`Console Errors: ${report.summary.consoleErrors}`);
   lines.push(`Network Errors: ${report.summary.networkErrors}`);
   lines.push(`JS Exceptions: ${report.summary.jsExceptions}`);
+  if ((report.summary.crashes ?? 0) > 0) {
+    lines.push(`Renderer Crashes: ${report.summary.crashes}`);
+  }
   lines.push(`Unhandled Rejections: ${report.summary.unhandledRejections}`);
   if (report.summary.invariantViolations > 0) {
     lines.push(`Invariant Violations: ${report.summary.invariantViolations}`);
@@ -342,6 +345,13 @@ function failedLine(reasons: readonly string[]): string {
 const STRICT_CLUSTER_TYPES: ReadonlySet<ErrorCluster["type"]> = new Set(["console", "exception", "unhandled-rejection"]);
 
 /**
+ * Cluster types that fail a run in every mode: a violated invariant, a
+ * page the crawler could not navigate (it failed to load or timed out),
+ * a renderer crash.
+ */
+const ALWAYS_FAILING_CLUSTER_TYPES: ReadonlySet<ErrorCluster["type"]> = new Set(["invariant-violation", "navigation", "crash"]);
+
+/**
  * `report.errorClusters` with the ones a rule that failed the run counts
  * first: new vs the baseline under `--baseline-strict` (`fresh`), then
  * invariant violations and the types `--strict` fails on, then the rest,
@@ -353,7 +363,7 @@ function rankByVerdict(report: CrawlReport, strict: boolean | ExitCodeOptions, f
   const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
   const rank = (c: ErrorCluster): number => {
     if (opts.baselineStrict && fresh.has(c.key)) return 2;
-    if (c.type === "invariant-violation" || (opts.strict && STRICT_CLUSTER_TYPES.has(c.type))) return 1;
+    if (ALWAYS_FAILING_CLUSTER_TYPES.has(c.type) || (opts.strict && STRICT_CLUSTER_TYPES.has(c.type))) return 1;
     return 0;
   };
   // A stable sort, so the count order errorClusters comes in holds within a rank.
@@ -373,7 +383,17 @@ export function formatVerdictLine(report: CrawlReport, strict: boolean | ExitCod
   // left out, so a `--strict` run that failed on a rejection alone printed
   // `[FAIL] 1 pages, 0 errors`.
   const s = report.summary;
-  const errors = s.consoleErrors + s.networkErrors + s.jsExceptions + s.unhandledRejections + s.invariantViolations;
+  // A failed navigation has no summary count of its own (it is not a JS
+  // exception, which is where it used to be counted): read it off the pages.
+  const navigations = report.pages.reduce((n, p) => n + p.errors.filter((e) => e.type === "navigation").length, 0);
+  const errors =
+    s.consoleErrors +
+    s.networkErrors +
+    s.jsExceptions +
+    navigations +
+    (s.crashes ?? 0) +
+    s.unhandledRejections +
+    s.invariantViolations;
   const diffSuffix = report.diff
     ? ` diff=+${report.diff.newClusters.length}c/+${report.diff.newFailedPages.length}p`
     : "";
@@ -564,8 +584,15 @@ export function exitReasons(report: ExitCodeReport, strict: boolean | ExitCodeOp
   const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
   const s = report.summary;
   const out: string[] = [];
-  if (s.errorPages > 0) out.push(`${plural(s.errorPages, "page")} failed to load${firstUrl(report, "error")}`);
-  if (s.timeoutPages > 0) out.push(`${plural(s.timeoutPages, "page")} timed out${firstUrl(report, "timeout")}`);
+  // A crashed page has status "error" too, and is named as a crash: it loaded.
+  const crashes = s.crashes ?? 0;
+  const loadFailures = Math.max(0, s.errorPages - crashes);
+  if (loadFailures > 0) {
+    out.push(`${plural(loadFailures, "page")} failed to load${firstUrl(report, (p) => p.status === "error" && !crashed(p))}`);
+  }
+  if (s.timeoutPages > 0) out.push(`${plural(s.timeoutPages, "page")} timed out${firstUrl(report, (p) => p.status === "timeout")}`);
+  // Always a failure: the page's process died, whatever the app did.
+  if (crashes > 0) out.push(`${crashes} renderer ${crashes === 1 ? "crash" : "crashes"}${firstUrl(report, crashed)}`);
   // Invariant violations always fail — the whole point of declaring them.
   if (s.invariantViolations > 0) out.push(plural(s.invariantViolations, "invariant violation"));
   if (opts.strict) {
@@ -593,8 +620,12 @@ function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
-/** ` (first: <url>)` for the first page with `status`, or nothing for a report without pages. */
-function firstUrl(report: ExitCodeReport, status: PageResult["status"]): string {
-  const page = report.pages?.find((p) => p.status === status);
+/** ` (first: <url>)` for the first page `which` picks, or nothing for a report without pages. */
+function firstUrl(report: ExitCodeReport, which: (page: PageResult) => boolean): string {
+  const page = report.pages?.find(which);
   return page ? ` (first: ${page.url})` : "";
+}
+
+function crashed(page: PageResult): boolean {
+  return page.errors.some((e) => e.type === "crash");
 }

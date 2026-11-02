@@ -8,6 +8,7 @@
  * collapse to the same cluster but don't swallow unrelated errors.
  */
 
+import { stripAnsi, withoutCallLog } from "./error-text.js";
 import type { PageError } from "./types.js";
 
 export interface ErrorCluster {
@@ -33,7 +34,11 @@ export interface ErrorCluster {
 
 /** Normalise an error message to its fingerprint. */
 export function fingerprintError(err: PageError): string {
-  let msg = err.message ?? "";
+  // Before anything else: Playwright's call log names the call's options
+  // (`waiting until "networkidle"` vs `"load"`, i.e. the crawl's --settle),
+  // and colours them with ANSI escapes. With them in, one failure was a
+  // different cluster per settle mode, and --baseline-strict failed on it.
+  let msg = withoutCallLog(stripAnsi(err.message ?? ""));
   // A perf-budget breach is one failure however much it went over by: the
   // measured value ("requestCount=23 > budget 20") changes run to run, and
   // the generic 3+-digit fold below leaves 10–99 and decimals literal, so

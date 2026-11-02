@@ -110,7 +110,10 @@ export function summarizePages(
   const allErrors = results.flatMap((r) => r.errors);
   const consoleErrors = allErrors.filter((e) => e.type === "console").length;
   const networkErrors = allErrors.filter((e) => e.type === "network").length;
+  // Not `navigation`: the crawler's own goto failing is no error the page
+  // threw, and the page's status already counts it.
   const jsExceptions = allErrors.filter((e) => e.type === "exception").length;
+  const crashes = allErrors.filter((e) => e.type === "crash").length;
   const unhandledRejections = allErrors.filter((e) => e.type === "unhandled-rejection").length;
   const invariantViolations = allErrors.filter((e) => e.type === "invariant-violation").length;
 
@@ -149,6 +152,7 @@ export function summarizePages(
     consoleErrors,
     networkErrors,
     jsExceptions,
+    crashes,
     unhandledRejections,
     invariantViolations,
     avgLoadTime,

@@ -141,6 +141,7 @@ import { tagServerFaults } from "./perf-faults.js";
 import { attemptedActionType } from "./perf-key.js";
 import { resolvePerfOptions } from "./perf-options.js";
 import { errorMessage } from "./errors.js";
+import { CRASHED_PAGE_ERROR, CRAWLER_NAVIGATION_ERROR, RENDERER_CRASHED, stripAnsi, withoutCallLog } from "./error-text.js";
 import {
   ACTION_SETTLE_CAP_MS,
   pageSettleEnv,
@@ -803,6 +804,7 @@ export class ChaosCrawler {
           try {
             const result = await this.crawlPage(this.currentEntry);
             this.results.push(result);
+            if (this.cdpPageCrashed(result)) break;
           } finally {
             this.currentReplayActions = null;
           }
@@ -828,6 +830,7 @@ export class ChaosCrawler {
 
           const result = await this.crawlPage(entry);
           this.results.push(result);
+          if (this.cdpPageCrashed(result)) break;
 
           // Add discovered links to queue with source tracking
           for (const rawLink of result.links) {
@@ -892,6 +895,18 @@ export class ChaosCrawler {
     await this.logger.close();
 
     return report;
+  }
+
+  /**
+   * Whether `result` is a crash of the attached browser's tab (`--cdp`).
+   * The crawl's own pages are a new tab per visit, so a crash costs only
+   * that visit; the attached tab is the only one, and every call on it
+   * fails once it crashed, so the crawl stops there.
+   */
+  private cdpPageCrashed(result: PageResult): boolean {
+    if (!this.cdpPage || !result.errors.some((e) => e.type === "crash")) return false;
+    this.logger.warn("cdp_page_crashed", { url: result.url, reason: "the attached tab's renderer crashed; stopping the crawl" });
+    return true;
   }
 
   /**
@@ -1805,14 +1820,20 @@ export class ChaosCrawler {
    * Register the per-page error / warning / server-fault collectors. They
    * register in their original order: console, pageerror, response, then —
    * after `betweenRegistrations` (the page's init scripts) has run —
-   * requestfailed. `stop()` turns collection off and detaches every handler.
+   * requestfailed, then crash. `stop()` turns collection off and detaches
+   * every handler.
+   *
+   * `recordCrash()` records the page's renderer crash, once: the `crash`
+   * event calls it, and so does the crawl when a Playwright call fails with
+   * `Page crashed` before that event has arrived. `crashed()` says whether
+   * it did.
    */
   private async attachPageCollectors(
     page: Page,
     errors: PageError[],
     warnings: string[],
     betweenRegistrations: () => Promise<void>,
-  ): Promise<{ stop(): void }> {
+  ): Promise<{ stop(): void; recordCrash(): void; crashed(): boolean }> {
     // Set to false once collection is done so spurious events fired during
     // page.close() (in-flight requests getting cancelled as ERR_ABORTED, etc.)
     // don't pollute the PageResult.
@@ -1912,6 +1933,23 @@ export class ChaosCrawler {
     };
     page.on("requestfailed", onRequestFailed);
 
+    // The renderer process died: out of memory, or a browser bug the page
+    // hit. Every Playwright call on the page fails from here on, and the
+    // first one used to be what the page was reported as: a timeout with a
+    // `page.waitForTimeout: Page crashed` exception, or a clean success when
+    // no call after the crash threw. Not subject to `ignoreErrorPatterns`:
+    // it is the page's status, not noise on it.
+    let crashed = false;
+    const recordCrash = () => {
+      if (crashed) return;
+      crashed = true;
+      this.emitPageError(errors, { type: "crash", message: RENDERER_CRASHED, url: page.url(), timestamp: Date.now() });
+    };
+    const onCrash = () => {
+      if (collecting) recordCrash();
+    };
+    page.on("crash", onCrash);
+
     return {
       stop: () => {
         collecting = false;
@@ -1919,7 +1957,10 @@ export class ChaosCrawler {
         page.off("pageerror", onPageError);
         if (onResponse) page.off("response", onResponse);
         page.off("requestfailed", onRequestFailed);
+        page.off("crash", onCrash);
       },
+      recordCrash,
+      crashed: () => crashed,
     };
   }
 
@@ -2014,6 +2055,9 @@ export class ChaosCrawler {
     // then failed later (an action, an invariant, a screenshot) still has a
     // live document.
     let navigated = false;
+    // Whether the crawler's own `page.goto` (and the load's settle) is what
+    // threw: a `navigation` error, not one of the page's.
+    let navigating = false;
 
     // Adaptive settle counts this page's requests from before its `goto`, so
     // the load's own requests are in flight when the load settle begins.
@@ -2037,7 +2081,9 @@ export class ChaosCrawler {
       await this.beginLoadSpan(page, url);
       await this.installCallerPageFaultScripts(page);
 
+      navigating = true;
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
+      navigating = false;
       navigated = true;
 
       // The page loaded, but is not the crawl's to act on: stop here.
@@ -2139,14 +2185,36 @@ export class ChaosCrawler {
           ...err.fields,
           ...this.blockedNavigationsField(),
         };
+      } else if (collectors.crashed() || CRASHED_PAGE_ERROR.test(stripAnsi(errorMessage(err)))) {
+        // What threw is only the first call that met the dead page: the
+        // crash is the page's error, not a timeout or a JS exception.
+        collectors.recordCrash();
+        result = {
+          url,
+          status: "error",
+          loadTime,
+          errors: [...errors],
+          hasErrors: true,
+          warnings,
+          links: [],
+          ...this.blockedNavigationsField(),
+        };
       } else {
-        const isTimeout = err instanceof Error && err.message.includes("Timeout");
+        const raw = stripAnsi(errorMessage(err));
+        const isTimeout = raw.includes("Timeout");
+        // The crawler's own call failing: `page.goto` (and the load's
+        // settle), or a navigation call later on. The page threw nothing, so
+        // it is not an `exception`: the page's status is the finding. The
+        // message stops before Playwright's call log, which names the
+        // `waitUntil` of the crawl's --settle and stays in the stack.
+        const navigation = navigating || CRAWLER_NAVIGATION_ERROR.test(raw);
+        const stack = err instanceof Error && err.stack ? stripAnsi(err.stack) : undefined;
         const combinedErrors: PageError[] = [
           ...errors,
           {
-            type: "exception",
-            message: errorMessage(err),
-            stack: err instanceof Error ? err.stack : undefined,
+            type: navigation ? "navigation" : "exception",
+            message: withoutCallLog(raw),
+            ...(stack ? { stack } : {}),
             url,
             timestamp: Date.now(),
           },
@@ -2171,6 +2239,12 @@ export class ChaosCrawler {
     // the measurement itself causes must not reach the error stream, which
     // is what a crawl with perf off would report.
     collectors.stop();
+    // A crash nothing after it threw on (the crawl's later calls on the page
+    // are best-effort reads): the page still did not survive its visit.
+    if (collectors.crashed() && result.status !== "error") {
+      result.status = "error";
+      result.hasErrors = true;
+    }
     requestTracking?.detach();
     this.pageRequests = null;
     if (this.settle.mode === "adaptive") result.settleCapped = this.pageSettleCapped;

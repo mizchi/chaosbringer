@@ -53,6 +53,7 @@ import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CrawlerOptions } from "./types.js";
+import { isUnreachableTargetError, unreachableTarget, unreachableTargetMessage } from "./unreachable-target.js";
 import { validateOptions } from "./validate.js";
 
 // Subcommand dispatch (the table is SUBCOMMANDS in cli-usage.ts). Intercept
@@ -77,6 +78,12 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   } catch (err) {
     if (isUsageError(err)) {
       console.error(usageErrorMessage(err, `chaosbringer ${(err as UsageError).command ?? subcommand}`));
+      process.exit(2);
+    }
+    // `flake` and `scan` on a site nothing answers for: refused like a usage
+    // error, one line and exit 2, but not one the --help would fix.
+    if (isUnreachableTargetError(err)) {
+      console.error(`chaosbringer ${subcommand}: ${err.message}`);
       process.exit(2);
     }
     console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
@@ -323,6 +330,15 @@ async function main() {
 
     if (isCompact && !isQuiet && isTTY) {
       console.log(""); // New line after progress
+    }
+
+    // Nothing answered at the start URL: no run was made, so no report, no
+    // verdict and no file a later step could take for one (a perf median
+    // over a crawl of nothing, a --baseline of it).
+    const unreachable = unreachableTarget(report);
+    if (unreachable) {
+      console.error(`chaosbringer: ${unreachableTargetMessage(unreachable)}`);
+      process.exit(2);
     }
 
     if (baselinePath) {

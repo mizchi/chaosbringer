@@ -279,6 +279,102 @@ describe("main CLI output on a pipe", () => {
   }, 120_000);
 });
 
+describe("a page whose connection the server drops", () => {
+  let server: TestServer;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-drop-"));
+    server = await startTestServer((req, res) => {
+      // No response at all: `page.goto` rejects with ERR_EMPTY_RESPONSE.
+      if (req.url === "/reset" || req.url === "/reset2") {
+        req.socket.destroy();
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<!doctype html><title>home</title><a href="/reset">r</a> <a href="/reset2">r2</a>`);
+    });
+  }, 30_000);
+
+  afterAll(async () => {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The cluster key kept Playwright's call log, which names the `waitUntil`
+  // --settle picks, and its ANSI colours: the same failure was a new cluster
+  // and a resolved one under another --settle, and --baseline-strict failed
+  // on it. And the failed goto counted as a JS exception the site never threw.
+  it("is the same cluster under another --settle, and not a JS exception under --strict", async () => {
+    const crawl = ["--url", `${server.url}/`, "--max-pages", "3", "--max-actions", "0", "--seed", "1", "--quiet"];
+    const first = join(dir, "r1.json");
+    const r1 = await cli([...crawl, "--output", first]);
+    expect(r1.status).toBe(1);
+    const report = JSON.parse(readFileSync(first, "utf8")) as CrawlReport;
+    expect(report.errorClusters.map((c) => [c.key, c.count])).toEqual([
+      ["navigation|page.goto: net::ERR_EMPTY_RESPONSE at <url>", 2],
+    ]);
+    const failure = report.pages.find((p) => p.url.endsWith("/reset"))!.errors;
+    expect(failure.map((e) => [e.type, e.message])).toEqual([
+      ["navigation", `page.goto: net::ERR_EMPTY_RESPONSE at ${server.url}/reset`],
+    ]);
+    expect(report.summary.jsExceptions).toBe(0);
+
+    const second = join(dir, "r2.json");
+    const r2 = await cli([...crawl, "--settle", "adaptive", "--baseline", first, "--baseline-strict", "--strict", "--output", second]);
+    expect(r2.status).toBe(1);
+    const failed = r2.stdout.split("\n").find((l) => l.startsWith("  Failed: "));
+    expect(failed).toBe(`  Failed: 2 pages failed to load (first: ${server.url}/reset)`);
+    expect(r2.stdout).toMatch(/ diff=\+0c\/\+0p\n/);
+    const diff = (JSON.parse(readFileSync(second, "utf8")) as CrawlReport).diff!;
+    expect([diff.newClusters.length, diff.resolvedClusters.length]).toEqual([0, 0]);
+  }, 120_000);
+});
+
+describe("a target nothing listens on", () => {
+  let dir: string;
+  let url: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-down-"));
+    const closed = await startTestServer(() => {});
+    await closed.close();
+    url = `${closed.url}/`;
+  }, 30_000);
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const refusal = (command: string) =>
+    `${command}: could not reach ${url}: is the server running? (net::ERR_CONNECTION_REFUSED at ${url})`;
+
+  it("crawl refuses in one stderr line with exit 2, and writes no report", async () => {
+    const output = join(dir, "down.json");
+    const r = await cli(["--url", url, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output]);
+    expect(r.status).toBe(2);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([refusal("chaosbringer")]);
+    expect(existsSync(output)).toBe(false);
+  }, 120_000);
+
+  // flake called the one failure every run met a stable cluster, and exited 0.
+  it("flake refuses with exit 2 after the first run, not a stable cluster", async () => {
+    const r = await cli(["flake", "--url", url, "--runs", "2", "--max-pages", "1", "--max-actions", "0"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([refusal("chaosbringer flake")]);
+    expect(r.stdout).not.toContain("Run 2/2");
+    expect(r.stdout).not.toContain("Stable clusters");
+  }, 120_000);
+
+  // scan suggested a single-page app, a bot check or a consent wall.
+  it("scan refuses with exit 2, without its SPA or bot-check hints", async () => {
+    const r = await cli(["scan", "--url", url, "--no-chaos", "--max-pages", "1", "--max-actions", "0", "--quiet", "--out", join(dir, "scan")]);
+    expect(r.status).toBe(2);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([refusal("chaosbringer scan")]);
+    expect(r.stdout).not.toMatch(/single-page app|bot check|consent wall/);
+  }, 120_000);
+});
+
 describe("a run of src/ through tsx", () => {
   let site: { url: string; close: () => Promise<void> };
   let dir: string;

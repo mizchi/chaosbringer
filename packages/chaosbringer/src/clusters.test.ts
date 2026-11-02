@@ -112,3 +112,24 @@ describe("clusterErrors", () => {
     expect(clusters[0]!.invariantNames).toEqual(["has-h1"]);
   });
 });
+
+describe("fingerprintError on a navigation failure's Playwright message", () => {
+  // What `page.goto` rejects with, byte for byte: Playwright colours the call
+  // log it appends, and the call log names the `waitUntil` the crawl's
+  // `--settle` picked.
+  const goto = (waitUntil: string) =>
+    "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:4517/reset\nCall log:\n" +
+    `\u001b[2m  - navigating to "http://127.0.0.1:4517/reset", waiting until "${waitUntil}"\u001b[22m\n`;
+
+  it("gives the same failure one key whatever --settle is, without the call log or its colours", () => {
+    const idle = fingerprintError(err({ type: "navigation", message: goto("networkidle") }));
+    const load = fingerprintError(err({ type: "navigation", message: goto("load") }));
+    expect(idle).toBe(load);
+    expect(idle).toBe("page.goto: net::ERR_EMPTY_RESPONSE at <url>");
+  });
+
+  it("drops ANSI colour codes from any message", () => {
+    const fp = fingerprintError(err({ type: "console", message: "\u001b[31mred\u001b[39m alert" }));
+    expect(fp).toBe("red alert");
+  });
+});

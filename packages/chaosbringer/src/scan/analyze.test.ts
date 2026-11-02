@@ -480,7 +480,7 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 
   it("leaves the crawler's own navigation errors to the page rules", () => {
-    const goto = cluster("exception", "page.goto: Timeout 30000ms exceeded.\nCall log: navigating to ...", [`${U}/slow`]);
+    const goto = cluster("navigation", "page.goto: Timeout 30000ms exceeded.", [`${U}/slow`]);
     const clean = fakeReport([fakePage(`${U}/slow`)], []);
     const chaos = fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] });
     expect(rules(analyzeScan(chaos))).toEqual(["page-load-failed"]);
@@ -666,6 +666,24 @@ describe("analyzeScan: coverage warnings", () => {
     });
     expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
     expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
+  });
+
+  it("says the site could not be reached, and no SPA / bot-check hint, when the start page's connection failed", () => {
+    const message = `page.goto: net::ERR_CONNECTION_REFUSED at ${U}/`;
+    const down = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "navigation", message, url: `${U}/`, timestamp: 0 }],
+      perfPage: perfPage({ network: { totalRequests: 1, totalEncodedKB: 0, fromCacheCount: 0 } }),
+    });
+    expect(analyzeScan(fakeReport([down], [])).coverageWarnings).toEqual([
+      `Could not reach ${U}/: is the server running? (net::ERR_CONNECTION_REFUSED at ${U}/)`,
+    ]);
+    // A start page that failed to load for another reason: the page finding
+    // says so, and the hints about what the site served do not apply.
+    const slow = fakePage(`${U}/`, undefined, { status: "timeout" });
+    expect(analyzeScan(fakeReport([slow], [])).coverageWarnings).toEqual([
+      "The start page did not load (timeout), so the crawl had nothing to follow; see the page findings.",
+    ]);
   });
 
   it("does not call a light start page a bot check when the crawl went on past it", () => {

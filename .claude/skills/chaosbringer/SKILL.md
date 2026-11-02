@@ -133,9 +133,9 @@ aborts the fetch and the browser cancels the request whether or not the route
 ever answers — so either tests whether a bound exists. What separates them:
 `hang` is a real HTTP request your server sees, held open; `never-settle-fetch`
 patches `fetch` in the page and **sends nothing**. A load-time `hang` also
-costs the crawler a whole navigation `timeout`, and that rejection is recorded
-as a page `exception`, so `summary.jsExceptions` reads 1 for a page that threw
-nothing. Expected, not a finding.
+costs the crawler a whole navigation `timeout`: the page is a `timeout` with a
+`navigation` error (`page.goto: Timeout …`). Expected, not a finding. It is no
+JS exception, so `summary.jsExceptions` and `strict` do not count it.
 
 ## Schedules, not probabilities
 
@@ -175,8 +175,9 @@ unhandled rejection). Two defects behind one status code; test both, with
 gives `AbortError`). A `catch` branching on the name will look broken when it
 isn't.
 
-**Exit codes** (`chaos()` only): a page that errors or times out, and any
-invariant violation, fail in every mode. Console errors, JS exceptions and
+**Exit codes** (`chaos()` only): a page that errors or times out, a renderer
+crash (`crash` error, `summary.crashes`), and any invariant violation, fail in
+every mode. Console errors, JS exceptions and
 unhandled rejections fail only under `strict: true` — so if your finding is
 "a rejection escaped", you need `strict`. `ignoreErrorPatterns` matches
 `PageError.message`, which for a network error is `"<url> - <errorText>"`, so a

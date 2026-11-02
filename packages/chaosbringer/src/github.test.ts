@@ -73,6 +73,19 @@ describe("buildGithubAnnotations", () => {
     expect(out[1]!.level).toBe("warning");
   });
 
+  it("annotates a failed navigation and a renderer crash as errors: both always fail the run", () => {
+    const report = makeReport({
+      errorClusters: [
+        cluster({ key: "k1", type: "navigation", fingerprint: "page.goto: net::ERR_EMPTY_RESPONSE at <url>" }),
+        cluster({ key: "k2", type: "crash", fingerprint: "renderer crashed" }),
+      ],
+    });
+    expect(buildGithubAnnotations(report).map((a) => [a.level, a.title])).toEqual([
+      ["error", "[navigation] page.goto: net::ERR_EMPTY_RESPONSE at <url>"],
+      ["error", "[crash] renderer crashed"],
+    ]);
+  });
+
   it("upgrades warnings to errors in strict mode", () => {
     const report = makeReport({
       errorClusters: [cluster({ key: "k", type: "console", fingerprint: "f" })],

@@ -117,7 +117,11 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   `chaosbringer perf regress <before>/clean-report.json --current <after>/clean-report.json`.
 - **Gate CI.** `--fail-on high` exits 1 when a high finding exists. A
   mistyped flag or a bad value exits 2 before anything runs, with one
-  `chaosbringer scan: …` line, so a gate does not read it as a finding.
+  `chaosbringer scan: …` line, so a gate does not read it as a finding. So
+  does a `--url` nothing answers on (the server is not running, the name
+  does not resolve): `chaosbringer scan: could not reach <url>: is the
+  server running? (net::ERR_CONNECTION_REFUSED at <url>)` and exit 2, after
+  the clean crawl.
 
 ## Options
 
@@ -220,9 +224,11 @@ If the crawl barely reached the site (one page with no links, or a nearly
 empty start page it got no further than), the report opens with a warning
 instead of reading as a clean site. That happens with a bot check, a rate
 limit, a consent wall, or a site that needs `--storage-state`. A light start
-page alone is no warning: a small static site has one too. The crawler's own
-navigation errors (`page.goto: Timeout …`) are not reported as the site's
-exceptions; the page that failed to load is. A page that fails in a chaos
+page alone is no warning: a small static site has one too. Neither warning is
+given for a start page that did not load, which says so instead (and the scan
+CLI exits 2 when nothing answered there at all). The crawler's own
+navigation errors (`page.goto: Timeout …`, PageError type `navigation`) are
+not reported as the site's exceptions; the page that failed to load is. A page that fails in a chaos
 crawl counts against the fault only if the fault hit that page's load.
 
 A same-site URL that redirects to another origin (a `/chat` that 302s to a

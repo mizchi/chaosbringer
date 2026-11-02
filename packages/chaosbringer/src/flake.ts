@@ -14,6 +14,7 @@ import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
 import type { CrawlReport, PageError } from "./types.js";
+import { UnreachableTargetError, unreachableTarget } from "./unreachable-target.js";
 
 export interface ClusterOccurrence {
   key: string;
@@ -330,6 +331,12 @@ OPTIONS:
   --output <path>       Write the flake analysis as JSON alongside stdout
   --quiet               Print only the final summary
   --help                Show this help
+
+EXIT CODES:
+  0  nothing flaked
+  1  a cluster or a page flaked
+  2  refused: a bad flag or value, or nothing answered at --url
+     ("could not reach <url>: is the server running?", after the first run)
 `);
 }
 
@@ -358,6 +365,10 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
       storageState: args.storageState,
     });
     const report = await crawler.start();
+    // A site nothing answered for fails the same way every run, which read
+    // as a stable cluster and exit 0. Stop at the first.
+    const unreachable = unreachableTarget(report);
+    if (unreachable) throw new UnreachableTargetError(unreachable);
     reports.push(report);
   }
   const analysis = flakeReport(reports);

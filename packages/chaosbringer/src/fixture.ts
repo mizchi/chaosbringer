@@ -433,6 +433,8 @@ export const chaosExpect = {
   },
 
   toHaveNoExceptions(result: PageResult | CrawlReport) {
+    // What the page's code threw: not a failed navigation (the crawler's
+    // own call) or a renderer crash, which the page's status reports.
     const errors = "pages" in result ? result.pages.flatMap((p) => p.errors) : result.errors;
     const exceptions = errors.filter((e) => e.type === "exception" || e.type === "unhandled-rejection");
     expect(

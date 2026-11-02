@@ -55,8 +55,10 @@ export interface CrawlerOptions {
    * Error message patterns to ignore (regex strings).
    *
    * Matched (case-insensitively) against `PageError.message` for **every**
-   * error type — `console`, `network`, `js-exception`, `unhandled-rejection`,
-   * and `invariant-violation`. There is no separate
+   * error the page raised — `console`, `network`, `exception`,
+   * `unhandled-rejection`, and `invariant-violation` — but not the crawler's
+   * own `navigation` failing or a renderer `crash`: those are the page's
+   * status, which a pattern cannot make a success. There is no separate
    * `ignoreNetworkErrorPatterns`; use this single allowlist for both
    * console noise and network noise.
    *
@@ -868,13 +870,32 @@ export interface ActionWeights {
 }
 
 export interface PageError {
+  /**
+   * - `console`: a `console.error`, or the browser logging a failed resource.
+   * - `network`: a request that failed at the transport level.
+   * - `exception`: an error the page's own code threw and nothing caught.
+   * - `unhandled-rejection`: a promise the page's code left rejected.
+   * - `invariant-violation`: a declared invariant failed.
+   * - `navigation`: the crawler's own navigation of the page failed
+   *   (`page.goto: net::ERR_EMPTY_RESPONSE at …`, a load timeout). The page
+   *   threw nothing: its status (`error` / `timeout`) is the finding, and
+   *   this is why. Not a JS exception: not in `summary.jsExceptions` nor
+   *   under `--strict`. An older version recorded it as `exception`.
+   * - `crash`: the page's renderer process died (`page.on("crash")`); the
+   *   page's status is `error`, and the run always fails on it.
+   */
   type:
     | "console"
     | "network"
     | "exception"
+    | "navigation"
     | "crash"
     | "unhandled-rejection"
     | "invariant-violation";
+  /**
+   * The error's text. Free of ANSI colour codes; for a `navigation` error
+   * it stops before Playwright's call log, which stays in `stack`.
+   */
   message: string;
   url?: string;
   stack?: string;
@@ -1467,7 +1488,18 @@ export interface CrawlSummary {
   pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
+  /**
+   * Errors the page's own code threw (`PageError.type: "exception"`). Not
+   * the crawler's own navigation failing (`navigation`), which is counted
+   * as the page's `errorPages` / `timeoutPages`.
+   */
   jsExceptions: number;
+  /**
+   * Renderer crashes (`PageError.type: "crash"`), one per crashed page. A
+   * crashed page's status is `error`, so it is in `errorPages` too.
+   * Absent from a report an older version wrote.
+   */
+  crashes: number;
   unhandledRejections: number;
   invariantViolations: number;
   avgLoadTime: number;
