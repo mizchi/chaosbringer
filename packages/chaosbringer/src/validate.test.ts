@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ChaosCrawler } from "./crawler.js";
 import { CHAOS_TEST_OPTION_NAMES, validateChaosTestOptions, validateOptions } from "./validate.js";
 
 function base(extra: Record<string, unknown> = {}): any {
@@ -497,6 +498,61 @@ describe("config errors that used to pass silently", () => {
         ],
       }),
     ).not.toThrow();
+  });
+
+  it("refuses an invariant `when` that names no phase", () => {
+    // The crawler runs an invariant only in the phase `when` names, so
+    // `"afterAction"` (the docs had it) never ran the check: an invariant that
+    // always fails gave no errors and a strict exit of 0.
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        invariants: [{ name: "no-xss-fired", when: "afterAction" as never, check: () => false }],
+      }),
+    ).toThrow(
+      'chaosbringer: invariant "no-xss-fired" when must be "afterLoad" or "afterActions" (got "afterAction")',
+    );
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        invariants: [{ name: "n", when: null as never, check: () => true }],
+      }),
+    ).toThrow(/invariant "n" when .*\(got null\)/);
+  });
+
+  it("accepts each phase, and no `when` at all", () => {
+    for (const when of [undefined, "afterLoad", "afterActions"] as const) {
+      expect(() =>
+        validateOptions({
+          baseUrl: "http://127.0.0.1:1",
+          invariants: [{ name: "ok", when, check: () => true }],
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("refuses an invariant whose check is not a function", () => {
+    // Accepted before, then every page reported "inv.check is not a function"
+    // as a violation of the invariant rather than a mistake in the config.
+    for (const check of [undefined, true, "() => true"]) {
+      expect(() =>
+        validateOptions({
+          baseUrl: "http://127.0.0.1:1",
+          invariants: [{ name: "no-check", check: check as never }],
+        }),
+      ).toThrow('chaosbringer: invariant "no-check" check must be a function');
+    }
+  });
+
+  it("refuses the bad `when` when the crawler is constructed, before any page loads", () => {
+    expect(
+      () =>
+        new ChaosCrawler({
+          baseUrl: "http://127.0.0.1:1",
+          maxPages: 1,
+          invariants: [{ name: "no-xss-fired", when: "afterAction" as never, check: () => false }],
+        }),
+    ).toThrow(/invariant "no-xss-fired" when must be/);
   });
 });
 
