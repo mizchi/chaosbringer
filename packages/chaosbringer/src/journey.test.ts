@@ -449,6 +449,42 @@ describe("runJourney", () => {
       expect(parsed.nested.also).toBe("ref-7");
     });
 
+    // An object capture was bound with String(), as the literal
+    // "[object Object]", which no later step could use. An array of
+    // primitives keeps its comma list.
+    it("binds an object capture as its JSON, an array of primitives as a comma list", async () => {
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/seed")) {
+          return new Response(JSON.stringify({ user: { id: 7, roles: ["a", "b"] }, items: [{ id: 1 }, { id: 2 }] }), { status: 200 });
+        }
+        seen.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "POST",
+            path: "/seed",
+            body: {},
+            capture: [
+              { from: "body.user", as: "user" },
+              { from: "body.user.roles", as: "roles" },
+              { from: "body.user.id", as: "id" },
+              { from: "body.items", as: "items" },
+            ],
+          },
+          { method: "POST", path: "/use", body: { user: "{{user}}", roles: "{{roles}}", id: "{{id}}", items: "{{items}}" } },
+        ],
+        fetcher,
+      });
+      const parsed = JSON.parse(seen[0]);
+      expect(parsed).toEqual({ user: '{"id":7,"roles":["a","b"]}', roles: "a,b", id: "7", items: '[{"id":1},{"id":2}]' });
+    });
+
     it("captures from response headers (header.<name>)", async () => {
       const seen: string[] = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -46,7 +46,16 @@ export type DriveDecision =
   | { action: "fill"; index: number; value: string; submit?: boolean; reasoning?: string }
   | { action: "select"; index: number; value: string; reasoning?: string }
   | { action: "press"; key: string; index?: number; reasoning?: string }
-  | { action: "done"; reasoning?: string }
+  | {
+      action: "done";
+      reasoning?: string;
+      /**
+       * The decider has nothing else to offer (a plan that ran out): when
+       * `until` does not hold, the run stops as `stuck` instead of asking
+       * again for an answer that cannot change.
+       */
+      final?: boolean;
+    }
   | { action: "give_up"; reasoning?: string };
 
 export interface DriveCandidateView {
@@ -113,7 +122,11 @@ export interface DriveOptions {
   until?: DriveUntil;
   /** Actions at most. Default 20. */
   maxSteps?: number;
-  /** Failed decisions in a row before stopping. Default 3. */
+  /**
+   * Failed decisions in a row before stopping as `stuck`: answers that led
+   * to no action. Only an action that ran resets the count. Default 3;
+   * below 1 counts as 1.
+   */
   maxFailedDecisions?: number;
   /**
    * URLs never to reach (`toRegExp` patterns): a link to one is refused, and
@@ -155,7 +168,11 @@ export type DriveStatus =
   | "done"
   | "gave-up"
   | "out-of-steps"
-  /** The decider failed `maxFailedDecisions` times in a row. */
+  /**
+   * The decider failed `maxFailedDecisions` times in a row without an action
+   * in between (no answer, a "done" while `until` did not hold, an index
+   * that does not exist), or a `final` "done" came while `until` did not hold.
+   */
   | "stuck"
   /** The start page did not load, or the browser went away. */
   | "error";
@@ -180,8 +197,10 @@ export interface DriveResult {
 
 export async function drive(opts: DriveOptions): Promise<DriveResult> {
   const started = Date.now();
-  const maxSteps = opts.maxSteps ?? 20;
-  const maxFailed = opts.maxFailedDecisions ?? 3;
+  // Whole numbers, and at least one failed decision: with 0 the stuck
+  // checks and the cap below would end the run before the first ask.
+  const maxSteps = wholeAtLeast(opts.maxSteps, 0, 20);
+  const maxFailed = wholeAtLeast(opts.maxFailedDecisions, 1, 3);
   const actionTimeout = opts.actionTimeoutMs ?? 5000;
   const settleCap = opts.settleCapMs ?? 3000;
   const excluded = (opts.excludePatterns ?? []).map((p) => toRegExp(p)).filter((r): r is RegExp => r !== null);
@@ -214,6 +233,17 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   let reason: string | undefined;
   let feedback: string | undefined;
   let failedDecisions = 0;
+  // What the failed decisions since the last action were, so a stuck
+  // reason names them rather than only the kind of the last one.
+  let refused = { done: 0, index: 0, none: 0 };
+  const stuckReason = (only: string): string => {
+    const kinds = [
+      refused.done ? `${refused.done} "done" while the success condition did not hold` : "",
+      refused.index ? `${refused.index} ${refused.index === 1 ? "index" : "indices"} not on the page` : "",
+      refused.none ? `${refused.none} with no usable answer` : "",
+    ].filter(Boolean);
+    return kinds.length === 1 ? only : `the decider gave ${failedDecisions} answers in a row that led to no action (${kinds.join(", ")})`;
+  };
   let seenProblems = 0;
 
   const reached = async (): Promise<boolean> => (opts.until ? untilHolds(page, opts.until) : false);
@@ -264,7 +294,20 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     return finish();
   }
 
-  for (let step = 0; step < maxSteps; step++) {
+  // `step` counts actions, and only an action resets `failedDecisions`, so
+  // each action costs at most `maxFailed` asks and a run that acts on
+  // nothing is stuck after `maxFailed`: the decider (a paid model) is
+  // asked at most `maxSteps × maxFailed` times. The counters keep that
+  // bound, so this cap is not reached; it is a backstop should a later
+  // branch `continue` without counting.
+  const maxDecisions = maxSteps * maxFailed;
+  let step = 0;
+  for (let asked = 0; step < maxSteps; asked++) {
+    if (asked >= maxDecisions) {
+      status = "stuck";
+      reason = `asked the decider ${asked} times for ${step} action(s) without reaching the goal`;
+      break;
+    }
     if (page.isClosed()) {
       status = "error";
       reason = "the page closed";
@@ -298,23 +341,27 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     feedback = undefined;
 
     let decision: DriveDecision | null;
+    let noAnswer = "the decider gave no usable answer";
     try {
       decision = await opts.decider.decide(input);
     } catch (err) {
       decision = null;
-      reason = `decider threw: ${errorMessage(err)}`;
+      noAnswer = `decider threw: ${errorMessage(err)}`;
+      reason = noAnswer;
     }
+    // A failed decision is not an action: it uses no step, and it is
+    // counted until an action runs.
     if (!decision) {
       failedDecisions++;
+      refused.none++;
       if (failedDecisions >= maxFailed) {
         status = "stuck";
-        reason ??= "the decider gave no usable answer";
+        // Not an earlier answer's reasoning: this answer is the one that failed.
+        reason = stuckReason(noAnswer);
         break;
       }
-      step--; // a failed decision is not an action
       continue;
     }
-    failedDecisions = 0;
     if (decision.reasoning) reason = decision.reasoning;
 
     if (decision.action === "give_up") {
@@ -330,12 +377,17 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
         status = "reached";
         break;
       }
+      if (decision.final) {
+        status = "stuck";
+        reason = `${decision.reasoning ?? "the decider is done"}, but the success condition does not hold (${describeUntil(opts.until)})`;
+        break;
+      }
       feedback = `You answered "done", but the goal's success condition does not hold yet (${describeUntil(opts.until)}). Keep going, or answer give_up.`;
-      step--;
       failedDecisions++;
+      refused.done++;
       if (failedDecisions >= maxFailed) {
         status = "stuck";
-        reason = "the decider kept answering done while the success condition did not hold";
+        reason = stuckReason("the decider kept answering done while the success condition did not hold");
         break;
       }
       continue;
@@ -345,15 +397,17 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     if ("index" in decision && decision.index !== undefined && !candidate) {
       feedback = `There is no candidate #${decision.index}; pick one of the listed indices.`;
       failedDecisions++;
-      step--;
+      refused.index++;
       if (failedDecisions >= maxFailed) {
         status = "stuck";
-        reason = "the decider kept picking indices that do not exist";
+        reason = stuckReason("the decider kept picking indices that do not exist");
         break;
       }
       continue;
     }
 
+    failedDecisions = 0;
+    refused = { done: 0, index: 0, none: 0 };
     watch.setStep(step);
     const before = problems.length;
     const entry: DriveHistoryEntry = {
@@ -388,6 +442,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     if (entry.ok) recipeSteps.push(...withExpect(recorded, entry.url, history.at(-1)?.url ?? opts.url));
     history.push(entry);
     opts.onStep?.(entry, decision);
+    step++;
 
     if (await reached()) {
       status = "reached";
@@ -396,6 +451,11 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   }
   if (status === "out-of-steps") reason = `used all ${maxSteps} steps without reaching the goal`;
   return finish();
+}
+
+/** `value` floored, and at least `min`; `fallback` when it is unset or not a number. */
+function wholeAtLeast(value: number | undefined, min: number, fallback: number): number {
+  return value === undefined || Number.isNaN(value) ? fallback : Math.max(min, Math.floor(value));
 }
 
 async function perform(page: Page, d: DriveDecision, c: AriaCandidate | undefined, timeout: number): Promise<void> {

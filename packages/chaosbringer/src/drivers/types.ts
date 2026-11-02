@@ -155,6 +155,14 @@ export interface DriverStep {
   /** Invariant violations observed since the previous step. */
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
   /**
+   * What the run is for, in words: the crawl's `driverGoal`. `aiDriver`
+   * puts it in the prompt as `Goal: …` when it was built without a `goal`
+   * of its own; the other built-in drivers do not read it. Absent when no
+   * goal was given, and on the steps `recipes repair` / `investigate`
+   * build, whose goal is a success check, not a hint.
+   */
+  goal?: string;
+  /**
    * What the previous action on this page cost — the last `history` entry's
    * span. Present only with `perf` on (and `perf.actions` not false) and
    * only once an action on this page was measured; absent, never zeroed,

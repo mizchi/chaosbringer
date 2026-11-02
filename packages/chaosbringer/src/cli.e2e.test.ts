@@ -312,4 +312,30 @@ describe("a run of src/ through tsx", () => {
     // The page has no links, so a click can only be one of its buttons.
     expect(report.actions.some((a) => a.type === "click")).toBe(true);
   }, 120_000);
+
+  // A plan that ran out before --until-url held (here: wrong credentials,
+  // which the fixture's /login rejects) was asked for its next step forever,
+  // and the run only ended when something killed it.
+  it.each([
+    ["a plan that never submits", [{ fill: 'textbox "Username"', value: "alice" }], "nowhere", 1],
+    [
+      "wrong credentials",
+      [
+        { fill: 'textbox "Username"', value: "alice" },
+        { fill: 'textbox "Password"', value: "hunter2" },
+        { click: 'button "Sign in"' },
+      ],
+      "auth-thanks",
+      3,
+    ],
+  ])("drive: %s ends as stuck, exit 1, once the plan ran out", async (name, plan, until, steps) => {
+    const file = join(dir, `plan-${name.replace(/\W+/g, "-")}.json`);
+    writeFileSync(file, JSON.stringify(plan));
+    const started = Date.now();
+    const r = await cli(["drive", "--url", `${site.url}/login`, "--goal", "log in", "--plan", file, "--until-url", until, "--quiet"]);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(`drive: stuck — the plan is complete, but the success condition does not hold (the URL contains "${until}")`);
+    expect(r.stdout).toContain(`${steps} step(s)`);
+    expect(Date.now() - started).toBeLessThan(30_000);
+  }, 60_000);
 });

@@ -213,6 +213,9 @@ describe("usage errors", () => {
     expect(new Set(subRows.map(([argv]) => argv[0]))).toEqual(new Set(Object.keys(SUBCOMMANDS)));
   });
 
+  // Each row spawns the CLI through tsx, which compiles it first. Five at a
+  // time beside the suite's browser tests, one took longer than vitest's
+  // default 5s on a 4-core machine and failed on the clock, not the output.
   it.concurrent.each(subRows)("%j is one `chaosbringer %s:` line on stderr and exit 2", async (args, command, message) => {
     const r = await cliAsync(args);
     expect(r.stderr.trimEnd().split("\n")).toEqual([
@@ -220,7 +223,7 @@ describe("usage errors", () => {
     ]);
     expect(r.stdout).toBe("");
     expect(r.status).toBe(2);
-  });
+  }, 30_000);
 
   it("keeps a run that failed on its input as `<sub> failed:` and exit 1", async () => {
     const r = await cliAsync(["diff", "missing-left.json", "missing-right.json"]);

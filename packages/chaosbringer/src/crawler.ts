@@ -2748,6 +2748,7 @@ export class ChaosCrawler {
         // Once per step, however many times a driver asks.
         outline: () => (outline ??= this.outlineFor(page, stepTargets)),
         invariantViolations: pendingViolations,
+        ...(this.options.driverGoal !== undefined ? { goal: this.options.driverGoal } : {}),
       };
       // Set only when measured, so a driver can tell "unmeasured" from
       // "cost nothing" by the field's presence.

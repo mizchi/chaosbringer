@@ -42,7 +42,9 @@ OPTIONS:
   --until-url <text>        Success: the URL contains this
   --until-url-matches <re>  Success: the URL matches this regex
   --until-text <text>       Success: the page shows this text
-                            (without an --until-*, the model's "done" ends the run, unverified)
+                            (without an --until-*, the model's "done" ends the run, unverified;
+                            with one, 3 answers in a row that act on nothing, or a --plan that
+                            ran out before it held, end the run as stuck)
   --provider <name>         anthropic | openrouter (default: whichever of
                             ANTHROPIC_API_KEY / OPENROUTER_API_KEY is set)
   --model <id>              Model id (default: claude-haiku-4-5-20251001 / google/gemini-2.5-flash)
