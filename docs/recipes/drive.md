@@ -53,6 +53,13 @@ is accepted only while that condition holds. If it does not, the model is told
 so and keeps going. Without one, "done" ends the run unverified (status
 `done`, not `reached`).
 
+An answer that leads to no action (a refused "done", an index that is not on
+the page, no usable answer at all) uses no step, and three in a row with no
+action in between end the run as `stuck` (exit 1). Only an action that ran
+resets that count, so a model that keeps answering "done" is asked three
+times, not until something kills the run. However the answers mix, the
+decider is asked at most `(max-steps + 1) × 3` times.
+
 `--exclude` URLs are never reached. A link to one is refused, and a step that
 lands on one is undone with a history back.
 
@@ -155,6 +162,13 @@ its description, or by a regex written as `"/…/"`:
 
 A step whose control is not on the page ends the run (`gave-up`, naming the
 step). The plan no longer matches the site.
+
+When every step has run, the plan answers "done". With an `--until-*` that
+does not hold then (wrong credentials, a flow that changed), the run ends at
+once as `stuck` (exit 1), with the reason `the plan is complete, but the
+success condition does not hold (…)`. A plan has nothing else to try, so it
+is not asked again. From code, a decider says the same with
+`{ action: "done", final: true }`.
 
 ## From code
 

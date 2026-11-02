@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runRecipe } from "../recipes/replay.js";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
 import { anthropicDecider, parseDriveDecision, planDecider } from "./deciders.js";
-import { drive, type DriveDecider, type DriveInput } from "./drive.js";
+import { drive, type DriveDecider, type DriveDecision, type DriveInput } from "./drive.js";
 
 const HOME = `<!doctype html><title>Home</title>
 <div role="dialog" aria-label="Cookies" id="consent"><p>We use cookies.</p>
@@ -131,6 +131,73 @@ describe("drive", () => {
     expect(result.status).toBe("reached");
     expect(inputs[1]!.feedback).toContain('the URL contains "/login"');
   }, 60_000);
+
+  // A decider that kept answering done (a plan that ran out, a model sure it
+  // was finished) while `until` did not hold was asked again forever: each
+  // answer reset the failure count before it was counted, and gave its step back.
+  describe("stops as stuck when the decider keeps answering without acting", () => {
+    const stub = (answer: (input: DriveInput) => DriveDecision) => {
+      const asked: DriveInput[] = [];
+      const decider: DriveDecider = {
+        name: "stub",
+        async decide(input) {
+          asked.push(input);
+          return answer(input);
+        },
+      };
+      return { decider, asked };
+    };
+    const until = { urlIncludes: "/nowhere" };
+
+    it("always done", async () => {
+      const { decider, asked } = stub(() => ({ action: "done", reasoning: "looks done" }));
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxFailedDecisions: 3, browser });
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toBe("the decider kept answering done while the success condition did not hold");
+      expect(asked).toHaveLength(3);
+      expect(asked[2]!.feedback).toContain('the URL contains "/nowhere"');
+      expect(result.steps).toEqual([]);
+    }, 30_000);
+
+    it("always an index that does not exist", async () => {
+      const { decider, asked } = stub(() => ({ action: "click", index: 999 }));
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxFailedDecisions: 3, browser });
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toBe("the decider kept picking indices that do not exist");
+      expect(asked).toHaveLength(3);
+      expect(asked[1]!.feedback).toBe("There is no candidate #999; pick one of the listed indices.");
+    }, 30_000);
+
+    it("refused answers of different kinds count together until an action runs", async () => {
+      const answers: DriveDecision[] = [{ action: "done" }, { action: "press", key: "Tab" }, { action: "done" }, { action: "click", index: 999 }, { action: "done" }];
+      const { decider, asked } = stub(() => answers[Math.min(asked.length - 1, answers.length - 1)]!);
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxFailedDecisions: 3, browser });
+      expect(result.status).toBe("stuck");
+      expect(asked).toHaveLength(5);
+      expect(result.steps.map((s) => s.action)).toEqual(["press"]);
+    }, 30_000);
+
+    it("asks at most (maxSteps + 1) × maxFailedDecisions times, whatever it answers", async () => {
+      // Two refused answers, then an action, over and over: never stuck, never reached.
+      const cycle: DriveDecision[] = [{ action: "done" }, { action: "click", index: 999 }, { action: "press", key: "Tab" }];
+      const { decider, asked } = stub(() => cycle[(asked.length - 1) % cycle.length]!);
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxSteps: 3, maxFailedDecisions: 3, browser });
+      expect(result.status).toBe("out-of-steps");
+      expect(result.steps).toHaveLength(3);
+      expect(asked.length).toBeLessThanOrEqual((3 + 1) * 3);
+    }, 30_000);
+
+    it("a plan that ran out before the goal held stops at once", async () => {
+      const plan = planDecider([{ click: 'button "Reject optional"' }]);
+      let asked = 0;
+      const decider: DriveDecider = { name: "plan", decide: (input) => (asked++, plan.decide(input)) };
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, browser });
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toBe('the plan is complete, but the success condition does not hold (the URL contains "/nowhere")');
+      expect(asked).toBe(2);
+      expect(result.steps.map((s) => [s.action, s.ok])).toEqual([["click", true]]);
+    }, 30_000);
+  });
 
   it("refuses a link to an excluded URL", async () => {
     const before = hits.filter((h) => h === "/logout").length;

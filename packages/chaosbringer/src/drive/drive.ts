@@ -46,7 +46,16 @@ export type DriveDecision =
   | { action: "fill"; index: number; value: string; submit?: boolean; reasoning?: string }
   | { action: "select"; index: number; value: string; reasoning?: string }
   | { action: "press"; key: string; index?: number; reasoning?: string }
-  | { action: "done"; reasoning?: string }
+  | {
+      action: "done";
+      reasoning?: string;
+      /**
+       * The decider has nothing else to offer (a plan that ran out): when
+       * `until` does not hold, the run stops as `stuck` instead of asking
+       * again for an answer that cannot change.
+       */
+      final?: boolean;
+    }
   | { action: "give_up"; reasoning?: string };
 
 export interface DriveCandidateView {
@@ -113,7 +122,10 @@ export interface DriveOptions {
   until?: DriveUntil;
   /** Actions at most. Default 20. */
   maxSteps?: number;
-  /** Failed decisions in a row before stopping. Default 3. */
+  /**
+   * Failed decisions in a row before stopping as `stuck`: answers that led
+   * to no action. Only an action that ran resets the count. Default 3.
+   */
   maxFailedDecisions?: number;
   /**
    * URLs never to reach (`toRegExp` patterns): a link to one is refused, and
@@ -155,7 +167,11 @@ export type DriveStatus =
   | "done"
   | "gave-up"
   | "out-of-steps"
-  /** The decider failed `maxFailedDecisions` times in a row. */
+  /**
+   * The decider failed `maxFailedDecisions` times in a row without an action
+   * in between (no answer, a "done" while `until` did not hold, an index
+   * that does not exist), or a `final` "done" came while `until` did not hold.
+   */
   | "stuck"
   /** The start page did not load, or the browser went away. */
   | "error";
@@ -264,7 +280,18 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     return finish();
   }
 
-  for (let step = 0; step < maxSteps; step++) {
+  // `step` counts actions, and only an action resets `failedDecisions`, so
+  // between two actions at most `maxFailed - 1` answers are refused. This
+  // cap on how often the decider is asked holds whatever the answers are:
+  // a decider that never acts cannot keep the loop (and a paid model) going.
+  const maxDecisions = (maxSteps + 1) * maxFailed;
+  let step = 0;
+  for (let asked = 0; step < maxSteps; asked++) {
+    if (asked >= maxDecisions) {
+      status = "stuck";
+      reason = `asked the decider ${asked} times for ${step} action(s) without reaching the goal`;
+      break;
+    }
     if (page.isClosed()) {
       status = "error";
       reason = "the page closed";
@@ -304,6 +331,8 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       decision = null;
       reason = `decider threw: ${errorMessage(err)}`;
     }
+    // A failed decision is not an action: it uses no step, and it is
+    // counted until an action runs.
     if (!decision) {
       failedDecisions++;
       if (failedDecisions >= maxFailed) {
@@ -311,10 +340,8 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
         reason ??= "the decider gave no usable answer";
         break;
       }
-      step--; // a failed decision is not an action
       continue;
     }
-    failedDecisions = 0;
     if (decision.reasoning) reason = decision.reasoning;
 
     if (decision.action === "give_up") {
@@ -330,8 +357,12 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
         status = "reached";
         break;
       }
+      if (decision.final) {
+        status = "stuck";
+        reason = `${decision.reasoning ?? "the decider is done"}, but the success condition does not hold (${describeUntil(opts.until)})`;
+        break;
+      }
       feedback = `You answered "done", but the goal's success condition does not hold yet (${describeUntil(opts.until)}). Keep going, or answer give_up.`;
-      step--;
       failedDecisions++;
       if (failedDecisions >= maxFailed) {
         status = "stuck";
@@ -345,7 +376,6 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     if ("index" in decision && decision.index !== undefined && !candidate) {
       feedback = `There is no candidate #${decision.index}; pick one of the listed indices.`;
       failedDecisions++;
-      step--;
       if (failedDecisions >= maxFailed) {
         status = "stuck";
         reason = "the decider kept picking indices that do not exist";
@@ -354,6 +384,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       continue;
     }
 
+    failedDecisions = 0;
     watch.setStep(step);
     const before = problems.length;
     const entry: DriveHistoryEntry = {
@@ -388,6 +419,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     if (entry.ok) recipeSteps.push(...withExpect(recorded, entry.url, history.at(-1)?.url ?? opts.url));
     history.push(entry);
     opts.onStep?.(entry, decision);
+    step++;
 
     if (await reached()) {
       status = "reached";

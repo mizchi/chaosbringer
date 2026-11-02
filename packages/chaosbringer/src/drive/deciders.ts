@@ -191,8 +191,10 @@ export type DrivePlanStep =
   | { press: string; on?: string | RegExp };
 
 /**
- * Follow `steps` in order, then answer `done`. A step whose control is not
- * on the page gives up, naming it: the plan no longer matches the site.
+ * Follow `steps` in order, then answer `done` (a `final` one: with an
+ * `until` that does not hold then, the run ends as `stuck`). A step whose
+ * control is not on the page gives up, naming it: the plan no longer
+ * matches the site.
  */
 export function planDecider(steps: readonly DrivePlanStep[], name = "plan"): DriveDecider {
   let next = 0;
@@ -200,7 +202,9 @@ export function planDecider(steps: readonly DrivePlanStep[], name = "plan"): Dri
     name,
     async decide(input) {
       const step = steps[next];
-      if (!step) return { action: "done", reasoning: "the plan is complete" };
+      // `final`: asked again, a plan has nothing new to say, so with an
+      // `until` that does not hold, drive stops here as stuck.
+      if (!step) return { action: "done", reasoning: "the plan is complete", final: true };
       const find = (t: string | RegExp) => input.candidates.find((c) => (typeof t === "string" ? c.description.includes(t) : t.test(c.description)));
       const target = "click" in step ? step.click : "fill" in step ? step.fill : "select" in step ? step.select : step.on;
       const c = target === undefined ? undefined : find(target);
