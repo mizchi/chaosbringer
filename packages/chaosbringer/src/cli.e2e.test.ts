@@ -316,7 +316,7 @@ describe("a run of src/ through tsx", () => {
   // A plan that ran out before --until-url held (here: wrong credentials,
   // which the fixture's /login rejects) was asked for its next step forever,
   // and the run only ended when something killed it.
-  it.concurrent.each([
+  it.each([
     ["a plan that never submits", [{ fill: 'textbox "Username"', value: "alice" }], "nowhere", 1],
     [
       "wrong credentials",
