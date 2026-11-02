@@ -173,18 +173,40 @@ describe("drive", () => {
       const { decider, asked } = stub(() => answers[Math.min(asked.length - 1, answers.length - 1)]!);
       const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxFailedDecisions: 3, browser });
       expect(result.status).toBe("stuck");
+      // Named for every kind, not only the last answer's.
+      expect(result.reason).toBe(
+        'the decider gave 3 answers in a row that led to no action (2 "done" while the success condition did not hold, 1 index not on the page)',
+      );
       expect(asked).toHaveLength(5);
       expect(result.steps.map((s) => s.action)).toEqual(["press"]);
     }, 30_000);
 
-    it("asks at most (maxSteps + 1) × maxFailedDecisions times, whatever it answers", async () => {
-      // Two refused answers, then an action, over and over: never stuck, never reached.
+    it("no usable answer is the reason, not an earlier answer's reasoning", async () => {
+      // One action with its reasoning, then nothing usable.
+      const answers: DriveDecision[] = [{ action: "press", key: "Tab", reasoning: "move focus" }];
+      const decider: DriveDecider = { name: "stub", decide: async () => answers.shift() ?? null };
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxFailedDecisions: 3, browser });
+      expect(result.status).toBe("stuck");
+      expect(result.reason).toBe("the decider gave no usable answer");
+    }, 30_000);
+
+    it("refused answers between actions use no step", async () => {
+      // Two refused answers, then an action, over and over: never stuck, never
+      // reached, and each action costs maxFailedDecisions asks at most.
       const cycle: DriveDecision[] = [{ action: "done" }, { action: "click", index: 999 }, { action: "press", key: "Tab" }];
       const { decider, asked } = stub(() => cycle[(asked.length - 1) % cycle.length]!);
       const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxSteps: 3, maxFailedDecisions: 3, browser });
       expect(result.status).toBe("out-of-steps");
       expect(result.steps).toHaveLength(3);
-      expect(asked.length).toBeLessThanOrEqual((3 + 1) * 3);
+      expect(asked).toHaveLength(3 * 3);
+    }, 30_000);
+
+    it("reads maxFailedDecisions below 1 as 1, not as stuck before the first ask", async () => {
+      const { decider, asked } = stub(() => ({ action: "press", key: "Tab" }));
+      const result = await drive({ url: `${server.url}/`, goal: "g", decider, until, maxSteps: 2, maxFailedDecisions: 0, browser });
+      expect(result.status).toBe("out-of-steps");
+      expect(result.steps).toHaveLength(2);
+      expect(asked).toHaveLength(2);
     }, 30_000);
 
     it("a plan that ran out before the goal held stops at once", async () => {

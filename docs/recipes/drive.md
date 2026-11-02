@@ -58,7 +58,7 @@ the page, no usable answer at all) uses no step, and three in a row with no
 action in between end the run as `stuck` (exit 1). Only an action that ran
 resets that count, so a model that keeps answering "done" is asked three
 times, not until something kills the run. However the answers mix, the
-decider is asked at most `(max-steps + 1) × 3` times.
+decider is asked at most `max-steps × 3` times.
 
 `--exclude` URLs are never reached. A link to one is refused, and a step that
 lands on one is undone with a history back.
