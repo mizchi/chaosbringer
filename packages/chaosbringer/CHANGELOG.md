@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.15.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.14.0...chaosbringer-v0.15.0) (2026-11-02)
+
+Invariant presets that catch bad and hostile data doing damage once it reaches the page. See [#196](https://github.com/mizchi/chaosbringer/pull/196).
+
+### ⚠ BREAKING CHANGES
+
+* **An invariant whose `when` or `check` the crawler cannot run is refused.** `validateOptions`, and so `new ChaosCrawler()`, `chaos()` and the fixture, throw `chaosbringer: invariant "<name>" when must be "afterLoad" or "afterActions" (got "afterAction")`, or `… check must be a function`. A `when` the crawler does not know made the invariant never run, so it could not fail and the crawl exited 0. `docs/recipes/drivers.md` showed `when: "afterAction"`; it now says `"afterActions"`.
+
+### Features
+
+* **Data-safety invariant presets**, exported and on the `invariants` namespace. Each is an ordinary `Invariant`, checked after the page's actions by default (`name`, `when` and `urlPattern` override that), on the top document and every iframe. An iframe that cannot be read, or does not answer within 5 s, is skipped. None of them runs unless you add it. [docs](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/data-safety.md)
+  * `xssMarker()` (`data.xss-marker`): a payload ran. One of `markers` (default `__cb_xss_fired`, what the auth-attack payloads set, and `__xss_fired`, what `payloadDriver`'s `xss` set sets) is a truthy own property of `window`. An element whose id is the marker does not count.
+  * `injectedMarkup()` (`data.injected-markup`): a payload reached the DOM without running. An element carries `attribute` (default `data-cb-injected`); an `href`, `src`, `action`, `formaction` or `xlink:href` holds a `javascript:` URL naming a marker (any `javascript:` URL with `anyJavascriptUrl`); or an `on*` attribute names a marker. The crawler never clicks a `javascript:` link, so this flags the sink, not its execution.
+  * `prototypePollution()` (`data.prototype-pollution`): `Object.prototype` has an enumerable key, what an unguarded deep merge or query-string parser leaves after a `__proto__` key. A non-enumerable polyfill stays clean.
+  * `renderedGarbage()` (`data.rendered-garbage`): visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` (`tokens`). `$NaN` and `Hello[object Object]` match, `isNaN` and `undefinedBehavior` do not. Text in `code`, `pre`, `kbd`, `samp`, `script`, `style`, `textarea`, `noscript` and `[contenteditable]` (`ignore`) is skipped, and so is text that is not rendered. Prose that writes about `undefined` is not skipped: give such pages their own `ignore`, `selector` or `urlPattern`.
+  * `notBlank()` (`data.not-blank`): fewer than `minText` (default 1) characters of visible text, open shadow roots included, or a match of `errorText`. It is the blank screen a swallowed error leaves.
+  * `dataSafety()` returns `xssMarker`, `injectedMarkup`, `prototypePollution` and `renderedGarbage`, and takes `when`, `urlPattern`, `markers` and per-preset options. `notBlank` is left out, because a canvas- or image-only page is blank by design.
+
+  Only `xssMarker` and `injectedMarkup` need a canary, so only they stay quiet on a site that never received a payload. Pair the presets with the data's delivery: `faults.status(200, { body })` for an API response, a query string on the start URL, `faults.tamperStorage`, or `payloadDriver`. New types: `DataInvariantOptions`, `DataSafetyOptions`, `XssMarkerOptions`, `InjectedMarkupOptions`, `PrototypePollutionOptions`, `RenderedGarbageOptions`, `NotBlankOptions`.
+
+  `examples/data-patterns` uses them on 28 apps that mishandle bad data (null, missing or mistyped fields, truncated JSON, an HTML error served as 200, corrupted storage) or hostile data (stored, reflected and form XSS, `javascript:` links, HTML injection, prototype pollution, an open redirect). It checks that chaosbringer flags each one, stays clean on its fix and on benign data, and stays clean on 4 pages built to look buggy.
+
 ## [0.14.0](https://github.com/mizchi/chaosbringer/compare/chaosbringer-v0.13.0...chaosbringer-v0.14.0) (2026-10-21)
 
 Fixes for load runs against a host that is down, faults that never fired, reproduction commands that dropped faults, and the subcommands' exit codes. See [#191](https://github.com/mizchi/chaosbringer/pull/191) and [#192](https://github.com/mizchi/chaosbringer/pull/192).
