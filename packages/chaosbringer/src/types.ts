@@ -289,9 +289,10 @@ export interface CrawlerOptions {
    */
   driver?: unknown;
   /**
-   * Optional goal hint forwarded to AI-backed drivers. Surfaces in the
-   * prompt as a `Goal: ...` line. Example: "find form validation bugs".
-   * Default: undefined.
+   * Optional goal hint for the driver, on every `DriverStep` as `goal`.
+   * `aiDriver` surfaces it in the prompt as a `Goal: ...` line, unless it
+   * was built with a `goal` of its own; the other built-in drivers do not
+   * read it. Example: "find form validation bugs". Default: undefined.
    */
   driverGoal?: string;
   /**

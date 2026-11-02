@@ -86,6 +86,8 @@ await chaos({
 });
 ```
 
+The goal can also be set for the whole crawl: `driverGoal: "exercise edge cases in checkout"` on the crawler options puts it on every `DriverStep` as `step.goal`, and an `aiDriver` built without a `goal` of its own forwards that one to its provider (the prompt's `Goal: …` line). An `aiDriver` with its own `goal` keeps it. The other built-in drivers do not read `step.goal`; a custom driver can.
+
 ### Fall back when the model is unsure
 
 Providers return a confidence with the pick. A model that is about to pick badly often says so while doing it — reporting 0.4 on the third attempt at the same disabled button — so `minConfidence` turns that into a fallback rather than asking the model a better question:
