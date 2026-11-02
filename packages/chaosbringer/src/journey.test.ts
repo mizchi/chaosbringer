@@ -449,6 +449,40 @@ describe("runJourney", () => {
       expect(parsed.nested.also).toBe("ref-7");
     });
 
+    // An object or array capture was bound with String(), as the literal
+    // "[object Object]" (or "1,2"), which no later step could use.
+    it("binds an object or array capture as its JSON", async () => {
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/seed")) {
+          return new Response(JSON.stringify({ user: { id: 7, roles: ["a", "b"] } }), { status: 200 });
+        }
+        seen.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "POST",
+            path: "/seed",
+            body: {},
+            capture: [
+              { from: "body.user", as: "user" },
+              { from: "body.user.roles", as: "roles" },
+              { from: "body.user.id", as: "id" },
+            ],
+          },
+          { method: "POST", path: "/use", body: { user: "{{user}}", roles: "{{roles}}", id: "{{id}}" } },
+        ],
+        fetcher,
+      });
+      const parsed = JSON.parse(seen[0]);
+      expect(parsed).toEqual({ user: '{"id":7,"roles":["a","b"]}', roles: '["a","b"]', id: "7" });
+    });
+
     it("captures from response headers (header.<name>)", async () => {
       const seen: string[] = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
