@@ -433,6 +433,8 @@ export const chaosExpect = {
   },
 
   toHaveNoExceptions(result: PageResult | CrawlReport) {
+    // What the page's code threw: not a failed navigation (the crawler's
+    // own call) or a renderer crash, which the page's status reports.
     const errors = "pages" in result ? result.pages.flatMap((p) => p.errors) : result.errors;
     const exceptions = errors.filter((e) => e.type === "exception" || e.type === "unhandled-rejection");
     expect(
@@ -442,6 +444,15 @@ export const chaosExpect = {
   },
 
   toLoadWithin(result: PageResult, maxMs: number) {
+    // A page that did not load (or whose renderer crashed) did not load
+    // within anything, however fast it failed: a refused connection fails
+    // in a few ms. toHaveNoExceptions does not count either, so without
+    // this the pair passed for a page that never loaded.
+    const why = result.errors
+      .filter((e) => e.type === "navigation" || e.type === "crash")
+      .map((e) => `: [${e.type}] ${e.message}`)
+      .join("");
+    expect(["error", "timeout"], `Page ${result.url} did not load (${result.status})${why}`).not.toContain(result.status);
     expect(result.loadTime, `Page load time ${result.loadTime}ms exceeded ${maxMs}ms`).toBeLessThanOrEqual(
       maxMs
     );

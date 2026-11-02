@@ -12,6 +12,7 @@ import { SCAN_FAULT_KINDS, type ScanFaultKind, type ScanSeverity } from "./analy
 import { formatScanSummary } from "./format.js";
 import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } from "./run.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
+import { UnreachableTargetError, unreachableTarget } from "../unreachable-target.js";
 
 const HELP = `
 chaosbringer scan — sweep a site for bugs and slow spots
@@ -55,6 +56,7 @@ OPTIONS:
   --timeout <ms>          Page load timeout (default 30000)
   --no-headless           Show the browser
   --fail-on <severity>    Exit 1 when a finding at or above it exists: high | medium | low
+                          (a --url nothing answers on exits 2: could not reach <url>)
   --quiet                 Only print the summary
   --help                  Show this help
 
@@ -123,6 +125,9 @@ export async function runScanCli(argv: string[]): Promise<void> {
   const failOn = values["fail-on"];
 
   const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
+  // No finding is about a site nothing answered for: refused, exit 2.
+  const unreachable = unreachableTarget(result.baseline);
+  if (unreachable) throw new UnreachableTargetError(unreachable);
 
   console.log(formatScanSummary(result.analysis));
   console.log(`\nreport: ${result.files.markdown}\n        ${result.files.json}`);

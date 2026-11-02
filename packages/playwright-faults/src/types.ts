@@ -61,12 +61,12 @@ export type Fault =
    * `releaseAfterMs` aborts with `"timedout"` after that long. Omit it to
    * hold until the page closes — but note the crawler navigates with
    * `waitUntil: "networkidle"`, so a hang on a request issued *during*
-   * navigation costs one `timeout` per page visit — and the resulting
-   * `page.goto` rejection is recorded as a page error of type `exception`,
-   * which shows up in `summary.jsExceptions` even though the page threw
-   * nothing. That is the expected outcome of this fault, not a finding.
-   * Prefer hanging requests
-   * that an action fires after load, or set `releaseAfterMs`.
+   * navigation costs one `timeout` per page visit — and the page is
+   * recorded as timed out, with the `page.goto` rejection as a page error
+   * of type `navigation` (not a JS exception: the page threw nothing).
+   * That is the expected outcome of this fault, not a finding. Prefer
+   * hanging requests that an action fires after load, or set
+   * `releaseAfterMs`.
    */
   | { kind: "hang"; releaseAfterMs?: number };
 

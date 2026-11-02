@@ -480,11 +480,38 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 
   it("leaves the crawler's own navigation errors to the page rules", () => {
-    const goto = cluster("exception", "page.goto: Timeout 30000ms exceeded.\nCall log: navigating to ...", [`${U}/slow`]);
+    const goto = cluster("navigation", "page.goto: Timeout 30000ms exceeded.", [`${U}/slow`]);
     const clean = fakeReport([fakePage(`${U}/slow`)], []);
     const chaos = fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] });
     expect(rules(analyzeScan(chaos))).toEqual(["page-load-failed"]);
     expect(rules(analyzeScan(clean, [{ fault: "hang", report: chaos }]))).toEqual(["fault-page-broken"]);
+  });
+
+  // `analyzeScan` reads reports already on disk, and an older version
+  // recorded the same failure as an `exception` with the call log in it.
+  it("leaves an older report's page.goto exceptions to the page rules too", () => {
+    const old = cluster(
+      "exception",
+      `page.goto: net::ERR_EMPTY_RESPONSE at ${U}/reset\nCall log:\n\x1b[2m  - navigating to "${U}/reset"\x1b[22m\n`,
+      [`${U}/reset`],
+    );
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/reset`, undefined, { status: "error" })], [], {
+      errorClusters: [old, cluster("exception", "boom 12345")],
+    });
+    expect(analyzeScan(report).findings.map((f) => [f.rule, f.title])).toEqual([
+      ["js-exception", "Uncaught exception: boom 12345"],
+      ["page-load-failed", "Pages that did not load"],
+    ]);
+  });
+
+  // A crashed page has status "error", but it loaded: it was listed as a
+  // page that did not load, with a navigation hint, beside its crash.
+  it("reports a crashed page as a crash only, not as a page that did not load", () => {
+    const crash = { type: "crash" as const, message: "renderer crashed", url: `${U}/a`, timestamp: 0 };
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/a`, undefined, { status: "error", errors: [crash] })], [], {
+      errorClusters: [cluster("crash", "renderer crashed", [`${U}/a`])],
+    });
+    expect(rules(analyzeScan(report))).toEqual(["page-crash"]);
   });
 
   it("does not blame a fault for a page whose measured load it never touched", () => {
@@ -666,6 +693,32 @@ describe("analyzeScan: coverage warnings", () => {
     });
     expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
     expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
+  });
+
+  it("says the site could not be reached, and no SPA / bot-check hint, when the start page's connection failed", () => {
+    const message = `page.goto: net::ERR_CONNECTION_REFUSED at ${U}/`;
+    const down = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "navigation", message, url: `${U}/`, timestamp: 0 }],
+      perfPage: perfPage({ network: { totalRequests: 1, totalEncodedKB: 0, fromCacheCount: 0 } }),
+    });
+    expect(analyzeScan(fakeReport([down], [])).coverageWarnings).toEqual([
+      `Could not reach ${U}/: is the server running? (net::ERR_CONNECTION_REFUSED at ${U}/)`,
+    ]);
+    // A start page that failed to load for another reason: the page finding
+    // says so, and the hints about what the site served do not apply.
+    const slow = fakePage(`${U}/`, undefined, { status: "timeout" });
+    expect(analyzeScan(fakeReport([slow], [])).coverageWarnings).toEqual([
+      "The start page did not load (timeout), so the crawl had nothing to follow; see the page findings.",
+    ]);
+    // A crashed one did load: it is not called a page that did not load.
+    const crashed = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "crash", message: "renderer crashed", url: `${U}/`, timestamp: 0 }],
+    });
+    expect(analyzeScan(fakeReport([crashed], [])).coverageWarnings).toEqual([
+      "The start page's renderer crashed; see the page-crash finding.",
+    ]);
   });
 
   it("does not call a light start page a bot check when the crawl went on past it", () => {

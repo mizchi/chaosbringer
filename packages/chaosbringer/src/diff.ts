@@ -3,18 +3,59 @@
  * regression detection in CI: surface what's newly broken since the last run
  * while ignoring clusters / pages that were already broken.
  *
- * Clusters are matched by `ErrorCluster.key` (already fingerprinted, stable
- * across runs); pages are matched by URL. Nothing else is compared.
+ * Clusters are matched by key, recomputed from each cluster's sample with
+ * the current `fingerprintError` (see `clusterKeys`); pages are matched by
+ * URL. Nothing else is compared.
  */
 
 import { readFileSync } from "node:fs";
+import { fingerprintError, type ErrorCluster } from "./clusters.js";
+import { CRASHED_PAGE_ERROR, CRAWLER_NAVIGATION_ERROR, RENDERER_CRASHED, stripAnsi } from "./error-text.js";
 import type {
   ClusterDiffEntry,
   CrawlReport,
   PageDiffEntry,
+  PageError,
   PageResult,
   ReportDiff,
 } from "./types.js";
+
+/**
+ * A report's clusters by the key the current version gives them. A
+ * baseline an older version wrote keyed a cluster by an older
+ * fingerprint: with Playwright's call log in it (which named the
+ * `waitUntil` of the crawl's `--settle`) and its ANSI colours, and it
+ * recorded a failed `page.goto` as an `exception` and a renderer crash as
+ * whichever call met the dead page. Compared as written, upgrading
+ * reported every such cluster as both new and resolved, and
+ * `--baseline-strict` failed. So clusters are matched by a key recomputed
+ * from each one's `sample.message`, under the type the current crawler
+ * records it as; the entries keep the key the report wrote. Clusters of the
+ * older version that are one cluster now are added up, under the first.
+ * For a report this version wrote, the recomputed key is its own.
+ */
+function clusterKeys(report: Pick<CrawlReport, "errorClusters">): Map<string, ErrorCluster> {
+  const out = new Map<string, ErrorCluster>();
+  for (const c of report.errorClusters) {
+    const key = matchKey(c);
+    const seen = out.get(key);
+    out.set(key, seen ? { ...seen, count: seen.count + c.count, urls: [...new Set([...seen.urls, ...c.urls])] } : c);
+  }
+  return out;
+}
+
+function matchKey(c: ErrorCluster): string {
+  const sample = c.sample as PageError | undefined;
+  if (!sample || typeof sample.message !== "string") return c.key;
+  const message = stripAnsi(sample.message);
+  if (c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(message)) {
+    return `navigation|${fingerprintError({ ...sample, type: "navigation" })}`;
+  }
+  if (c.type === "exception" && CRASHED_PAGE_ERROR.test(message)) {
+    return `crash|${fingerprintError({ ...sample, type: "crash", message: RENDERER_CRASHED })}`;
+  }
+  return `${c.type}|${fingerprintError({ ...sample, type: c.type })}`;
+}
 
 function pageFailed(page: Pick<PageResult, "status" | "errors">): boolean {
   return page.errors.length > 0 || page.status === "error" || page.status === "timeout";
@@ -29,8 +70,8 @@ export function diffReports(
   current: CrawlReport,
   options: { baselinePath?: string } = {}
 ): ReportDiff {
-  const baselineClusters = new Map(baseline.errorClusters.map((c) => [c.key, c]));
-  const currentClusters = new Map(current.errorClusters.map((c) => [c.key, c]));
+  const baselineClusters = clusterKeys(baseline);
+  const currentClusters = clusterKeys(current);
 
   const newClusters: ClusterDiffEntry[] = [];
   const resolvedClusters: ClusterDiffEntry[] = [];
@@ -39,7 +80,7 @@ export function diffReports(
   for (const [key, curr] of currentClusters) {
     const prev = baselineClusters.get(key);
     const entry: ClusterDiffEntry = {
-      key,
+      key: curr.key,
       type: curr.type,
       fingerprint: curr.fingerprint,
       before: prev?.count ?? 0,
@@ -51,7 +92,7 @@ export function diffReports(
   for (const [key, prev] of baselineClusters) {
     if (currentClusters.has(key)) continue;
     resolvedClusters.push({
-      key,
+      key: prev.key,
       type: prev.type,
       fingerprint: prev.fingerprint,
       before: prev.count,

@@ -86,6 +86,43 @@ describe("getExitCode", () => {
 });
 
 describe("exitReasons", () => {
+  it("counts a failed navigation in the verdict line's errors, though not as a JS exception", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/reset", undefined, {
+          status: "error",
+          errors: [{ type: "navigation", message: "page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset", timestamp: 0 }],
+        }),
+      ],
+      summary: makeSummary({ errorPages: 1 }),
+    });
+    expect(formatCompactReport(report, true).split("\n").slice(0, 2)).toEqual([
+      "[FAIL] 1 pages, 1 errors, 1.0s (seed=42)",
+      "  Failed: 1 page failed to load (first: http://localhost:3000/reset)",
+    ]);
+  });
+
+  it("names a renderer crash as one, not as a page that failed to load", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/down", undefined, { status: "error" }),
+        fakePage("http://localhost:3000/oom", undefined, {
+          status: "error",
+          errors: [{ type: "crash", message: "renderer crashed", timestamp: 0 }],
+        }),
+      ],
+      summary: makeSummary({ errorPages: 2, crashes: 1 }),
+    });
+    expect(exitReasons(report)).toEqual([
+      "1 page failed to load (first: http://localhost:3000/down)",
+      "1 renderer crash (first: http://localhost:3000/oom)",
+    ]);
+    // A crash alone fails the run, in every mode.
+    const alone = makeReport({ summary: makeSummary({ errorPages: 1, crashes: 1 }) });
+    expect(exitReasons(alone)).toEqual(["1 renderer crash"]);
+    expect(getExitCode(alone)).toBe(1);
+  });
+
   it("names every rule that fails the run, and nothing for a passing one", () => {
     const report = makeReport({
       pages: [
@@ -305,6 +342,12 @@ describe("formatReport", () => {
     expect(out).toContain("3/3 succeeded");
     expect(out).toContain("novelty_stall=2");
     expect(out).toContain("invariant_violation=1");
+  });
+
+  it("counts renderer crashes in the summary when there were any", () => {
+    const lines = (report: CrawlReport) => formatReport(report).split("\n");
+    expect(lines(makeReport({ summary: makeSummary({ errorPages: 1, crashes: 1 }) }))).toContain("Renderer Crashes: 1");
+    expect(formatReport(makeReport())).not.toContain("Renderer Crashes");
   });
 
   it("omits the advisor section when advisor was never consulted", () => {

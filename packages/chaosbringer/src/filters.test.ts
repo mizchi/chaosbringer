@@ -194,6 +194,16 @@ describe("summarizePages", () => {
     expect(s.invariantViolations).toBe(2);
   });
 
+  it("counts a renderer crash as a crash, and neither it nor a failed navigation as a JS exception", () => {
+    const s = summarizePages([
+      makeResult({ status: "error", errors: [{ type: "navigation", message: "page.goto: net::ERR_EMPTY_RESPONSE at http://x/", timestamp: 0 }] }),
+      makeResult({ status: "error", errors: [{ type: "crash", message: "renderer crashed", timestamp: 0 }] }),
+    ]);
+    expect(s.jsExceptions).toBe(0);
+    expect(s.crashes).toBe(1);
+    expect(s.errorPages).toBe(2);
+  });
+
   it("averages load times", () => {
     const s = summarizePages([
       makeResult({ loadTime: 100 }),

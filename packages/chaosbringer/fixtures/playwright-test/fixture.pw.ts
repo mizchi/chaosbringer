@@ -7,9 +7,10 @@
  * Pages are load-only (`maxActionsPerPage: 0`): what is under test is which
  * URLs the crawler visits and what it reports, not what it clicks.
  */
+import { createServer } from "node:net";
 import { expect } from "@playwright/test";
 import { faults } from "../../src/faults.js";
-import { chaosTest, runChaosTest } from "../../src/fixture.js";
+import { chaosExpect, chaosTest, runChaosTest } from "../../src/fixture.js";
 import type { ChaosTestOptions } from "../../src/types.js";
 
 /** The same site under a second origin, for the explicit-`baseUrl` case. */
@@ -88,6 +89,26 @@ chaosTest.describe("strict", () => {
 chaosTest("without strict, the same error is only reported", async ({ chaos }) => {
   const report = await chaos.crawl("/boom");
   expect(report.summary.consoleErrors).toBe(1);
+});
+
+/** A URL on a port nothing listens on: bound, then released. */
+async function closedPortUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}/`;
+}
+
+// A failed navigation is not an exception, so toHaveNoExceptions passes for
+// it; and a refused connection fails in a few ms, so toLoadWithin passed too.
+chaosTest("chaosExpect.toLoadWithin fails a page that did not load, however fast", async ({ page, chaos }) => {
+  const result = await chaos.testPage(page, await closedPortUrl());
+  expect(result.status).toBe("error");
+  chaosExpect.toHaveNoExceptions(result);
+  expect(() => chaosExpect.toLoadWithin(result, 3000)).toThrow(
+    /did not load \(error\): \[navigation\] page\.goto: net::ERR_CONNECTION_REFUSED/,
+  );
 });
 
 chaosTest.describe("chaosOptions reach the crawler", () => {

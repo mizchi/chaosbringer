@@ -24,6 +24,8 @@ import { isLoadKey } from "../perf-key.js";
 import { reportSpans } from "../perf-summary.js";
 import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
 import type { ErrorCluster } from "../clusters.js";
+import { unreachableTarget, unreachableTargetMessage } from "../unreachable-target.js";
+import { CRAWLER_NAVIGATION_ERROR, stripAnsi } from "../error-text.js";
 import { registrableDomain } from "lightbringer/analyze";
 import { escapeRegExp } from "../filters.js";
 import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
@@ -412,6 +414,19 @@ function coverageWarnings(report: CrawlReport): string[] {
   const out: string[] = [];
   const start = report.pages[0];
   if (!start) return ["The crawl visited no page."];
+  // What the hints below guess at is what the site served, and a start page
+  // that did not load served nothing: a server that is down was told it may
+  // be a single-page app, a bot check or a consent wall.
+  const unreachable = unreachableTarget(report);
+  if (unreachable) {
+    const message = unreachableTargetMessage(unreachable);
+    return [message.charAt(0).toUpperCase() + message.slice(1)];
+  }
+  // It did load: what it served is unknown past the crash.
+  if (crashed(start)) return ["The start page's renderer crashed; see the page-crash finding."];
+  if (start.status === "error" || start.status === "timeout") {
+    return [`The start page did not load (${start.status}), so the crawl had nothing to follow; see the page findings.`];
+  }
   const net = start.perfPage?.network;
   // Links the crawl could follow: same-site, and not back to the page itself.
   const onward = start.links.filter((l) => sameOrigin(l, start.url) && pageIdentity(l) !== pageIdentity(start.url));
@@ -485,16 +500,6 @@ function thirdPartyScript(c: ErrorCluster, baseUrl: string): string | undefined 
   }
 }
 
-/**
- * The crawler's own navigation failing (`page.goto: Timeout 30000ms
- * exceeded`), recorded as an exception on the page. Not the site's script:
- * the page's failed or timed-out load is reported by the page rules.
- */
-const CRAWLER_NAVIGATION_ERROR = /^(?:page\.(?:goto|reload|goBack|goForward|waitForNavigation|waitForLoadState):|Navigation to .* is interrupted)/;
-
-function isCrawlerError(c: ErrorCluster): boolean {
-  return c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(c.sample.message);
-}
 
 function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvironmentNote[] {
   const byCode = new Map<string, { reason: string; count: number; hosts: Set<string> }>();
@@ -525,9 +530,14 @@ function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvir
 
 // ---------------------------------------------------------------- bugs
 
+/** A page whose renderer crashed: status `error`, but it loaded, and the `page-crash` rule reports it. */
+function crashed(p: PageResult): boolean {
+  return p.errors.some((e) => e.type === "crash");
+}
+
 function pageFailures(report: CrawlReport): ScanFinding[] {
   const out: ScanFinding[] = [];
-  const failed = report.pages.filter((p) => p.status === "error" || p.status === "timeout");
+  const failed = report.pages.filter((p) => (p.status === "error" || p.status === "timeout") && !crashed(p));
   if (failed.length > 0) {
     out.push({
       rule: "page-load-failed",
@@ -579,8 +589,25 @@ function linkedFrom(p: PageResult): string {
   return p.sourceUrl ? ` (linked from ${p.sourceUrl})` : "";
 }
 
+/**
+ * A cluster of the site's own errors: not `navigation`, the crawler's own
+ * navigation failing (`page.goto: Timeout 30000ms exceeded`). That is no
+ * error of the site's script, and the page's failed or timed-out load is
+ * reported by the page rules.
+ */
+type SiteErrorCluster = ErrorCluster & { type: Exclude<ErrorCluster["type"], "navigation"> };
+
+function isSiteError(c: ErrorCluster): c is SiteErrorCluster {
+  if (c.type === "navigation") return false;
+  // A report an older version wrote recorded the crawler's failed
+  // navigation as an `exception` (`analyzeScan` reads reports already on
+  // disk); `diffReports` reads an older baseline the same way.
+  return !(c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(stripAnsi(c.sample.message)));
+}
+
+/** A rule per type of the site's own errors (`SiteErrorCluster`). */
 const ERROR_RULES: Record<
-  ErrorCluster["type"],
+  SiteErrorCluster["type"],
   { rule: string; severity: ScanSeverity; category: ScanCategory; title: string; hint: string }
 > = {
   exception: {
@@ -633,8 +660,8 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
   // resource", which `pageFailures` already reports as the page's own finding.
   const failedDocs = new Set(report.pages.filter((p) => (p.statusCode ?? 0) >= 400).map((p) => p.url));
   for (const c of report.errorClusters ?? []) {
+    if (!isSiteError(c)) continue;
     const r = ERROR_RULES[c.type];
-    if (isCrawlerError(c)) continue;
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;
     }
@@ -690,13 +717,13 @@ function resilienceFindings(
   const known = new Set((baseline.errorClusters ?? []).map((c) => c.key));
 
   // Errors that only a fault produced, merged over the runs by cluster.
-  const fresh = new Map<string, { c: ErrorCluster; count: number; urls: Set<string>; faults: ScanFaultKind[] }>();
+  const fresh = new Map<string, { c: SiteErrorCluster; count: number; urls: Set<string>; faults: ScanFaultKind[] }>();
   for (const { fault, report } of runs) {
     for (const c of report.errorClusters ?? []) {
       if (known.has(c.key)) continue;
       if (c.type === "network" || c.type === "invariant-violation") continue;
       if (c.type === "console" && FAULT_ECHO.test(c.sample.message)) continue;
-      if (isCrawlerError(c)) continue;
+      if (!isSiteError(c)) continue;
       const entry = fresh.get(c.key) ?? { c, count: 0, urls: new Set<string>(), faults: [] };
       entry.count += c.count;
       for (const u of c.urls) entry.urls.add(u);

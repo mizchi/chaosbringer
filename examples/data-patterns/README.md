@@ -183,8 +183,6 @@ Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/o
 - **Well-formed but wrong values**: an off-by-one total, the wrong currency.
 - **Server-side classes** (SQL injection, SSRF, path traversal, IDOR): only
   the page's reaction to what the server sends back is visible.
-- **Renderer crashes**: the `crash` page-error type exists but is never
-  emitted.
 - **`chaosbringer scan` delivering bad data itself**: it takes no
   `faultInjection`, and its chaos crawls inject only 500s, network errors and
   hangs.

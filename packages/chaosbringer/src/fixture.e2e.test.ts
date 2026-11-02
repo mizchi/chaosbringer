@@ -142,6 +142,10 @@ describe("chaosbringer/fixture under Playwright Test", () => {
     expectPassed("without strict, the same error is only reported");
   });
 
+  it("fails toLoadWithin for a page that did not load", () => {
+    expectPassed("chaosExpect.toLoadWithin fails a page that did not load");
+  });
+
   it("passes seed, faults and invariants through to the crawler", () => {
     expectPassed("chaosOptions reach the crawler");
   });

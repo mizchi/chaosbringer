@@ -26,6 +26,8 @@
  * testcase anyway).
  */
 
+import { fileURLToPath } from "node:url";
+import { ANSI_ESCAPE } from "./error-text.js";
 import type { CrawlReport, PageError, PageResult } from "./types.js";
 
 export interface JunitOptions {
@@ -78,7 +80,11 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
     return `${head}><failure message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.status === "error") {
-    const code = typeof page.statusCode === "number" ? `HTTP ${page.statusCode}` : "navigation error";
+    const code = page.errors.some((e) => e.type === "crash")
+      ? "renderer crash"
+      : typeof page.statusCode === "number"
+        ? `HTTP ${page.statusCode}`
+        : "navigation error";
     return `${head}><failure message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.errors.length > 0) {
@@ -154,10 +160,37 @@ function formatErrorBody(page: PageResult): string {
   return page.errors
     .map((e) => {
       const head = e.invariantName ? `[${e.type}:${e.invariantName}] ` : `[${e.type}] `;
-      const stack = e.stack ? `\n${e.stack}` : "";
-      return `${head}${e.message}${stack}`;
+      const frames = pageFrames(e);
+      return `${head}${e.message}${frames ? `\n${frames}` : ""}`;
     })
     .join("\n\n");
+}
+
+/** A stack frame line: V8's `    at …`, or SpiderMonkey / JSC's `fn@url:line:col`. */
+const FRAME = /^\s*at |^[^\s@]*@\S+:\d+(?::\d+)?$/;
+
+/**
+ * This package's own directory (its `dist/` when installed). A frame in it
+ * is the crawler's code that made the call, which says nothing about the
+ * page; so is a frame of Node's own (`node:internal/…`).
+ */
+const OWN_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * The frames of `e.stack` that are the page's, one per line. Not the lines
+ * before the first frame: V8 starts a stack with the message (`TypeError:
+ * x is not a function`), which the body has just printed. None for a
+ * `navigation` error: the stack is the crawler's own `page.goto` call.
+ */
+function pageFrames(e: PageError): string {
+  if (!e.stack || e.type === "navigation") return "";
+  const lines = e.stack.split("\n");
+  const first = lines.findIndex((l) => FRAME.test(l));
+  if (first === -1) return "";
+  return lines
+    .slice(first)
+    .filter((l) => !l.includes(OWN_DIR) && !l.includes("(node:") && !/^\s*at node:/.test(l))
+    .join("\n");
 }
 
 /**
@@ -168,7 +201,7 @@ function formatErrorBody(page: PageResult): string {
  * dropped rather than escaped: XML 1.0 has no escape for them.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
-const NOT_XML = /\x1b\[[0-?]*[ -/]*[@-~]|[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g; // oxlint-disable-line no-control-regex
+const NOT_XML = new RegExp(`${ANSI_ESCAPE.source}|[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\ufffe\\uffff]`, "g"); // oxlint-disable-line no-control-regex
 
 /** XML attribute / text escape. */
 function esc(s: string): string {

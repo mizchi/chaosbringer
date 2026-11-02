@@ -511,6 +511,9 @@ export async function runShardCli(argv: string[]): Promise<void> {
 
     const reports: CrawlReport[] = [];
     for (const r of results) {
+      // Exit 2 is a worker that refused to run (the site did not answer,
+      // `could not reach …` on its stderr) and so wrote no report.
+      if (r.exitCode === 2) continue;
       try {
         const raw = readFileSync(r.reportPath, "utf-8");
         reports.push(JSON.parse(raw) as CrawlReport);
@@ -522,6 +525,13 @@ export async function runShardCli(argv: string[]): Promise<void> {
     }
 
     if (reports.length === 0) {
+      // Every worker refused, as the plain crawl would have: its exit 2, and
+      // their `could not reach …` lines (on the inherited stderr, one per
+      // worker) already say why.
+      if (results.every((r) => r.exitCode === 2)) {
+        process.exitCode = 2;
+        return;
+      }
       console.error("shard: no reports produced — aborting");
       process.exitCode = 1;
       return;

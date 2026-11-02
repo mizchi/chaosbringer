@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ErrorCluster } from "./clusters.js";
+import { clusterErrors, type ErrorCluster } from "./clusters.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
 import { getExitCode } from "./reporter.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
@@ -234,5 +234,133 @@ describe("getExitCode with baselineStrict", () => {
     const report = makeReport({ summary: makeSummary({ consoleErrors: 1 }) });
     expect(getExitCode(report, true)).toBe(1);
     expect(getExitCode(report, false)).toBe(0);
+  });
+});
+
+describe("diffReports against a baseline an older version wrote", () => {
+  const url = "http://127.0.0.1:4517/reset";
+  // Before navigation failures had their own type, a failed `page.goto` was
+  // an `exception` whose cluster key kept Playwright's call log, colours and
+  // all. This is such a report's cluster, as that version saved it.
+  const oldMessage =
+    `page.goto: net::ERR_EMPTY_RESPONSE at ${url}\nCall log:\n` +
+    `\u001b[2m  - navigating to "${url}", waiting until "networkidle"\u001b[22m\n`;
+  const oldBaseline = {
+    baseUrl: "http://127.0.0.1:4517",
+    seed: 1,
+    pages: [
+      {
+        url,
+        status: "error",
+        loadTime: 5,
+        errors: [{ type: "exception", message: oldMessage, url, timestamp: 1 }],
+        hasErrors: true,
+        warnings: [],
+        links: [],
+      },
+    ],
+    errorClusters: [
+      {
+        key: 'exception|page.goto: net::ERR_EMPTY_RESPONSE at <url> Call log: \u001b[2m - navigating to "<url>", waiting until "networkidle"\u001b[22m',
+        type: "exception",
+        fingerprint:
+          'page.goto: net::ERR_EMPTY_RESPONSE at <url> Call log: \u001b[2m - navigating to "<url>", waiting until "networkidle"\u001b[22m',
+        sample: { type: "exception", message: oldMessage, url, timestamp: 1 },
+        count: 1,
+        urls: [url],
+      },
+      {
+        key: "exception|boom",
+        type: "exception",
+        fingerprint: "boom",
+        sample: { type: "exception", message: "boom", url, timestamp: 1 },
+        count: 2,
+        urls: [url],
+      },
+    ],
+  };
+
+  it("reads its goto failures as the navigation type, so upgrading reports nothing new or resolved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chaos-old-baseline-"));
+    try {
+      const path = join(dir, "old.json");
+      writeFileSync(path, JSON.stringify(oldBaseline));
+      const baseline = loadBaseline(path)!;
+      const errors: PageError[] = [
+        { type: "navigation", message: `page.goto: net::ERR_EMPTY_RESPONSE at ${url}`, url, timestamp: 2 },
+        { type: "exception", message: "boom", url, timestamp: 2 },
+        { type: "exception", message: "boom", url, timestamp: 3 },
+      ];
+      const current = makeReport({
+        pages: [page({ url, status: "error", errors })],
+        errorClusters: clusterErrors(errors),
+      });
+      const diff = diffReports(baseline, current);
+      expect(diff.newClusters).toEqual([]);
+      expect(diff.resolvedClusters).toEqual([]);
+      expect(diff.unchangedClusters.map((c) => [c.key, c.before, c.after])).toEqual([
+        ["exception|boom", 2, 2],
+        ["navigation|page.goto: net::ERR_EMPTY_RESPONSE at <url>", 1, 1],
+      ]);
+      expect(hasRegressions(diff)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads an old renderer crash, a `Page crashed` exception, as the crash type", () => {
+    const crashed = {
+      ...oldBaseline,
+      errorClusters: [
+        {
+          key: "exception|page.waitForTimeout: Page crashed",
+          type: "exception",
+          fingerprint: "page.waitForTimeout: Page crashed",
+          sample: { type: "exception", message: "page.waitForTimeout: Page crashed", url, timestamp: 1 },
+          count: 1,
+          urls: [url],
+        },
+      ],
+    } as unknown as CrawlReport;
+    const errors: PageError[] = [{ type: "crash", message: "renderer crashed", url, timestamp: 2 }];
+    const diff = diffReports(crashed, makeReport({ errorClusters: clusterErrors(errors) }));
+    expect(diff.newClusters).toEqual([]);
+    expect(diff.resolvedClusters).toEqual([]);
+  });
+
+  // Two old clusters that are one now: a crash met by two different calls,
+  // and the same goto failure under two --settle modes' call logs. Kept
+  // apart, the later one overwrote the earlier and `before` lost its count.
+  it("adds up old clusters that are one cluster now", () => {
+    const oldCluster = (type: string, message: string, count: number) => ({
+      key: `${type}|${message}`,
+      type,
+      fingerprint: message,
+      sample: { type, message, url, timestamp: 1 },
+      count,
+      urls: [url],
+    });
+    const log = (waitUntil: string) =>
+      `page.goto: net::ERR_EMPTY_RESPONSE at ${url}\nCall log:\n\u001b[2m  - navigating to "${url}", waiting until "${waitUntil}"\u001b[22m\n`;
+    const merged = {
+      ...oldBaseline,
+      errorClusters: [
+        oldCluster("exception", "page.waitForTimeout: Page crashed", 1),
+        oldCluster("exception", "page.evaluate: Target crashed", 2),
+        oldCluster("exception", log("networkidle"), 1),
+        oldCluster("exception", log("load"), 3),
+      ],
+    } as unknown as CrawlReport;
+    const errors: PageError[] = [
+      { type: "crash", message: "renderer crashed", url, timestamp: 2 },
+      { type: "navigation", message: `page.goto: net::ERR_EMPTY_RESPONSE at ${url}`, url, timestamp: 2 },
+    ];
+    const diff = diffReports(merged, makeReport({ errorClusters: clusterErrors(errors) }));
+    expect(diff.newClusters).toEqual([]);
+    expect(diff.resolvedClusters).toEqual([]);
+    expect(diff.unchangedClusters.map((c) => [c.type, c.before, c.after]).sort()).toEqual([
+      ["crash", 3, 1],
+      ["navigation", 4, 1],
+    ]);
   });
 });

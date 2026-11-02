@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { buildJunitXml } from "./junit.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
@@ -302,6 +303,40 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('Call log:\n  - navigating to &quot;http://localhost:3000/slow&quot;\n');
     expect(xml).toContain("at a\tb\r\n");
     expect(Array.from(xml).filter((ch) => ch.charCodeAt(0) < 0x20 && !"\t\n\r".includes(ch))).toEqual([]);
+  });
+
+  it("prints a message once, and only the page's own stack frames", () => {
+    // Where this module runs from: the package's own code, which says
+    // nothing about the page. In dist/ when installed, src/ under the tests.
+    const own = fileURLToPath(new URL(".", import.meta.url));
+    const thrown: PageError = {
+      type: "exception",
+      message: "x is not a function",
+      timestamp: 0,
+      stack: `TypeError: x is not a function\n    at render (http://localhost:3000/app.js:10:5)\n    at ChaosCrawler.run (${own}crawler.js:2155:41)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/", { errors: [thrown], hasErrors: true })]));
+    const body = /<failure [^>]*>([\s\S]*?)<\/failure>/.exec(xml)![1]!;
+    expect(body).toBe("[exception] x is not a function\n    at render (http://localhost:3000/app.js:10:5)");
+  });
+
+  it("gives a navigation failure no stack: it is the crawler's own call, not the page's", () => {
+    const own = fileURLToPath(new URL(".", import.meta.url));
+    const goto: PageError = {
+      type: "navigation",
+      message: "page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset",
+      timestamp: 0,
+      stack: `page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset\nCall log:\n  - navigating to "http://localhost:3000/reset", waiting until "load"\n\n    at ChaosCrawler.gotoAndSettle (${own}crawler.js:2155:41)`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/reset", { status: "error", errors: [goto], hasErrors: true })]));
+    const body = /<failure [^>]*>([\s\S]*?)<\/failure>/.exec(xml)![1]!;
+    expect(body).toBe("[navigation] page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset");
+  });
+
+  it("names a crashed page's failure a renderer crash", () => {
+    const crash: PageError = { type: "crash", message: "renderer crashed", timestamp: 0 };
+    const xml = buildJunitXml(report([page("http://localhost:3000/oom", { status: "error", errors: [crash], hasErrors: true })]));
+    expect(xml).toContain('<failure message="renderer crash @ http://localhost:3000/oom" type="error">[crash] renderer crashed</failure>');
   });
 
   it("annotates invariant-violation entries with the invariant name", () => {
