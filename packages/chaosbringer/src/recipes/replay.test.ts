@@ -127,6 +127,20 @@ describe("runRecipe with a baseUrl", () => {
     expect(visits).toEqual([`${RECORDED}/login`]);
   });
 
+  it("moves a postcondition pattern that names the recorded origin along with the page", async () => {
+    // Checked since postconditions are, it failed every replay on another
+    // host while the expectation on the same URL moved and passed.
+    const { page } = fakePage();
+    const r: ActionRecipe = {
+      ...recipe([
+        { kind: "navigate", url: `${RECORDED}/login` },
+        { kind: "click", selector: "button", expectAfter: { urlContains: `${RECORDED}/done`, timeoutMs: 200 } },
+      ]),
+      postconditions: [{ urlPattern: "^http://127\\.0\\.0\\.1:4791/done" }],
+    };
+    expect(await runRecipe(page, r, { baseUrl: BASE })).toMatchObject({ ok: true });
+  });
+
   it("refuses a base URL with no origin to move to", async () => {
     const { page, visits } = fakePage();
     const r = recipe([{ kind: "navigate", url: `${RECORDED}/login` }]);
@@ -203,6 +217,29 @@ describe("recipeOrigin / rebaseRecipe / rebaseNotice", () => {
       { kind: "click", selector: "a", expectAfter: { urlContains: `${RECORDED}0/x` } },
     ]);
     expect(rebaseRecipe(r, BASE).steps[1]).toEqual(r.steps[1]);
+  });
+
+  it("moves only the origin a postcondition pattern spells out, as it is written", () => {
+    const r: ActionRecipe = {
+      ...recipe([{ kind: "navigate", url: `${RECORDED}/login` }]),
+      postconditions: [
+        { urlPattern: "^http:\\/\\/127\\.0\\.0\\.1:4791\\/done$", hasSelector: "#ok" },
+        { urlPattern: "http://127\\.0\\.0\\.1:4791$" },
+        // Path-only, another origin, a longer port, or no single host: left alone.
+        { urlPattern: "/done$" },
+        { urlPattern: "^https://pay\\.example\\.test/" },
+        { urlPattern: "^http://127\\.0\\.0\\.1:47910/" },
+        { urlPattern: "^http://127\\.0\\.0\\.1:\\d+/" },
+        { hidesSelector: "#spinner" },
+      ],
+    };
+    const moved = rebaseRecipe(r, "https://staging.example.test/login").postconditions;
+    expect(moved.slice(0, 2)).toEqual([
+      { urlPattern: "^https://staging\\.example\\.test\\/done$", hasSelector: "#ok" },
+      { urlPattern: "https://staging\\.example\\.test$" },
+    ]);
+    expect(moved.slice(2)).toEqual(r.postconditions.slice(2));
+    expect(rebaseRecipe(r, `${RECORDED}/`).postconditions).toBe(r.postconditions);
   });
 
   it("says when the base URL moves a recipe, and only then", () => {

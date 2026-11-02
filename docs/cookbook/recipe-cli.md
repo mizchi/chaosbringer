@@ -86,7 +86,8 @@ drive` saves `{"kind":"navigate","url":"http://localhost:3000/login"}`.
 `recipes verify`, `recipes repair` and `chaosbringer load` replay it on
 `--base-url` instead. Each navigation to the origin the recipe was
 recorded on goes to `--base-url`'s origin, path and query kept, and so
-does a `urlContains` that spells that origin out. That origin is its
+do a `urlContains` and a postcondition `urlPattern` that spell that
+origin out. That origin is its
 first step's, when the recipe starts with a navigate; a recipe that
 starts on the page it matched on (a click, a fill) has it only when its
 first precondition's `urlPattern` names a scheme and host

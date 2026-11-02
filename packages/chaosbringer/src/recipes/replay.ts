@@ -14,6 +14,7 @@
  */
 import type { Page } from "playwright";
 import type { ExpectClause, ActionRecipe, RecipeStep, ReplayResult } from "./types.js";
+import { escapeRegExp } from "../filters.js";
 import { hasTemplates, substituteSteps, type RecipeVars } from "./templating.js";
 
 const DEFAULT_EXPECT_TIMEOUT_MS = 5000;
@@ -83,7 +84,7 @@ export async function runRecipe(
   // `urlPattern` is a regex source tested against `page.url()`, as
   // `preconditionHolds` and repair's goal read it, and waited for like the
   // other clauses: the last step's navigation may still be under way.
-  for (const p of recipe.postconditions) {
+  for (const p of rebased.postconditions) {
     const failed = (reason: string): ReplayResult => ({
       ok: false,
       durationMs: performance.now() - start,
@@ -137,18 +138,24 @@ export function recipeOrigin(
  * `[a-z]+` or `\d+` in the host, or a host a quantifier ends on.
  */
 function patternOrigin(pattern: string | undefined): string | null {
-  const head = pattern
-    ? /^\^?(https?:(?:\\?\/){2}(?:\\[.:-]|[^/\\?#()[\]{}|*+^$])+)(?:$|\/|\\\/|\$)/i.exec(pattern)?.[1]
-    : undefined;
-  return head ? httpOrigin(head.replace(/\\(.)/g, "$1")) : null;
+  return patternHead(pattern)?.origin ?? null;
+}
+
+/** `patternOrigin`'s origin, and where in `pattern` it is written. */
+function patternHead(pattern: string | undefined): { origin: string; start: number; end: number } | null {
+  const m = pattern
+    ? /^(\^?)(https?:(?:\\?\/){2}(?:\\[.:-]|[^/\\?#()[\]{}|*+^$])+)(?:$|\/|\\\/|\$)/i.exec(pattern)
+    : null;
+  const origin = m ? httpOrigin(m[2]!.replace(/\\(.)/g, "$1")) : null;
+  return m && origin ? { origin, start: m[1]!.length, end: m[1]!.length + m[2]!.length } : null;
 }
 
 /**
  * `recipe` replayed on `baseUrl`'s site: every navigate to the recipe's
  * recorded origin (`recipeOrigin`) goes to `baseUrl`'s origin instead,
  * path, query, hash and any `{{var}}` in them kept as written, and so do
- * the `urlContains` / `urlNotContains` expectations that spell that
- * origin out. Only the origin moves, never a path prefix: a base URL is
+ * the `urlContains` / `urlNotContains` expectations and the postcondition
+ * `urlPattern`s that spell that origin out. Only the origin moves, never a path prefix: a base URL is
  * often a start page (`https://staging.test/login`), not a mount point.
  * A navigate to another origin (a payment provider, an SSO page) is left
  * alone, and so is every step of a recipe with no recorded origin. Saved
@@ -159,7 +166,16 @@ export function rebaseRecipe(recipe: ActionRecipe, baseUrl: string): ActionRecip
   if (!to) throw new Error(`rebaseRecipe: base URL ${JSON.stringify(baseUrl)} is not an absolute http(s) URL`);
   const from = recipeOrigin(recipe);
   if (!from || from === to) return recipe;
-  return { ...recipe, steps: recipe.steps.map((s) => rebaseStep(s, from, to)) };
+  return {
+    ...recipe,
+    steps: recipe.steps.map((s) => rebaseStep(s, from, to)),
+    // runRecipe checks these on the page it replayed on: one that names
+    // the recorded origin would fail every replay on another host.
+    postconditions: recipe.postconditions.map((p) => {
+      const urlPattern = swapPatternOrigin(p.urlPattern, from, to);
+      return urlPattern === p.urlPattern ? p : { ...p, urlPattern };
+    }),
+  };
 }
 
 /**
@@ -194,6 +210,17 @@ function rebaseStep(step: RecipeStep, from: string, to: string): RecipeStep {
       ...(urlNotContains !== undefined ? { urlNotContains } : {}),
     },
   };
+}
+
+/**
+ * A `urlPattern` that starts with the `from` origin (as `patternOrigin`
+ * reads it) with that origin written as `to`, escaped; the rest of the
+ * regex, and any other pattern, as is.
+ */
+function swapPatternOrigin(pattern: string | undefined, from: string, to: string): string | undefined {
+  const head = patternHead(pattern);
+  if (!pattern || !head || head.origin !== from) return pattern;
+  return pattern.slice(0, head.start) + escapeRegExp(to) + pattern.slice(head.end);
 }
 
 /** `text` with a leading `from` origin replaced by `to`; anything else as is. */
