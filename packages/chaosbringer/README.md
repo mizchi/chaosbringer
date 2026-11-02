@@ -765,7 +765,7 @@ await chaos({
 });
 ```
 
-The file is read by Playwright and not modified by the crawl. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
+The file is read by Playwright and not modified by the crawl. The CLI (and `scan`, `flake`, `shard`) checks it before the browser starts: a file that is not there, or is not storageState JSON, exits 2 with `chaosbringer: --storage-state auth.json: no such file`. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
 
 ## HAR record / replay
 
@@ -778,6 +778,8 @@ chaosbringer --url http://localhost:3000 --seed 42 --har-record chaos.har
 # Later: replay without the server running
 chaosbringer --url http://localhost:3000 --seed 42 --har-replay chaos.har
 ```
+
+A `--har-replay` file that is not there, or is not HAR JSON (`{"log": {"entries": [...]}}`; a `.zip` HAR only has to exist), is refused before the browser starts, with exit 2.
 
 Programmatic:
 
@@ -810,10 +812,10 @@ await chaos({
 
 ## Accessibility (axe-core)
 
-Install `axe-core` as a peer and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
+Install `axe-core` as a dev dependency and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
 
 ```bash
-pnpm add axe-core
+pnpm add -D axe-core
 chaosbringer --url http://localhost:3000 --axe
 chaosbringer --url http://localhost:3000 --axe --axe-tags wcag2aa,best-practice
 ```
@@ -833,7 +835,7 @@ await chaos({
 });
 ```
 
-`axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
+`axe-core` is an optional peer dependency. Without it, the run is refused before its browser starts: `--axe` (and `scan --axe`) exits 2 with ``chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` …``, and `new ChaosCrawler()`, `chaos()` and the fixture throw `MissingPeerError` (its `packages` and `installCommand` say what to install). The preset declares the package in its `peers`, which is what the crawler checks. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
 
 axe is injected over CDP, so a page's Content-Security-Policy does not block it, and the page's iframes are scanned with it, same-origin and cross-origin (axe-core 4.3+; older versions scan the top document only). A cross-origin iframe loads only with `blockExternalNavigation: false`: the default guard blocks its document, and the blocked frame is skipped. So is an iframe that can't run axe: one sandboxed without `allow-scripts`, or one whose scan doesn't finish within 10s (a stuck widget). To leave embeds you don't own out of the scan, `exclude` them (`exclude: ["iframe"]`).
 
@@ -920,7 +922,7 @@ await chaos({
 ```
 
 - Baseline filenames are derived from each page's URL (path + query, sanitized) so different routes don't collide.
-- `pixelmatch` and `pngjs` are optional peer deps — install them explicitly (`pnpm add pixelmatch pngjs`). The invariant fails with a clear install hint when they're missing.
+- `pixelmatch` and `pngjs` are optional peer deps — install them explicitly (`pnpm add -D pixelmatch pngjs`). Without either, the run is refused before its browser starts, the first run that only writes baselines too: `--visual-baseline` exits 2 naming the missing package, and the library throws `MissingPeerError`.
 - Dimension mismatches between baseline and current are treated as full-diff failures — resize or re-record the baseline intentionally rather than auto-accepting.
 - Takes `fullPage: true` screenshots by default. Flip to viewport-only via `fullPage: false` in the programmatic API if your layout is sensitive to scroll position.
 - Pair with `--device iPhone 14` to record device-specific baselines; the baseline dir is per-crawl so split baselines across devices by using different dirs.
@@ -976,7 +978,7 @@ await chaos({
 });
 ```
 
-Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
+Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Each value is a number of ms above 0; anything else exits 2 naming the metric (`chaosbringer: --budget lcp must be a finite number (got "abc")`), as does an unknown key. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
 
 Where the numbers come from, measured once the page load has settled:
 
@@ -1036,7 +1038,8 @@ For failures that are hard to diagnose from a seed alone, record the exact seque
 # Record
 chaosbringer --url http://localhost:3000 --seed 42 --trace-out chaos.trace.jsonl
 
-# Replay the exact sequence (no RNG, no discovery)
+# Replay the exact sequence (no RNG, no discovery); a trace that is not
+# there or does not parse exits 2 before the browser starts
 chaosbringer --url http://localhost:3000 --trace-replay chaos.trace.jsonl
 
 # Shrink the trace to the minimum subsequence that still reproduces a failure
@@ -1188,12 +1191,12 @@ The browser's "Failed to load resource" message names no file, so its console er
 | A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
-| The CLI refused to run: an unknown flag, a malformed value, no `--url`, a `--perf-budgets` file it cannot use. Nothing ran; stderr has one `chaosbringer: …` line | **2** |
+| The CLI refused to run: an unknown flag, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`), or an optional peer `--axe` / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
 | Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
-Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value of a flag the subcommand checks, such as `scan --max-pages abc`, `flake --runs 1` or `load --workers abc`. Not every value is checked yet: some numeric flags still take a malformed number without a word, for example `cluster-artifacts --max-clusters` and `--min-count`, and the `--timeout`, `--perf-delta-ms` and `--perf-ratio` of `parity` and `journey`. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s` or `cluster-artifacts --min-count abc`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`scan`, `flake` and `shard` take `--storage-state`, `--har-replay`, `--trace-replay` as the main command does, `minimize` its `--trace`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and `scan --axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
 
 > **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
 > Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
@@ -1202,6 +1205,22 @@ Every subcommand refuses its arguments the same way: an unknown flag, or a missi
 > `recipes show` and the other `recipes` subs that need a name printed their
 > usage and exited 0 without one. A script that checked a subcommand for
 > exactly 1 on a typo now sees 2.
+
+> **Behaviour change:** a run that could not be made because of how it was
+> invoked now exits 2 before its browser starts, where it used to fail with
+> exit 1, the code of a run that found something: a missing or malformed
+> `--storage-state`, `--har-replay` or `--trace-replay` (crawl, `shard`,
+> `scan`, `flake`) or `minimize --trace`, a crawl option only the crawler
+> checked under `scan` (`--exclude '('`, `--device`), `--axe` without
+> axe-core (it failed every page as an invariant violation) and
+> `--visual-baseline` without pixelmatch / pngjs (its second run did; the
+> first now refuses too), and `parity` / `journey --timeout 5s`, which ran
+> with a 5 ms timeout. A malformed number that used to be read as NaN and
+> ignored (`parity --perf-ratio abc`, `cluster-artifacts --min-count abc`)
+> exits 2 instead of 0. In code, `new ChaosCrawler()`, `chaos()` and the
+> Playwright fixture throw `MissingPeerError` for an `axe()` or
+> `visualRegression()` invariant whose package is not installed, instead of
+> reporting a violation on every page.
 
 > **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
 > used to ignore them, so a run whose entire finding was "the app left a
@@ -1381,7 +1400,7 @@ chaosbringer parity \
   --output parity.json
 ```
 
-Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits non-zero on any mismatch so it slots into CI as a gate.
+Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits 1 on any mismatch so it slots into CI as a gate, and 2 when it refuses its arguments: `--timeout`, `--perf-samples`, `--perf-delta-ms` and `--perf-ratio` must be numbers (`--timeout 5s` was read as 5 ms and failed every slow path), and the thresholds above 0, which would turn them off. `journey` checks its `--timeout`, `--perf-delta-ms` and `--perf-ratio` the same way.
 
 ### `cluster-artifacts`
 
@@ -1398,7 +1417,7 @@ chaosbringer --url http://localhost:3000 \
   --cluster-min-count 5
 ```
 
-`--min-count` (or `--cluster-min-count` inline) filters low-frequency noise. The inline form requires `--failure-artifacts` since it copies from the per-page bundles.
+`--min-count` (or `--cluster-min-count` inline) filters low-frequency noise; it and `--max-clusters` (at least 1) must be integers, or the command exits 2 (`--min-count abc` used to emit every cluster). The inline form requires `--failure-artifacts` since it copies from the per-page bundles.
 
 ## CLI reference
 
@@ -1424,12 +1443,12 @@ chaosbringer --url http://localhost:3000 \
 | `--log-console` | Also log to console | false |
 | `--seed <n>` | Seed for deterministic action selection | random |
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
-| `--har-replay <path>` | Replay network traffic from a HAR file | — |
-| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
-| `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
-| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
+| `--har-replay <path>` | Replay network traffic from a HAR file (checked before the browser starts) | — |
+| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls (checked before the browser starts) | — |
+| `--budget <k=ms,...>` | Per-metric performance budget (repeatable; each ms > 0) | — |
+| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed; exit 2 without it) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
-| `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`) | — |
+| `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`; exit 2 without them) | — |
 | `--visual-threshold <n>` | pixelmatch color distance (0..1) | 0.1 |
 | `--visual-max-diff-pixels <n>` | Absolute pixel budget before failing | 0 |
 | `--visual-max-diff-ratio <n>` | Ratio pixel budget (0..1) | — |
@@ -1438,7 +1457,7 @@ chaosbringer --url http://localhost:3000 \
 | `--failure-artifacts <dir>` | Per-failure bundle (screenshot + html + errors + trace + repro.sh) | — |
 | `--failure-max <n>` | Cap the number of failure bundles per run | unlimited |
 | `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
-| `--trace-replay <path>` | Replay a previously recorded trace | — |
+| `--trace-replay <path>` | Replay a previously recorded trace (checked before the browser starts) | — |
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
 | `--no-http-cache` | Disable the browser HTTP cache on every page (`httpCache: false`), for cold-cache measurement. Otherwise the cache is on, except in runs with fault injection, `traceparent` or HAR replay, which route every request and so run cold | cache on |

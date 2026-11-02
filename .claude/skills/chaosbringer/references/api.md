@@ -163,6 +163,14 @@ nothing. This is where your oracle lives, so it is worth more care than the
 faults themselves — see the main SKILL.md on the four ways an oracle passes
 without checking anything.
 
+`invariants.axe()` needs `axe-core`, and `visualRegression()` needs `pixelmatch`
+and `pngjs`: optional peers, so install them (`pnpm add -D axe-core`). Without
+one, `new ChaosCrawler()` / `chaos()` / the fixture throw `MissingPeerError`
+(`packages`, `installCommand`) before a browser starts, and the CLI's `--axe` /
+`--visual-baseline` exit 2 with the install command. It used to be one
+invariant violation per page, which reads as an accessibility bug in the app.
+An invariant declares such packages in `peers`; the presets already do.
+
 ## Driving a known path instead of a random one
 
 ```ts

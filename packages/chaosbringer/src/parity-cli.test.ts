@@ -191,7 +191,7 @@ describe("runParityCli", () => {
         "--perf-samples", "0",
       ])).rejects.toMatchObject({
         name: "UsageError",
-        message: "--perf-samples must be a positive integer (got 0)",
+        message: "--perf-samples must be >= 1 (got 0)",
       });
     });
 

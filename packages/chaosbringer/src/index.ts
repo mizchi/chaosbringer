@@ -180,6 +180,13 @@ export { candidatePerfKey, compilePerfKeyGlob } from "./perf-key.js";
 export { DEFAULT_SETTLE_QUIET_MS, ACTION_SETTLE_CAP_MS } from "./settle.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
+  AXE_PEERS,
+  MissingPeerError,
+  VISUAL_REGRESSION_PEERS,
+  isMissingPeerError,
+  type PeerNeed,
+} from "./peers.js";
+export {
   dataSafety,
   injectedMarkup,
   notBlank,

@@ -8,6 +8,7 @@
  * subcommands, and the other ten could only be found in the source.
  */
 import { readFileSync } from "node:fs";
+import { isMissingPeerError } from "./peers.js";
 
 export interface Subcommand {
   /** Its line in the SUBCOMMANDS section of `chaosbringer --help`. */
@@ -144,8 +145,8 @@ export async function inSubcommand<T>(command: string, run: () => T | Promise<T>
 
 /**
  * The one line a refused invocation prints. `err` is what `parseArgs`, the
- * flag parsers or `validateOptions` threw; they used to escape as a Node
- * stack trace. `command` is who refused it: `chaosbringer`, or a subcommand
+ * flag parsers, `validateOptions`, `checkInputFiles` or `assertPeers`
+ * (a `MissingPeerError`) threw; they used to escape as a Node stack trace. `command` is who refused it: `chaosbringer`, or a subcommand
  * as `chaosbringer scan`.
  */
 export function usageErrorMessage(err: unknown, command = "chaosbringer"): string {
@@ -160,6 +161,8 @@ export function usageErrorMessage(err: unknown, command = "chaosbringer"): strin
   // a subcommand's `chaosbringer shard: `). parseArgs' advice for a value
   // that starts with a dash (`--timeout -5`) spans three lines.
   const text = message.replace(/^chaosbringer(?: [a-z-]+)*: /, "").replace(/\s*\n\s*/g, " ");
+  // A missing package is fixed by the install command the message gives, not by --help.
+  if (isMissingPeerError(err)) return `${command}: ${text}`;
   return `${command}: ${text} (see ${command} --help)`;
 }
 

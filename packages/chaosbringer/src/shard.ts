@@ -303,10 +303,11 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: numbe
   // Imported on demand, like perf-cli in cli.ts: the library's
   // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
   // imports `parseShardArg` from it.
-  const { crawlCliExtras, crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, readCrawlPerfBudgets } = await import(
-    "./cli-crawl-options.js"
-  );
+  const { crawlCliExtras, crawlCliPeerNeeds, crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, readCrawlPerfBudgets } =
+    await import("./cli-crawl-options.js");
   const { validateOptions } = await import("./validate.js");
+  const { checkInputFiles } = await import("./input-files.js");
+  const { assertPeers, isMissingPeerError } = await import("./peers.js");
   try {
     // The main CLI's checks, in its order, so whatever a worker would refuse
     // before its browser starts is refused here, once.
@@ -317,6 +318,8 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: numbe
     if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
     if (budgets) options.perfBudgets = budgets.rules;
     validateOptions(options);
+    checkInputFiles(options);
+    assertPeers(crawlCliPeerNeeds(values));
     const bundleDir = values["failure-artifacts"];
     const files: ShardReportFiles = {
       ...(values.junit ? { junit: values.junit } : {}),
@@ -325,7 +328,7 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: numbe
     };
     return { seed: options.seed ?? randomSeed(), files };
   } catch (err) {
-    throw isUsageError(err) ? err : new UsageError(errorMessage(err));
+    throw isUsageError(err) || isMissingPeerError(err) ? err : new UsageError(errorMessage(err));
   }
 }
 

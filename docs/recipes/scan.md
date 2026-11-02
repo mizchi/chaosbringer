@@ -117,7 +117,11 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   `chaosbringer perf regress <before>/clean-report.json --current <after>/clean-report.json`.
 - **Gate CI.** `--fail-on high` exits 1 when a high finding exists. A
   mistyped flag or a bad value exits 2 before anything runs, with one
-  `chaosbringer scan: …` line, so a gate does not read it as a finding. So
+  `chaosbringer scan: …` line, so a gate does not read it as a finding:
+  also an `--exclude` that is not a regex, an unknown `--device`, a
+  `--storage-state` file that is not there or not storageState JSON, and
+  `--axe` without axe-core installed. These used to start the clean crawl
+  and end in `scan failed: …` and exit 1, the code `--fail-on` uses. So
   does a `--url` nothing answers on (the server is not running, the name
   does not resolve): `chaosbringer scan: could not reach <url>: is the
   server running? (net::ERR_CONNECTION_REFUSED at <url>)` and exit 2, after
@@ -132,11 +136,11 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 | `--no-chaos` | | the clean crawl only |
 | `--hang-ms` | 8000 | how long a hung request is held |
 | `--seed` | random | printed, so the run can be repeated |
-| `--axe` | off | axe-core on every page (needs `axe-core`) |
+| `--axe` | off | axe-core on every page (needs `axe-core`: exit 2 without it) |
 | `--aria-targets` | off | also act on controls only the accessibility snapshot sees, such as a `<div onclick>` with a pointer cursor |
 | `--bind` / `--bind-title` | off | serve each crawl's browser to other Playwright clients: `npx playwright cli attach <title>`, or `npx playwright mcp --endpoint` |
 | `--no-coverage` | | skip coverage (and the unused-JS finding) |
-| `--storage-state` | | a Playwright storageState, for a logged-in scan |
+| `--storage-state` | | a Playwright storageState, for a logged-in scan (read before the first crawl; exit 2 if missing or not JSON) |
 | `--sitemap` | | also start from the URLs of a sitemap.xml |
 | `--network slow-3g\|fast-3g` / `--device "<name>"` | | throttle / emulate; a site on localhost is too fast to cross the Web Vitals bounds otherwise |
 | `--exclude`, `--ignore-error`, `--ignore-analytics`, `--ignore-preset` | | as for the crawl |

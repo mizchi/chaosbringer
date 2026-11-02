@@ -28,6 +28,13 @@ describe("public package exports (this branch's additions)", () => {
     expect(api.SCAN_FAULT_KINDS).toEqual(["status", "abort", "hang"]);
   });
 
+  it("re-exports MissingPeerError, which an axe() / visualRegression() crawl throws without its package", () => {
+    expect(typeof api.MissingPeerError).toBe("function");
+    expect(api.isMissingPeerError(new api.MissingPeerError([{ by: "x", peers: ["y"] }]))).toBe(true);
+    expect(api.AXE_PEERS).toEqual(["axe-core"]);
+    expect(api.VISUAL_REGRESSION_PEERS).toEqual(["pixelmatch", "pngjs"]);
+  });
+
   it("re-exports parity surface", () => {
     expect(typeof api.runParity).toBe("function");
   });

@@ -31,6 +31,7 @@ import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import {
   crawlCliExtras,
+  crawlCliPeerNeeds,
   crawlerOptionsFromCli,
   crawlUrlFromArgs,
   parseCrawlArgs,
@@ -54,6 +55,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CrawlerOptions } from "./types.js";
 import { isUnreachableTargetError, unreachableTarget, unreachableTargetMessage } from "./unreachable-target.js";
+import { checkInputFiles } from "./input-files.js";
+import { assertPeers, isMissingPeerError } from "./peers.js";
 import { validateOptions } from "./validate.js";
 
 // Subcommand dispatch (the table is SUBCOMMANDS in cli-usage.ts). Intercept
@@ -62,9 +65,10 @@ import { validateOptions } from "./validate.js";
 //
 // The handler is expected to set `process.exitCode` on a non-fatal failure;
 // thrown errors are surfaced with the subcommand name and an exit code of 1.
-// A refused invocation — what `parseArgs` throws for an unknown flag, or a
-// `UsageError` for a missing operand or a bad value — is reported like the
-// main command's own (`exitWithUsageError`): one line, exit 2. It used to be
+// A refused invocation — what `parseArgs` throws for an unknown flag, a
+// `UsageError` for a missing operand, a bad value or an input file that is
+// not there, or a `MissingPeerError` — is reported like the main command's
+// own (`exitWithUsageError`): one line, exit 2. It used to be
 // `<sub> failed: Unknown option …` and exit 1, which a CI step reads as "the
 // run found something". `flake` still calls `process.exit(1)` itself on a
 // flaky run, and `minimize` / `flake` `process.exit(0)` on --help.
@@ -76,7 +80,7 @@ if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
-    if (isUsageError(err)) {
+    if (isUsageError(err) || isMissingPeerError(err)) {
       console.error(usageErrorMessage(err, `chaosbringer ${(err as UsageError).command ?? subcommand}`));
       process.exit(2);
     }
@@ -154,15 +158,18 @@ OPTIONS:
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
-  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
+  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable;
+                        keys: ttfb, fcp, lcp, tbt, domContentLoaded, load; each ms > 0)
   --aria-targets        Also find targets through the accessibility snapshot (clickable divs the
                         CSS scrape misses), and describe targets from the tree to drivers
   --bind                Serve the crawl's browser to other Playwright clients while it runs:
                         npx playwright cli attach <title> / npx playwright mcp --endpoint <ep>
   --bind-title <title>  Name to attach by (default chaosbringer)
-  --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
+  --axe                 Enable axe-core accessibility scan on every page (requires axe-core
+                        installed: without it the run is refused, exit 2)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
-  --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires pixelmatch + pngjs)
+  --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires
+                        pixelmatch + pngjs: without them the run is refused, exit 2)
   --visual-threshold <n>   pixelmatch color threshold 0..1 (default 0.1)
   --visual-max-diff-pixels <n>  Absolute pixel budget; fail when exceeded (default 0)
   --visual-max-diff-ratio <n>   Ratio pixel budget (0..1); evaluated alongside max-diff-pixels
@@ -200,6 +207,15 @@ OPTIONS:
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
+
+EXIT CODES:
+  0  nothing failed
+  1  the run found something: a page that failed or timed out, an invariant violation,
+     a renderer crash, --strict errors, --baseline-strict regressions
+  2  the run was refused before a browser started: an unknown flag, a malformed value, an
+     input file (--storage-state, --har-replay, --trace-replay, --perf-budgets) that is
+     missing or does not parse, a peer --axe / --visual-baseline needs that is not
+     installed; or nothing answered at --url
 
 SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
 ${formatSubcommandList()}
@@ -274,9 +290,13 @@ try {
 
 // The crawler validates again; this is so a refused option is a usage error
 // (`--max-pages 0`, `--cdp-target` without `--cdp`), not a stack trace from
-// inside main() after "Starting chaos crawl" was already printed.
+// inside main() after "Starting chaos crawl" was already printed. So are the
+// files the crawl reads (a missing `--storage-state` failed once the browser
+// was up, with exit 1) and the packages `--axe` / `--visual-baseline` need.
 try {
   validateOptions(options);
+  checkInputFiles(options);
+  assertPeers(crawlCliPeerNeeds(values));
 } catch (err) {
   exitWithUsageError(err);
 }

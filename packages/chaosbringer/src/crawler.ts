@@ -129,6 +129,7 @@ import type {
 
 import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "./defaults.js";
 import { parseTraceparent } from "./traceparent.js";
+import { assertPeers, invariantPeerNeeds } from "./peers.js";
 import { validateOptions } from "./validate.js";
 import { findFaultRuleShadows } from "./fault-shadow.js";
 import { buildReproCommand, reproFlags, unreplayedNote } from "./repro-command.js";
@@ -408,6 +409,10 @@ export class ChaosCrawler {
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
+    // Here rather than in start(): `chaos()` runs its setup hook, in a browser
+    // of its own, between the two, and the fixture's `testPage` never calls
+    // start(). An invariant whose package is missing failed every page.
+    assertPeers(invariantPeerNeeds(options.invariants));
 
     // Filter out undefined values to preserve defaults
     const filteredOptions = Object.fromEntries(

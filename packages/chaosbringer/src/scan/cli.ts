@@ -13,6 +13,10 @@ import { formatScanSummary } from "./format.js";
 import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } from "./run.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UnreachableTargetError, unreachableTarget } from "../unreachable-target.js";
+import { checkRegexFlag } from "../cli-crawl-options.js";
+import { checkInputFiles } from "../input-files.js";
+import { AXE_PEERS, assertPeers } from "../peers.js";
+import { validateOptions } from "../validate.js";
 
 const HELP = `
 chaosbringer scan — sweep a site for bugs and slow spots
@@ -36,7 +40,7 @@ OPTIONS:
   --no-chaos              Skip the fault-injected crawls
   --faults <list>         Which fault crawls to run (default 500,abort,hang)
   --seed <n>              Seed for every crawl (default random; printed)
-  --axe                   Run axe-core accessibility checks (needs axe-core)
+  --axe                   Run axe-core accessibility checks (needs axe-core; exit 2 without it)
   --bind                  Serve each crawl's browser to other Playwright clients
                           (npx playwright cli attach <title>; the endpoint is printed)
   --bind-title <title>    Name to attach by (default chaosbringer)
@@ -49,14 +53,15 @@ OPTIONS:
   --ignore-analytics      Ignore common analytics script errors
   --ignore-preset <name>  Named ignore preset (repeatable; see chaosbringer --help)
   --sitemap <url|path>    Also start from the URLs in a sitemap.xml
-  --storage-state <path>  Playwright storageState for a logged-in scan
+  --storage-state <path>  Playwright storageState for a logged-in scan (read before the first crawl)
   --network <profile>     Throttle every crawl: ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")}
                           (a local server is too fast to cross the Web Vitals bounds without it)
   --device <name>         Emulate a Playwright device, e.g. "Pixel 7"
   --timeout <ms>          Page load timeout (default 30000)
   --no-headless           Show the browser
   --fail-on <severity>    Exit 1 when a finding at or above it exists: high | medium | low
-                          (a --url nothing answers on exits 2: could not reach <url>)
+                          (a --url nothing answers on exits 2: could not reach <url>; so does
+                          a refused flag or value, before the first crawl)
   --quiet                 Only print the summary
   --help                  Show this help
 
@@ -122,6 +127,9 @@ export async function runScanCli(argv: string[]): Promise<void> {
     return;
   }
   const options = scanOptionsFromCli(values);
+  // What the crawls read and import, before the clean crawl's browser starts.
+  checkInputFiles(options.crawler ?? {});
+  assertPeers(values.axe ? [{ by: "--axe", peers: AXE_PEERS }] : []);
   const failOn = values["fail-on"];
 
   const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
@@ -147,6 +155,8 @@ export async function runScanCli(argv: string[]): Promise<void> {
 export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
   // Every check is a usage error: one `chaosbringer scan: …` line and exit 2
   // (cli.ts), not `scan failed: …` and exit 1, which --fail-on gates on.
+  // The files the crawls read are checked by runScanCli: this also parses a
+  // report's repro command back, whose files are where it ran.
   if (!values.url) throw new UsageError("--url is required");
   try {
     new URL(values.url);
@@ -178,8 +188,10 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
   const seed = intFlag("--seed", values.seed, 0);
   const hangReleaseMs = intFlag("--hang-ms", values["hang-ms"], 1);
   const timeout = intFlag("--timeout", values.timeout, 1);
+  checkRegexFlag("--exclude", values.exclude);
+  checkRegexFlag("--ignore-error", values["ignore-error"]);
 
-  return {
+  const options: ScanOptions = {
     url: values.url,
     maxPages,
     maxActionsPerPage,
@@ -203,6 +215,21 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
       ...(timeout !== undefined ? { timeout } : {}),
     },
   };
+  // What every crawl of the scan would refuse, refused here: an option
+  // only the crawler checked failed after `[scan] clean crawl of …`, as
+  // `scan failed: …` and exit 1.
+  try {
+    validateOptions({
+      ...options.crawler,
+      baseUrl: options.url,
+      maxPages: options.maxPages,
+      maxActionsPerPage: options.maxActionsPerPage,
+      seed: options.seed,
+    });
+  } catch (err) {
+    throw new UsageError(errorMessage(err));
+  }
+  return options;
 }
 
 /** `500,abort,hang` → fault kinds; `500` is the `status` crawl. */
