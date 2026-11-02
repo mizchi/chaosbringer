@@ -184,6 +184,16 @@ not become a remote-code-execution vector.
   selector that takes 2s to appear will never match. If your recipe needs
   to wait for an SPA bootstrap, put a `waitFor` as the first step
   *after* preconditions match.
+- **Postconditions are waited for, up to 5s each.** After the last step,
+  replay waits until every postcondition holds: `urlPattern` is a regex
+  source tested against the full `page.url()` (as preconditions read it),
+  `hasSelector` / `hidesSelector` a visible or hidden selector. A
+  `urlPattern` that is not a valid regex fails the replay
+  (`postcondition not satisfied: url~/…/ is not a valid regex`), and so
+  does one the URL never matches (`postcondition not satisfied:
+  url~/\/thanks/`). Before 0.16 a postcondition's `urlPattern` was not
+  checked at all, so a recipe promoted then can be demoted the next time
+  `recipes verify` runs it.
 - **Recipes don't compose automatically.** `requires: ["auth/login"]` is
   metadata — the driver does not chain. Either inline the prerequisite
   steps or run the prerequisite recipe explicitly before the dependent one.

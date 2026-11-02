@@ -80,23 +80,31 @@ export async function runRecipe(
   // not a separate concept, because from the caller's point of view a
   // recipe that "succeeded" but left the page in the wrong state is
   // still broken.
-  if (recipe.postconditions.length > 0) {
-    for (const p of recipe.postconditions) {
-      const ok = await expectHolds(page, {
-        urlContains: p.urlPattern ? undefined : undefined,
-        hasSelector: p.hasSelector,
-        hidesSelector: p.hidesSelector,
-      });
-      if (!ok) {
-        return {
-          ok: false,
-          durationMs: performance.now() - start,
-          failedAt: {
-            index: steps.length,
-            reason: "postcondition not satisfied",
-          },
-        };
+  // `urlPattern` is a regex source tested against `page.url()`, as
+  // `preconditionHolds` and repair's goal read it, and waited for like the
+  // other clauses: the last step's navigation may still be under way.
+  for (const p of recipe.postconditions) {
+    const failed = (reason: string): ReplayResult => ({
+      ok: false,
+      durationMs: performance.now() - start,
+      failedAt: { index: steps.length, reason: `postcondition not satisfied: ${reason}` },
+    });
+    let urlPattern: RegExp | undefined;
+    if (p.urlPattern) {
+      try {
+        urlPattern = new RegExp(p.urlPattern);
+      } catch (err) {
+        // A broken recipe file fails its verify; it does not stop a load run.
+        return failed(`url~/${p.urlPattern}/ is not a valid regex (${errorMessage(err)})`);
       }
+    }
+    const clause: ExpectClause = {
+      ...(p.hasSelector ? { hasSelector: p.hasSelector } : {}),
+      ...(p.hidesSelector ? { hidesSelector: p.hidesSelector } : {}),
+    };
+    if (!(await expectHolds(page, clause, urlPattern))) {
+      const parts = [...(urlPattern ? [`url~${String(urlPattern)}`] : []), ...(p.hasSelector || p.hidesSelector ? [describeExpect(clause)] : [])];
+      return failed(parts.join(", "));
     }
   }
   return { ok: true, durationMs: performance.now() - start };
@@ -257,13 +265,17 @@ async function executeStep(page: Page, step: RecipeStep): Promise<void> {
   }
 }
 
-async function expectHolds(page: Page, expect: ExpectClause): Promise<boolean> {
+/** `urlPattern`: a postcondition's, tested against `page.url()`. */
+async function expectHolds(page: Page, expect: ExpectClause, urlPattern?: RegExp): Promise<boolean> {
   const timeout = expect.timeoutMs ?? DEFAULT_EXPECT_TIMEOUT_MS;
   const deadline = Date.now() + timeout;
 
   while (Date.now() <= deadline) {
     let allHold = true;
-    if (expect.urlContains !== undefined && !page.url().includes(expect.urlContains)) {
+    if (urlPattern && !urlPattern.test(page.url())) {
+      allHold = false;
+    }
+    if (allHold && expect.urlContains !== undefined && !page.url().includes(expect.urlContains)) {
       allHold = false;
     }
     if (allHold && expect.urlNotContains !== undefined && page.url().includes(expect.urlNotContains)) {

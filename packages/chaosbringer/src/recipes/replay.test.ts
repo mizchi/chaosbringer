@@ -8,7 +8,7 @@
  * expectation that names the recorded origin shows whether it moved too.
  */
 import type { Page } from "playwright";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { rebaseNotice, rebaseRecipe, recipeOrigin, runRecipe } from "./replay.js";
 import type { ActionRecipe, RecipeStep } from "./types.js";
 import { emptyStats } from "./types.js";
@@ -210,5 +210,54 @@ describe("recipeOrigin / rebaseRecipe / rebaseNotice", () => {
     expect(rebaseNotice(r, `${BASE}/`)).toBe(`site/login was recorded on ${RECORDED}; replaying it on ${BASE} instead`);
     expect(rebaseNotice(r, `${RECORDED}/`)).toBeNull();
     expect(rebaseNotice(recipe([{ kind: "navigate", url: "{{base}}/" }]), BASE)).toBeNull();
+  });
+});
+
+// A postcondition's `urlPattern` was never checked (`urlContains: p.urlPattern
+// ? undefined : undefined`): the postcondition `recipes harvest` and `drive`
+// write passed at once, and `recipes verify` promoted a recipe whose flow no
+// longer reached its end page.
+describe("runRecipe postconditions", () => {
+  const withPost = (postconditions: ActionRecipe["postconditions"]): ActionRecipe => ({
+    ...recipe([{ kind: "navigate", url: `${RECORDED}/login` }, { kind: "click", selector: "button" }]),
+    postconditions,
+  });
+
+  it("holds when the URL matches the pattern, as a regex", async () => {
+    const { page } = fakePage();
+    expect(await runRecipe(page, withPost([{ urlPattern: "/done(?:[/?#]|$)" }]))).toMatchObject({ ok: true });
+  });
+
+  it("fails, naming the pattern, when the URL does not match within the expect timeout", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fakePage();
+      const pending = runRecipe(page, withPost([{ urlPattern: "/thank-you" }, { hasSelector: "#ok" }]));
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await pending).toMatchObject({ ok: false, failedAt: { index: 2, reason: "postcondition not satisfied: url~/\\/thank-you/" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for a URL that changes after the last step", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fakePage();
+      const pending = runRecipe(page, withPost([{ urlPattern: "/thank-you$", hasSelector: "#ok" }]));
+      await vi.advanceTimersByTimeAsync(1000);
+      await page.goto(`${RECORDED}/thank-you`);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a pattern that is not a regex as not satisfied, not as a throw", async () => {
+    const { page } = fakePage();
+    const result = await runRecipe(page, withPost([{ urlPattern: "/done(" }]));
+    expect(result.ok).toBe(false);
+    expect(result.failedAt?.reason).toMatch(/^postcondition not satisfied: url~\/\/done\(\/ is not a valid regex \(/);
   });
 });
