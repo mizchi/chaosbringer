@@ -1407,7 +1407,7 @@ chaosbringer parity \
   --output parity.json
 ```
 
-Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits 1 on any mismatch so it slots into CI as a gate, and 2 when it refuses its arguments: `--timeout`, `--perf-samples`, `--perf-delta-ms` and `--perf-ratio` must be numbers (`--timeout 5s` was read as 5 ms and failed every slow path), and the thresholds above 0, which would turn them off. `journey` checks its `--timeout`, `--perf-delta-ms` and `--perf-ratio` the same way.
+Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits 1 on any mismatch so it slots into CI as a gate, and 2 when it refuses its arguments: `--timeout` and `--perf-samples` must be integers of at least 1 (`--timeout 5s` was read as 5 ms and failed every slow path), and `--perf-delta-ms` and `--perf-ratio` numbers above 0, since 0 would turn the check off. `journey` checks its `--timeout`, `--perf-delta-ms` and `--perf-ratio` the same way.
 
 ### `cluster-artifacts`
 

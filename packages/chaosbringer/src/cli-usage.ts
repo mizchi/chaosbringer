@@ -145,9 +145,10 @@ export async function inSubcommand<T>(command: string, run: () => T | Promise<T>
 
 /**
  * The one line a refused invocation prints. `err` is what `parseArgs`, the
- * flag parsers, `validateOptions`, `checkInputFiles` or `assertPeers`
- * (a `MissingPeerError`) threw; they used to escape as a Node stack trace. `command` is who refused it: `chaosbringer`, or a subcommand
- * as `chaosbringer scan`.
+ * flag parsers, `validateOptions`, `checkInputFiles` or `assertPeers` (a
+ * `MissingPeerError`) threw; they used to escape as a Node stack trace.
+ * `command` is who refused it: `chaosbringer`, or a subcommand as
+ * `chaosbringer scan`.
  */
 export function usageErrorMessage(err: unknown, command = "chaosbringer"): string {
   let message = err instanceof Error ? err.message : String(err);

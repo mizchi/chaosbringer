@@ -78,7 +78,8 @@ OPTIONS:
   --help                    Show this help
 
 Exit code: 0 when the goal was reached (or the model said done), 1 otherwise,
-2 when it refuses to start (no --url or --goal, no model, a bad value).
+2 when it refuses to start (no --url or --goal, no model, a bad value, a
+--plan or --storage-state file that is missing or does not parse).
 Only drive sites you own or are allowed to test.
 `;
 

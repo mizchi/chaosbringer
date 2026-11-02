@@ -944,8 +944,8 @@ export interface Invariant {
    * called) resolve each from where chaosbringer is installed, before any
    * browser starts, and throw `MissingPeerError` naming the ones that do not
    * resolve: without it, every page failed this invariant on the missing
-   * package. A dependency the check imports from the
-   * caller's own code needs no entry.
+   * package. A dependency the check imports from the caller's own code needs
+   * no entry.
    */
   peers?: readonly string[];
 }

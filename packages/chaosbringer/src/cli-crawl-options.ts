@@ -139,8 +139,8 @@ export function crawlUrlFromArgs(values: CrawlCliValues, positionals: readonly s
  * go through it: `parseInt("5s")` is 5, `parseFloat("abc")` NaN, and either
  * ran the command with a value nobody typed, and so did `Number("")`, which
  * is 0. A caller that reads an empty value as unset checks for it first.
- * `positive` is `> 0`, for a
- * threshold that 0 would turn off (`--perf-ratio 0` compared nothing).
+ * `positive` is `> 0`, for a threshold that 0 would turn off
+ * (`--perf-ratio 0` compared nothing).
  */
 export function parseNumberFlag(
   flag: string,
