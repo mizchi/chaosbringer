@@ -165,7 +165,7 @@ without checking anything.
 
 `invariants.axe()` needs `axe-core`, and `visualRegression()` needs `pixelmatch`
 and `pngjs`: optional peers, so install them (`pnpm add -D axe-core`). Without
-one, `new ChaosCrawler()` / `chaos()` / the fixture throw `MissingPeerError`
+one, `new ChaosCrawler()` / `chaos()` / the fixture / `scenarioLoad()` throw `MissingPeerError`
 (`packages`, `installCommand`) before a browser starts, and the CLI's `--axe` /
 `--visual-baseline` exit 2 with the install command. It used to be one
 invariant violation per page, which reads as an accessibility bug in the app.

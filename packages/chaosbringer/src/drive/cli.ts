@@ -3,11 +3,13 @@
  * towards a goal and report what broke on the way. See `drive()`.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UsageError } from "../cli-usage.js";
+import { errorMessage } from "../errors.js";
+import { checkInputFiles, readInputJson } from "../input-files.js";
 import { recipeOrigin } from "../recipes/replay.js";
 import { RecipeStore } from "../recipes/store.js";
 import type { ActionRecipe } from "../recipes/types.js";
@@ -122,6 +124,9 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   const maxSteps = values["max-steps"] ? positiveInt(values["max-steps"], "--max-steps") : undefined;
   const faults = values.chaos ? parseFaults(values.faults ?? "all") : undefined;
   const hangReleaseMs = values["hang-ms"] ? positiveInt(values["hang-ms"], "--hang-ms") : undefined;
+  // Read before the browser starts: a missing one failed inside Playwright
+  // as `drive failed: …` and exit 1, which is "the goal was not reached".
+  checkInputFiles({ storageState: values["storage-state"] });
 
   const decider = values.plan ? planFrom(values.plan) : modelDecider(values.provider, values.model, values.vision ?? false);
   const until: DriveUntil = {
@@ -278,21 +283,32 @@ function modelDecider(provider: string | undefined, model: string | undefined, v
   throw new UsageError("no model: set ANTHROPIC_API_KEY or OPENROUTER_API_KEY, or pass --plan <file.json>");
 }
 
-/** A plan file: `DrivePlanStep`s, with `"/re/flags"` strings read as regexes. */
+/**
+ * A plan file: `DrivePlanStep`s, with `"/re/flags"` strings read as regexes.
+ * Anything wrong with it is a `UsageError` naming `--plan` (exit 2): as a
+ * plain Error it was `drive failed: …` and exit 1, "the goal was not reached".
+ */
 export function planFrom(path: string): DriveDecider {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-  if (!Array.isArray(raw)) throw new Error(`--plan ${path}: expected a JSON array of steps`);
-  const pattern = (v: unknown): string | RegExp => {
-    if (typeof v !== "string") throw new Error(`--plan ${path}: a step's target must be a string`);
+  const raw = readInputJson("--plan", path, "plan");
+  if (!Array.isArray(raw)) throw new UsageError(`--plan ${path}: expected a JSON array of steps`);
+  const pattern = (v: unknown, i: number): string | RegExp => {
+    if (typeof v !== "string") throw new UsageError(`--plan ${path}: step ${i}'s target must be a string`);
     const m = /^\/(.+)\/([a-z]*)$/.exec(v);
-    return m ? new RegExp(m[1]!, m[2]) : v;
+    if (!m) return v;
+    try {
+      return new RegExp(m[1]!, m[2]);
+    } catch (err) {
+      throw new UsageError(`--plan ${path}: step ${i}'s target ${JSON.stringify(v)} is not a valid regex (${errorMessage(err)})`);
+    }
   };
-  const steps = raw.map((s: Record<string, unknown>, i): DrivePlanStep => {
-    if ("click" in s) return { click: pattern(s.click) };
-    if ("fill" in s && typeof s.value === "string") return { fill: pattern(s.fill), value: s.value, ...(s.submit === true ? { submit: true } : {}) };
-    if ("select" in s && typeof s.value === "string") return { select: pattern(s.select), value: s.value };
-    if ("press" in s && typeof s.press === "string") return { press: s.press, ...(s.on !== undefined ? { on: pattern(s.on) } : {}) };
-    throw new Error(`--plan ${path}: step ${i} is not click / fill+value / select+value / press`);
+  const steps = raw.map((s: unknown, i): DrivePlanStep => {
+    if (typeof s !== "object" || s === null) throw new UsageError(`--plan ${path}: step ${i} is not an object`);
+    const step = s as Record<string, unknown>;
+    if ("click" in step) return { click: pattern(step.click, i) };
+    if ("fill" in step && typeof step.value === "string") return { fill: pattern(step.fill, i), value: step.value, ...(step.submit === true ? { submit: true } : {}) };
+    if ("select" in step && typeof step.value === "string") return { select: pattern(step.select, i), value: step.value };
+    if ("press" in step && typeof step.press === "string") return { press: step.press, ...(step.on !== undefined ? { on: pattern(step.on, i) } : {}) };
+    throw new UsageError(`--plan ${path}: step ${i} is not click / fill+value / select+value / press`);
   });
   return planDecider(steps, `plan:${path}`);
 }

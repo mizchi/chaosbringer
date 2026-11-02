@@ -213,9 +213,9 @@ EXIT CODES:
   1  the run found something: a page that failed or timed out, an invariant violation,
      a renderer crash, --strict errors, --baseline-strict regressions
   2  the run was refused before a browser started: an unknown flag, a malformed value, an
-     input file (--storage-state, --har-replay, --trace-replay, --perf-budgets) that is
-     missing or does not parse, a peer --axe / --visual-baseline needs that is not
-     installed; or nothing answered at --url
+     input file (--storage-state, --har-replay, --trace-replay, --perf-budgets, a
+     --seed-from-sitemap path) that is missing or does not parse, a peer --axe /
+     --visual-baseline needs that is not installed; or nothing answered at --url
 
 SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
 ${formatSubcommandList()}

@@ -940,10 +940,11 @@ export interface Invariant {
   /**
    * Optional peer dependencies of chaosbringer the check imports when it runs,
    * as `axe()` does axe-core and `visualRegression()` pixelmatch and pngjs.
-   * The crawler resolves each from where chaosbringer is installed when it is
-   * constructed, before any browser starts, and throws `MissingPeerError`
-   * naming the ones that do not resolve: without it, every page failed this
-   * invariant on the missing package. A dependency the check imports from the
+   * The crawler (when it is constructed) and `scenarioLoad` (when it is
+   * called) resolve each from where chaosbringer is installed, before any
+   * browser starts, and throw `MissingPeerError` naming the ones that do not
+   * resolve: without it, every page failed this invariant on the missing
+   * package. A dependency the check imports from the
    * caller's own code needs no entry.
    */
   peers?: readonly string[];

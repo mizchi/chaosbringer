@@ -11,12 +11,34 @@
  * cli.test.ts. Each row's other arguments name files that do not exist,
  * because the numbers are checked before anything is read.
  */
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { runClusterArtifactsCli } from "./cluster-artifacts-cli.js";
+import { writeClusterArtifacts } from "./cluster-artifacts.js";
 import { runJourneyCli } from "./journey-cli.js";
+import { runJourney } from "./journey.js";
 import { runMinimizeCli } from "./minimize.js";
 import { runParityCli } from "./parity-cli.js";
+import { runParity } from "./parity.js";
+
+// What the commands run once their flags are read, so the accepted values
+// can be seen arriving. The refusals never get this far.
+vi.mock("./parity.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./parity.js")>()),
+  runParity: vi.fn(async () => ({ pathsChecked: 1, matches: [], mismatches: [], config: {} })),
+}));
+vi.mock("./journey.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./journey.js")>()),
+  runJourney: vi.fn(async () => ({ stepsChecked: 1, matches: [], mismatches: [] })),
+}));
+vi.mock("./cluster-artifacts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./cluster-artifacts.js")>()),
+  writeClusterArtifacts: vi.fn(() => []),
+}));
 
 type Run = (argv: string[]) => Promise<void>;
 /** What a flag takes: `min` inclusive, `positive` for > 0 (0 turns the check off). */
@@ -67,12 +89,18 @@ const COMMANDS: Array<{ name: string; run: Run; base: string[]; flags: Record<st
   },
 ];
 
+const ALWAYS_PARSED = new Set(["--perf-samples"]);
+
 /** The values a flag refuses, with what it says about each. */
 function refusals(flag: string, bound: Bound): Array<[value: string, message: string]> {
   const rows: Array<[string, string]> = [
     ["5s", `${flag} must be a finite number (got "5s")`],
     ["abc", `${flag} must be a finite number (got "abc")`],
   ];
+  // Parsed whether or not it is given, so an empty value (an unset variable
+  // in `--perf-samples "$N"`) reaches the parser, where Number("") was 0.
+  // The others read an empty value as not given.
+  if (ALWAYS_PARSED.has(flag)) rows.push(["", `${flag} must be a finite number (got "")`]);
   if ("positive" in bound) {
     rows.push(["-1", `${flag} must be > 0 (got -1)`], ["0", `${flag} must be > 0 (got 0)`]);
   } else {
@@ -96,5 +124,60 @@ describe("subcommand number flags", () => {
     );
     expect(err).toBeInstanceOf(UsageError);
     expect((err as Error).message).toBe(row.message);
+  });
+});
+
+describe("parseNumberFlag", () => {
+  it("refuses an empty or blank value, which Number() reads as 0", () => {
+    expect(() => parseNumberFlag("--heatmap-top", "", { min: 0 })).toThrow('--heatmap-top must be a finite number (got "")');
+    expect(() => parseNumberFlag("--heatmap-top", " ", { min: 0 })).toThrow('--heatmap-top must be a finite number (got " ")');
+    expect(parseNumberFlag("--heatmap-top", "0", { min: 0 })).toBe(0);
+    expect(parseNumberFlag("--heatmap-top", undefined, { min: 0 })).toBeUndefined();
+  });
+});
+
+// The values the bounds let through, as they reach what the command runs:
+// the refusal rows above pass just as well if a parsed value is dropped on
+// the way, or if a bound is tightened past a value that is meant to work
+// (a --perf-ratio below 1 flags a right side that got faster).
+describe("subcommand number flags that are accepted", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-numeric-accept-"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+    vi.mocked(console.log).mockRestore();
+  });
+
+  it("parity passes --timeout, --perf-ratio, --perf-delta-ms and --perf-samples on", async () => {
+    const paths = join(dir, "paths.txt");
+    writeFileSync(paths, "/\n");
+    await runParityCli([...TWO_SIDES, "--paths", paths, "--timeout", "5000", "--perf-ratio", "0.5", "--perf-delta-ms", "10", "--perf-samples", "3"]);
+    expect(vi.mocked(runParity)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ timeoutMs: 5000, perfRatio: 0.5, perfDeltaMs: 10, perfSamples: 3 }),
+    );
+  });
+
+  it("journey passes --timeout, --perf-ratio and --perf-delta-ms on, and reads an empty one as not given", async () => {
+    const steps = join(dir, "steps.json");
+    writeFileSync(steps, JSON.stringify([{ method: "GET", path: "/" }]));
+    await runJourneyCli([...TWO_SIDES, "--steps", steps, "--timeout", "5000", "--perf-ratio", "0.5", "--perf-delta-ms", "10"]);
+    expect(vi.mocked(runJourney)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ timeoutMs: 5000, perfRatio: 0.5, perfDeltaMs: 10 }),
+    );
+    await runJourneyCli([...TWO_SIDES, "--steps", steps, "--timeout", ""]);
+    expect(vi.mocked(runJourney).mock.lastCall?.[0].timeoutMs).toBeUndefined();
+  });
+
+  it("cluster-artifacts passes --max-clusters and --min-count on, 0 included", async () => {
+    const report = join(dir, "report.json");
+    writeFileSync(report, JSON.stringify({ errorClusters: [] }));
+    await runClusterArtifactsCli([report, "--bundle-dir", dir, "--max-clusters", "1", "--min-count", "0"]);
+    expect(vi.mocked(writeClusterArtifacts)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ maxClusters: 1, minCount: 0 }),
+    );
   });
 });

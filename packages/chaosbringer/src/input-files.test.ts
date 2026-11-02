@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { UsageError } from "./cli-usage.js";
-import { checkInputFiles } from "./input-files.js";
+import { checkInputFiles, readInputJson } from "./input-files.js";
 import { TRACE_FORMAT_VERSION } from "./trace.js";
 
 describe("checkInputFiles", () => {
@@ -89,6 +89,31 @@ describe("checkInputFiles", () => {
     const noMeta = at("no-meta.jsonl", `${JSON.stringify({ kind: "visit", url: "http://x.test/" })}\n`);
     expect(refusal({ traceReplay: noMeta })).toBe(
       `--trace-replay ${noMeta}: not a chaosbringer trace (trace is missing a leading meta entry)`,
+    );
+  });
+
+  it("refuses a sitemap path that is not there, and leaves a sitemap URL to the crawl", () => {
+    const missing = join(dir, "missing.xml");
+    expect(refusal({ seedFromSitemap: missing })).toBe(`--seed-from-sitemap ${missing}: no such file`);
+    expect(refusal({ seedFromSitemap: join(dir, "a-dir") })).toBe(
+      `--seed-from-sitemap ${join(dir, "a-dir")}: is a directory, not a file`,
+    );
+    expect(refusal({ seedFromSitemap: at("sitemap.xml", "<urlset/>") })).toBeUndefined();
+    // Fetched by the crawler, best-effort: a server down for a moment does not refuse the run.
+    expect(refusal({ seedFromSitemap: "http://127.0.0.1:9/sitemap.xml" })).toBeUndefined();
+    expect(refusal({ seedFromSitemap: "HTTPS://127.0.0.1:9/sitemap.xml" })).toBeUndefined();
+    expect(() => checkInputFiles({ seedFromSitemap: missing }, { seedFromSitemap: "--sitemap" })).toThrow(
+      `--sitemap ${missing}: no such file`,
+    );
+  });
+
+  it("reads a JSON input file, naming the flag for one that is missing or not JSON", () => {
+    expect(readInputJson("--perf-budgets", at("b.json", '{"version":1}'), "perf budgets")).toEqual({ version: 1 });
+    expect(() => readInputJson("--perf-budgets", join(dir, "missing"), "perf budgets")).toThrow(
+      `--perf-budgets ${join(dir, "missing")}: no such file`,
+    );
+    expect(() => readInputJson("--perf-budgets", at("b.txt", "nope"), "perf budgets")).toThrow(
+      new RegExp(`^--perf-budgets ${join(dir, "b.txt")}: not a perf budgets file \\(not JSON: .+\\)$`),
     );
   });
 

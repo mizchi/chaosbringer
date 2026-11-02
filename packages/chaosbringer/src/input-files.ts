@@ -5,9 +5,12 @@
  * Playwright or the replay only opened once the browser was up: a missing or
  * malformed one failed the run with a stack trace and exit 1, the code of a
  * run that found something, and `scan` printed `scan failed: …` after its
- * clean crawl had started. The CLI commands that take them (the crawl,
- * `shard`, `scan`, `flake`, `minimize --trace`) call `checkInputFiles` first,
- * and its `UsageError` is one line and exit 2.
+ * clean crawl had started. A `--seed-from-sitemap` path that was not there
+ * was dropped with a logger warning nobody saw, and the run passed without
+ * its seeds. The CLI commands that take them (the crawl, `shard`, `scan`,
+ * `flake`, `drive`, `minimize --trace`) call `checkInputFiles` first, and its
+ * `UsageError` is one line and exit 2. `--perf-budgets` is read with
+ * `readInputJson` by the crawl, before any of these.
  *
  * Apart from the flag parsers (`crawlerOptionsFromCli`, `scanOptionsFromCli`,
  * `parseFlakeArgs`), which stay free of the file system: they also read a
@@ -24,28 +27,33 @@ export interface InputFileFlags {
   storageState?: string;
   harReplay?: string;
   traceReplay?: string;
+  seedFromSitemap?: string;
 }
 
 const DEFAULT_FLAGS: Required<InputFileFlags> = {
   storageState: "--storage-state",
   harReplay: "--har-replay",
   traceReplay: "--trace-replay",
+  seedFromSitemap: "--seed-from-sitemap",
 };
 
 /**
  * Throw a `UsageError` naming the flag and the path unless each file
  * `options` reads is there and parses as what it must be: a storage state as
  * Playwright's storageState JSON, a HAR as HAR JSON (a zipped HAR only has to
- * be there), a trace as a chaosbringer JSONL trace.
+ * be there), a trace as a chaosbringer JSONL trace. A sitemap given as a
+ * path only has to be there: one given as a URL stays best-effort, as the
+ * crawler fetches it (a server that is down for a moment should not refuse
+ * the run).
  */
 export function checkInputFiles(
-  options: Pick<CrawlerOptions, "storageState" | "har" | "traceReplay">,
+  options: Pick<CrawlerOptions, "storageState" | "har" | "traceReplay" | "seedFromSitemap">,
   flags: InputFileFlags = {},
 ): void {
   const flag = { ...DEFAULT_FLAGS, ...flags };
   if (typeof options.storageState === "string" && options.storageState !== "") {
     const path = options.storageState;
-    const state = readJson(flag.storageState, path, "storage state");
+    const state = readInputJson(flag.storageState, path, "storage state");
     const isList = (v: unknown) => v === undefined || Array.isArray(v);
     if (!isObject(state) || !isList(state.cookies) || !isList(state.origins)) {
       throw new UsageError(
@@ -58,7 +66,7 @@ export function checkInputFiles(
     if (/\.zip$/i.test(path)) {
       readFile(flag.harReplay, path);
     } else {
-      const har = readJson(flag.harReplay, path, "HAR");
+      const har = readInputJson(flag.harReplay, path, "HAR");
       if (!isObject(har) || !isObject(har.log) || !Array.isArray(har.log.entries)) {
         throw new UsageError(`${flag.harReplay} ${path}: not a HAR file (expected {"log": {"entries": [...]}})`);
       }
@@ -74,6 +82,10 @@ export function checkInputFiles(
         `${flag.traceReplay} ${path}: not a chaosbringer trace (${errorMessage(err).replace(/^parseTrace: /, "")})`,
       );
     }
+  }
+  const sitemap = options.seedFromSitemap;
+  if (typeof sitemap === "string" && sitemap !== "" && !/^https?:\/\//i.test(sitemap)) {
+    readFile(flag.seedFromSitemap, sitemap);
   }
 }
 
@@ -93,7 +105,12 @@ function readFile(flag: string, path: string): string {
   }
 }
 
-function readJson(flag: string, path: string, what: string): unknown {
+/**
+ * A JSON input file's contents, or a `UsageError` naming the flag and the
+ * path: `<flag> <path>: no such file`, `… is a directory, not a file` or
+ * `… not a <what> file (not JSON: …)`.
+ */
+export function readInputJson(flag: string, path: string, what: string): unknown {
   const text = readFile(flag, path);
   try {
     return JSON.parse(text);

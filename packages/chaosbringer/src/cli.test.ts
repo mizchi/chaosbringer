@@ -98,13 +98,17 @@ describe("usage errors", () => {
     [[...URL_ARG, "--timeout", "5s"], '--timeout must be a finite number (got "5s")'],
     // It said `"performanceBudget.lcp" must be a positive number of ms (got null)`.
     [[...URL_ARG, "--budget", "lcp=abc"], '--budget lcp must be a finite number (got "abc")'],
-    // Input files are read before the browser starts: these failed inside the
-    // crawl with a stack trace and exit 1, the code of a run that found something.
     // validateOptions refused it as `excludePatterns entry has invalid regex`, without the flag.
     [[...URL_ARG, "--exclude", "("], '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
+    // Input files are read before the browser starts: these failed inside the
+    // crawl with a stack trace and exit 1, the code of a run that found something.
     [[...URL_ARG, "--storage-state", "missing-state.json"], "--storage-state missing-state.json: no such file"],
     [[...URL_ARG, "--har-replay", "missing.har"], "--har-replay missing.har: no such file"],
     [[...URL_ARG, "--trace-replay", "missing.jsonl"], "--trace-replay missing.jsonl: no such file"],
+    // A bare `ENOENT: no such file or directory, open '…'`, without the flag.
+    [[...URL_ARG, "--perf-budgets", "missing-budgets.json"], "--perf-budgets missing-budgets.json: no such file"],
+    // Dropped with a logger warning nobody saw: the run passed without its seeds.
+    [[...URL_ARG, "--seed-from-sitemap", "missing-sitemap.xml"], "--seed-from-sitemap missing-sitemap.xml: no such file"],
     // Refused by validateOptions, which used to throw from inside main().
     [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
     [[], "--url is required"],
@@ -175,7 +179,7 @@ describe("usage errors", () => {
     [
       ["shard", "--count", "2", ...URL_ARG, "--perf-budgets", "missing-budgets.json"],
       "shard",
-      "ENOENT: no such file or directory, open 'missing-budgets.json'",
+      "--perf-budgets missing-budgets.json: no such file",
     ],
     [["shard", "--count", "2"], "shard", "--url is required"],
     [["shard", ...URL_ARG], "shard", "--count <N> is required and must be an integer >= 1"],
@@ -199,6 +203,7 @@ describe("usage errors", () => {
     // 1, the code --fail-on gates on.
     [["scan", ...URL_ARG, "--exclude", "("], "scan", '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
     [["scan", ...URL_ARG, "--storage-state", "missing-state.json"], "scan", "--storage-state missing-state.json: no such file"],
+    [["scan", ...URL_ARG, "--sitemap", "missing-sitemap.xml"], "scan", "--sitemap missing-sitemap.xml: no such file"],
     [["flake"], "flake", "--url is required"],
     [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
     // These started Run 1/3 and failed inside the crawler with exit 1, which
@@ -208,6 +213,7 @@ describe("usage errors", () => {
     [["flake", ...URL_ARG, "--timeout", "5s"], "flake", '--timeout must be a finite number (got "5s")'],
     [["flake", ...URL_ARG, "--storage-state", "missing-state.json"], "flake", "--storage-state missing-state.json: no such file"],
     [["flake", ...URL_ARG, "--trace-replay", "missing.jsonl"], "flake", "--trace-replay missing.jsonl: no such file"],
+    [["flake", ...URL_ARG, "--har-replay", "missing.har"], "flake", "--har-replay missing.har: no such file"],
     [["shard", "--count", "2", ...URL_ARG, "--har-replay", "missing.har"], "shard", "--har-replay missing.har: no such file"],
     [["minimize"], "minimize", "--url is required"],
     // The numbers of the subcommands that read them with parseInt / parseFloat:
@@ -225,6 +231,10 @@ describe("usage errors", () => {
     [["load"], "load", "--base-url is required"],
     [["load", "--base-url", "http://a.test", "--workers", "abc"], "load", "--workers must be a positive integer, got abc"],
     [["drive"], "drive", "--url and --goal are required"],
+    // These were `drive failed: …` and exit 1, drive's code for a goal it did
+    // not reach; the storage state only failed once the browser was up.
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--storage-state", "missing-state.json"], "drive", "--storage-state missing-state.json: no such file"],
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "missing-plan.json"], "drive", "--plan missing-plan.json: no such file"],
     [["recipes", "show"], "recipes show", "expected a recipe name"],
     [["recipes", "rollback", "x"], "recipes rollback", "--to-version N is required"],
     [["recipes", "verify", "x", "--base-url", "staging.test"], "recipes verify", '--base-url must be an absolute http(s) URL, got "staging.test"'],
@@ -239,6 +249,10 @@ describe("usage errors", () => {
     [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--max-runs", "0"], "model shrink", '--max-runs needs a positive integer, got "0"'],
     [["perf", "gate", "r.json"], "perf gate", "--budgets <file> is required"],
     [["perf", "regress", "base/"], "perf regress", "--current <report.json...> is required"],
+    // Number("") is 0: an unset variable in `--threshold "$T"` compared at 0,
+    // and `--retries "$N"` ran without retries.
+    [["perf", "regress", "base/", "--threshold", "", "--current", "c.json"], "perf regress", '--threshold must be a number >= 0 (got "")'],
+    [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--retries", ""], "model shrink", '--retries needs a non-negative integer, got ""'],
   ];
 
   it("has a row for every subcommand", () => {
@@ -271,6 +285,21 @@ describe("usage errors", () => {
       maxPages: 3,
       maxActionsPerPage: 0,
       timeout: 5000,
+    });
+  });
+
+  it("names the flag for a regex or a device the crawler would refuse as an option field", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    // validateOptions said `ignoreErrorPatterns entry has invalid regex`, `spaPatterns …` and `"device" …`.
+    expect(() => options(["--ignore-error", "("])).toThrow(
+      '--ignore-error "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)',
+    );
+    expect(() => options(["--spa", "("])).toThrow('--spa "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)');
+    expect(() => options(["--device", "Nope 9"])).toThrow('--device "Nope 9" is not a known Playwright device descriptor');
+    expect(options(["--spa", "^/app", "--ignore-error", "ResizeObserver", "--device", "iPhone 13"])).toMatchObject({
+      spaPatterns: ["^/app"],
+      ignoreErrorPatterns: ["ResizeObserver"],
+      device: "iPhone 13",
     });
   });
 

@@ -10,8 +10,10 @@ describe("scanOptionsFromCli", () => {
   it.each([
     [["--exclude", "("], '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
     [["--ignore-error", "[a-"], '--ignore-error "[a-" is not a valid regex (Invalid regular expression: /[a-/: Unterminated character class)'],
-    // validateOptions, run on the options every crawl of the scan gets.
-    [["--device", "No Such Phone"], 'chaosbringer: "device" "No Such Phone" is not a known Playwright device descriptor'],
+    // validateOptions refused it too, as `"device" "No Such Phone" …`, naming the option field.
+    [["--device", "No Such Phone"], '--device "No Such Phone" is not a known Playwright device descriptor'],
+    // Number("") is 0: `--seed "$SEED"` with SEED unset ran seed 0.
+    [["--seed", ""], '--seed must be an integer >= 0 (got "")'],
   ])("refuses %j as a usage error before any crawl", (argv, message) => {
     expect(() => scanOptions(argv)).toThrow(UsageError);
     expect(() => scanOptions(argv)).toThrow(message);

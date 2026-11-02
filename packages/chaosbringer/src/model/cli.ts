@@ -616,7 +616,8 @@ async function runShrink(argv: string[]): Promise<void> {
 /** Like `positiveInt`, for a flag where 0 is a legitimate choice. */
 function nonNegativeInt(raw: string, flag: string): number {
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) {
+  // `Number("")` is 0: `--retries "$N"` with N unset ran no retries.
+  if (raw.trim() === "" || !Number.isInteger(n) || n < 0) {
     throw new UsageError(`${flag} needs a non-negative integer, got "${raw}"`);
   }
   return n;

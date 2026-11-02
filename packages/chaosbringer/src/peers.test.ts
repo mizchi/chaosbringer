@@ -1,7 +1,10 @@
+import { chromium } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import { chaos } from "./chaos.js";
 import { ChaosCrawler } from "./crawler.js";
 import { axe } from "./invariants.js";
+import { defineScenario } from "./load/scenario.js";
+import { scenarioLoad } from "./load/scenario-load.js";
 import {
   AXE_PEERS,
   assertPeers,
@@ -77,6 +80,19 @@ describe("invariantPeerNeeds", () => {
     ]);
     expect(invariantPeerNeeds(undefined)).toEqual([]);
   });
+
+  it("refuses a peers that is not a list of package names, which was spread into its letters", () => {
+    const withPeers = (peers: unknown): Invariant => ({ name: "x", peers: peers as string[], check: () => true });
+    for (const peers of ["axe-core", [""], [42]]) {
+      expect(() => invariantPeerNeeds([withPeers(peers)])).toThrow(
+        `chaosbringer: invariant "x" peers must be an array of package names (got ${JSON.stringify(peers)})`,
+      );
+    }
+    expect(() => new ChaosCrawler({ baseUrl: "http://127.0.0.1:9/", invariants: [withPeers("axe-core")] })).toThrow(
+      'invariant "x" peers must be an array of package names',
+    );
+    expect(invariantPeerNeeds([withPeers([])])).toEqual([]);
+  });
 });
 
 describe("peerInstalled", () => {
@@ -102,6 +118,24 @@ describe("an invariant whose peer is not installed", () => {
       `invariant "needs-absent" needs ${NOT_INSTALLED}`,
     );
     expect(setup).not.toHaveBeenCalled();
+  });
+
+  it("is refused by scenarioLoad before its browser launches", async () => {
+    // Without the check, each iteration failed on the missing package and
+    // the load run itself resolved.
+    const launch = vi.spyOn(chromium, "launch").mockRejectedValue(new Error("launched"));
+    try {
+      await expect(
+        scenarioLoad({
+          baseUrl: "http://127.0.0.1:9/",
+          scenarios: [{ scenario: defineScenario({ name: "x", steps: [{ name: "s", run: async () => {} }] }), workers: 1 }],
+          invariants: [needsAbsent],
+        }),
+      ).rejects.toBeInstanceOf(MissingPeerError);
+      expect(launch).not.toHaveBeenCalled();
+    } finally {
+      launch.mockRestore();
+    }
   });
 
   it("fails the Playwright fixture before the test body runs", async () => {

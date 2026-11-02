@@ -13,7 +13,7 @@ import { formatScanSummary } from "./format.js";
 import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } from "./run.js";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UnreachableTargetError, unreachableTarget } from "../unreachable-target.js";
-import { checkRegexFlag } from "../cli-crawl-options.js";
+import { checkDeviceFlag, checkRegexFlag } from "../cli-crawl-options.js";
 import { checkInputFiles } from "../input-files.js";
 import { AXE_PEERS, assertPeers } from "../peers.js";
 import { validateOptions } from "../validate.js";
@@ -128,7 +128,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
   }
   const options = scanOptionsFromCli(values);
   // What the crawls read and import, before the clean crawl's browser starts.
-  checkInputFiles(options.crawler ?? {});
+  checkInputFiles(options.crawler ?? {}, { seedFromSitemap: "--sitemap" });
   assertPeers(values.axe ? [{ by: "--axe", peers: AXE_PEERS }] : []);
   const failOn = values["fail-on"];
 
@@ -190,6 +190,7 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
   const timeout = intFlag("--timeout", values.timeout, 1);
   checkRegexFlag("--exclude", values.exclude);
   checkRegexFlag("--ignore-error", values["ignore-error"]);
+  checkDeviceFlag(values.device);
 
   const options: ScanOptions = {
     url: values.url,
@@ -249,6 +250,7 @@ export function parseFaults(raw: string): ScanFaultKind[] {
 function intFlag(flag: string, raw: string | undefined, min: number): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < min) throw new UsageError(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
+  // `Number("")` is 0: `--seed "$SEED"` with SEED unset ran seed 0.
+  if (raw.trim() === "" || !Number.isInteger(n) || n < min) throw new UsageError(`${flag} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }

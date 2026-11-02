@@ -23,6 +23,7 @@ import {
   faultStatsFrom,
   installFaultRoutes,
 } from "./fault-routes.js";
+import { assertPeers, invariantPeerNeeds } from "../peers.js";
 import { parseDurationMs } from "./histogram.js";
 import { resolveLoadPerf, sampledWorkerIndexes } from "./perf-stats.js";
 import { buildLoadReport } from "./report.js";
@@ -106,6 +107,9 @@ export async function scenarioLoad(
   if (options.scenarios.length === 0) {
     throw new Error("scenarioLoad: scenarios is empty");
   }
+  // Before the browser launches, as the crawler does: without it, a missing
+  // axe-core failed every iteration with "requires the axe-core package".
+  assertPeers(invariantPeerNeeds(options.invariants));
   const durationMs = options.duration !== undefined
     ? parseDurationMs(options.duration)
     : DEFAULT_DURATION_MS;

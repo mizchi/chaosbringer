@@ -12,7 +12,7 @@
  * packages and the command that installs them, and the CLI exits 2.
  *
  * An invariant says what it needs with `Invariant.peers`, which the crawler
- * reads; it does not guess from the invariant's name.
+ * and `scenarioLoad` read; neither guesses from the invariant's name.
  */
 import { createRequire } from "node:module";
 import type { Invariant } from "./types.js";
@@ -81,8 +81,20 @@ function andList(items: readonly string[]): string {
   return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 }
 
-/** What `invariants` declare in `peers`, one entry per invariant that declares any. */
+/**
+ * What `invariants` declare in `peers`, one entry per invariant that declares
+ * any. Throws on a `peers` that is not a list of package names: from plain
+ * JS, `peers: "axe-core"` was spread into its letters.
+ */
 export function invariantPeerNeeds(invariants: readonly Invariant[] | undefined): PeerNeed[] {
+  for (const inv of invariants ?? []) {
+    const peers: unknown = inv.peers;
+    if (peers !== undefined && (!Array.isArray(peers) || peers.some((p) => typeof p !== "string" || p === ""))) {
+      throw new Error(
+        `chaosbringer: invariant "${inv.name}" peers must be an array of package names (got ${JSON.stringify(peers)})`,
+      );
+    }
+  }
   return (invariants ?? [])
     .filter((inv) => (inv.peers?.length ?? 0) > 0)
     .map((inv) => ({ by: `invariant "${inv.name}"`, peers: [...inv.peers!] }));

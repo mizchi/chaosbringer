@@ -25,6 +25,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const PEERS = ["axe-core", "pixelmatch", "pngjs"];
+/** Nothing listens here; a crawl that got this far would fail, not hang. */
+const URL_ARG = ["--url", "http://127.0.0.1:9/"];
 /** Where this repo's packages are: hoisted to the root, workspace links in the package. */
 const MODULE_DIRS = [join(PACKAGE_DIR, "..", "..", "node_modules"), join(PACKAGE_DIR, "node_modules")];
 
@@ -93,20 +95,23 @@ describe("the CLI without its optional peers installed", () => {
   });
 
   it.each([
-    [["--axe"], "chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)"],
+    [[...URL_ARG, "--axe"], "chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)"],
     // Its first run, which writes the baselines and needed neither, passed.
     [
-      ["--visual-baseline", "vb"],
+      [...URL_ARG, "--visual-baseline", "vb"],
       "chaosbringer: --visual-baseline needs pixelmatch and pngjs: optional peer dependencies that are not installed. " +
         "Install them with `pnpm add -D pixelmatch pngjs` (or `npm install -D pixelmatch pngjs`)",
     ],
     [
-      ["scan", "--axe"],
+      ["scan", ...URL_ARG, "--axe"],
       "chaosbringer scan: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)",
     ],
-  ])("%j refuses in one line with exit 2, before a browser starts", async (flags, line) => {
-    const [first, ...rest] = flags;
-    const args = first === "scan" ? ["scan", "--url", "http://127.0.0.1:9/", ...rest] : ["--url", "http://127.0.0.1:9/", ...flags];
+    // Once, for the workers: each of them would refuse it on its own.
+    [
+      ["shard", "--count", "2", ...URL_ARG, "--axe"],
+      "chaosbringer shard: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)",
+    ],
+  ])("%j refuses in one line with exit 2, before a browser starts", async (args, line) => {
     const r = await run(args);
     expect(r.stderr.trimEnd().split("\n")).toEqual([line]);
     expect(r.stdout).toBe("");

@@ -713,7 +713,7 @@ Emulate mobile devices or throttle the network to catch bugs that only surface o
 chaosbringer --url http://localhost:3000 --device "iPhone 14" --network slow-3g
 ```
 
-- `--device <name>` — any Playwright device descriptor (`iPhone 14`, `Pixel 7`, `iPad Pro 11`, `Desktop Chrome`, …). Sets viewport, user-agent, device pixel ratio, mobile / touch flags via `newContext({ ...devices[name] })`. Unknown names fail validation up-front.
+- `--device <name>` — any Playwright device descriptor (`iPhone 14`, `Pixel 7`, `iPad Pro 11`, `Desktop Chrome`, …). Sets viewport, user-agent, device pixel ratio, mobile / touch flags via `newContext({ ...devices[name] })`. Unknown names fail validation up-front (the CLI: `chaosbringer: --device "Nope 9" is not a known Playwright device descriptor`, exit 2).
 - `--network <profile>` — `slow-3g`, `fast-3g`, or `offline`. Attaches a CDP session per page and calls `Network.emulateNetworkConditions` with the same values Chrome DevTools' presets use.
 
 Combining the two lets you measure perf budgets under realistic conditions: `chaosbringer --url … --device "Pixel 7" --network slow-3g --budget lcp=4000`.
@@ -726,7 +726,7 @@ Prepend every URL in a sitemap.xml (or sitemap index) to the crawl queue — ess
 chaosbringer --url https://docs.example.com --seed-from-sitemap https://docs.example.com/sitemap.xml
 ```
 
-Accepts a URL or a local path. Sitemap indexes are followed breadth-first; referenced URLs outside the baseUrl origin are dropped to avoid wasting visit budget. A runaway index (suspected cycle) fails fast.
+Accepts a URL or a local path. The CLI checks a path before the browser starts (`chaosbringer: --seed-from-sitemap ./sitemap.xml: no such file`, exit 2; `scan --sitemap` the same); a URL is fetched by the crawl, and one that fails is logged (`sitemap_fetch_failed`) and skipped, so a server that is down for a moment does not refuse the run. Sitemap indexes are followed breadth-first; referenced URLs outside the baseUrl origin are dropped to avoid wasting visit budget. A runaway index (suspected cycle) fails fast.
 
 ```ts
 import { fetchSitemapUrls } from "chaosbringer";
@@ -835,7 +835,7 @@ await chaos({
 });
 ```
 
-`axe-core` is an optional peer dependency. Without it, the run is refused before its browser starts: `--axe` (and `scan --axe`) exits 2 with ``chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` …``, and `new ChaosCrawler()`, `chaos()` and the fixture throw `MissingPeerError` (its `packages` and `installCommand` say what to install). The preset declares the package in its `peers`, which is what the crawler checks. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
+`axe-core` is an optional peer dependency. Without it, the run is refused before its browser starts: `--axe` (and `scan --axe`) exits 2 with ``chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` …``, and `new ChaosCrawler()`, `chaos()`, the fixture and `scenarioLoad()` throw `MissingPeerError` (its `packages` and `installCommand` say what to install). The preset declares the package in its `peers`, which is what the crawler checks. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
 
 axe is injected over CDP, so a page's Content-Security-Policy does not block it, and the page's iframes are scanned with it, same-origin and cross-origin (axe-core 4.3+; older versions scan the top document only). A cross-origin iframe loads only with `blockExternalNavigation: false`: the default guard blocks its document, and the blocked frame is skipped. So is an iframe that can't run axe: one sandboxed without `allow-scripts`, or one whose scan doesn't finish within 10s (a stuck widget). To leave embeds you don't own out of the scan, `exclude` them (`exclude: ["iframe"]`).
 
@@ -1191,12 +1191,12 @@ The browser's "Failed to load resource" message names no file, so its console er
 | A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
-| The CLI refused to run: an unknown flag, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`), or an optional peer `--axe` / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
+| The CLI refused to run: an unknown flag, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`, a `--seed-from-sitemap` path; a sitemap URL is fetched best-effort), or an optional peer `--axe` / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
 | Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
-Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s` or `cluster-artifacts --min-count abc`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`scan`, `flake` and `shard` take `--storage-state`, `--har-replay`, `--trace-replay` as the main command does, `minimize` its `--trace`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and `scan --axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s` or `cluster-artifacts --min-count abc`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`shard` takes every input file of the main command, `flake` its `--storage-state`, `--har-replay` and `--trace-replay`, `scan` its `--storage-state` and a `--sitemap` path, `drive` its `--storage-state` and `--plan`, `minimize` its `--trace`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and `scan --axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
 
 > **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
 > Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
@@ -1210,17 +1210,24 @@ Every subcommand refuses its arguments the same way: an unknown flag, or a missi
 > invoked now exits 2 before its browser starts, where it used to fail with
 > exit 1, the code of a run that found something: a missing or malformed
 > `--storage-state`, `--har-replay` or `--trace-replay` (crawl, `shard`,
-> `scan`, `flake`) or `minimize --trace`, a crawl option only the crawler
+> `flake`; `scan` and `drive` take `--storage-state`), `minimize --trace`, and
+> a missing or malformed `drive --plan` (`drive failed: …` and exit 1, which
+> is drive's code for a goal it did not reach), a crawl option only the crawler
 > checked under `scan` (`--exclude '('`, `--device`), `--axe` without
 > axe-core (it failed every page as an invariant violation) and
 > `--visual-baseline` without pixelmatch / pngjs (its second run did; the
 > first now refuses too), and `parity` / `journey --timeout 5s`, which ran
 > with a 5 ms timeout. A malformed number that used to be read as NaN and
 > ignored (`parity --perf-ratio abc`, `cluster-artifacts --min-count abc`)
-> exits 2 instead of 0. In code, `new ChaosCrawler()`, `chaos()` and the
+> exits 2 instead of 0, and so does an empty one where it used to be read
+> as 0 (`perf regress --threshold ""`, `scan --seed ""`,
+> `--perf-samples ""`). A `--seed-from-sitemap` (or `scan --sitemap`) path
+> that is not there exits 2 where the run went on without its seeds and
+> exit 0. In code, `new ChaosCrawler()`, `chaos()` and the
 > Playwright fixture throw `MissingPeerError` for an `axe()` or
 > `visualRegression()` invariant whose package is not installed, instead of
-> reporting a violation on every page.
+> reporting a violation on every page, and so does `scenarioLoad()` instead
+> of failing every iteration.
 
 > **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
 > used to ignore them, so a run whose entire finding was "the app left a
@@ -1461,7 +1468,7 @@ chaosbringer --url http://localhost:3000 \
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
 | `--no-http-cache` | Disable the browser HTTP cache on every page (`httpCache: false`), for cold-cache measurement. Otherwise the cache is on, except in runs with fault injection, `traceparent` or HAR replay, which route every request and so run cold | cache on |
-| `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
+| `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware; a path is checked before the browser starts, a URL is fetched best-effort) | — |
 | `--shard <i/N>` | Run as shard i of N. See the `shard` subcommand to spawn + merge. | — |
 | `--heatmap` | Print an action-frequency heatmap after the report | false |
 | `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |

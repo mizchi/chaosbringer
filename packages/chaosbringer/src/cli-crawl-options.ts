@@ -7,10 +7,12 @@
  * here without either fails `repro-command.test.ts`.
  */
 import { parseArgs } from "node:util";
+import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
 import { PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
+import { readInputJson } from "./input-files.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg, resolveSettle } from "./settle.js";
@@ -135,7 +137,9 @@ export function crawlUrlFromArgs(values: CrawlCliValues, positionals: readonly s
  * A number flag's value, or a `UsageError` naming the flag: the CLI prints
  * `chaosbringer[ <sub>]: <message>` and exits 2. Every subcommand's numbers
  * go through it: `parseInt("5s")` is 5, `parseFloat("abc")` NaN, and either
- * ran the command with a value nobody typed. `positive` is `> 0`, for a
+ * ran the command with a value nobody typed, and so did `Number("")`, which
+ * is 0. A caller that reads an empty value as unset checks for it first.
+ * `positive` is `> 0`, for a
  * threshold that 0 would turn off (`--perf-ratio 0` compared nothing).
  */
 export function parseNumberFlag(
@@ -145,7 +149,8 @@ export function parseNumberFlag(
 ): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isFinite(n)) {
+  // `Number("")` is 0: an unset variable in `--perf-samples "$N"` ran with 0.
+  if (raw.trim() === "" || !Number.isFinite(n)) {
     throw new UsageError(`${flag} must be a finite number (got ${JSON.stringify(raw)})`);
   }
   if (opts.integer && !Number.isInteger(n)) {
@@ -175,6 +180,17 @@ export function checkRegexFlag(flag: string, patterns: readonly string[] | undef
     } catch (err) {
       throw new UsageError(`${flag} ${JSON.stringify(pattern)} is not a valid regex (${errorMessage(err)})`);
     }
+  }
+}
+
+/**
+ * `--device`, refused with the flag's name: validateOptions refused an
+ * unknown one as `"device" "Nope 9" is not a known Playwright device
+ * descriptor`, which names the option, not what was typed.
+ */
+export function checkDeviceFlag(device: string | undefined): void {
+  if (device && !devices[device]) {
+    throw new UsageError(`--device ${JSON.stringify(device)} is not a known Playwright device descriptor`);
   }
 }
 
@@ -225,9 +241,12 @@ export async function readCrawlPerfBudgets(
 ): Promise<{ rules: PerfBudgetRule[]; warning?: string; refusal?: { message: string; exitCode: number } } | undefined> {
   const file = values["perf-budgets"];
   if (file === undefined) return undefined;
+  // Read as the other input files are: a missing one was a bare
+  // `ENOENT: no such file or directory, open '…'`, without the flag.
+  const json = readInputJson("--perf-budgets", file, "perf budgets");
   // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-  const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-  const read = readPerfBudgetsForCrawl(file, resolveSettle(settle), `--perf-budgets ${file}`);
+  const { perfBudgetsForCrawl } = await import("./perf-cli.js");
+  const read = perfBudgetsForCrawl(json, resolveSettle(settle), `--perf-budgets ${file}`);
   if (!read.settleMismatch) return { rules: read.rules };
   if (values["allow-settle-mismatch"]) {
     return { rules: read.rules, warning: `[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.` };
@@ -335,6 +354,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
   checkRegexFlag("--exclude", values.exclude);
   checkRegexFlag("--ignore-error", values["ignore-error"]);
   checkRegexFlag("--spa", values.spa);
+  checkDeviceFlag(values.device);
 
   const cliReproFlags = cliOnlyReproFlags(values);
   return {
