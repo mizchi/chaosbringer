@@ -38,8 +38,9 @@ export interface CaptureSpec {
    * - `header.<name>` — case-insensitive response header (e.g.
    *   `header.x-request-id`).
    *
-   * A string, number or boolean is bound as its text; an object or array
-   * as its JSON (`{"id":7}`), substituted as that text.
+   * A string, number or boolean is bound as its text, and an array of
+   * them as a comma list (`1,2`); an object, or an array holding one, as
+   * its JSON (`{"id":7}`). The text is substituted as is.
    *
    * Extraction failures (non-JSON body, missing path) leave the var
    * unset on that side, so a subsequent `{{var}}` template renders as
@@ -298,11 +299,17 @@ function applyCaptures(
       value = headers.get(cap.from.slice("header.".length));
     }
     if (value !== undefined && value !== null) {
-      // An object or array is bound as its JSON: String() made it the
-      // literal "[object Object]" (or "a,b"), which no later step can use.
-      vars[cap.as] = typeof value === "object" ? JSON.stringify(value) : String(value);
+      // An object, or an array holding one, is bound as its JSON: String()
+      // made it the literal "[object Object]", which no later step can use.
+      // An array of primitives keeps String()'s comma list ("1,2"), which a
+      // `?ids={{ids}}` query already relies on.
+      vars[cap.as] = typeof value === "object" && !isPrimitiveArray(value) ? JSON.stringify(value) : String(value);
     }
   }
+}
+
+function isPrimitiveArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((v) => v === null || typeof v !== "object");
 }
 
 /**
