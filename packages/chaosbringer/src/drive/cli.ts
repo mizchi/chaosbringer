@@ -152,11 +152,13 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   // as `drive failed: …` and exit 1, which is "the goal was not reached".
   checkInputFiles({ storageState: values["storage-state"] });
   const secrets = parseSecretFlags(values.secret ?? [], process.env);
-  if (values["save-secrets"] !== undefined) checkSecretsPath(values["save-secrets"]);
-
   const decider = values.plan
     ? planFrom(values.plan, new Set(Object.keys(secrets)))
     : modelDecider(values.provider, values.model, values.vision ?? false);
+  // Last of the checks: it creates a missing directory, which a run another
+  // check refuses (a bad --plan, no model) should not leave behind.
+  if (values["save-secrets"] !== undefined) checkSecretsPath(values["save-secrets"]);
+
   const until: DriveUntil = {
     ...(values["until-url"] ? { urlIncludes: values["until-url"] } : {}),
     ...(values["until-url-matches"] ? { urlMatches: values["until-url-matches"] } : {}),

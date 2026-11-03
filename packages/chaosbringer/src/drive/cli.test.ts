@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { UsageError } from "../cli-usage.js";
 import type { ActionRecipe } from "../recipes/types.js";
 import { emptyStats } from "../recipes/types.js";
-import { checkSecretsPath, parseSecretFlags, planFrom, verifyCommand, writeSecretsFile } from "./cli.js";
+import { checkSecretsPath, parseSecretFlags, planFrom, runDriveCli, verifyCommand, writeSecretsFile } from "./cli.js";
 
 function recipe(name: string, url: string): ActionRecipe {
   return {
@@ -215,6 +215,16 @@ describe("--save-secrets", () => {
       expect(refusal(join(locked, "sub", "secrets.json"))).toMatch(/cannot write a file in/);
       expect(refusal(join(locked, "secrets.json"))).toMatch(/cannot write a file in/);
     }
+  });
+
+  // The check creates a missing directory: a run another check refuses
+  // should not leave one behind.
+  it("creates no directory for a run refused on another flag", async () => {
+    const parent = join(dir, "never-made");
+    await expect(
+      runDriveCli(["--url", "http://127.0.0.1:9/", "--goal", "g", "--plan", join(dir, "missing-plan.json"), "--save-secrets", join(parent, "secrets.json")]),
+    ).rejects.toThrow(new UsageError(`--plan ${join(dir, "missing-plan.json")}: no such file`));
+    expect(existsSync(parent)).toBe(false);
   });
 
   it("writes the vars as JSON readable by its owner only, also over a file that was readable by all", () => {
