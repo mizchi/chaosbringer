@@ -111,56 +111,65 @@ Measured by `pnpm report` on 2026-10-27: one crawl per case, `strict` on, the ca
 The table above is the catalog's own test: it hands chaosbringer the bad
 data and knows what to look for. [`chaosbringer
 scan`](../../docs/recipes/scan.md) takes no fault rules, and runs no
-data-safety check unless told to. `pnpm scan-check` serves each entry's bad
-data through what scan can reach (a response entry's route answers with the
-bad body itself; a query rides on the URL; storage and form data go in as
+data-safety check unless told to (`--invariants`, or `crawler.invariants`
+from code). `pnpm scan-check` serves each entry's bad data through what scan
+can reach (a response entry's route answers with the bad body itself; a
+query rides on the URL; storage and form data go in as
 `crawler.lifecycleFaults` and `crawler.driver`), and scans every variant
-twice: as it comes, and with the catalog suite as `crawler.invariants`.
+twice: as it comes, and with the catalog suite as `crawler.invariants`. A
+buggy variant whose data the command line can deliver (a response or a
+query: everything but storage and form data) is scanned a third time by the
+built CLI, `chaosbringer scan --invariants data-safety,not-blank`, the same
+suite named by flag.
 
 A variant is flagged when a `bug` finding matches the entry's signal: an
 error by a `js-exception` or `unhandled-rejection` finding whose title
 matches the message, an invariant by an `invariant-violation` finding that
 names it. Expect the entries that throw to be flagged out of the box, and
 the ones caught only by an invariant (a marker, a polluted prototype,
-garbage on screen, a blank page) only with the suite. The script exits 1
-when a fixed variant is still flagged or an oracle entry has any bug
-finding.
+garbage on screen, a blank page) only with the suite, and from the CLI
+wherever it can deliver the data: the query entries
+(`prototype-pollution-query`, `reflected-xss-query`) included. The third
+query entry, `open-redirect-param`, is a blocked navigation, which no scan
+rule reads, with or without the checks. The script
+exits 1 when a fixed variant is still flagged, an oracle entry has any bug
+finding, or the CLI misses a variant the suite in code flags.
 
 <!-- scan-check:start -->
-Measured by `pnpm scan-check` on 2026-10-27: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data.
+Measured by `pnpm scan-check` on 2026-11-03: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data; the CLI column is the built `chaosbringer scan --no-chaos --invariants data-safety,not-blank` with the same page, seed and actions.
 
-**12 of 28** buggy variants are flagged out of the box, **27 of 28** with the catalog suite as `crawler.invariants`; **0** fixed variants are still flagged.
+**12 of 28** buggy variants are flagged out of the box, **27 of 28** with the catalog suite as `crawler.invariants`, and **25 of 26** from the command line, of the 26 whose data the command line can deliver; **0** fixed variants are still flagged.
 
-| entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | fixed: still flagged | every bug rule on buggy |
-|---|---|---|---|---|---|
-| [array-became-object](src/patterns/array-became-object.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [attribute-breakout-xss](src/patterns/attribute-breakout-xss.ts) | response `/api/profile` | – | `invariant-violation` | – | `invariant-violation` |
-| [corrupted-storage](src/patterns/corrupted-storage.ts) | localStorage `prefs` | `js-exception` | `js-exception` | – | `js-exception` |
-| [empty-list](src/patterns/empty-list.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [form-echo-xss](src/patterns/form-echo-xss.ts) | form | – | `invariant-violation` | – | `invariant-violation` |
-| [html-error-200](src/patterns/html-error-200.ts) | response `/api/stats` | `js-exception` | `js-exception` | – | `js-exception` |
-| [html-injection-markup](src/patterns/html-injection-markup.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
-| [invalid-date-throw](src/patterns/invalid-date-throw.ts) | response `/api/post` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [javascript-url-sink](src/patterns/javascript-url-sink.ts) | response `/api/profile` | – | `invariant-violation` | – | `invariant-violation` |
-| [markdown-javascript-link](src/patterns/markdown-javascript-link.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
-| [missing-field](src/patterns/missing-field.ts) | response `/api/me` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [negative-count](src/patterns/negative-count.ts) | response `/api/page` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [null-in-list-item](src/patterns/null-in-list-item.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [null-relation](src/patterns/null-relation.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [open-redirect-param](src/patterns/open-redirect-param.ts) | query on `/go` | – (report field only) | – (report field only) | – | – |
-| [prototype-pollution-merge](src/patterns/prototype-pollution-merge.ts) | response `/api/preferences` | – | `invariant-violation` | – | `invariant-violation` |
-| [prototype-pollution-query](src/patterns/prototype-pollution-query.ts) | query on `/settings` | – | `invariant-violation` | – | `invariant-violation` |
-| [reflected-xss-query](src/patterns/reflected-xss-query.ts) | query on `/search` | – | `invariant-violation` | – | `invariant-violation` |
-| [rendered-invalid-date](src/patterns/rendered-invalid-date.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
-| [rendered-nan](src/patterns/rendered-nan.ts) | response `/api/cart` | – | `invariant-violation` | – | `invariant-violation` |
-| [rendered-object](src/patterns/rendered-object.ts) | response `/api/post` | – | `invariant-violation` | – | `invariant-violation` |
-| [rendered-undefined](src/patterns/rendered-undefined.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
-| [stored-xss-innerhtml](src/patterns/stored-xss-innerhtml.ts) | response `/api/comments` | – | `invariant-violation` | – | `invariant-violation` |
-| [swallowed-error-blank](src/patterns/swallowed-error-blank.ts) | response `/api/user` | – | `invariant-violation` | – | `invariant-violation` |
-| [template-injection](src/patterns/template-injection.ts) | response `/api/greeting` | – | `invariant-violation` | – | `invariant-violation` |
-| [truncated-json](src/patterns/truncated-json.ts) | response `/api/items` | `js-exception` | `js-exception` | – | `js-exception` |
-| [unicode-surrogate-split](src/patterns/unicode-surrogate-split.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [wrong-type-method](src/patterns/wrong-type-method.ts) | response `/api/product` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | buggy: CLI `scan --invariants data-safety,not-blank` | fixed: still flagged | every bug rule on buggy |
+|---|---|---|---|---|---|---|
+| [array-became-object](src/patterns/array-became-object.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [attribute-breakout-xss](src/patterns/attribute-breakout-xss.ts) | response `/api/profile` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [corrupted-storage](src/patterns/corrupted-storage.ts) | localStorage `prefs` | `js-exception` | `js-exception` | – (storage data is code-only) | – | `js-exception` |
+| [empty-list](src/patterns/empty-list.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [form-echo-xss](src/patterns/form-echo-xss.ts) | form | – | `invariant-violation` | – (form data is code-only) | – | `invariant-violation` |
+| [html-error-200](src/patterns/html-error-200.ts) | response `/api/stats` | `js-exception` | `js-exception` | `js-exception` | – | `js-exception` |
+| [html-injection-markup](src/patterns/html-injection-markup.ts) | response `/api/user` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [invalid-date-throw](src/patterns/invalid-date-throw.ts) | response `/api/post` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [javascript-url-sink](src/patterns/javascript-url-sink.ts) | response `/api/profile` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [markdown-javascript-link](src/patterns/markdown-javascript-link.ts) | response `/api/post` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [missing-field](src/patterns/missing-field.ts) | response `/api/me` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [negative-count](src/patterns/negative-count.ts) | response `/api/page` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [null-in-list-item](src/patterns/null-in-list-item.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [null-relation](src/patterns/null-relation.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [open-redirect-param](src/patterns/open-redirect-param.ts) | query on `/go` | – (report field only) | – (report field only) | – (report field only) | – | – |
+| [prototype-pollution-merge](src/patterns/prototype-pollution-merge.ts) | response `/api/preferences` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [prototype-pollution-query](src/patterns/prototype-pollution-query.ts) | query on `/settings` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [reflected-xss-query](src/patterns/reflected-xss-query.ts) | query on `/search` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [rendered-invalid-date](src/patterns/rendered-invalid-date.ts) | response `/api/post` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [rendered-nan](src/patterns/rendered-nan.ts) | response `/api/cart` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [rendered-object](src/patterns/rendered-object.ts) | response `/api/post` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [rendered-undefined](src/patterns/rendered-undefined.ts) | response `/api/user` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [stored-xss-innerhtml](src/patterns/stored-xss-innerhtml.ts) | response `/api/comments` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [swallowed-error-blank](src/patterns/swallowed-error-blank.ts) | response `/api/user` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [template-injection](src/patterns/template-injection.ts) | response `/api/greeting` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
+| [truncated-json](src/patterns/truncated-json.ts) | response `/api/items` | `js-exception` | `js-exception` | `js-exception` | – | `js-exception` |
+| [unicode-surrogate-split](src/patterns/unicode-surrogate-split.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
+| [wrong-type-method](src/patterns/wrong-type-method.ts) | response `/api/product` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
 
 Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/oracle-code-sample.ts) clean, [oracle-escaped-payload](src/patterns/oracle-escaped-payload.ts) clean, [oracle-own-keys](src/patterns/oracle-own-keys.ts) clean, [oracle-safe-links](src/patterns/oracle-safe-links.ts) clean.
 <!-- scan-check:end -->
@@ -185,7 +194,10 @@ Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/o
   the page's reaction to what the server sends back is visible.
 - **`chaosbringer scan` delivering bad data itself**: it takes no
   `faultInjection`, and its chaos crawls inject only 500s, network errors and
-  hangs.
+  hangs. From the command line, `--invariants data-safety,not-blank` runs
+  the checks, but the only bad data it can reach is what the app serves and
+  a query on `--url`: storage and form entries need `crawler.lifecycleFaults`
+  and `crawler.driver` from code.
 
 ## Layout
 

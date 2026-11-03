@@ -8,7 +8,10 @@
  * response entry's route answers with the bad body itself; a query rides on
  * the URL; storage and form data go in as `crawler.lifecycleFaults` and
  * `crawler.driver`) and scans every variant twice: as it comes, and with the
- * catalog suite as `crawler.invariants`.
+ * catalog suite as `crawler.invariants`. A buggy variant whose data the
+ * command line can deliver (a response the app serves, a query on `--url`)
+ * is scanned a third time by the built CLI, `chaosbringer scan --invariants
+ * data-safety,not-blank`: the same suite, named by flag.
  *
  * A variant is **flagged** when a `bug` finding matches the entry's signal:
  * an error by a `js-exception` / `unhandled-rejection` finding whose title
@@ -20,15 +23,17 @@
  *   pnpm scan-check                     # every entry; rewrites the README section
  *   PATTERN=null-relation pnpm scan-check
  *
- * Exits 1 when a fixed variant is still flagged or an oracle entry has any
- * bug finding.
+ * Exits 1 when a fixed variant is still flagged, an oracle entry has any
+ * bug finding, or the CLI scan misses a variant the suite in code flags: the
+ * flag and `crawler.invariants` must run the same checks.
  */
 
+import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type CrawlerOptions, runScan, type ScanFinding } from "chaosbringer";
+import { type CrawlerOptions, runScan, type ScanFinding, type ScanReportFile } from "chaosbringer";
 import { describeInjection, toCrawlOptions, toServedRoutes } from "../src/inject.js";
 import type { DataPattern, Signal, Variant } from "../src/pattern.js";
 import { loadPatterns } from "../src/registry.js";
@@ -38,6 +43,50 @@ import { catalogSuite } from "../src/suite.js";
 const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
 const START = "<!-- scan-check:start -->";
 const END = "<!-- scan-check:end -->";
+
+/** The built CLI, as `chaosbringer` resolves for this package. */
+const CLI = fileURLToPath(new URL("./cli.js", import.meta.resolve("chaosbringer")));
+
+/** What the CLI scan names: the catalog suite (`dataSafety()` plus `notBlank()`). */
+const CLI_INVARIANTS = "data-safety,not-blank";
+
+/**
+ * Why the CLI cannot deliver `pattern`'s bad data, or `undefined` when it
+ * can: storage and form data go in only as crawler options, and so do
+ * action weights and other crawl options.
+ */
+function cliUnreachable(pattern: DataPattern): string | undefined {
+  const channel = pattern.inject.channel;
+  if (channel !== "response" && channel !== "query") return `${channel === "storage" ? "storage" : "form"} data is code-only`;
+  if (pattern.crawl?.actionWeights || pattern.crawl?.options) return "crawl options are code-only";
+  return undefined;
+}
+
+/** The bug findings of `chaosbringer scan --invariants …` on a variant's bad data, from its scan-report.json. */
+async function scanVariantCli(pattern: DataPattern, variant: Variant): Promise<ScanFinding[]> {
+  const server = await servePattern(pattern, variant, (v, ctx) => toServedRoutes(pattern, v, ctx));
+  const outDir = mkdtempSync(join(tmpdir(), `scan-check-cli-${pattern.id}-`));
+  const c = pattern.crawl ?? {};
+  try {
+    const { query } = toCrawlOptions(pattern, "bad", server.ctx);
+    const args = [
+      CLI, "scan", "--url", server.origin + (c.entry ?? "/") + query,
+      "--seed", String(c.seed ?? 1), "--max-pages", "1", "--max-actions", String(c.maxActionsPerPage ?? 0),
+      "--no-chaos", "--no-coverage", "--invariants", CLI_INVARIANTS, "--quiet", "--out", outDir,
+    ];
+    // Exit 1 only with --fail-on, which is not passed: anything else is the CLI refusing.
+    await new Promise<void>((resolve, reject) =>
+      execFile(process.execPath, args, { timeout: 120_000 }, (err, _stdout, stderr) =>
+        err ? reject(new Error(`${pattern.id}: chaosbringer scan exited ${err.code}: ${stderr.trim()}`)) : resolve(),
+      ),
+    );
+    const report = JSON.parse(readFileSync(join(outDir, "scan-report.json"), "utf-8")) as ScanReportFile;
+    return report.findings.filter((f) => f.category === "bug");
+  } finally {
+    await server.close();
+    rmSync(outDir, { recursive: true, force: true });
+  }
+}
 
 /** The bug findings of one scan of one variant on its bad data. */
 async function scanVariant(pattern: DataPattern, variant: Variant, withSuite: boolean): Promise<ScanFinding[]> {
@@ -107,6 +156,8 @@ interface Row {
   signal: Signal;
   outOfTheBox?: string;
   withSuite?: string;
+  /** The CLI scan's flagging rule, or why the CLI cannot deliver the data (`cliUnreachable`). */
+  cli: { rule?: string } | { unreachable: string };
   /** Every bug rule the fixed variant raised, not only the entry's own signal. */
   fixed: string[];
   rules: string[];
@@ -127,18 +178,24 @@ for (const p of patterns) {
   const plain = await scanVariant(p, "buggy", false);
   const suite = await scanVariant(p, "buggy", true);
   const fixed = [...(await scanVariant(p, "fixed", false)), ...(await scanVariant(p, "fixed", true))];
+  const unreachable = cliUnreachable(p);
+  const cli = unreachable ? { unreachable } : { rule: flaggedBy(await scanVariantCli(p, "buggy"), signal)?.rule };
   const row: Row = {
     pattern: p,
     signal,
     outOfTheBox: flaggedBy(plain, signal)?.rule,
     withSuite: flaggedBy(suite, signal)?.rule,
+    cli,
     // A fix is held to the same bar as an oracle: no bug finding at all, not
     // just none matching its own signal, so a fix that trades its bug for
     // another one is caught too.
     fixed: [...new Set(fixed.map((f) => f.rule))].sort(),
     rules: [...new Set([...plain, ...suite].map((f) => f.rule))].sort(),
   };
-  process.stderr.write(` out of the box: ${row.outOfTheBox ?? "-"} | with the suite: ${row.withSuite ?? "-"} | fixed: ${row.fixed.join(",") || "-"}\n`);
+  const cliNote = "unreachable" in cli ? `- (${cli.unreachable})` : (cli.rule ?? "-");
+  process.stderr.write(
+    ` out of the box: ${row.outOfTheBox ?? "-"} | with the suite: ${row.withSuite ?? "-"} | CLI: ${cliNote} | fixed: ${row.fixed.join(",") || "-"}\n`,
+  );
   rows.push(row);
 }
 
@@ -146,20 +203,23 @@ const code = (x: string | undefined) => (x ? `\`${x}\`` : "–");
 const codes = (xs: string[]) => (xs.length ? xs.map(code).join(", ") : "–");
 // No scan rule reads a blocked navigation: say so rather than show a miss.
 const flagCell = (r: Row, rule: string | undefined) => (r.signal.kind === "blocked-navigation" ? "– (report field only)" : code(rule));
+const cliCell = (r: Row) => ("unreachable" in r.cli ? `– (${r.cli.unreachable})` : flagCell(r, r.cli.rule));
 const outOfTheBox = rows.filter((r) => r.outOfTheBox).length;
 const withSuite = rows.filter((r) => r.withSuite).length;
+const cliReachable = rows.filter((r) => !("unreachable" in r.cli));
+const fromCli = cliReachable.filter((r) => "rule" in r.cli && r.cli.rule).length;
 const fixedFlagged = rows.filter((r) => r.fixed.length > 0).length;
 const oraclesFlagged = oracles.filter((o) => o.findings.length > 0);
 const lines = [
-  `Measured by \`pnpm scan-check\` on ${new Date().toISOString().slice(0, 10)}: \`runScan\` with \`chaos: false\`, one page, the entry's seed and actions, on the bad data.`,
+  `Measured by \`pnpm scan-check\` on ${new Date().toISOString().slice(0, 10)}: \`runScan\` with \`chaos: false\`, one page, the entry's seed and actions, on the bad data; the CLI column is the built \`chaosbringer scan --no-chaos --invariants ${CLI_INVARIANTS}\` with the same page, seed and actions.`,
   "",
-  `**${outOfTheBox} of ${rows.length}** buggy variants are flagged out of the box, **${withSuite} of ${rows.length}** with the catalog suite as \`crawler.invariants\`; **${fixedFlagged}** fixed variants are still flagged.`,
+  `**${outOfTheBox} of ${rows.length}** buggy variants are flagged out of the box, **${withSuite} of ${rows.length}** with the catalog suite as \`crawler.invariants\`, and **${fromCli} of ${cliReachable.length}** from the command line, of the ${cliReachable.length} whose data the command line can deliver; **${fixedFlagged}** fixed variants are still flagged.`,
   "",
-  "| entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | fixed: still flagged | every bug rule on buggy |",
-  "|---|---|---|---|---|---|",
+  `| entry | data via | buggy: out of the box | buggy: with \`invariants.dataSafety()\` + \`notBlank()\` | buggy: CLI \`scan --invariants ${CLI_INVARIANTS}\` | fixed: still flagged | every bug rule on buggy |`,
+  "|---|---|---|---|---|---|---|",
   ...rows.map(
     (r) =>
-      `| [${r.pattern.id}](src/patterns/${r.pattern.id}.ts) | ${describeInjection(r.pattern)} | ${flagCell(r, r.outOfTheBox)} | ${flagCell(r, r.withSuite)} | ${codes(r.fixed)} | ${codes(r.rules)} |`,
+      `| [${r.pattern.id}](src/patterns/${r.pattern.id}.ts) | ${describeInjection(r.pattern)} | ${flagCell(r, r.outOfTheBox)} | ${flagCell(r, r.withSuite)} | ${cliCell(r)} | ${codes(r.fixed)} | ${codes(r.rules)} |`,
   ),
 ];
 if (oracles.length > 0) {
@@ -180,7 +240,15 @@ if (process.env.PATTERN) {
   console.log(table);
 } else {
   writeFileSync(readme, `${text.slice(0, s + START.length)}\n${table}\n${text.slice(e)}`);
-  console.log(`README.md: ${outOfTheBox}/${rows.length} out of the box, ${withSuite}/${rows.length} with the suite, ${fixedFlagged} fixed flagged`);
+  console.log(
+    `README.md: ${outOfTheBox}/${rows.length} out of the box, ${withSuite}/${rows.length} with the suite, ` +
+      `${fromCli}/${cliReachable.length} from the CLI, ${fixedFlagged} fixed flagged`,
+  );
+}
+const cliMissed = cliReachable.filter((r) => r.withSuite && "rule" in r.cli && !r.cli.rule);
+if (cliMissed.length > 0) {
+  console.error(`scan-check: flagged with the suite in code but not from the CLI: ${cliMissed.map((r) => r.pattern.id).join(", ")}`);
+  process.exitCode = 1;
 }
 if (fixedFlagged > 0 || oraclesFlagged.length > 0) {
   console.error(
