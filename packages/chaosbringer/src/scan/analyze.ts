@@ -790,7 +790,12 @@ function resilienceFindings(
         `${count}× under ${faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")}; never in the clean crawl`,
         ...(c.sample.stack ? [truncate(firstStackFrame(c.sample.stack), 160)] : []),
       ],
-      hint: "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
+      // Nothing threw for a data-safety one: the page caught the failure
+      // and rendered what the response left behind.
+      hint:
+        c.type === "invariant-violation"
+          ? "The code assumes the request succeeds: when it fails, the page renders what the failed response left (undefined, NaN, nothing). Check response.ok and show an error state (message + retry) instead."
+          : "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
     });
   }
 

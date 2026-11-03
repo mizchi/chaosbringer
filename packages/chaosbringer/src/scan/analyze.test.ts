@@ -202,6 +202,9 @@ describe("analyzeScan: resilience", () => {
     expect(r.findings[1]!.title).toBe(
       'Only when an API request fails: Invariant violated: [data.rendered-garbage] rendered garbage: undefined in "Hello, undefined"',
     );
+    // Nothing threw: the hint is about what the page rendered, not a throw.
+    expect(r.findings[1]!.hint).toContain("renders what the failed response left");
+    expect(r.findings[1]!.hint).not.toContain("throwing");
     // In the clean crawl too: the bug finding has it, not resilience.
     const both = analyzeScan({ ...clean, errorClusters: [...clean.errorClusters, data] }, [{ fault: "status", report: chaos }]);
     expect(both.findings.map((f) => f.rule)).not.toContain("fault-new-error");

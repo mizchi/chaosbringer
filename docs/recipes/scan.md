@@ -80,6 +80,14 @@ itself; from the shell, a query on `--url` is how hostile data reaches the
 page. The presets run with their defaults; set their options through
 `runScan({ crawler: { invariants } })`.
 
+> **Behaviour change:** this applies to data-safety presets passed through
+> `runScan({ crawler: { invariants } })` as well, which reached the scan
+> before the flag did. Their violations used to be `medium`
+> `invariant-violation` findings, below `--fail-on high`; the three hostile-data
+> ones are now `high`. One seen only in a chaos crawl used to be dropped and is
+> now a `medium` `fault-new-error` finding. A `failOn` gate that passed can
+> fail, and `analyzeScan` re-grades an old report the same way.
+
 ## Reading the report
 
 `scan-report.md` opens with a table. Each finding also gets its own

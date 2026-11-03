@@ -221,7 +221,8 @@ EXIT CODES:
   2  the run was refused before a browser started: an unknown flag or --invariants name, a
      malformed value, an input file (--storage-state, --har-replay, --trace-replay,
      --perf-budgets, a --seed-from-sitemap path) that is missing or does not parse, a peer
-     --axe / --visual-baseline needs that is not installed; or nothing answered at --url
+     --axe (or --invariants axe) / --visual-baseline needs that is not installed; or nothing
+     answered at --url
 
 SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
 ${formatSubcommandList()}

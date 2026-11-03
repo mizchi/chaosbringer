@@ -75,6 +75,11 @@ stops on hostile data that ran or reached the DOM. One that shows only in a
 chaos crawl (a page that renders `undefined` once its API answers 500) is a
 `fault-new-error` resilience finding.
 
+> **Behaviour change:** these used to be `medium` `invariant-violation`
+> findings for every preset, and one seen only in a chaos crawl was dropped.
+> A `runScan({ crawler: { invariants: dataSafety() } })` gate on `high` or
+> `medium` that passed can now fail (see [scan](scan.md#data-safety-checks)).
+
 Each preset checks the top document and every iframe, same-origin or not.
 An iframe that can't be read (detached mid-check, stuck for 5 s) is skipped,
 and so is the browser's error page left in an iframe whose cross-origin

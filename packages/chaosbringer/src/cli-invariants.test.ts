@@ -5,6 +5,9 @@
  * cli.test.ts; that a Repro line carries the flag back is in
  * repro-command.test.ts and scan/scan-repro.test.ts.
  */
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { crawlCliPeerNeeds, crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
 import {
@@ -20,6 +23,7 @@ import {
 import { UsageError } from "./cli-usage.js";
 import { dataSafety, notBlank } from "./data-invariants.js";
 import { parseScanArgs, scanOptionsFromCli } from "./scan/cli.js";
+import { runScan } from "./scan/run.js";
 import { AXE_PEERS } from "./peers.js";
 
 const URL = "http://127.0.0.1:4455/";
@@ -118,8 +122,25 @@ describe("expandInvariantNames (ScanOptions.invariants)", () => {
     expect(expandInvariantNames(["not-blank", "data-safety"])).toEqual([...DATA_SAFETY_PRESETS, "not-blank"]);
   });
 
-  it("refuses a name it does not know, from plain JS", () => {
-    expect(() => expandInvariantNames(["axe" as never])).toThrow('unknown invariant "axe"');
+  it("refuses a name it does not know, from plain JS, as the option it was passed to", () => {
+    expect(() => expandInvariantNames(["nope" as never])).toThrow(
+      'ScanOptions.invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank)',
+    );
+    // axe is the flag's alias for --axe, not a preset: point at the option that is.
+    expect(() => expandInvariantNames(["axe" as never])).toThrow(
+      'ScanOptions.invariants: unknown invariant "axe" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank); axe-core is ScanOptions.axe: true',
+    );
+  });
+
+  it("refuses it in runScan before the report directory is made", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cb-invariants-"));
+    try {
+      const outDir = join(root, "scan");
+      await expect(runScan({ url: URL, outDir, chaos: false, invariants: ["nope" as never] })).rejects.toThrow(UsageError);
+      expect(existsSync(outDir)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

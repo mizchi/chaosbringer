@@ -299,11 +299,12 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   const log = options.onProgress ?? (() => {});
   const hangReleaseMs = options.hangReleaseMs ?? DEFAULT_HANG_RELEASE_MS;
   const kinds = options.chaos === false ? [] : [...new Set(options.faults ?? SCAN_FAULT_KINDS)];
+  // Before mkdirSync: a refused name leaves nothing behind.
+  const presets = expandInvariantNames(options.invariants ?? []);
   mkdirSync(outDir, { recursive: true });
 
   const invariants: Invariant[] = [...(options.crawler?.invariants ?? [])];
   if (options.axe) invariants.push(axe());
-  const presets = expandInvariantNames(options.invariants ?? []);
   invariants.push(...buildInvariantPresets(presets));
   // The clean crawl's repro is a plain crawl, which builds the same checks from the same flags.
   const reproFlags: ReproFlag[] = [

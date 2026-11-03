@@ -57,18 +57,33 @@ const known = () => `known: ${INVARIANT_FLAG_NAMES.join(", ")}`;
 
 /**
  * `names` as the presets they stand for, once each, in `INVARIANT_PRESETS`'
- * order: `data-safety` and one of its members, or a name given twice, run
- * one check, not two. Throws on a name it does not know, which a plain-JS
- * `ScanOptions.invariants` can hold.
+ * order. `unknown` words the refusal for whoever passed the name: the flag
+ * lists `axe` among its names, `ScanOptions.invariants` does not take it.
  */
-export function expandInvariantNames(names: readonly string[]): InvariantPreset[] {
+function expand(names: readonly string[], unknown: (name: string) => string): InvariantPreset[] {
   const wanted = new Set<string>();
   for (const name of names) {
     if (name === "data-safety") for (const p of DATA_SAFETY_PRESETS) wanted.add(p);
     else if (Object.hasOwn(PRESETS, name)) wanted.add(name);
-    else throw new UsageError(`--invariants: unknown invariant ${JSON.stringify(name)} (${known()})`);
+    else throw new UsageError(unknown(name));
   }
   return INVARIANT_PRESETS.filter((p) => wanted.has(p));
+}
+
+/**
+ * `names` as the presets they stand for, once each, in `INVARIANT_PRESETS`'
+ * order: `data-safety` and one of its members, or a name given twice, run
+ * one check, not two. Throws on a name it does not know, which a plain-JS
+ * `ScanOptions.invariants` can hold; the refusal names that option, not the
+ * flag, and sends `axe` (the flag's alias, not a preset) to `axe: true`.
+ */
+export function expandInvariantNames(names: readonly string[]): InvariantPreset[] {
+  return expand(
+    names,
+    (name) =>
+      `ScanOptions.invariants: unknown invariant ${JSON.stringify(name)} (known: ${["data-safety", ...INVARIANT_PRESETS].join(", ")})` +
+      (name === "axe" ? "; axe-core is ScanOptions.axe: true" : ""),
+  );
 }
 
 /**
@@ -90,7 +105,7 @@ export function parseInvariantsFlag(values: readonly string[] | undefined, dataS
       else names.push(part);
     }
   }
-  return { presets: expandInvariantNames(names), axe };
+  return { presets: expand(names, (name) => `--invariants: unknown invariant ${JSON.stringify(name)} (${known()})`), axe };
 }
 
 /** The presets' invariants, each with its defaults. */
