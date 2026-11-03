@@ -8,6 +8,7 @@
 
 import type { Frame } from "playwright";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
+import { AXE_PEERS } from "./peers.js";
 import type { Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
 import { stateMachineInvariant } from "./state-machine-invariants.js";
@@ -138,7 +139,7 @@ async function loadAxeSource(): Promise<string> {
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("axe-core")) throw err;
     throw new Error(
-      "chaosbringer: invariants.axe() requires the `axe-core` package. Install it with `pnpm add axe-core`."
+      "chaosbringer: invariants.axe() requires the `axe-core` package. Install it with `pnpm add -D axe-core`."
     );
   }
 }
@@ -259,8 +260,9 @@ async function runPartialInFrames(
  * on and into its iframes, same- and cross-origin, scans them as one page
  * and fails with a one-line summary of the violations, naming the frame of
  * those inside an iframe. Requires `axe-core` to be installed — it's an
- * optional peer dep; before axe-core 4.3 (no `runPartial`) only the top
- * document is scanned.
+ * optional peer dep, declared in `peers`, so a crawl with this invariant and
+ * no axe-core throws `MissingPeerError` before its browser starts. Before
+ * axe-core 4.3 (no `runPartial`) only the top document is scanned.
  */
 export function axe(options: AxeInvariantOptions = {}): Invariant {
   const payload = buildAxeRunPayload(options);
@@ -268,6 +270,9 @@ export function axe(options: AxeInvariantOptions = {}): Invariant {
     name: options.name ?? "a11y-axe",
     urlPattern: options.urlPattern,
     when: options.when ?? "afterActions",
+    // Resolved before the browser starts (MissingPeerError), so the crawl
+    // never gets as far as `loadAxeSource` failing on every page.
+    peers: AXE_PEERS,
     async check({ page }) {
       const source = await loadAxeSource();
       const main = page.mainFrame();

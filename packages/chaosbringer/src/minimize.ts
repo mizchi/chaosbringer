@@ -13,9 +13,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
+import { checkInputFiles } from "./input-files.js";
 import {
   readTrace,
   writeTrace,
@@ -208,8 +210,10 @@ function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
     tracePath: values.trace!,
     match: match!,
     traceOut: values["trace-out"] ?? "min.trace.jsonl",
-    maxPages: values["max-pages"] ? Number(values["max-pages"]) : undefined,
-    timeout: values.timeout ? Number(values.timeout) : undefined,
+    // Checked as the main crawl checks them: `Number` made `--timeout abc`
+    // NaN, refused by the first replay's crawler after `Minimizing …`.
+    maxPages: values["max-pages"] ? parseNumberFlag("--max-pages", values["max-pages"], { min: 1, integer: true }) : undefined,
+    timeout: values.timeout ? parseNumberFlag("--timeout", values.timeout, { min: 1, integer: true }) : undefined,
     ignoreAnalytics: values["ignore-analytics"] ?? false,
     quiet: values.quiet ?? false,
   };
@@ -225,7 +229,7 @@ USAGE:
 
 OPTIONS:
   --url <url>           Base URL under test (required)
-  --trace <path>        Source trace to shrink (required)
+  --trace <path>        Source trace to shrink (required; exit 2 if missing or not a trace)
   --match <regex>       Reproduction predicate — matches error cluster fingerprints
   --trace-out <path>    Where to write the minimized trace (default: min.trace.jsonl)
   --max-pages <n>       Forward to the crawler
@@ -244,6 +248,8 @@ function fail(msg: string): never {
 /** Entry point wired from src/cli.ts when the `minimize` subcommand is used. */
 export async function runMinimizeCli(argv: string[]): Promise<void> {
   const args = parseMinimizeArgs(argv);
+  // A missing or malformed --trace is a usage error, like --trace-replay's.
+  checkInputFiles({ traceReplay: args.tracePath }, { traceReplay: "--trace" });
   const trace = readTrace(args.tracePath);
   const meta = trace[0] as TraceMeta;
 

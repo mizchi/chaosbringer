@@ -1,14 +1,17 @@
 /**
  * The main CLI as a user meets it, run as a process: `cli.ts` parses
  * `process.argv` and exits as soon as it is imported. None of these get as
- * far as starting a browser.
+ * far as starting a browser, and each spawn makes sure of it: its
+ * PLAYWRIGHT_BROWSERS_PATH is a directory with no browser in it, so a launch
+ * would fail with Playwright's "Executable doesn't exist" instead of the one
+ * line a row expects.
  */
 import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
 import { progressText, SUBCOMMANDS } from "./cli-usage.js";
 
@@ -16,12 +19,17 @@ const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 /** Nothing listens here; a crawl that got this far would fail, not hang. */
 const URL_ARG = ["--url", "http://127.0.0.1:9/"];
+/** Where the spawned CLI looks for browsers: nowhere that has one. */
+const NO_BROWSERS = mkdtempSync(join(tmpdir(), "cli-no-browsers-"));
+const ENV = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: NO_BROWSERS };
+afterAll(() => rmSync(NO_BROWSERS, { recursive: true, force: true }));
 
 function cli(args: string[]) {
   const r = spawnSync(process.execPath, ["--import", "tsx", CLI, ...args], {
     cwd: PACKAGE_DIR,
     encoding: "utf8",
     timeout: 60_000,
+    env: ENV,
   });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
@@ -32,7 +40,7 @@ function cliAsync(args: string[]): Promise<{ status: number | null; stdout: stri
     execFile(
       process.execPath,
       ["--import", "tsx", CLI, ...args],
-      { cwd: PACKAGE_DIR, timeout: 60_000 },
+      { cwd: PACKAGE_DIR, timeout: 60_000, env: ENV },
       (err, stdout, stderr) => {
         const status = err ? (typeof err.code === "number" ? err.code : null) : 0;
         resolve({ status, stdout, stderr });
@@ -88,6 +96,19 @@ describe("usage errors", () => {
     [[...URL_ARG, "--max-pages", "abc"], '--max-pages must be a finite number (got "abc")'],
     [[...URL_ARG, "--max-pages", "0"], "--max-pages must be >= 1 (got 0)"],
     [[...URL_ARG, "--timeout", "5s"], '--timeout must be a finite number (got "5s")'],
+    // It said `"performanceBudget.lcp" must be a positive number of ms (got null)`.
+    [[...URL_ARG, "--budget", "lcp=abc"], '--budget lcp must be a finite number (got "abc")'],
+    // validateOptions refused it as `excludePatterns entry has invalid regex`, without the flag.
+    [[...URL_ARG, "--exclude", "("], '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
+    // Input files are read before the browser starts: these failed inside the
+    // crawl with a stack trace and exit 1, the code of a run that found something.
+    [[...URL_ARG, "--storage-state", "missing-state.json"], "--storage-state missing-state.json: no such file"],
+    [[...URL_ARG, "--har-replay", "missing.har"], "--har-replay missing.har: no such file"],
+    [[...URL_ARG, "--trace-replay", "missing.jsonl"], "--trace-replay missing.jsonl: no such file"],
+    // A bare `ENOENT: no such file or directory, open '…'`, without the flag.
+    [[...URL_ARG, "--perf-budgets", "missing-budgets.json"], "--perf-budgets missing-budgets.json: no such file"],
+    // Dropped with a logger warning nobody saw: the run passed without its seeds.
+    [[...URL_ARG, "--seed-from-sitemap", "missing-sitemap.xml"], "--seed-from-sitemap missing-sitemap.xml: no such file"],
     // Refused by validateOptions, which used to throw from inside main().
     [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
     [[], "--url is required"],
@@ -158,7 +179,7 @@ describe("usage errors", () => {
     [
       ["shard", "--count", "2", ...URL_ARG, "--perf-budgets", "missing-budgets.json"],
       "shard",
-      "ENOENT: no such file or directory, open 'missing-budgets.json'",
+      "--perf-budgets missing-budgets.json: no such file",
     ],
     [["shard", "--count", "2"], "shard", "--url is required"],
     [["shard", ...URL_ARG], "shard", "--count <N> is required and must be an integer >= 1"],
@@ -178,6 +199,11 @@ describe("usage errors", () => {
         "`setopt interactivecomments`); drop the `#` and everything after it",
     ],
     [["scan", ...URL_ARG, "crawl"], "scan", 'unexpected argument "crawl": scan takes no positional arguments'],
+    // These printed `[scan] clean crawl of …`, then `scan failed: …` and exit
+    // 1, the code --fail-on gates on.
+    [["scan", ...URL_ARG, "--exclude", "("], "scan", '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
+    [["scan", ...URL_ARG, "--storage-state", "missing-state.json"], "scan", "--storage-state missing-state.json: no such file"],
+    [["scan", ...URL_ARG, "--sitemap", "missing-sitemap.xml"], "scan", "--sitemap missing-sitemap.xml: no such file"],
     [["flake"], "flake", "--url is required"],
     [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
     // These started Run 1/3 and failed inside the crawler with exit 1, which
@@ -185,7 +211,19 @@ describe("usage errors", () => {
     [["flake", ...URL_ARG, "--max-pages", "abc"], "flake", '--max-pages must be a finite number (got "abc")'],
     [["flake", ...URL_ARG, "--max-actions-per-page", "1.5"], "flake", "--max-actions-per-page must be an integer (got 1.5)"],
     [["flake", ...URL_ARG, "--timeout", "5s"], "flake", '--timeout must be a finite number (got "5s")'],
+    [["flake", ...URL_ARG, "--storage-state", "missing-state.json"], "flake", "--storage-state missing-state.json: no such file"],
+    [["flake", ...URL_ARG, "--trace-replay", "missing.jsonl"], "flake", "--trace-replay missing.jsonl: no such file"],
+    [["flake", ...URL_ARG, "--har-replay", "missing.har"], "flake", "--har-replay missing.har: no such file"],
+    [["shard", "--count", "2", ...URL_ARG, "--har-replay", "missing.har"], "shard", "--har-replay missing.har: no such file"],
     [["minimize"], "minimize", "--url is required"],
+    // The numbers of the subcommands that read them with parseInt / parseFloat:
+    // `--timeout 5s` was 5 ms, and a run that timed out on it exited 1.
+    // One row per command here; every flag and value is in cli-numeric-flags.test.ts.
+    [["minimize", ...URL_ARG, "--trace", "t.jsonl", "--match", "x", "--timeout", "5s"], "minimize", '--timeout must be a finite number (got "5s")'],
+    [["minimize", ...URL_ARG, "--trace", "missing.jsonl", "--match", "x"], "minimize", "--trace missing.jsonl: no such file"],
+    [["cluster-artifacts", "r.json", "--bundle-dir", "b", "--max-clusters", "abc"], "cluster-artifacts", '--max-clusters must be a finite number (got "abc")'],
+    [["parity", "--left", "http://a.test", "--right", "http://b.test", "--paths", "p.txt", "--timeout", "5s"], "parity", '--timeout must be a finite number (got "5s")'],
+    [["journey", "--left", "http://a.test", "--right", "http://b.test", "--steps", "s.json", "--timeout", "5s"], "journey", '--timeout must be a finite number (got "5s")'],
     [["diff", "a.json"], "diff", "expected exactly two report paths, got 1"],
     [["cluster-artifacts", "r.json"], "cluster-artifacts", "--bundle-dir is required"],
     [["parity", "--left", "http://a.test"], "parity", "--left, --right, and --paths are all required"],
@@ -193,6 +231,10 @@ describe("usage errors", () => {
     [["load"], "load", "--base-url is required"],
     [["load", "--base-url", "http://a.test", "--workers", "abc"], "load", "--workers must be a positive integer, got abc"],
     [["drive"], "drive", "--url and --goal are required"],
+    // These were `drive failed: …` and exit 1, drive's code for a goal it did
+    // not reach; the storage state only failed once the browser was up.
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--storage-state", "missing-state.json"], "drive", "--storage-state missing-state.json: no such file"],
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "missing-plan.json"], "drive", "--plan missing-plan.json: no such file"],
     [["recipes", "show"], "recipes show", "expected a recipe name"],
     [["recipes", "rollback", "x"], "recipes rollback", "--to-version N is required"],
     [["recipes", "verify", "x", "--base-url", "staging.test"], "recipes verify", '--base-url must be an absolute http(s) URL, got "staging.test"'],
@@ -207,6 +249,10 @@ describe("usage errors", () => {
     [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--max-runs", "0"], "model shrink", '--max-runs needs a positive integer, got "0"'],
     [["perf", "gate", "r.json"], "perf gate", "--budgets <file> is required"],
     [["perf", "regress", "base/"], "perf regress", "--current <report.json...> is required"],
+    // Number("") is 0: an unset variable in `--threshold "$T"` compared at 0,
+    // and `--retries "$N"` ran without retries.
+    [["perf", "regress", "base/", "--threshold", "", "--current", "c.json"], "perf regress", '--threshold must be a number >= 0 (got "")'],
+    [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--retries", ""], "model shrink", '--retries needs a non-negative integer, got ""'],
   ];
 
   it("has a row for every subcommand", () => {
@@ -239,6 +285,38 @@ describe("usage errors", () => {
       maxPages: 3,
       maxActionsPerPage: 0,
       timeout: 5000,
+    });
+  });
+
+  it("names the flag for a regex or a device the crawler would refuse as an option field", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    // validateOptions said `ignoreErrorPatterns entry has invalid regex`, `spaPatterns …` and `"device" …`.
+    expect(() => options(["--ignore-error", "("])).toThrow(
+      '--ignore-error "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)',
+    );
+    expect(() => options(["--spa", "("])).toThrow('--spa "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)');
+    expect(() => options(["--device", "Nope 9"])).toThrow('--device "Nope 9" is not a known Playwright device descriptor');
+    expect(options(["--spa", "^/app", "--ignore-error", "ResizeObserver", "--device", "iPhone 13"])).toMatchObject({
+      spaPatterns: ["^/app"],
+      ignoreErrorPatterns: ["ResizeObserver"],
+      device: "iPhone 13",
+    });
+  });
+
+  it("names `--budget <metric>` for a budget value it cannot use, and keeps the valid syntax", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    expect(() => options(["--budget", "lcp=abc"])).toThrow('--budget lcp must be a finite number (got "abc")');
+    expect(() => options(["--budget", "ttfb=200,lcp=2.5s"])).toThrow('--budget lcp must be a finite number (got "2.5s")');
+    expect(() => options(["--budget", "fcp=0"])).toThrow("--budget fcp must be > 0 (got 0)");
+    expect(() => options(["--budget", "fcp=-5"])).toThrow("--budget fcp must be > 0 (got -5)");
+    expect(() => options(["--budget", "lcp="])).toThrow('--budget expects key=ms pairs (got "lcp=")');
+    expect(() => options(["--budget", "lpc=2500"])).toThrow(
+      "--budget lpc: unknown metric (known: ttfb, fcp, lcp, tbt, domContentLoaded, load)",
+    );
+    expect(options(["--budget", "ttfb=200, fcp=1800", "--budget", "lcp=2500"]).performanceBudget).toEqual({
+      ttfb: 200,
+      fcp: 1800,
+      lcp: 2500,
     });
   });
 });

@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { summariseBodyDiff } from "./body-diff.js";
+import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { type PerfPercentile, runParity } from "./parity.js";
 
@@ -73,7 +74,7 @@ Options:
 
 Exit code is 1 when any mismatch is found, 0 when both sides agree on
 every path, 2 when it refuses its arguments (a missing --left / --right /
---paths, a bad value). Useful as a CI gate: \`chaosbringer parity ... || exit 1\`.
+--paths, a bad value: --timeout 5s, a --perf-ratio of 0). Useful as a CI gate: \`chaosbringer parity ... || exit 1\`.
 
 Examples:
   chaosbringer parity --left http://localhost:3000 --right http://localhost:3001 \\
@@ -123,22 +124,23 @@ export async function runParityCli(argv: string[]): Promise<void> {
   if (!values.left || !values.right || !values.paths) {
     throw new UsageError("--left, --right, and --paths are all required");
   }
-  const timeoutMs = values.timeout ? parseInt(values.timeout, 10) : undefined;
   const checkHeaders = values["check-headers"]
     ?.split(",")
     .map((h) => h.trim())
     .filter((h) => h.length > 0);
 
   // The flags first, then the file: a bad flag is refused (exit 2) whatever
-  // --paths holds.
-  let perfSamples: number | undefined;
-  if (values["perf-samples"] !== undefined) {
-    const n = parseInt(values["perf-samples"], 10);
-    if (!Number.isFinite(n) || n < 1) {
-      throw new UsageError(`--perf-samples must be a positive integer (got ${values["perf-samples"]})`);
-    }
-    perfSamples = n;
-  }
+  // --paths holds. parseNumberFlag, not parseInt / parseFloat: `--timeout 5s`
+  // was a 5 ms timeout, whose aborted probes were a mismatch and exit 1, and
+  // `--timeout abc` / `--perf-ratio abc` NaN, which ran as if never given.
+  // An empty value is unset. A threshold of 0 turns the check off, so it is
+  // refused with the rest.
+  const timeoutMs = values.timeout ? parseNumberFlag("--timeout", values.timeout, { min: 1, integer: true }) : undefined;
+  const perfDeltaMs = values["perf-delta-ms"]
+    ? parseNumberFlag("--perf-delta-ms", values["perf-delta-ms"], { positive: true })
+    : undefined;
+  const perfRatio = values["perf-ratio"] ? parseNumberFlag("--perf-ratio", values["perf-ratio"], { positive: true }) : undefined;
+  const perfSamples = parseNumberFlag("--perf-samples", values["perf-samples"], { min: 1, integer: true });
   let perfPercentile: PerfPercentile | undefined;
   if (values["perf-percentile"] !== undefined) {
     const p = values["perf-percentile"];
@@ -163,8 +165,8 @@ export async function runParityCli(argv: string[]): Promise<void> {
     checkBody: values["check-body"],
     checkHeaders,
     checkExceptions: values["check-exceptions"],
-    perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
-    perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
+    perfDeltaMs,
+    perfRatio,
     perfSamples,
     perfPercentile,
     timeoutMs,

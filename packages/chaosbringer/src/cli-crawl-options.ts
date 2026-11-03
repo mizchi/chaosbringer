@@ -7,14 +7,18 @@
  * here without either fails `repro-command.test.ts`.
  */
 import { parseArgs } from "node:util";
+import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
-import { PASTED_COMMENT, SUBCOMMANDS } from "./cli-usage.js";
+import { PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
+import { errorMessage } from "./errors.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
+import { readInputJson } from "./input-files.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg, resolveSettle } from "./settle.js";
 import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant, PerfBudgetRule, ReproFlag } from "./types.js";
+import { AXE_PEERS, type PeerNeed, VISUAL_REGRESSION_PEERS } from "./peers.js";
+import { PERF_BUDGET_KEYS, type CrawlerOptions, type Invariant, type PerfBudgetRule, type ReproFlag } from "./types.js";
 import { visualRegression } from "./visual.js";
 
 export const CRAWL_CLI_OPTIONS = {
@@ -129,27 +133,65 @@ export function crawlUrlFromArgs(values: CrawlCliValues, positionals: readonly s
   return baseUrl;
 }
 
-/** Throws on a bad value; the CLI prints `chaosbringer: <message>` and exits 2. */
+/**
+ * A number flag's value, or a `UsageError` naming the flag: the CLI prints
+ * `chaosbringer[ <sub>]: <message>` and exits 2. Every subcommand's numbers
+ * go through it: `parseInt("5s")` is 5, `parseFloat("abc")` NaN, and either
+ * ran the command with a value nobody typed, and so did `Number("")`, which
+ * is 0. A caller that reads an empty value as unset checks for it first.
+ * `positive` is `> 0`, for a threshold that 0 would turn off
+ * (`--perf-ratio 0` compared nothing).
+ */
 export function parseNumberFlag(
   flag: string,
   raw: string | undefined,
-  opts: { min?: number; max?: number; integer?: boolean }
+  opts: { min?: number; max?: number; integer?: boolean; positive?: boolean }
 ): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    throw new Error(`${flag} must be a finite number (got ${JSON.stringify(raw)})`);
+  // `Number("")` is 0: an unset variable in `--perf-samples "$N"` ran with 0.
+  if (raw.trim() === "" || !Number.isFinite(n)) {
+    throw new UsageError(`${flag} must be a finite number (got ${JSON.stringify(raw)})`);
   }
   if (opts.integer && !Number.isInteger(n)) {
-    throw new Error(`${flag} must be an integer (got ${n})`);
+    throw new UsageError(`${flag} must be an integer (got ${n})`);
+  }
+  if (opts.positive && !(n > 0)) {
+    throw new UsageError(`${flag} must be > 0 (got ${n})`);
   }
   if (opts.min !== undefined && n < opts.min) {
-    throw new Error(`${flag} must be >= ${opts.min} (got ${n})`);
+    throw new UsageError(`${flag} must be >= ${opts.min} (got ${n})`);
   }
   if (opts.max !== undefined && n > opts.max) {
-    throw new Error(`${flag} must be <= ${opts.max} (got ${n})`);
+    throw new UsageError(`${flag} must be <= ${opts.max} (got ${n})`);
   }
   return n;
+}
+
+/**
+ * A regex flag's patterns, refused with the flag's name: validateOptions
+ * refused `--exclude "("` as `excludePatterns entry has invalid regex`,
+ * which names the option, not what was typed.
+ */
+export function checkRegexFlag(flag: string, patterns: readonly string[] | undefined): void {
+  for (const pattern of patterns ?? []) {
+    try {
+      new RegExp(pattern);
+    } catch (err) {
+      throw new UsageError(`${flag} ${JSON.stringify(pattern)} is not a valid regex (${errorMessage(err)})`);
+    }
+  }
+}
+
+/**
+ * `--device`, refused with the flag's name: validateOptions refused an
+ * unknown one as `"device" "Nope 9" is not a known Playwright device
+ * descriptor`, which names the option, not what was typed.
+ */
+export function checkDeviceFlag(device: string | undefined): void {
+  if (device && !devices[device]) {
+    throw new UsageError(`--device ${JSON.stringify(device)} is not a known Playwright device descriptor`);
+  }
 }
 
 /** What the main CLI reads off its flags besides the crawler's options. */
@@ -199,9 +241,12 @@ export async function readCrawlPerfBudgets(
 ): Promise<{ rules: PerfBudgetRule[]; warning?: string; refusal?: { message: string; exitCode: number } } | undefined> {
   const file = values["perf-budgets"];
   if (file === undefined) return undefined;
+  // Read as the other input files are: a missing one was a bare
+  // `ENOENT: no such file or directory, open '…'`, without the flag.
+  const json = readInputJson("--perf-budgets", file, "perf budgets");
   // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-  const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-  const read = readPerfBudgetsForCrawl(file, resolveSettle(settle), `--perf-budgets ${file}`);
+  const { perfBudgetsForCrawl } = await import("./perf-cli.js");
+  const read = perfBudgetsForCrawl(json, resolveSettle(settle), `--perf-budgets ${file}`);
   if (!read.settleMismatch) return { rules: read.rules };
   if (values["allow-settle-mismatch"]) {
     return { rules: read.rules, warning: `[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.` };
@@ -263,6 +308,9 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
   if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
   if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
 
+  // Each value is checked as `--budget <metric>`: an unchecked `Number` made
+  // `lcp=abc` NaN, which validateOptions refused as `"performanceBudget.lcp"
+  // must be a positive number of ms (got null)`, without the flag.
   let performanceBudget: CrawlerOptions["performanceBudget"];
   if (values.budget && values.budget.length > 0) {
     performanceBudget = {};
@@ -271,12 +319,17 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
         const trimmed = entry.trim();
         if (!trimmed) continue;
         const eq = trimmed.indexOf("=");
-        if (eq <= 0) {
+        const value = trimmed.slice(eq + 1).trim();
+        if (eq <= 0 || value === "") {
           throw new Error(`--budget expects key=ms pairs (got "${trimmed}")`);
         }
         const key = trimmed.slice(0, eq).trim();
-        const ms = Number(trimmed.slice(eq + 1).trim());
-        (performanceBudget as Record<string, number>)[key] = ms;
+        if (!(PERF_BUDGET_KEYS as readonly string[]).includes(key)) {
+          throw new Error(`--budget ${key}: unknown metric (known: ${PERF_BUDGET_KEYS.join(", ")})`);
+        }
+        (performanceBudget as Record<string, number | undefined>)[key] = parseNumberFlag(`--budget ${key}`, value, {
+          positive: true,
+        });
       }
     }
   }
@@ -297,6 +350,11 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     shardIndex = parsed.shardIndex;
     shardCount = parsed.shardCount;
   }
+
+  checkRegexFlag("--exclude", values.exclude);
+  checkRegexFlag("--ignore-error", values["ignore-error"]);
+  checkRegexFlag("--spa", values.spa);
+  checkDeviceFlag(values.device);
 
   const cliReproFlags = cliOnlyReproFlags(values);
   return {
@@ -354,6 +412,18 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     perfBudgetsFile: values["perf-budgets"],
     ...(cliReproFlags.length > 0 ? { cliReproFlags } : {}),
   };
+}
+
+/**
+ * The optional peer dependencies the flags need, by flag, for `assertPeers`
+ * before the browser starts: the crawl's own check of the invariants they
+ * become names the invariant, not the flag.
+ */
+export function crawlCliPeerNeeds(values: Pick<CrawlCliValues, "axe" | "visual-baseline">): PeerNeed[] {
+  const needs: PeerNeed[] = [];
+  if (values.axe) needs.push({ by: "--axe", peers: AXE_PEERS });
+  if (values["visual-baseline"]) needs.push({ by: "--visual-baseline", peers: VISUAL_REGRESSION_PEERS });
+  return needs;
 }
 
 function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {

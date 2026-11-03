@@ -335,7 +335,8 @@ OPTIONS:
 EXIT CODES:
   0  nothing flaked
   1  a cluster or a page flaked
-  2  refused: a bad flag or value, or nothing answered at --url
+  2  refused: a bad flag or value, a --storage-state / --har-replay / --trace-replay
+     file that is missing or does not parse (before Run 1), or nothing answered at --url
      ("could not reach <url>: is the server running?", after the first run)
 `);
 }
@@ -348,6 +349,14 @@ function fail(msg: string): never {
 /** Entry point wired from src/cli.ts when the `flake` subcommand is used. */
 export async function runFlakeCli(argv: string[]): Promise<void> {
   const args = parseFlakeArgs(argv);
+  // Before Run 1/N: a missing file failed inside the first crawl with exit 1,
+  // which chaos-flake.yml reads as "flakes were found".
+  const { checkInputFiles } = await import("./input-files.js");
+  checkInputFiles({
+    storageState: args.storageState,
+    har: args.harReplay ? { path: args.harReplay, mode: "replay" } : undefined,
+    traceReplay: args.traceReplay,
+  });
   const { ChaosCrawler } = await import("./crawler.js");
   const { COMMON_IGNORE_PATTERNS } = await import("./ignore-presets.js");
   const reports: CrawlReport[] = [];

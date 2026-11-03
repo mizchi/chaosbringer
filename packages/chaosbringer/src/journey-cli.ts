@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { summariseBodyDiff } from "./body-diff.js";
+import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { runJourney, type JourneyStep } from "./journey.js";
 
@@ -44,7 +45,9 @@ Options:
   --timeout <ms>        Per-request timeout. Default 10000
   --help                Show this help
 
-Exit code is 1 when any step diverges, 0 when every step matches.
+Exit code is 1 when any step diverges, 0 when every step matches, 2 when
+it refuses its arguments (a missing --left / --right / --steps, a bad
+value: --timeout 5s, a --perf-ratio of 0).
 Useful as a CI gate for canary-vs-prod or v1-vs-v2 comparisons.
 
 Example:
@@ -100,6 +103,15 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
     throw new UsageError("--left, --right, and --steps are all required");
   }
 
+  // The flags before the file, as parity checks them: `--timeout 5s` was a
+  // 5 ms timeout and a mismatch with exit 1, `--perf-ratio abc` NaN and no
+  // check at all. An empty value is unset; a threshold of 0 turns the check off.
+  const timeoutMs = values.timeout ? parseNumberFlag("--timeout", values.timeout, { min: 1, integer: true }) : undefined;
+  const perfDeltaMs = values["perf-delta-ms"]
+    ? parseNumberFlag("--perf-delta-ms", values["perf-delta-ms"], { positive: true })
+    : undefined;
+  const perfRatio = values["perf-ratio"] ? parseNumberFlag("--perf-ratio", values["perf-ratio"], { positive: true }) : undefined;
+
   const steps = readSteps(values.steps);
   if (steps.length === 0) {
     console.error("journey: steps file has no steps");
@@ -115,11 +127,11 @@ export async function runJourneyCli(argv: string[]): Promise<void> {
     left: values.left,
     right: values.right,
     steps,
-    timeoutMs: values.timeout ? parseInt(values.timeout, 10) : undefined,
+    timeoutMs,
     checkBody: !values["no-check-body"],
     checkHeaders,
-    perfDeltaMs: values["perf-delta-ms"] ? parseFloat(values["perf-delta-ms"]) : undefined,
-    perfRatio: values["perf-ratio"] ? parseFloat(values["perf-ratio"]) : undefined,
+    perfDeltaMs,
+    perfRatio,
     stopOnMismatch: values["stop-on-mismatch"],
   });
 

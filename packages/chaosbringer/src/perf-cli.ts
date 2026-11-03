@@ -126,16 +126,16 @@ export function readPerfBudgetRulesFile(path: string, source: string = path): Pe
 }
 
 /**
- * The crawler's `--perf-budgets` read: the rules, plus why the file cannot
- * be enforced on a crawl settling `crawl` (`crawlBudgetsSettleMismatch`) and
- * the exit code a refusal uses.
+ * The crawler's `--perf-budgets` rules, from the file's parsed JSON (the
+ * crawl reads the file itself, as it does its other input files), plus why
+ * they cannot be enforced on a crawl settling `crawl`
+ * (`crawlBudgetsSettleMismatch`) and the exit code a refusal uses.
  */
-export function readPerfBudgetsForCrawl(
-  path: string,
+export function perfBudgetsForCrawl(
+  json: unknown,
   crawl: PerfSettleRecord,
-  source: string = path,
+  source: string,
 ): { rules: PerfBudgetRule[]; settleMismatch?: string; exitCode: number } {
-  const json: unknown = JSON.parse(readFileSync(path, "utf-8"));
   const rules = perfBudgetRulesFromJson(json, source);
   const settleMismatch = crawlBudgetsSettleMismatch(json, crawl);
   return { rules, ...(settleMismatch ? { settleMismatch } : {}), exitCode: SETTLE_MISMATCH_EXIT_CODE };
@@ -917,7 +917,8 @@ function fail(msg: string): void {
 function parseNumber(flag: string, raw: string | undefined, def: number, min: number): number {
   if (raw === undefined) return def;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < min) throw new UsageError(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
+  // `Number("")` is 0: `--threshold "$T"` with T unset compared at 0.
+  if (raw.trim() === "" || !Number.isFinite(n) || n < min) throw new UsageError(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }
 

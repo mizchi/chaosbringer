@@ -937,6 +937,17 @@ export interface Invariant {
   when?: "afterLoad" | "afterActions";
   /** Restrict to URLs matching this matcher (regex literal or regex string). Omit to run on every page. */
   urlPattern?: UrlMatcher;
+  /**
+   * Optional peer dependencies of chaosbringer the check imports when it runs,
+   * as `axe()` does axe-core and `visualRegression()` pixelmatch and pngjs.
+   * The crawler (when it is constructed) and `scenarioLoad` (when it is
+   * called) resolve each from where chaosbringer is installed, before any
+   * browser starts, and throw `MissingPeerError` naming the ones that do not
+   * resolve: without it, every page failed this invariant on the missing
+   * package. A dependency the check imports from the caller's own code needs
+   * no entry.
+   */
+  peers?: readonly string[];
 }
 
 export interface InvariantContext {

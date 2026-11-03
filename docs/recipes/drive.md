@@ -161,7 +161,12 @@ its description, or by a regex written as `"/…/"`:
 ```
 
 A step whose control is not on the page ends the run (`gave-up`, naming the
-step). The plan no longer matches the site.
+step). The plan no longer matches the site. A plan file that is not there,
+is not JSON, or has a step drive cannot read (`--plan plan.json: step 2 is
+not click / fill+value / select+value / press`) is refused before the
+browser starts, with exit 2; so is a `--storage-state` file that is not
+there or not storageState JSON. Both used to be `drive failed: …` and exit
+1, the code for a goal that was not reached.
 
 When every step has run, the plan answers "done". With an `--until-*` that
 does not hold then (wrong credentials, a flow that changed), the run ends at
