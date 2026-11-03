@@ -27,6 +27,7 @@ import type { Driver, DriverStep } from "../drivers/types.js";
 import { discoverCandidates } from "./investigate.js";
 import { rebaseRecipe, runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
+import { hasTemplates, type RecipeVars, substituteConditions, substituteString } from "./templating.js";
 import { tracingDriver, type TracingDriver } from "./tracing-driver.js";
 import type {
   ActionRecipe,
@@ -58,6 +59,15 @@ export interface RepairOptions {
    * here.
    */
   baseUrl?: string;
+  /**
+   * Values for the recipe's `{{var}}` placeholders (`RunRecipeOptions.vars`):
+   * the replay that finds the failing step types them, and the goal the
+   * driver works towards is the postconditions they fill in. The repaired
+   * version keeps the placeholders of the steps it kept. Throws, before the
+   * browser launches, when the start URL or a postcondition uses one these
+   * do not define; a step that does fails the replay there.
+   */
+  vars?: RecipeVars;
   /** Headless. Default: true. */
   headless?: boolean;
   /** Caller-supplied browser to amortise launches. */
@@ -89,6 +99,10 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     : () => {};
   // Before the browser launches: a bad base URL throws here, not mid-run.
   const recipe = opts.baseUrl ? rebaseRecipe(opts.recipe, opts.baseUrl) : opts.recipe;
+  const vars = opts.vars ?? {};
+  // Also before it: a missing variable in either throws here.
+  const startUrl = opts.startUrl ?? deriveStartUrl(recipe, opts.baseUrl, vars);
+  const goal = postconditionGoal({ ...recipe, postconditions: substituteConditions(recipe.postconditions, vars) });
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
   let isolated: IsolatedPage;
@@ -99,10 +113,8 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     throw err;
   }
   const { context, page } = isolated;
-  const startUrl = opts.startUrl ?? deriveStartUrl(recipe, opts.baseUrl);
 
-  // Build a Goal whose successCheck = original postconditions held.
-  const goal = postconditionGoal(recipe);
+  // The Goal (built above) is: the original postconditions hold.
   const tracing = tracingDriver({ inner: opts.driver, goal });
 
   // Tracing trace will start fresh — we'll splice the AI-discovered
@@ -133,7 +145,7 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
         // Strip postconditions while probing — they are the END check.
         postconditions: [],
       };
-      const result = await runRecipe(page, partial);
+      const result = await runRecipe(page, partial, { vars });
       if (!result.ok) {
         failedAt = i;
         log(`step ${i} (${recipe.steps[i]!.kind}) failed: ${result.failedAt?.reason}`);
@@ -244,9 +256,11 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
   }
 }
 
-function deriveStartUrl(recipe: ActionRecipe, baseUrl?: string): string {
+function deriveStartUrl(recipe: ActionRecipe, baseUrl: string | undefined, vars: RecipeVars): string {
   const firstNav = recipe.steps.find((s) => s.kind === "navigate");
-  if (firstNav && firstNav.kind === "navigate") return firstNav.url;
+  if (firstNav && firstNav.kind === "navigate") {
+    return hasTemplates(firstNav.url) ? substituteString(firstNav.url, vars) : firstNav.url;
+  }
   if (baseUrl) return baseUrl;
   // Last resort — pull the host from the first urlPattern.
   const pattern = recipe.preconditions[0]?.urlPattern;

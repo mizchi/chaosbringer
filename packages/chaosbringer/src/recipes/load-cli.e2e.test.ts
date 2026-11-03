@@ -34,6 +34,12 @@ function cli(args: string[]): Promise<{ status: number | null; stdout: string; s
   });
 }
 
+/** Goes on to /welcome only with the right password. */
+const LOGIN = `<!doctype html><title>Log in</title><h1>Log in</h1>
+<form onsubmit="event.preventDefault(); if (this.pw.value === 'load-cb-pw') location.href = '/welcome'; else document.title = 'Wrong'">
+  <input id="pw" name="pw" type="password"><button>Sign in</button>
+</form>`;
+
 describe("load and recipes verify on the command line", () => {
   let server: TestServer;
   /** A server that was closed: what a run meets when staging is down. */
@@ -56,7 +62,9 @@ describe("load and recipes verify on the command line", () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/html" });
-      res.end("<!doctype html><title>About</title><h1>About</h1>");
+      if (req.url === "/login") res.end(LOGIN);
+      else if (req.url === "/welcome") res.end("<!doctype html><title>Welcome</title><h1>Welcome</h1>");
+      else res.end("<!doctype html><title>About</title><h1>About</h1>");
     });
     const closed = await startTestServer(() => {});
     down = closed.url;
@@ -194,6 +202,40 @@ describe("load and recipes verify on the command line", () => {
       expect(brokenStats(store).failCount).toBeGreaterThan(0);
     }
   }, 90_000);
+
+  // load took no vars, and nothing checked that it passes them on, or that it
+  // asks for those of a recipe a `requires` chain runs first.
+  it("load fills a requires chain's {{password}} from --var, and refuses to start without it", async () => {
+    const store = storeWith("verified", server.url);
+    const about = JSON.parse(recipeFile(store)) as ActionRecipe;
+    writeFileSync(join(store, FILE), `${JSON.stringify({ ...about, requires: ["auth/login"] }, null, 2)}\n`);
+    const login: ActionRecipe = {
+      ...about,
+      name: "auth/login",
+      // Not one load picks: only the chain runs it.
+      status: "candidate",
+      steps: [
+        { kind: "navigate", url: `${server.url}/login` },
+        { kind: "fill", selector: "#pw", value: "{{password}}" },
+        { kind: "click", selector: "button", expectAfter: { urlContains: "/welcome" } },
+      ],
+    };
+    writeFileSync(join(store, "auth__login.json"), `${JSON.stringify(login, null, 2)}\n`);
+    const before = recipeFile(store);
+    const args = ["load", "--base-url", server.url, "--dir", store, "--max-iterations", "1", "--workers", "1", "--think-time", "0-0", "--quiet"];
+
+    const refused = await cli(args);
+    expect(refused.stderr.trim()).toBe(
+      'chaosbringer load: auth/login: variable "password" is not defined (pass --var password=VALUE, or --vars-file FILE) (see chaosbringer load --help)',
+    );
+    expect(refused.status).toBe(2);
+    expect(recipeFile(store)).toBe(before);
+
+    // The value reached the chain's fill: a wrong one would not get past the login.
+    const r = await cli([...args, "--var", "password=load-cb-pw", "--no-record"]);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+  }, 60_000);
 
   it("recipes verify records a replay the site answered with a redirect to a dead host", async () => {
     const store = storeWithBroken("/checkout");

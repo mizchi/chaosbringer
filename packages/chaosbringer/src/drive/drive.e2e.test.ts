@@ -5,7 +5,7 @@ import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runRecipe } from "../recipes/replay.js";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
-import { anthropicDecider, parseDriveDecision, planDecider } from "./deciders.js";
+import { anthropicDecider, parseDriveDecision, planDecider, renderDrivePrompt } from "./deciders.js";
 import { drive, type DriveDecider, type DriveDecision, type DriveInput } from "./drive.js";
 
 const HOME = `<!doctype html><title>Home</title>
@@ -23,6 +23,22 @@ const LOGIN = `<!doctype html><title>Sign in</title><main><h1>Account</h1>
   <button>Sign in</button>
 </form></main>`;
 
+/**
+ * A GET form, so what is typed lands in the next page's URL, and a page
+ * there that logs a console error (a problem stamped with that URL).
+ * "Locked" is read-only: a fill of it fails.
+ */
+const GET_LOGIN = `<!doctype html><title>Get in</title><main><h1>Get in</h1>
+<form method="get" action="/noisy">
+  <label>User <input name="user"></label>
+  <label>Secret <input name="password" type="password" autocomplete="current-password"></label>
+  <label>Locked <input name="locked" type="password" readonly></label>
+  <button>Go</button>
+</form></main>`;
+const NOISY = `<!doctype html><title>Noisy</title><main><h1>Noisy</h1>
+<script>console.error("noisy page")</script>
+<button onclick="document.getElementById('m').textContent = 'All done'">Finish</button><p id="m"></p></main>`;
+
 describe("drive", () => {
   let server: TestServer;
   let browser: Browser;
@@ -39,6 +55,8 @@ describe("drive", () => {
       }
       res.writeHead(200, { "content-type": "text/html" });
       if (url.pathname === "/login") res.end(LOGIN);
+      else if (url.pathname === "/get-login") res.end(GET_LOGIN);
+      else if (url.pathname === "/noisy") res.end(NOISY);
       else if (url.pathname === "/welcome") res.end(`<!doctype html><title>Welcome</title><h1>Welcome, ${url.searchParams.get("u")} (${url.searchParams.get("plan")})</h1>`);
       else if (url.pathname === "/logout") res.end(`<!doctype html><title>Bye</title><p>Logged out</p>`);
       else res.end(HOME);
@@ -80,16 +98,140 @@ describe("drive", () => {
     expect(result.steps[0]!.target).toBe('button "Reject optional" — in dialog "Cookies"');
     expect(result.recipe!.steps.map((s) => s.kind)).toEqual(["navigate", "click", "click", "fill", "fill", "select", "click"]);
     expect(result.recipe!.steps[2]).toEqual({ kind: "click", selector: 'role=link[name="Sign in"s]', expectAfter: { urlContains: "/login" } });
+    // The password field's value is a placeholder; secretValues() replays it.
+    expect(result.recipe!.steps[4]).toEqual({ kind: "fill", selector: 'role=textbox[name="Password"s]', value: "{{password}}" });
+    expect(result.variables).toEqual(["password"]);
+    expect(result.secretValues()).toEqual({ password: "not-a-real-password" });
 
     const page = await browser.newPage();
     try {
-      const replay = await runRecipe(page, result.recipe!);
+      const replay = await runRecipe(page, result.recipe!, { vars: result.secretValues() });
       expect(replay).toMatchObject({ ok: true });
       await expect.poll(() => page.getByText("Welcome, ada@example.test (pro)").isVisible()).toBe(true);
     } finally {
       await page.close();
     }
   }, 60_000);
+
+  // A typed password was copied as it was into the recipe, drive-report.json
+  // and the progress line, and the outline the decider read next showed it as
+  // the field's value (`textbox "Password": …`).
+  describe("secrets", () => {
+    const recorder = (answers: Array<(input: DriveInput) => DriveDecision>) => {
+      const asked: DriveInput[] = [];
+      const decider: DriveDecider = {
+        name: "secrets",
+        async decide(input) {
+          asked.push(input);
+          return answers[asked.length - 1]?.(input) ?? { action: "done" };
+        },
+      };
+      return { decider, asked };
+    };
+    const at = (input: DriveInput, prefix: string) => input.candidates.find((c) => c.description.startsWith(prefix))!.index;
+
+    it("keeps what it types into a password field out of all it returns and shows the decider", async () => {
+      const steps: Array<[unknown, unknown]> = [];
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "Email"'), value: "ada@example.test" }),
+        (i) => ({ action: "fill", index: at(i, 'textbox "Password"'), value: "first-cb-secret", reasoning: "typing first-cb-secret" }),
+        (i) => ({ action: "fill", index: at(i, 'textbox "Password"'), value: "second-cb-secret" }),
+        (i) => ({ action: "fill", index: at(i, 'textbox "Password"'), value: "first-cb-secret" }),
+        (i) => ({ action: "click", index: at(i, 'button "Sign in"') }),
+      ]);
+      const result = await drive({
+        url: `${server.url}/login`,
+        goal: "sign in",
+        decider,
+        until: { urlIncludes: "/welcome" },
+        browser,
+        onStep: (entry, decision) => steps.push([entry, decision]),
+      });
+      expect(result.status).toBe("reached");
+      expect(result.steps.map((s) => s.value)).toEqual(["ada@example.test", "{{password}}", "{{password_2}}", "{{password}}", undefined]);
+      expect(result.recipe!.steps.filter((s) => s.kind === "fill").map((s) => (s as { value: string }).value)).toEqual([
+        "ada@example.test",
+        "{{password}}",
+        "{{password_2}}",
+        "{{password}}",
+      ]);
+      expect(result.variables).toEqual(["password", "password_2"]);
+      expect(result.secretValues()).toEqual({ password: "first-cb-secret", password_2: "second-cb-secret" });
+      // The outline after the first fill showed the field's value.
+      expect(asked[2]!.outline).toMatch(/textbox "Password"[^\n]*: \{\{password\}\}/);
+      expect(asked[2]!.secrets).toEqual(["password"]);
+      expect(asked[2]!.history[1]).toMatchObject({ action: "fill", value: "{{password}}" });
+      const everything = JSON.stringify({ result, asked, steps });
+      expect(everything).not.toContain("cb-secret");
+      expect(result.reason).toBe("typing {{password}}");
+    }, 60_000);
+
+    it("types a named secret where a decider writes {{name}}, and scrubs it from the URL it lands on", async () => {
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "Email"'), value: "{{login}}@example.test" }),
+        (i) => ({ action: "click", index: at(i, 'button "Sign in"') }),
+      ]);
+      const result = await drive({
+        url: `${server.url}/login`,
+        goal: "sign in",
+        decider,
+        until: { text: "Welcome" },
+        secrets: { login: "named-cb-token" },
+        browser,
+      });
+      expect(result.status).toBe("reached");
+      expect(asked[0]!.secrets).toEqual(["login"]);
+      // The welcome page's URL and heading carry what was typed.
+      expect(hits.some((h) => h.includes("named-cb-token"))).toBe(true);
+      expect(result.finalUrl).toContain("u={{login}}%40example.test");
+      expect(result.recipe!.steps.find((s) => s.kind === "fill")).toMatchObject({ value: "{{login}}@example.test" });
+      expect(result.variables).toEqual(["login"]);
+      expect(JSON.stringify(result)).not.toContain("named-cb-token");
+      expect(JSON.stringify(asked)).not.toContain("named-cb-token");
+    }, 60_000);
+
+    // problems[].url is the page's URL: it kept the value a GET form put there.
+    it("scrubs a problem's URL, in the result and in what the decider is shown", async () => {
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "Secret"'), value: "url-cb-secret" }),
+        (i) => ({ action: "click", index: at(i, 'button "Go"') }),
+        (i) => ({ action: "click", index: at(i, 'button "Finish"') }),
+      ]);
+      const result = await drive({ url: `${server.url}/get-login`, goal: "get in", decider, until: { text: "All done" }, browser });
+      expect(result.status).toBe("reached");
+      const noisy = (p: { kind: string; message: string }) => p.kind === "console" && p.message.includes("noisy page");
+      expect(asked[2]!.problems.find(noisy)?.url).toContain("password={{password}}");
+      expect(result.problems.find(noisy)?.url).toContain("password={{password}}");
+      expect(JSON.stringify({ result, asked })).not.toContain("url-cb-secret");
+    }, 60_000);
+
+    // The decider was shown the history as it was recorded: a value typed
+    // into a plain field before it was typed into a password field stayed
+    // in its entry, raw, on every later ask.
+    it("scrubs an earlier entry whose value later became a secret, from the next ask on", async () => {
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "User"'), value: "late-cb-secret" }),
+        (i) => ({ action: "fill", index: at(i, 'textbox "Secret"'), value: "late-cb-secret" }),
+        (i) => ({ action: "click", index: at(i, 'button "Go"') }),
+      ]);
+      const result = await drive({ url: `${server.url}/get-login`, goal: "get in", decider, until: { urlIncludes: "/noisy" }, browser });
+      expect(result.status).toBe("reached");
+      expect(asked[2]!.history.map((h) => h.value)).toEqual(["{{password}}", "{{password}}"]);
+      expect(JSON.stringify(asked.slice(2))).not.toContain("late-cb-secret");
+      expect(result.steps.map((s) => s.value)).toEqual(["{{password}}", "{{password}}", undefined]);
+      expect(result.recipe!.steps.filter((s) => s.kind === "fill").map((s) => (s as { value: string }).value)).toEqual([
+        "{{password}}",
+        "{{password}}",
+      ]);
+      expect(JSON.stringify(result)).not.toContain("late-cb-secret");
+    }, 60_000);
+
+    it("fails the step of a {{name}} no secret defines, without typing it", async () => {
+      const { decider } = recorder([(i) => ({ action: "fill", index: at(i, 'textbox "Email"'), value: "{{nope}}" }), () => ({ action: "give_up" })]);
+      const result = await drive({ url: `${server.url}/login`, goal: "g", decider, browser });
+      expect(result.steps[0]).toMatchObject({ ok: false, value: "{{nope}}", error: 'variable "nope" is not defined (no secret has that name)' });
+    }, 60_000);
+  });
 
   it("reports what broke at each step, and shows it to the decider", async () => {
     const inputs: DriveInput[] = [];
@@ -251,6 +393,61 @@ describe("drive", () => {
     expect(existsSync(video) && statSync(video).size > 1000).toBe(true);
   }, 60_000);
 
+  // Playwright titles a fill `Fill "<value>"` on the video: drive hides the
+  // titles around a secret's fill, and shows them again even when it fails.
+  it("hides the video's action titles around a secret's fill, and only there", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drive-video-"));
+    const calls: string[] = [];
+    const spied = new Proxy(browser, {
+      get(target, key) {
+        if (key === "newContext") {
+          return async (options?: Parameters<Browser["newContext"]>[0]) => {
+            const context = await target.newContext(options);
+            const newPage = context.newPage.bind(context);
+            context.newPage = async () => {
+              const page = await newPage();
+              const { screencast } = page;
+              const hide = screencast.hideActions.bind(screencast);
+              const show = screencast.showActions.bind(screencast);
+              screencast.hideActions = async () => {
+                calls.push("hide");
+                return hide();
+              };
+              screencast.showActions = async (o) => {
+                calls.push("show");
+                return show(o);
+              };
+              return page;
+            };
+            return context;
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const steps: string[] = [];
+    const result = await drive({
+      url: `${server.url}/get-login`,
+      goal: "get in",
+      decider: planDecider([
+        { fill: 'textbox "User"', value: "plain-text" },
+        { fill: 'textbox "Secret"', value: "vid-cb-secret" },
+        { fill: 'textbox "Locked"', value: "vid-cb-secret" },
+        { click: 'button "Go"' },
+      ]),
+      until: { urlIncludes: "/noisy" },
+      video: join(dir, "run.webm"),
+      actionTimeoutMs: 1000,
+      browser: spied,
+      onStep: (s) => steps.push([s.action, s.value, s.ok ? "ok" : "failed"].filter(Boolean).join(" ")),
+    });
+    expect(result.status).toBe("reached");
+    expect(steps).toEqual(["fill plain-text ok", "fill {{password}} ok", "fill {{password}} failed", "click ok"]);
+    // The opening show, then a hide and a show around each secret fill.
+    expect(calls).toEqual(["show", "hide", "show", "hide", "show"]);
+  }, 60_000);
+
   it("binds its browser, so another client can attach and take over where it stopped", async () => {
     const own = await chromium.launch();
     let seenByOther = "";
@@ -319,5 +516,30 @@ describe("parseDriveDecision", () => {
     expect(parseDriveDecision('{"action":"fill","index":0}', 2)).toBeNull();
     expect(parseDriveDecision('{"action":"jump"}', 2)).toBeNull();
     expect(parseDriveDecision("no json here", 2)).toBeNull();
+  });
+});
+
+describe("renderDrivePrompt", () => {
+  const input = (secrets?: string[]): DriveInput => ({
+    goal: "g",
+    url: "http://x.test/",
+    title: "t",
+    stepIndex: 1,
+    stepsLeft: 3,
+    outline: '- textbox "Password": {{password}}',
+    candidates: [],
+    history: [{ step: 0, action: "fill", target: 'textbox "Password"', value: "{{password}}", ok: true, url: "http://x.test/", problems: [] }],
+    problems: [],
+    ...(secrets ? { secrets } : {}),
+    screenshot: async () => Buffer.from(""),
+  });
+
+  it("lists the secrets the model can type by name, and shows a filled one by its placeholder", () => {
+    const text = renderDrivePrompt("{{feedback}}{{secrets}}Done so far:\n{{history}}", input(["password", "pw"]));
+    expect(text).toBe(
+      "Secrets you can type by name: {{password}}, {{pw}}. Fill with exactly that text; the value is typed for you.\n" +
+        'Done so far:\n0. fill textbox "Password" "{{password}}" — ok; now at http://x.test/',
+    );
+    expect(renderDrivePrompt("{{secrets}}x", input())).toBe("x");
   });
 });

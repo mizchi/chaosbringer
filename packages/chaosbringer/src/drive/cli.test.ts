@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { UsageError } from "../cli-usage.js";
 import type { ActionRecipe } from "../recipes/types.js";
 import { emptyStats } from "../recipes/types.js";
-import { planFrom, verifyCommand } from "./cli.js";
+import { checkSecretsPath, parseSecretFlags, planFrom, runDriveCli, verifyCommand, writeSecretsFile } from "./cli.js";
 
 function recipe(name: string, url: string): ActionRecipe {
   return {
@@ -40,6 +40,18 @@ describe("verifyCommand", () => {
     expect(verifyCommand(r, "chaosbringer-recipes/")).not.toContain("--dir");
     expect(verifyCommand(r, "out/recipes")).toBe(
       "chaosbringer recipes verify fixture/login --base-url http://127.0.0.1:4791 --dir out/recipes",
+    );
+  });
+
+  // drive records a password as `{{password}}`, and verify refuses a recipe
+  // whose placeholders it has no values for.
+  it("passes the secrets file drive wrote, or a --var to fill in for each placeholder", () => {
+    const r = recipe("fixture/login", "http://127.0.0.1:4791/login");
+    expect(verifyCommand(r, undefined, { variables: ["password"], varsFile: "out/secrets.json" })).toBe(
+      "chaosbringer recipes verify fixture/login --base-url http://127.0.0.1:4791 --vars-file out/secrets.json",
+    );
+    expect(verifyCommand(r, undefined, { variables: ["password", "one_time_code"] })).toBe(
+      "chaosbringer recipes verify fixture/login --base-url http://127.0.0.1:4791 --var password=VALUE --var one_time_code=VALUE",
     );
   });
 
@@ -98,5 +110,133 @@ describe("planFrom", () => {
     expect(refusal(regex)).toMatch(
       new RegExp(`^--plan ${regex}: step 0's target "/\\(/" is not a valid regex \\(Invalid regular expression: .+\\)$`),
     );
+  });
+});
+
+describe("planFrom with secrets", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-drive-plan-secrets-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("takes a {{name}} value a --secret names, and refuses one none does before anything runs", () => {
+    const path = join(dir, "plan.json");
+    writeFileSync(path, JSON.stringify([{ fill: "Email", value: "a@b.test" }, { fill: "Password", value: "{{password}}" }]));
+    expect(() => planFrom(path, new Set(["password"]))).not.toThrow();
+    expect(() => planFrom(path)).toThrow(
+      new UsageError(`--plan ${path}: step 1's value uses {{password}}, which no --secret names (add --secret password=ENV_VAR)`),
+    );
+  });
+});
+
+describe("parseSecretFlags", () => {
+  const env = { CB_PW: "pw-from-env", CB_EMPTY: "" };
+  const refusal = (flags: string[]) => {
+    try {
+      parseSecretFlags(flags, env);
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError);
+      return (err as Error).message;
+    }
+    return undefined;
+  };
+
+  it("reads each name=ENV_VAR from the environment", () => {
+    expect(parseSecretFlags(["password=CB_PW", "user.pw=CB_PW"], env)).toEqual({ password: "pw-from-env", "user.pw": "pw-from-env" });
+    expect(parseSecretFlags([], env)).toEqual({});
+  });
+
+  it("refuses, naming the flag, what it cannot type", () => {
+    expect(refusal(["password"])).toBe('--secret "password": expected NAME=ENV_VAR');
+    expect(refusal(["=CB_PW"])).toBe('--secret "=CB_PW": expected NAME=ENV_VAR');
+    expect(refusal(["password="])).toBe('--secret "password=": expected NAME=ENV_VAR');
+    expect(refusal(["my pw=CB_PW"])).toMatch(/^--secret "my pw=CB_PW": "my pw" is not a variable name/);
+    expect(refusal(["password=CB_UNSET_FOR_TEST"])).toBe('--secret "password=CB_UNSET_FOR_TEST": environment variable CB_UNSET_FOR_TEST is not set');
+    expect(refusal(["password=CB_EMPTY"])).toBe('--secret "password=CB_EMPTY": environment variable CB_EMPTY is empty');
+    expect(refusal(["password=CB_PW", "password=CB_PW"])).toBe('--secret "password=CB_PW": password is given twice');
+  });
+});
+
+describe("--save-secrets", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-drive-secrets-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const refusal = (path: string) => {
+    try {
+      checkSecretsPath(path);
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError);
+      return (err as Error).message;
+    }
+    return undefined;
+  };
+
+  it("takes a path that is not there, or a regular file it can overwrite", () => {
+    expect(refusal(join(dir, "new", "secrets.json"))).toBeUndefined();
+    const existing = join(dir, "existing.json");
+    writeFileSync(existing, "{}");
+    expect(refusal(existing)).toBeUndefined();
+  });
+
+  it("refuses a directory, a symlink, or a file it cannot write", () => {
+    const sub = join(dir, "a-dir");
+    mkdirSync(sub);
+    expect(refusal(sub)).toBe(`--save-secrets ${sub}: exists and is not a regular file`);
+    const target = join(dir, "target.json");
+    writeFileSync(target, "{}");
+    const link = join(dir, "link.json");
+    symlinkSync(target, link);
+    expect(refusal(link)).toBe(`--save-secrets ${link}: is a symlink; give the file itself`);
+    // root can write a read-only file, so this only holds for anyone else.
+    if (process.getuid?.() !== 0) {
+      const ro = join(dir, "read-only.json");
+      writeFileSync(ro, "{}");
+      chmodSync(ro, 0o400);
+      expect(refusal(ro)).toBe(`--save-secrets ${ro}: exists and cannot be written`);
+    }
+  });
+
+  // It used to pass a path whose directory could not be made, and fail
+  // after the run (exit 1, the recipe not saved).
+  it("refuses a new file in a directory it cannot create or write, and creates the one it can", () => {
+    const nested = join(dir, "made", "here", "secrets.json");
+    expect(refusal(nested)).toBeUndefined();
+    expect(statSync(join(dir, "made", "here")).isDirectory()).toBe(true);
+    // sysfs refuses every new entry, root's too.
+    if (process.platform === "linux" && existsSync("/sys/kernel")) {
+      expect(refusal("/sys/cb-no-such-dir/secrets.json")).toMatch(/^--save-secrets \/sys\/cb-no-such-dir\/secrets\.json: cannot write a file in \/sys\/cb-no-such-dir \(/);
+    }
+    if (process.getuid?.() !== 0) {
+      const locked = join(dir, "locked");
+      mkdirSync(locked, { mode: 0o500 });
+      expect(refusal(join(locked, "sub", "secrets.json"))).toMatch(/cannot write a file in/);
+      expect(refusal(join(locked, "secrets.json"))).toMatch(/cannot write a file in/);
+    }
+  });
+
+  // The check creates a missing directory: a run another check refuses
+  // should not leave one behind.
+  it("creates no directory for a run refused on another flag", async () => {
+    const parent = join(dir, "never-made");
+    await expect(
+      runDriveCli(["--url", "http://127.0.0.1:9/", "--goal", "g", "--plan", join(dir, "missing-plan.json"), "--save-secrets", join(parent, "secrets.json")]),
+    ).rejects.toThrow(new UsageError(`--plan ${join(dir, "missing-plan.json")}: no such file`));
+    expect(existsSync(parent)).toBe(false);
+  });
+
+  it("writes the vars as JSON readable by its owner only, also over a file that was readable by all", () => {
+    const fresh = join(dir, "out", "fresh.json");
+    writeSecretsFile(fresh, { password: "pw" });
+    expect(JSON.parse(readFileSync(fresh, "utf8"))).toEqual({ password: "pw" });
+    expect(statSync(fresh).mode & 0o777).toBe(0o600);
+    const wide = join(dir, "wide.json");
+    writeFileSync(wide, "old", { mode: 0o644 });
+    chmodSync(wide, 0o644);
+    writeSecretsFile(wide, { password: "pw2" });
+    expect(statSync(wide).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(wide, "utf8"))).toEqual({ password: "pw2" });
   });
 });

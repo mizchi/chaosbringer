@@ -80,17 +80,32 @@ The report covers what ran until the stop either way.
 ## Recipe templating
 
 Recipes can now declare `{{var}}` placeholders. Substitution happens
-in three positions:
+in these positions:
 
-| Step kind | Templated field |
+| Where | Templated field |
 |---|---|
-| `navigate` | `url` |
-| `fill` | `value` |
-| `select` | `value` |
+| `navigate` step | `url` |
+| `fill` step | `value` |
+| `select` step | `value` |
+| precondition / postcondition | `urlPattern`, with the value escaped so it matches as text (`{{id}}` = `1.5` matches `1.5`, not `125`) |
+| precondition / postcondition | `hasSelector`, `hidesSelector`, as written (`text=Welcome, {{name}}`) |
 
-Selectors, keys, click coordinates, and timeouts are **not**
+Step selectors, keys, click coordinates, and timeouts are **not**
 templated — those are stable references that shouldn't vary per
 iteration.
+
+Every replay substitutes, whether or not it was given `vars`. A
+placeholder `vars` has no value for fails the replay at the first step (or
+postcondition) that uses it, before anything runs: `{ ok: false, failedAt:
+{ index, reason: 'variable "email" is not defined' } }`. `recipeDriver`
+skips a recipe whose preconditions use one. `recipeVariables(recipe)` lists
+what a recipe needs. A name is letters, digits, `_`, `.` and `-`, starting
+with a letter or `_`; `{{` text that does not fit (`{{ }}`, `{{7*7}}`) is
+left as written. There is no escape for text that does fit: to type a
+literal `{{name}}`, pass `vars: { name: "{{name}}" }` (a substituted value
+is not read again). From the CLI, `chaosbringer load --var NAME=VALUE`
+and `--vars-file FILE` give every iteration the same values (see
+[recipe-cli.md](./recipe-cli.md#recipes-with-variables)).
 
 ```json
 {
@@ -124,9 +139,10 @@ Each iteration gets a fresh email. With 5 workers × 60 iterations,
 that's 300 unique signups — exactly the kind of data-variation that's
 painful to write in imperative `defineScenario`.
 
-A missing variable **throws** the moment a step references it. We do
-not silently substitute empty strings — a typo would otherwise let a
-form submit with a blank password.
+A missing variable fails that iteration's replay before any step runs
+(`variable "password" is not defined`), and the failure is recorded
+against the recipe. It is never typed as an empty string: a typo would
+otherwise let a form submit with a blank password.
 
 ## Selection strategies
 

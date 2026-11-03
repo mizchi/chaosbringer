@@ -298,3 +298,106 @@ describe("runRecipe postconditions", () => {
     expect(result.failedAt?.reason).toMatch(/^postcondition not satisfied: url~\/\/done\(\/ is not a valid regex \(/);
   });
 });
+
+// `runRecipe` substituted only when `vars` was given: without them a fill of
+// `{{password}}` typed the braces and reported ok, so `recipes verify` (which
+// could not pass vars) promoted a recipe that never logged in. With `vars: {}`
+// the missing variable threw out of runRecipe, past its try, and crashed
+// verify instead of failing the run.
+describe("runRecipe vars", () => {
+  function fillingPage(): { page: Page; fills: string[]; visits: string[] } {
+    const fills: string[] = [];
+    const { page, visits } = fakePage();
+    (page as unknown as { fill: (s: string, v: string) => Promise<void> }).fill = async (_s, v) => {
+      fills.push(v);
+    };
+    return { page, fills, visits };
+  }
+  const login = (postconditions: ActionRecipe["postconditions"] = []): ActionRecipe => ({
+    ...recipe([
+      { kind: "navigate", url: `${RECORDED}/login` },
+      { kind: "fill", selector: "#user", value: "{{user}}" },
+      { kind: "fill", selector: "#password", value: "{{password}}" },
+      { kind: "click", selector: "button" },
+    ]),
+    postconditions,
+  });
+
+  it("fails at the step that uses a variable no vars give, before typing anything", async () => {
+    const { page, fills, visits } = fillingPage();
+    expect(await runRecipe(page, login())).toMatchObject({
+      ok: false,
+      failedAt: { index: 1, reason: 'variable "user" is not defined' },
+    });
+    expect(await runRecipe(page, login(), { vars: { user: "ada" } })).toMatchObject({
+      ok: false,
+      failedAt: { index: 2, reason: 'variable "password" is not defined' },
+    });
+    expect(fills).toEqual([]);
+    expect(visits).toEqual([]);
+  });
+
+  it("types the substituted values", async () => {
+    const { page, fills } = fillingPage();
+    expect(await runRecipe(page, login(), { vars: { user: "ada", password: "pw" } })).toMatchObject({ ok: true });
+    expect(fills).toEqual(["ada", "pw"]);
+  });
+
+  it("fails a postcondition whose substituted URL pattern does not match", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fillingPage();
+      const pending = runRecipe(page, login([{ urlPattern: "/welcome/{{user}}$" }]), { vars: { user: "ada", password: "pw" } });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await pending).toMatchObject({
+        ok: false,
+        failedAt: { index: 4, reason: "postcondition not satisfied: url~/\\/welcome\\/ada$/" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("matches a substituted value in a URL pattern literally, regex characters and all", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const r = login([{ urlPattern: "/{{page}}$" }]);
+      const run = async (page: string) => {
+        const pending = runRecipe(fillingPage().page, r, { vars: { user: "ada", password: "pw", page } });
+        await vi.advanceTimersByTimeAsync(6000);
+        return pending;
+      };
+      expect(await run("done")).toMatchObject({ ok: true });
+      // As a regex, `.` would match the "n" of /done.
+      expect(await run("do.e")).toMatchObject({ ok: false, failedAt: { reason: "postcondition not satisfied: url~/\\/do\\.e$/" } });
+      // And `(` alone would not be one.
+      expect(await run("d(")).toMatchObject({ ok: false, failedAt: { reason: "postcondition not satisfied: url~/\\/d\\($/" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("substitutes a postcondition's selector, and names a variable it lacks at the postcondition", async () => {
+    const r = login([{ hasSelector: "text=Welcome {{user}}" }]);
+    const { page } = fillingPage();
+    const seen: string[] = [];
+    (page as unknown as { locator: (s: string) => unknown }).locator = (s: string) => {
+      seen.push(s);
+      return { first: () => ({ isVisible: async () => true }) };
+    };
+    expect(await runRecipe(page, r, { vars: { user: "ada", password: "pw" } })).toMatchObject({ ok: true });
+    expect(seen).toEqual(["text=Welcome ada"]);
+    const noUser = { ...r, steps: r.steps.filter((s) => s.kind !== "fill" || s.value !== "{{user}}") };
+    expect(await runRecipe(fillingPage().page, noUser, { vars: { password: "pw" } })).toMatchObject({
+      ok: false,
+      failedAt: { index: 3, reason: 'variable "user" is not defined' },
+    });
+  });
+
+  it("leaves `{{` text that is not a placeholder as it is", async () => {
+    const { page, fills } = fillingPage();
+    const r = recipe([{ kind: "fill", selector: "#q", value: "{{ }} {x} {{7*7}}" }]);
+    expect(await runRecipe(page, r)).toMatchObject({ ok: true });
+    expect(fills).toEqual(["{{ }} {x} {{7*7}}"]);
+  });
+});

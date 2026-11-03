@@ -106,9 +106,15 @@ export {
 } from "./minimize.js";
 export {
   hasTemplates,
+  recipeVariables,
+  substituteCondition,
+  substituteConditions,
   substituteStep,
   substituteSteps,
   substituteString,
+  templateNames,
+  UndefinedVariableError,
+  VARIABLE_NAME_RE,
   type RecipeVars,
 } from "./templating.js";
 export {
