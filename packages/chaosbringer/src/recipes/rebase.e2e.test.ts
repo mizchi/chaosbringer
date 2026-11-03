@@ -11,7 +11,7 @@ import type http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Browser, chromium } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { newIsolatedPage } from "../browser-session.js";
 import { planDecider } from "../drive/deciders.js";
 import { drive } from "../drive/drive.js";
@@ -22,6 +22,7 @@ import { scenarioLoadFromStore } from "./load-bridge.js";
 import { recipeDriver } from "./recipe-driver.js";
 import { repairRecipe } from "./repair.js";
 import { RecipeStore } from "./store.js";
+import { UndefinedVariableError } from "./templating.js";
 import type { ActionRecipe } from "./types.js";
 import { verifyAndPromote } from "./verify.js";
 
@@ -288,6 +289,37 @@ describe("a recipe replayed on another base URL", () => {
     // Nothing broke on that server either, so nothing to repair.
     expect(result).toMatchObject({ repaired: false, failedAt: login.steps.length });
     expect(otherHits).toContain("/auth-thanks?via=login");
+  }, 60_000);
+
+  // repairRecipe took no vars: its probe of a templated fill typed the
+  // braces (or now fails on the variable), and it "repaired" a recipe that
+  // was not broken.
+  it("repair fills in vars, and throws before a browser launches on one it lacks", async () => {
+    const templated: ActionRecipe = {
+      ...login,
+      name: "site/login-var",
+      steps: login.steps.map((s) => (s.kind === "fill" ? { ...s, value: "{{user}}" } : s)),
+      postconditions: [{ urlPattern: "/auth-thanks\\?via={{via}}" }],
+    };
+    const store = storeWith(templated);
+    const launch = vi.spyOn(chromium, "launch");
+    try {
+      await expect(repairRecipe({ recipe: templated, store, driver: weightedRandomDriver(), vars: { user: "admin" } })).rejects.toThrow(
+        UndefinedVariableError,
+      );
+      expect(launch).not.toHaveBeenCalled();
+    } finally {
+      launch.mockRestore();
+    }
+    const result = await repairRecipe({
+      recipe: templated,
+      store,
+      driver: weightedRandomDriver(),
+      browser,
+      vars: { user: "admin", via: "login" },
+      seed: 1,
+    });
+    expect(result).toMatchObject({ repaired: false, failedAt: templated.steps.length });
   }, 60_000);
 
   it("repair stores the repaired version with the URLs it ran on", async () => {

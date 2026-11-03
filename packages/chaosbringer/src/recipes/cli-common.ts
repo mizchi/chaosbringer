@@ -171,11 +171,14 @@ const NAME_RULE = "letters, digits, _ . -, starting with a letter or _";
  * A `UsageError` (exit 2, before a browser starts) for the first recipe
  * that uses a `{{name}}` placeholder `vars` does not define: each replay of
  * it would fail on that variable, and record the failure against a recipe
- * that is not broken.
+ * that is not broken. Only the placeholders a replay fills in count: its
+ * steps' and postconditions'. These commands do not read preconditions
+ * (`recipeDriver` does, to match a page), so one used only there is not
+ * asked for.
  */
 export function requireVars(recipes: Iterable<ActionRecipe>, vars: RecipeVars): void {
   for (const recipe of recipes) {
-    const missing = recipeVariables(recipe).filter((name) => !Object.hasOwn(vars, name));
+    const missing = recipeVariables({ ...recipe, preconditions: [] }).filter((name) => !Object.hasOwn(vars, name));
     if (missing.length === 0) continue;
     const names = missing.map((n) => `"${n}"`).join(", ");
     throw new UsageError(

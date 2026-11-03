@@ -296,7 +296,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       status,
       ...(reason !== undefined ? { reason: scrub(reason) } : {}),
       steps: history.map((h) => scrubEntry(h, secrets)),
-      problems: problems.map((p) => ({ ...p, message: scrub(p.message) })),
+      problems: problems.map((p) => scrubProblem(p, secrets)),
       finalUrl: scrub(safeUrl(page)),
       durationMs: Date.now() - started,
       recipe: null,
@@ -386,8 +386,11 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       stepsLeft: maxSteps - step,
       outline: secrets.scrub(view.outline),
       candidates: view.candidates.map(({ index, description, type }) => ({ index, description: secrets.scrub(description), type })),
-      history,
-      problems: siteProblems(problems.slice(seenProblems)).map((p) => ({ ...p, message: secrets.scrub(p.message) })),
+      // Scrubbed again for each ask, like the result: an entry recorded
+      // before its value was known to be a secret (a plain field, then a
+      // password field) would show the decider that value.
+      history: history.map((h) => scrubEntry(h, secrets)),
+      problems: siteProblems(problems.slice(seenProblems)).map((p) => scrubProblem(p, secrets)),
       ...(feedback !== undefined ? { feedback } : {}),
       secrets: secrets.names(),
       screenshot: async () => Buffer.from(await page.screenshot()),
@@ -535,6 +538,11 @@ function resolveSecret(secrets: DriveSecrets, value: string): string {
     if (err instanceof UndefinedVariableError) throw new Error(`variable "${err.variable}" is not defined (no secret has that name)`);
     throw err;
   }
+}
+
+/** `p` with its text scrubbed: its URL is the page's, which a GET form or a redirect can put a secret in. */
+function scrubProblem(p: DriveProblem, secrets: DriveSecrets): DriveProblem {
+  return { ...p, message: secrets.scrub(p.message), url: secrets.scrub(p.url) };
 }
 
 function scrubEntry(h: DriveHistoryEntry, secrets: DriveSecrets): DriveHistoryEntry {

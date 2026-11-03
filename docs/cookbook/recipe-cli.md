@@ -131,8 +131,10 @@ pnpm chaosbringer recipes verify auth/login --base-url http://localhost:3000 \
 pnpm chaosbringer load --base-url http://localhost:3000 --vars-file vars.json
 ```
 
-A recipe that uses a placeholder neither flag defines is refused before the
-browser starts, with exit 2 and the name of each variable it needs:
+A recipe that uses a placeholder neither flag defines, in a step or a
+postcondition, is refused before the browser starts, with exit 2 and the name
+of each variable it needs (these commands do not read preconditions, so a
+placeholder only a precondition uses is not asked for):
 
 ```
 chaosbringer recipes verify: auth/login: variable "password" is not defined (pass --var password=VALUE, or --vars-file FILE) (see chaosbringer recipes verify --help)
@@ -152,7 +154,11 @@ per-iteration values, use `scenarioLoadFromStore({ vars })`.
 > them in. From code, a recipe that uses a variable its `vars` lack fails at
 > that step (`ok: false`, `failedAt.reason` `variable "password" is not
 > defined`) instead of typing the braces, and with `vars: {}` it fails the
-> same way instead of throwing.
+> same way instead of throwing. `repairRecipe` throws an
+> `UndefinedVariableError` before it launches a browser when its start URL or
+> a postcondition uses a variable `vars` lacks. `minimizeRecipeTrace` and
+> `recipeChaos` fill placeholders in too: pass them `vars` for a templated
+> recipe (or a trace whose typed text holds `{{name}}`).
 
 ## Auto-repair (CLI form)
 

@@ -63,9 +63,14 @@ export class DriveSecrets {
   /** name → value, in the order they were added. */
   private readonly values = new Map<string, string>();
 
-  /** `named`: the `--secret` values, by the name a plan or model types them by. */
-  constructor(named: Readonly<Record<string, string>> = {}) {
-    for (const [name, value] of Object.entries(named)) this.values.set(name, value);
+  /**
+   * `named`: the `--secret` values, by the name a plan or model types them
+   * by. Also a run's `secretValues()`, to scrub what a replay with them
+   * writes (`drive --chaos`); a number or boolean is kept as the text a
+   * replay types for it.
+   */
+  constructor(named: Readonly<RecipeVars> = {}) {
+    for (const [name, value] of Object.entries(named)) this.values.set(name, String(value));
   }
 
   /** The names a value can be typed by (`{{name}}`). */

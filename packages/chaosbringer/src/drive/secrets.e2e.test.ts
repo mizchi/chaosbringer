@@ -47,6 +47,21 @@ const LOGIN = `<!doctype html><title>Log in</title><h1>Log in</h1>
   });
 </script>`;
 
+/**
+ * A GET form: the password lands in the result page's URL, which that page
+ * logs, and puts in the error it lets escape when its API call fails.
+ */
+const LOGIN_GET = `<!doctype html><title>Log in</title><h1>Log in</h1>
+<form method="get" action="/result">
+  <label>Password <input name="password" type="password" autocomplete="current-password"></label>
+  <button>Go</button>
+</form>`;
+const RESULT = `<!doctype html><title>Result</title><h1>Result</h1>
+<script>
+  console.error("oops at " + location.search);
+  fetch("/api/ping").then((r) => { if (!r.ok) throw new Error("api failed at " + location.search); });
+</script>`;
+
 function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile())
@@ -62,8 +77,15 @@ describe("drive keeps a typed password out of its output, and recipes verify rep
 
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
+      if (req.url === "/api/ping") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+        return;
+      }
       res.writeHead(200, { "content-type": "text/html" });
       if (req.url?.startsWith("/auth-thanks")) res.end(`<!doctype html><title>Welcome</title><h1>Welcome</h1>`);
+      else if (req.url === "/login-get") res.end(LOGIN_GET);
+      else if (req.url?.startsWith("/result")) res.end(RESULT);
       else res.end(LOGIN);
     });
     dir = mkdtempSync(join(tmpdir(), "chaos-drive-secrets-e2e-"));
@@ -121,6 +143,28 @@ describe("drive keeps a typed password out of its output, and recipes verify rep
     );
     expect(r.status).toBe(2);
   }, 60_000);
+
+  // The page's URL in drive-report.json's problems, and everything --chaos
+  // wrote and printed, kept the value an app echoed back.
+  it("keeps it out of a problem's URL and of what --chaos writes and prints, where the app echoes it", async () => {
+    const plan = join(dir, "plan-get.json");
+    writeFileSync(plan, JSON.stringify([{ fill: 'textbox "Password"', value: PASSWORD }, { click: 'button "Go"' }]));
+    const out = join(dir, "out-chaos");
+    const r = await cli([
+      "drive", "--url", `${server.url}/login-get`, "--goal", "log in", "--plan", plan, "--until-url", "/result",
+      "--out", out, "--chaos", "--faults", "500", "--quiet",
+    ]);
+    // The escaped error is a high finding.
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("the app let the API failure escape");
+    expect(r.stdout).toContain("api failed at ?password={{password}}");
+    const report = readFileSync(join(out, "drive-report.json"), "utf8");
+    expect((JSON.parse(report) as { problems: { url: string }[] }).problems.map((p) => p.url)).toContain(`${server.url}/result?password={{password}}`);
+    expect(filesUnder(out).map((f) => f.slice(out.length + 1)).sort()).toEqual(["chaos-report.json", "drive-report.json", "recipe.json"]);
+    for (const text of [r.stdout, r.stderr, ...filesUnder(out).map((f) => readFileSync(f, "utf8"))]) {
+      expect(text).not.toContain(PASSWORD);
+    }
+  }, 90_000);
 
   it("drive --secret types a plan's {{name}} from the environment, and keeps it out as well", async () => {
     const plan = join(dir, "plan-secret.json");

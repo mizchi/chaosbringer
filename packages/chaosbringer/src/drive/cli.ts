@@ -3,7 +3,7 @@
  * towards a goal and report what broke on the way. See `drive()`.
  */
 
-import { accessSync, closeSync, constants, fchmodSync, lstatSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
@@ -18,6 +18,7 @@ import { shellQuote } from "../repro-command.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
 import { drive, type DriveDecider, type DriveResult, type DriveUntil } from "./drive.js";
 import { siteProblems } from "./problems.js";
+import { DriveSecrets } from "./secrets.js";
 import { attachHint, type BoundBrowser, waitForInterrupt } from "../browser-bind.js";
 import { recipeChaos, type RecipeChaosResult } from "./chaos.js";
 import { SCAN_FAULT_KINDS, type ScanFaultKind } from "../scan/analyze.js";
@@ -66,7 +67,8 @@ OPTIONS:
                             It must be set and not empty
   --save-secrets <file>     Write the secrets the recipe needs to <file> (JSON, mode 0600), for
                             \`recipes verify --vars-file <file>\`. Overwrites a regular file;
-                            refuses a directory, a symlink or one it cannot write
+                            refuses a directory, a symlink or one it cannot write (a missing
+                            directory is created before the run)
   --storage-state <path>    Playwright storageState to start logged in
   --bind                    Serve the browser to other Playwright clients while driving:
                             npx playwright cli attach <title>, or an MCP client with
@@ -89,7 +91,8 @@ SECRETS:
   one-time-code field, and every --secret, is recorded as a placeholder: {{password}}
   ({{password_2}} for a second, different value), {{one_time_code}}, or the --secret's name.
   The value is replaced by that placeholder in what drive prints, drive-report.json,
-  recipe.json, the recipe store, the video's action titles and what the model is shown.
+  recipe.json, chaos-report.json, the recipe store, the video's action titles and what
+  the model is shown.
   It is not taken out of what the app itself sends or logs, nor out of screenshots or video
   frames of a field the page does not mask (a one-time code shows as typed).
 
@@ -233,11 +236,15 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       console.log(`chaos replay skipped: ${result.recipeSkipped ?? "the goal was not reached"}`);
     } else {
       console.log(`[chaos] replaying ${result.recipe.name} clean, then with ${faults.join(", ")}`);
+      const chaosSecrets = new DriveSecrets(result.secretValues());
       chaos = await recipeChaos({
         recipe: result.recipe,
         ...(Object.keys(until).length > 0 ? { until } : {}),
         faults,
         vars: result.secretValues(),
+        // The replay types the real values: what the app echoes of them (a
+        // URL, a log line, an error) is scrubbed as drive's own report is.
+        scrub: (text) => chaosSecrets.scrub(text),
         ...(values.exclude ? { exclude: values.exclude } : {}),
         ...(hangReleaseMs !== undefined ? { hangReleaseMs } : {}),
         ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
@@ -304,17 +311,20 @@ export function parseSecretFlags(flags: readonly string[], env: NodeJS.ProcessEn
 
 /**
  * A `UsageError` unless `--save-secrets` can be written once the run is
- * over: a path that does not exist (its directory is created), or a regular
- * file this process can write, which is overwritten. A directory, a symlink
- * (writing through it would put the secrets wherever it points) or anything
- * else is refused before the browser starts.
+ * over: a path that does not exist in a directory this process can write
+ * (a directory that does not exist yet is created here, before the run), or
+ * a regular file this process can write, which is overwritten. A directory,
+ * a symlink (writing through it would put the secrets wherever it points)
+ * or anything else is refused before the browser starts. A directory it
+ * could not create used to pass, and failed after the run, as exit 1 and
+ * with the run's recipe not saved.
  */
 export function checkSecretsPath(path: string): void {
   let st: ReturnType<typeof lstatSync>;
   try {
     st = lstatSync(path);
   } catch (err) {
-    if ((err as { code?: unknown }).code === "ENOENT") return;
+    if ((err as { code?: unknown }).code === "ENOENT") return checkSecretsDir(path);
     throw new UsageError(`--save-secrets ${path}: cannot be checked (${errorMessage(err)})`);
   }
   if (st.isSymbolicLink()) throw new UsageError(`--save-secrets ${path}: is a symlink; give the file itself`);
@@ -323,6 +333,27 @@ export function checkSecretsPath(path: string): void {
     accessSync(path, constants.W_OK);
   } catch {
     throw new UsageError(`--save-secrets ${path}: exists and cannot be written`);
+  }
+}
+
+/**
+ * The directory `path` (which does not exist) goes in: created one level at
+ * a time if it is missing, then checked writable. Creating it is what finds
+ * a place no file can go: `access` passes for root on a filesystem that
+ * refuses every new entry (`/sys`).
+ */
+function checkSecretsDir(path: string): void {
+  const dir = dirname(resolve(path));
+  const missing: string[] = [];
+  for (let d = dir; !existsSync(d); d = dirname(d)) {
+    missing.unshift(d);
+    if (dirname(d) === d) break;
+  }
+  try {
+    for (const d of missing) mkdirSync(d);
+    accessSync(dir, constants.W_OK | constants.X_OK);
+  } catch (err) {
+    throw new UsageError(`--save-secrets ${path}: cannot write a file in ${dir} (${errorMessage(err)})`);
   }
 }
 

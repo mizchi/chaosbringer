@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -196,6 +196,24 @@ describe("--save-secrets", () => {
       writeFileSync(ro, "{}");
       chmodSync(ro, 0o400);
       expect(refusal(ro)).toBe(`--save-secrets ${ro}: exists and cannot be written`);
+    }
+  });
+
+  // It used to pass a path whose directory could not be made, and fail
+  // after the run (exit 1, the recipe not saved).
+  it("refuses a new file in a directory it cannot create or write, and creates the one it can", () => {
+    const nested = join(dir, "made", "here", "secrets.json");
+    expect(refusal(nested)).toBeUndefined();
+    expect(statSync(join(dir, "made", "here")).isDirectory()).toBe(true);
+    // sysfs refuses every new entry, root's too.
+    if (process.platform === "linux" && existsSync("/sys/kernel")) {
+      expect(refusal("/sys/cb-no-such-dir/secrets.json")).toMatch(/^--save-secrets \/sys\/cb-no-such-dir\/secrets\.json: cannot write a file in \/sys\/cb-no-such-dir \(/);
+    }
+    if (process.getuid?.() !== 0) {
+      const locked = join(dir, "locked");
+      mkdirSync(locked, { mode: 0o500 });
+      expect(refusal(join(locked, "sub", "secrets.json"))).toMatch(/cannot write a file in/);
+      expect(refusal(join(locked, "secrets.json"))).toMatch(/cannot write a file in/);
     }
   });
 

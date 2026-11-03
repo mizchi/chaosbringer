@@ -139,9 +139,10 @@ Each iteration gets a fresh email. With 5 workers × 60 iterations,
 that's 300 unique signups — exactly the kind of data-variation that's
 painful to write in imperative `defineScenario`.
 
-A missing variable **throws** the moment a step references it. We do
-not silently substitute empty strings — a typo would otherwise let a
-form submit with a blank password.
+A missing variable fails that iteration's replay before any step runs
+(`variable "password" is not defined`), and the failure is recorded
+against the recipe. It is never typed as an empty string: a typo would
+otherwise let a form submit with a blank password.
 
 ## Selection strategies
 

@@ -148,4 +148,11 @@ describe("requireVars", () => {
       'site/login: variables "password", "user" are not defined (pass --var password=VALUE --var user=VALUE, or --vars-file FILE)',
     );
   });
+
+  // A replay never reads preconditions: one used only there was asked for,
+  // and the value given was never used.
+  it("does not ask for a placeholder only a precondition uses", () => {
+    const pre: ActionRecipe = { ...recipe("pre", "http://a.test/"), preconditions: [{ urlPattern: "/{{tenant}}/" }] };
+    expect(() => requireVars([pre], {})).not.toThrow();
+  });
 });

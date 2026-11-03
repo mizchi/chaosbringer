@@ -141,10 +141,14 @@ The real values are written only with `--save-secrets <file>`: a JSON object
 of the recipe's placeholders and their values, created (or overwritten) with
 mode 0600, which `recipes verify`, `recipes repair` and `load` read as
 `--vars-file <file>`. drive refuses, before the browser starts, a path that
-is a directory, a symlink or a file it cannot write. Keep the file out of
-version control. Without `--save-secrets`, the `verify with:` hint names
-each variable for you to supply (`--var password=VALUE`). `--chaos` replays
-the recipe with the values the run had.
+is a directory, a symlink, a file it cannot write, or a new file in a
+directory it cannot create or write (a directory that is missing is created
+then, before the run). Keep the file out of version control. Without
+`--save-secrets`, the `verify with:` hint names each variable for you to
+supply (`--var password=VALUE`). `--chaos` replays the recipe with the
+values the run had, and scrubs them from `chaos-report.json` and the
+findings it prints (what the app echoes back: a URL, a log line, an error)
+as it does from drive's own report.
 
 From code, `drive({ secrets: { pw: process.env.QA_PASSWORD! } })` does what
 `--secret` does, `result.variables` names the placeholders the recipe uses,
@@ -161,7 +165,9 @@ What drive cannot take a secret out of:
   does not mask (a one-time code is shown as typed; a password field shows
   dots);
 - a secret it does not know is one: a value typed into a plain text field
-  without `--secret`. `recipes lint` still warns about a credential-looking
+  without `--secret`. A value typed into a plain field first and into a
+  password field later is scrubbed from then on, and from the report and
+  the recipe, but the progress line printed for the earlier step keeps it. `recipes lint` still warns about a credential-looking
   fill whose value is not templated (`hardcoded-credentials`), for recipes
   written by hand.
 
@@ -195,7 +201,10 @@ no pages. Each faulted replay is compared with the clean one:
 
 A fault that never fired is reported as such. A journey that calls no API of
 its own (a localStorage TodoMVC) is skipped with that reason. `recipeChaos()`
-does the same from code, for any recipe.
+does the same from code, for any recipe. For one drive recorded with a
+secret, pass `vars: result.secretValues()` (without them the clean replay
+fails on the placeholder and no fault runs) and, to keep the values out of
+the result as `--chaos` does, `scrub: (text) => new DriveSecrets(result.secretValues()).scrub(text)`.
 
 ```sh
 chaosbringer drive --url http://localhost:3000/ --goal "add a T-shirt to the cart" \

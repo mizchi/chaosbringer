@@ -23,6 +23,22 @@ const LOGIN = `<!doctype html><title>Sign in</title><main><h1>Account</h1>
   <button>Sign in</button>
 </form></main>`;
 
+/**
+ * A GET form, so what is typed lands in the next page's URL, and a page
+ * there that logs a console error (a problem stamped with that URL).
+ * "Locked" is read-only: a fill of it fails.
+ */
+const GET_LOGIN = `<!doctype html><title>Get in</title><main><h1>Get in</h1>
+<form method="get" action="/noisy">
+  <label>User <input name="user"></label>
+  <label>Secret <input name="password" type="password" autocomplete="current-password"></label>
+  <label>Locked <input name="locked" type="password" readonly></label>
+  <button>Go</button>
+</form></main>`;
+const NOISY = `<!doctype html><title>Noisy</title><main><h1>Noisy</h1>
+<script>console.error("noisy page")</script>
+<button onclick="document.getElementById('m').textContent = 'All done'">Finish</button><p id="m"></p></main>`;
+
 describe("drive", () => {
   let server: TestServer;
   let browser: Browser;
@@ -39,6 +55,8 @@ describe("drive", () => {
       }
       res.writeHead(200, { "content-type": "text/html" });
       if (url.pathname === "/login") res.end(LOGIN);
+      else if (url.pathname === "/get-login") res.end(GET_LOGIN);
+      else if (url.pathname === "/noisy") res.end(NOISY);
       else if (url.pathname === "/welcome") res.end(`<!doctype html><title>Welcome</title><h1>Welcome, ${url.searchParams.get("u")} (${url.searchParams.get("plan")})</h1>`);
       else if (url.pathname === "/logout") res.end(`<!doctype html><title>Bye</title><p>Logged out</p>`);
       else res.end(HOME);
@@ -170,6 +188,42 @@ describe("drive", () => {
       expect(result.variables).toEqual(["login"]);
       expect(JSON.stringify(result)).not.toContain("named-cb-token");
       expect(JSON.stringify(asked)).not.toContain("named-cb-token");
+    }, 60_000);
+
+    // problems[].url is the page's URL: it kept the value a GET form put there.
+    it("scrubs a problem's URL, in the result and in what the decider is shown", async () => {
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "Secret"'), value: "url-cb-secret" }),
+        (i) => ({ action: "click", index: at(i, 'button "Go"') }),
+        (i) => ({ action: "click", index: at(i, 'button "Finish"') }),
+      ]);
+      const result = await drive({ url: `${server.url}/get-login`, goal: "get in", decider, until: { text: "All done" }, browser });
+      expect(result.status).toBe("reached");
+      const noisy = (p: { kind: string; message: string }) => p.kind === "console" && p.message.includes("noisy page");
+      expect(asked[2]!.problems.find(noisy)?.url).toContain("password={{password}}");
+      expect(result.problems.find(noisy)?.url).toContain("password={{password}}");
+      expect(JSON.stringify({ result, asked })).not.toContain("url-cb-secret");
+    }, 60_000);
+
+    // The decider was shown the history as it was recorded: a value typed
+    // into a plain field before it was typed into a password field stayed
+    // in its entry, raw, on every later ask.
+    it("scrubs an earlier entry whose value later became a secret, from the next ask on", async () => {
+      const { decider, asked } = recorder([
+        (i) => ({ action: "fill", index: at(i, 'textbox "User"'), value: "late-cb-secret" }),
+        (i) => ({ action: "fill", index: at(i, 'textbox "Secret"'), value: "late-cb-secret" }),
+        (i) => ({ action: "click", index: at(i, 'button "Go"') }),
+      ]);
+      const result = await drive({ url: `${server.url}/get-login`, goal: "get in", decider, until: { urlIncludes: "/noisy" }, browser });
+      expect(result.status).toBe("reached");
+      expect(asked[2]!.history.map((h) => h.value)).toEqual(["{{password}}", "{{password}}"]);
+      expect(JSON.stringify(asked.slice(2))).not.toContain("late-cb-secret");
+      expect(result.steps.map((s) => s.value)).toEqual(["{{password}}", "{{password}}", undefined]);
+      expect(result.recipe!.steps.filter((s) => s.kind === "fill").map((s) => (s as { value: string }).value)).toEqual([
+        "{{password}}",
+        "{{password}}",
+      ]);
+      expect(JSON.stringify(result)).not.toContain("late-cb-secret");
     }, 60_000);
 
     it("fails the step of a {{name}} no secret defines, without typing it", async () => {
@@ -337,6 +391,61 @@ describe("drive", () => {
     });
     expect(result.video).toBe(video);
     expect(existsSync(video) && statSync(video).size > 1000).toBe(true);
+  }, 60_000);
+
+  // Playwright titles a fill `Fill "<value>"` on the video: drive hides the
+  // titles around a secret's fill, and shows them again even when it fails.
+  it("hides the video's action titles around a secret's fill, and only there", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "drive-video-"));
+    const calls: string[] = [];
+    const spied = new Proxy(browser, {
+      get(target, key) {
+        if (key === "newContext") {
+          return async (options?: Parameters<Browser["newContext"]>[0]) => {
+            const context = await target.newContext(options);
+            const newPage = context.newPage.bind(context);
+            context.newPage = async () => {
+              const page = await newPage();
+              const { screencast } = page;
+              const hide = screencast.hideActions.bind(screencast);
+              const show = screencast.showActions.bind(screencast);
+              screencast.hideActions = async () => {
+                calls.push("hide");
+                return hide();
+              };
+              screencast.showActions = async (o) => {
+                calls.push("show");
+                return show(o);
+              };
+              return page;
+            };
+            return context;
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const steps: string[] = [];
+    const result = await drive({
+      url: `${server.url}/get-login`,
+      goal: "get in",
+      decider: planDecider([
+        { fill: 'textbox "User"', value: "plain-text" },
+        { fill: 'textbox "Secret"', value: "vid-cb-secret" },
+        { fill: 'textbox "Locked"', value: "vid-cb-secret" },
+        { click: 'button "Go"' },
+      ]),
+      until: { urlIncludes: "/noisy" },
+      video: join(dir, "run.webm"),
+      actionTimeoutMs: 1000,
+      browser: spied,
+      onStep: (s) => steps.push([s.action, s.value, s.ok ? "ok" : "failed"].filter(Boolean).join(" ")),
+    });
+    expect(result.status).toBe("reached");
+    expect(steps).toEqual(["fill plain-text ok", "fill {{password}} ok", "fill {{password}} failed", "click ok"]);
+    // The opening show, then a hide and a show around each secret fill.
+    expect(calls).toEqual(["show", "hide", "show", "hide", "show"]);
   }, 60_000);
 
   it("binds its browser, so another client can attach and take over where it stopped", async () => {

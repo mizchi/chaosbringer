@@ -163,4 +163,27 @@ describe("minimizeRecipeTrace", () => {
     });
     expect(result.reason).toBe("budget");
   });
+
+  // Every replay fills placeholders in now: a trace that types `{{q}}`
+  // reproduces only with the value, which minimize passes on.
+  it("replays a trace's {{placeholders}} with its vars", async () => {
+    let fills: string[] = [];
+    const factory = () => {
+      const { page } = makeFakePage();
+      fills = [];
+      (page as unknown as { fill: (s: string, v: string) => Promise<void> }).fill = async (s, v) => void fills.push(`${s}=${v}`);
+      return Promise.resolve({ page, cleanup: async () => {} });
+    };
+    const result = await minimizeRecipeTrace({
+      trace: trace([
+        { kind: "click", selector: "[redundant]" },
+        { kind: "fill", selector: "[s]", value: "{{q}}" },
+      ]),
+      goal: { name: "g", persona: "p", objective: "o", successCheck: async () => fills.includes("[s]=v") },
+      setupPage: factory,
+      vars: { q: "v" },
+    });
+    expect(result.shrank).toBe(true);
+    expect(result.steps).toEqual([{ kind: "fill", selector: "[s]", value: "{{q}}" }]);
+  });
 });

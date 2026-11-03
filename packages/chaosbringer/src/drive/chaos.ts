@@ -44,6 +44,14 @@ export interface RecipeChaosOptions {
    * `result.secretValues()` here.
    */
   vars?: RecipeVars;
+  /**
+   * Applied to every text of the result (and of what `onRun` is given)
+   * that the app or the replay wrote: problems' messages and URLs, a failed
+   * step's reason, the findings' details, the endpoints. The replay types
+   * `vars`' values, and an app can echo them back (a GET form's URL, a log
+   * line). `drive --chaos` passes its secrets' scrub here.
+   */
+  scrub?: (text: string) => string;
   /** The goal's success condition, checked after each replay. */
   until?: DriveUntil;
   /** Default: all three (`status`, `abort`, `hang`). */
@@ -112,7 +120,14 @@ export async function recipeChaos(opts: RecipeChaosOptions): Promise<RecipeChaos
           { exclude: opts.exclude ?? [] },
         );
     const pattern = opts.endpointPattern ?? endpointsPattern(endpoints);
-    const result: RecipeChaosResult = { endpoints, pattern, runs: [clean.run], findings: [] };
+    // The faults match the requests as sent: only the copy returned is scrubbed.
+    const scrub = opts.scrub ?? ((text: string) => text);
+    const result: RecipeChaosResult = {
+      endpoints: endpoints.map((e) => ({ ...e, label: scrub(e.label), pattern: scrub(e.pattern) })),
+      pattern: pattern === null ? null : scrub(pattern),
+      runs: [clean.run],
+      findings: [],
+    };
     if (!clean.run.replay.ok) {
       result.skipped = `the clean replay failed at step ${clean.run.replay.failedAt?.index}: ${clean.run.replay.failedAt?.reason}`;
       return result;
@@ -204,14 +219,20 @@ async function replayOnce(
     const fired = session ? (await session.firings()).reduce((n, f) => n + f.fired, 0) : 0;
     await session?.dispose().catch(() => {});
     const seen = new Set(cleanProblems.map(fingerprintOf));
+    // Scrubbed here, so that the comparison with the clean run's (also
+    // scrubbed) problems, the findings built from them and `onRun` all see
+    // the same text as the result.
+    const scrub = opts.scrub ?? ((text: string) => text);
+    const problems = watch.problems.map((p) => ({ ...p, message: scrub(p.message), url: scrub(p.url) }));
+    if (replay.failedAt) replay = { ...replay, failedAt: { ...replay.failedAt, step: scrub(replay.failedAt.step), reason: scrub(replay.failedAt.reason) } };
     const run: RecipeChaosRun = {
       fault,
       label: fault === "clean" ? "clean" : SCAN_FAULT_LABELS[fault],
       replay,
       goalHeld,
       fired,
-      problems: watch.problems,
-      newProblems: fault === "clean" ? [] : siteProblems(watch.problems).filter((p) => !seen.has(fingerprintOf(p))),
+      problems,
+      newProblems: fault === "clean" ? [] : siteProblems(problems).filter((p) => !seen.has(fingerprintOf(p))),
       durationMs: Date.now() - started,
     };
     return { run, requests, pages };
