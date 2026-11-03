@@ -652,6 +652,8 @@ export {
   type ScanFinding,
   type ScanSeverity,
 } from "./scan/analyze.js";
+// What `ScanOptions.invariants` (`--invariants`) names: a data-safety preset, or the bundle.
+export type { InvariantPresetName } from "./cli-invariants.js";
 export { deriveScanEndpoints, type ScanEndpoint } from "./scan/endpoints.js";
 export { formatScanMarkdown, formatScanSummary } from "./scan/format.js";
 

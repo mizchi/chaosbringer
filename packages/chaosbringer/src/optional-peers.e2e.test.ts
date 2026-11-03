@@ -96,6 +96,15 @@ describe("the CLI without its optional peers installed", () => {
 
   it.each([
     [[...URL_ARG, "--axe"], "chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)"],
+    // The alias, named as typed; the data-safety presets beside it need nothing.
+    [
+      [...URL_ARG, "--invariants", "data-safety,axe"],
+      "chaosbringer: --invariants axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)",
+    ],
+    [
+      ["scan", ...URL_ARG, "--invariants", "axe"],
+      "chaosbringer scan: --invariants axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` (or `npm install -D axe-core`)",
+    ],
     // Its first run, which writes the baselines and needed neither, passed.
     [
       [...URL_ARG, "--visual-baseline", "vb"],

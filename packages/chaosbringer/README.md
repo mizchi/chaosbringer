@@ -163,9 +163,9 @@ Every report includes:
 
 Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict` fails on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`.
 
-`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--invariants` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
 
-Fault rules (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`) and invariants set in code have no flag. The command cannot carry them, and a failure they caused reruns clean without them, so it ends in a comment that counts them and names them as their stats do: `Repro: chaosbringer --url … --seed 42 # + 1 fault rule not expressible on the CLI: api-500`. A shell skips the comment (zsh only with `setopt interactivecomments`; without it the CLI exits 2 and says to drop it). The invariants `--axe` and `--visual-baseline` build are carried as those flags. To rerun such a run, run its `chaos({...})` / `ChaosCrawler` config again with the printed seed. A `chaosbringer scan` chaos crawl's report holds the `chaosbringer scan … --faults <fault>` command that reruns it instead. Its comment also names the `runScan` options that change the crawls and have no scan flag, as `crawler.<option>` / `perf.<option>`: `crawler.spaPatterns`, a HAR replay's `crawler.har`, `crawler.httpCache: false`, a `crawler.settle` other than scan's adaptive one, `perf.memory`.
+Fault rules (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`) and invariants set in code have no flag. The command cannot carry them, and a failure they caused reruns clean without them, so it ends in a comment that counts them and names them as their stats do: `Repro: chaosbringer --url … --seed 42 # + 1 fault rule not expressible on the CLI: api-500`. A shell skips the comment (zsh only with `setopt interactivecomments`; without it the CLI exits 2 and says to drop it). The invariants `--axe`, `--invariants` / `--data-safety` and `--visual-baseline` build are carried as those flags (`--data-safety` and every `--invariants` as one `--invariants` list, `--invariants axe` as `--axe`). To rerun such a run, run its `chaos({...})` / `ChaosCrawler` config again with the printed seed. A `chaosbringer scan` chaos crawl's report holds the `chaosbringer scan … --faults <fault>` command that reruns it instead. Its comment also names the `runScan` options that change the crawls and have no scan flag, as `crawler.<option>` / `perf.<option>`: `crawler.spaPatterns`, a HAR replay's `crawler.har`, `crawler.httpCache: false`, a `crawler.settle` other than scan's adaptive one, `perf.memory`.
 
 To rerun an exact failure of a CLI run locally, copy the `Repro:` line from CI.
 
@@ -841,6 +841,42 @@ axe is injected over CDP, so a page's Content-Security-Policy does not block it,
 
 A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Violations inside an iframe follow, per frame URL: `[a11y-axe] 3 a11y violations: image-alt(×1, critical); in frame https://example.com/embed: button-name(×1, critical), image-alt(×1, critical)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
 
+## Bad and hostile data from the CLI
+
+`--strict` fails a run on what throws. A page that shows `Total: NaN EUR`,
+or runs a script a query parameter carried, throws nothing and passes.
+The [data-safety presets](../../docs/recipes/data-safety.md) catch those,
+and `--invariants` turns them on by name:
+
+```bash
+chaosbringer --url http://localhost:3000 --strict --data-safety
+chaosbringer --url http://localhost:3000 --invariants data-safety,not-blank
+# A reflected payload delivered on the start URL (it only sets a marker):
+chaosbringer --url 'http://localhost:3000/search?q=%3Cdetails%20open%20ontoggle%3D%22window.__cb_xss_fired%3D1%22%3E%3C%2Fdetails%3E' --invariants xss-marker
+chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
+```
+
+| Name | Builds | Fails when |
+|---|---|---|
+| `data-safety` | `invariants.dataSafety()`: the next four | any of them does |
+| `xss-marker` | `invariants.xssMarker()` (`data.xss-marker`) | a marker (`window.__cb_xss_fired`, `window.__xss_fired`) is set: a payload ran |
+| `injected-markup` | `invariants.injectedMarkup()` (`data.injected-markup`) | a `data-cb-injected` element, or a `javascript:` URL or `on*` attribute naming a marker, is in the DOM |
+| `prototype-pollution` | `invariants.prototypePollution()` (`data.prototype-pollution`) | `Object.prototype` has an enumerable key |
+| `rendered-garbage` | `invariants.renderedGarbage()` (`data.rendered-garbage`) | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` |
+| `not-blank` | `invariants.notBlank()` (`data.not-blank`) | the page shows no visible text. Not in `data-safety`, as `dataSafety()` leaves it out: a canvas or image-only page is blank by design |
+| `axe` | `invariants.axe()`, as `--axe` | an axe-core violation (needs `axe-core`) |
+
+A name given twice, or a member of `data-safety` named beside it, runs once.
+Each preset runs with its defaults: its options (your own `markers` or
+`tokens`, an `ignore` selector for a page that writes about `undefined`, a
+`urlPattern`, `when`) have no flag, and are set through the library, in
+`chaos({ invariants })`, `ChaosCrawler` or `runScan({ crawler: { invariants } })`.
+A violation is an `invariant-violation` page error, which fails the run in
+every mode; `scan` reports it as an `invariant-violation` finding, `high`
+for `xss-marker`, `injected-markup` and `prototype-pollution`, `medium`
+otherwise. `shard` forwards both flags to its workers; `flake` and `drive`
+take neither.
+
 ## Action heatmap
 
 Aggregate `report.actions[]` into per-target stats — count, success rate, blocked-external count, shard-skipped count — sorted by frequency. Useful when you want to know which targets the chaos driver is hitting most and which ones disproportionately fail.
@@ -1455,6 +1491,8 @@ chaosbringer --url http://localhost:3000 \
 | `--budget <k=ms,...>` | Per-metric performance budget (repeatable; each ms > 0) | — |
 | `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed; exit 2 without it) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
+| `--invariants <list>` | Run invariant presets on every page, by name (comma-separated, repeatable, merged): `data-safety` (`invariants.dataSafety()`: `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`; not `not-blank`), any of those or `not-blank`, `axe` (= `--axe`). Each with its defaults; an unknown name exits 2. See [Bad and hostile data](#bad-and-hostile-data-from-the-cli) | — |
+| `--data-safety` | Shorthand for `--invariants data-safety` | false |
 | `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`; exit 2 without them) | — |
 | `--visual-threshold <n>` | pixelmatch color distance (0..1) | 0.1 |
 | `--visual-max-diff-pixels <n>` | Absolute pixel budget before failing | 0 |

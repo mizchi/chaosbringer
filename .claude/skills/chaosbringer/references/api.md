@@ -171,6 +171,15 @@ one, `new ChaosCrawler()` / `chaos()` / the fixture / `scenarioLoad()` throw `Mi
 invariant violation per page, which reads as an accessibility bug in the app.
 An invariant declares such packages in `peers`; the presets already do.
 
+The data-safety presets (`invariants.dataSafety()`: `xssMarker`,
+`injectedMarkup`, `prototypePollution`, `renderedGarbage`; and `notBlank`,
+which `dataSafety()` leaves out) catch bad data that did damage without
+throwing: a payload that ran, `NaN` on screen, a polluted prototype. From the
+shell, `--invariants data-safety,not-blank` (or `--data-safety`) turns them
+on for the crawl, `shard` and `scan`, each with its defaults; their options
+(`markers`, `tokens`, `ignore`, `urlPattern`) are code-only. The `Repro:`
+line carries the flag. Details: `docs/recipes/data-safety.md`.
+
 ## Driving a known path instead of a random one
 
 ```ts

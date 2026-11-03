@@ -60,6 +60,9 @@ const ROUND_TRIPS: Record<string, string[]> = {
   axe: ["--axe"],
   "axe-tags": ["--axe", "--axe-tags", "wcag2a,wcag2aa"],
   "aria-targets": ["--aria-targets"],
+  // Merged and de-duplicated, then written back in one canonical form.
+  invariants: ["--invariants", "not-blank,xss-marker", "--invariants", "data-safety"],
+  "data-safety": ["--data-safety"],
   "visual-baseline": ["--visual-baseline", "baselines"],
   "visual-threshold": ["--visual-baseline", "b", "--visual-threshold", "0.2"],
   "visual-max-diff-pixels": ["--visual-baseline", "b", "--visual-max-diff-pixels", "10"],
@@ -143,6 +146,36 @@ describe("reproCommand covers the main CLI's flags", () => {
     const after = resolved(cliOptions(words.slice(1)));
     expect(comparable(after)).toEqual(comparable(before));
     expect(buildReproCommand(after, after.seed)).toBe(command);
+  });
+});
+
+describe("reproCommand of --invariants / --data-safety", () => {
+  const invariantNames = (o: CrawlerOptions) => (o.invariants ?? []).map((i) => i.name);
+
+  it.each([
+    [["--data-safety"], "--invariants data-safety"],
+    [["--invariants", "data-safety,xss-marker,rendered-garbage"], "--invariants data-safety"],
+    [["--invariants", "not-blank", "--data-safety"], "--invariants data-safety,not-blank"],
+    [["--invariants", "rendered-garbage,xss-marker"], "--invariants xss-marker,rendered-garbage"],
+    // The alias is written as the flag it stands for, with its tags.
+    [["--invariants", "axe,not-blank", "--axe-tags", "wcag2a"], "--axe --axe-tags wcag2a --invariants not-blank"],
+  ])("%j reruns with the same invariants: %s", (argv, flags) => {
+    const before = resolved(cliOptions(["--url", URL, ...argv]));
+    const command = buildReproCommand(before, 1);
+    expect(command).toBe(`chaosbringer --url ${URL} --seed 1 ${flags}`);
+    // What the flag built is the flag's, not "not expressible on the CLI".
+    expect(unreplayedNote(before)).toBeUndefined();
+    const after = resolved(cliOptions(shellWords(command).slice(1)));
+    expect(invariantNames(after)).toEqual(invariantNames(before));
+    expect(invariantNames(after).length).toBeGreaterThan(0);
+  });
+
+  it("still notes an invariant set in code next to them", () => {
+    const o = resolved({ ...cliOptions(["--url", URL, "--data-safety"]) });
+    o.invariants = [...o.invariants, { name: "cart-total", check: () => true }];
+    expect(buildReproCommand(o, 1)).toBe(
+      `chaosbringer --url ${URL} --seed 1 --invariants data-safety # + 1 invariant not expressible on the CLI: cart-total`,
+    );
   });
 });
 

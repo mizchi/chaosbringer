@@ -19,6 +19,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
 import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "../defaults.js";
+import { buildInvariantPresets, expandInvariantNames, formatInvariantsFlag, type InvariantPresetName } from "../cli-invariants.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
 import { attachHint } from "../browser-bind.js";
@@ -55,6 +56,15 @@ export interface ScanOptions {
   seed?: number;
   /** Run axe-core on every page (needs `axe-core` installed). Default false. */
   axe?: boolean;
+  /**
+   * Invariant presets to run on every page of every crawl, by the names
+   * `--invariants` takes: `data-safety` (`invariants.dataSafety()`'s four,
+   * not `not-blank`), `xss-marker`, `injected-markup`, `prototype-pollution`,
+   * `rendered-garbage`, `not-blank`. Each with its defaults; a preset with
+   * options of your own goes in `crawler.invariants`, which the Repro line
+   * can only note. Unlike those, these are carried as a flag.
+   */
+  invariants?: readonly InvariantPresetName[];
   /** Collect JS / CSS coverage for the unused-code finding. Default true. */
   coverage?: boolean;
   /** Further `perf` options for every crawl (e.g. `memory: { forceGc: true }`); `outDir` is the scan's. */
@@ -144,6 +154,8 @@ export function scanReproCommand(options: ScanOptions, seed: number, kind: ScanF
     push("--hang-ms", String(options.hangReleaseMs));
   }
   if (options.axe) push("--axe");
+  const presets = expandInvariantNames(options.invariants ?? []);
+  if (presets.length > 0) push("--invariants", formatInvariantsFlag(presets));
   if (c.ariaTargets) push("--aria-targets");
   if (options.coverage === false) push("--no-coverage");
   for (const p of c.excludePatterns ?? []) push("--exclude", p);
@@ -291,6 +303,13 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
 
   const invariants: Invariant[] = [...(options.crawler?.invariants ?? [])];
   if (options.axe) invariants.push(axe());
+  const presets = expandInvariantNames(options.invariants ?? []);
+  invariants.push(...buildInvariantPresets(presets));
+  // The clean crawl's repro is a plain crawl, which builds the same checks from the same flags.
+  const reproFlags: ReproFlag[] = [
+    ...(options.axe ? [{ flag: "--axe" }] : []),
+    ...(presets.length > 0 ? [{ flag: "--invariants", value: formatInvariantsFlag(presets) }] : []),
+  ];
 
   const base = (perfDir: string): CrawlerOptions => ({
     // Adaptive settle: an unknown site often never reaches networkidle
@@ -302,8 +321,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     maxActionsPerPage: options.maxActionsPerPage ?? DEFAULT_SCAN_MAX_ACTIONS,
     seed,
     invariants,
-    // The clean crawl's repro is a plain crawl, which builds the same check from --axe.
-    ...(options.axe ? { cliReproFlags: [...(options.crawler?.cliReproFlags ?? []), { flag: "--axe" }] } : {}),
+    ...(reproFlags.length > 0 ? { cliReproFlags: [...(options.crawler?.cliReproFlags ?? []), ...reproFlags] } : {}),
     perf: { coverage: options.coverage ?? true, ...options.perf, outDir: perfDir },
   });
   const events = (phase: string): CrawlerEvents => ({
