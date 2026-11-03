@@ -35,6 +35,8 @@ const ROUND_TRIPS: Record<string, string[]> = {
   "max-actions": ["--max-actions", "2"],
   seed: ["--seed", "7"],
   axe: ["--axe"],
+  invariants: ["--invariants", "not-blank,xss-marker", "--invariants", "data-safety"],
+  "data-safety": ["--data-safety"],
   "aria-targets": ["--aria-targets"],
   "no-coverage": ["--no-coverage"],
   "hang-ms": ["--hang-ms", "1500"],
@@ -93,6 +95,17 @@ describe("a scan chaos report's reproCommand", () => {
     const o = scanOptions(["--url", URL, "--seed", "7", "--sitemap", "sitemap.xml", "--hang-ms", "1500"]);
     expect(scanReproCommand(o, 7, "status")).toBe(`chaosbringer scan --url ${URL} --seed 7 --faults 500 --sitemap sitemap.xml`);
     expect(scanReproCommand(o, 7, "hang")).toBe(`chaosbringer scan --url ${URL} --seed 7 --faults hang --hang-ms 1500 --sitemap sitemap.xml`);
+  });
+
+  it("carries --invariants as one canonical list, and the axe alias as --axe", () => {
+    const o = scanOptions(["--url", URL, "--invariants", "rendered-garbage,axe", "--data-safety", "--invariants", "not-blank"]);
+    const command = scanReproCommand(o, 7, "status");
+    expect(command).toBe(`chaosbringer scan --url ${URL} --seed 7 --faults 500 --axe --invariants data-safety,not-blank`);
+    const after = scanOptions(shellWords(command).slice(2));
+    expect([after.axe, after.invariants]).toEqual([true, o.invariants]);
+    // From code, the bundle's name reads back as its members.
+    const fromCode = scanReproCommand({ url: URL, invariants: ["not-blank", "data-safety"] }, 7, "abort");
+    expect(fromCode).toBe(`chaosbringer scan --url ${URL} --seed 7 --faults abort --invariants data-safety,not-blank`);
   });
 
   it("ends in a comment naming what the options set in code", () => {

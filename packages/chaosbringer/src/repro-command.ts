@@ -17,6 +17,7 @@
  * whose 500 broke a page used to print a command that reran it clean and
  * passed, and said nothing.
  */
+import { invariantsFlagBuilds } from "./cli-invariants.js";
 import { DEFAULT_OPTIONS } from "./defaults.js";
 import { toRegExp } from "./fault-router.js";
 import { iframeFaultName } from "./iframe-faults.js";
@@ -72,11 +73,16 @@ type UnreplayedOptions = Pick<
   "faultInjection" | "lifecycleFaults" | "runtimeFaults" | "iframeFaults" | "invariants" | "cliReproFlags"
 >;
 
-/** The invariant each CLI flag builds, by the name it gives it (`cli-crawl-options.ts`). */
-const CLI_INVARIANTS: ReadonlyMap<string, string> = new Map([
-  ["--axe", "a11y-axe"],
-  ["--visual-baseline", "visual-regression"],
-]);
+/**
+ * The invariants a CLI flag builds, by the names it gives them
+ * (`cli-crawl-options.ts`); `--invariants`' depend on its value.
+ */
+function cliFlagBuilds({ flag, value }: ReproFlag): readonly string[] {
+  if (flag === "--axe") return ["a11y-axe"];
+  if (flag === "--visual-baseline") return ["visual-regression"];
+  if (flag === "--invariants" && value !== undefined) return invariantsFlagBuilds(value);
+  return [];
+}
 
 /** How many names a note lists before `+N more`. */
 const NOTE_NAMES = 5;
@@ -85,7 +91,8 @@ const NOTE_NAMES = 5;
  * What a run set that no flag of its repro command carries, counted and
  * named, e.g. `1 fault rule not expressible on the CLI: scan:api-500`;
  * `undefined` when there is nothing. The fault layers and the invariants
- * other than the ones `--axe` / `--visual-baseline` built, then `unflagged`,
+ * other than the ones `--axe` / `--invariants` / `--visual-baseline` built
+ * (`cliReproFlags`), then `unflagged`,
  * the other options the caller found no flag for (`scanReproCommand`'s
  * `crawler.spaPatterns`). A rule is named as its stats name it, an unnamed
  * network rule by its pattern.
@@ -98,10 +105,11 @@ const NOTE_NAMES = 5;
  */
 export function unreplayedNote(options: UnreplayedOptions, unflagged: readonly string[] = []): string | undefined {
   const invariants = (options.invariants ?? []).map((i) => i.name);
-  for (const { flag } of options.cliReproFlags ?? []) {
-    const built = CLI_INVARIANTS.get(flag);
-    const at = built === undefined ? -1 : invariants.indexOf(built);
-    if (at >= 0) invariants.splice(at, 1);
+  for (const flag of options.cliReproFlags ?? []) {
+    for (const built of cliFlagBuilds(flag)) {
+      const at = invariants.indexOf(built);
+      if (at >= 0) invariants.splice(at, 1);
+    }
   }
   const groups: Array<[string, string[]]> = [
     // An unnamed rule as `faultInjections[].rule` names it: by its compiled

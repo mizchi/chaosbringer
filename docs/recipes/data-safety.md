@@ -18,8 +18,27 @@ await chaos({
 ```
 
 They are ordinary invariants, like `invariants.axe()`: nothing turns them on
-by default, not the crawler, not `chaosbringer scan`, not the CLI. Pass them
-to `chaos()` / `ChaosCrawler`, or to `runScan({ crawler: { invariants } })`.
+by default. Pass them to `chaos()` / `ChaosCrawler`, or to
+`runScan({ crawler: { invariants } })`; from the command line, name them
+with `--invariants` (or `--data-safety`, for `--invariants data-safety`) on
+the crawl, `shard` and `scan`:
+
+```bash
+chaosbringer --url http://localhost:3000 --strict --data-safety
+chaosbringer --url http://localhost:3000 --invariants data-safety,not-blank
+chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
+```
+
+The names are `data-safety` (the four `dataSafety()` returns, not
+`not-blank`), `xss-marker`, `injected-markup`, `prototype-pollution`,
+`rendered-garbage`, `not-blank`, and `axe` for `--axe`. A list is
+comma-separated, the flag repeatable, and a check named twice (or a member
+named beside `data-safety`) runs once; an unknown name is refused with exit
+2 before the browser starts. The flags build each preset with its defaults:
+`markers`, `tokens`, `ignore`, `selector`, `urlPattern` and `when` have no
+flag, so a run that needs them uses the library. The `Repro:` line carries
+the flag back as one `--invariants` list.
+
 A failure is a page error of type `invariant-violation`, which always fails
 the run's exit code.
 
@@ -50,7 +69,16 @@ also takes one options object per preset (`xssMarker`, `injectedMarkup`,
 `prototypePollution`, `renderedGarbage`) whose values win. The `data.`
 prefix keeps `chaosbringer scan` reporting a failure as an
 `invariant-violation` finding (an `a11y` prefix would make it an
-accessibility one).
+accessibility one): `high` for `data.xss-marker`, `data.injected-markup` and
+`data.prototype-pollution`, `medium` for the others, so `--fail-on high`
+stops on hostile data that ran or reached the DOM. One that shows only in a
+chaos crawl (a page that renders `undefined` once its API answers 500) is a
+`fault-new-error` resilience finding.
+
+> **Behaviour change:** these used to be `medium` `invariant-violation`
+> findings for every preset, and one seen only in a chaos crawl was dropped.
+> A `runScan({ crawler: { invariants: dataSafety() } })` gate on `high` or
+> `medium` that passed can now fail (see [scan](scan.md#data-safety-checks)).
 
 Each preset checks the top document and every iframe, same-origin or not.
 An iframe that can't be read (detached mid-check, stuck for 5 s) is skipped,
@@ -231,6 +259,7 @@ that runs later, on a timer or after the last action, isn't seen.
   page's reaction to what the server sends back.
 - **`chaosbringer scan` cannot deliver bad data itself**: its chaos crawls
   inject only 500s, network errors and hangs, and it takes no
-  `faultInjection`. Give it the presets with `crawler.invariants`, and the
-  data through what it does take (a `baseUrl` query, `crawler.lifecycleFaults`,
-  `crawler.driver`).
+  `faultInjection`. Give it the presets with `--invariants` (or
+  `crawler.invariants`), and the data through what it does take: a query on
+  `--url` from the shell, and from code also `crawler.lifecycleFaults` and
+  `crawler.driver`.

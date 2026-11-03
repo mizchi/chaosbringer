@@ -242,6 +242,11 @@ same-site fetch / XHR failing. Findings are ranked in
   Each perf finding links to perf-patterns catalog entries with the same
   signal.
 
+It runs no data-safety check unless asked: `--data-safety` (or
+`--invariants data-safety,not-blank`) adds them, and a reflected payload on
+`--url`'s query (one that only sets `window.__cb_xss_fired`) is then a high
+`invariant-violation` finding.
+
 Treat it as a map, not an oracle. Each resilience finding is a place to
 write a real test (the fault it names, plus an invariant for the error
 state); to see it again first, rerun the `chaosbringer scan … --faults

@@ -53,9 +53,41 @@ when an API call fails.
 
 | rule | what it means |
 |---|---|
-| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl. The browser's own "Failed to load resource" line for the injected fault is not counted. The code assumes the request succeeds. |
+| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl, or, with `--invariants`, a data-safety violation (`undefined` on screen, a blank page) that only the fault produced. The browser's own "Failed to load resource" line for the injected fault is not counted. The code assumes the request succeeds. |
 | `fault-page-broken` | A page that loaded clean and fails or times out when its API call fails. |
 | `no-request-timeout` | A step that was still waiting when the hung request was finally failed, while the same step was fast in the clean crawl. The request has no client deadline. |
+
+## Data-safety checks
+
+Some damage throws nothing, so no error finding reports it: a total shown
+as `NaN`, a reflected payload that ran, a polluted `Object.prototype`.
+`--invariants <names>` runs the
+[data-safety presets](data-safety.md) on every page of every crawl, and
+`--data-safety` is `--invariants data-safety` (`xss-marker`,
+`injected-markup`, `prototype-pollution`, `rendered-garbage`; `not-blank` is
+separate, since a canvas or image-only page is blank by design):
+
+```bash
+chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
+chaosbringer scan --url 'http://localhost:3000/search?q=…' --invariants data-safety,not-blank
+```
+
+Each violation is an `invariant-violation` finding in the `bug` category,
+its title naming the preset (`Invariant violated: [data.xss-marker] …`):
+`high` for `xss-marker`, `injected-markup` and `prototype-pollution`,
+`medium` for `rendered-garbage` and `not-blank`. Scan delivers no bad data
+itself; from the shell, a query on `--url` is how hostile data reaches the
+page. The presets run with their defaults; set their options through
+`runScan({ crawler: { invariants } })`.
+
+> **Behaviour change:** this applies to data-safety presets passed through
+> `runScan({ crawler: { invariants } })` as well, which reached the scan
+> before the flag did. Their violations used to be `medium`
+> `invariant-violation` findings, below `--fail-on high`; the three hostile-data
+> ones are now `high`. One seen only in a chaos crawl used to be dropped and is
+> now a `medium` `fault-new-error` finding. Code that gates on the findings'
+> severity and passed can fail, and `analyzeScan` re-grades an old report the
+> same way.
 
 ## Reading the report
 
@@ -119,8 +151,9 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   mistyped flag or a bad value exits 2 before anything runs, with one
   `chaosbringer scan: …` line, so a gate does not read it as a finding:
   also an `--exclude` that is not a regex, an unknown `--device`, a
-  `--storage-state` file that is not there or not storageState JSON, and
-  `--axe` without axe-core installed. These used to start the clean crawl
+  `--storage-state` file that is not there or not storageState JSON, an
+  `--invariants` name it does not know, and `--axe` (or `--invariants axe`)
+  without axe-core installed. These used to start the clean crawl
   and end in `scan failed: …` and exit 1, the code `--fail-on` uses. A
   `--sitemap` path that is not there, which the scan used to skip without
   a word, exits 2 too. So
@@ -139,6 +172,7 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 | `--hang-ms` | 8000 | how long a hung request is held |
 | `--seed` | random | printed, so the run can be repeated |
 | `--axe` | off | axe-core on every page (needs `axe-core`: exit 2 without it) |
+| `--invariants <list>` / `--data-safety` | off | the [data-safety checks](#data-safety-checks) on every page, by name: `data-safety`, `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`, `not-blank`, `axe` (= `--axe`); comma-separated, repeatable |
 | `--aria-targets` | off | also act on controls only the accessibility snapshot sees, such as a `<div onclick>` with a pointer cursor |
 | `--bind` / `--bind-title` | off | serve each crawl's browser to other Playwright clients: `npx playwright cli attach <title>`, or `npx playwright mcp --endpoint` |
 | `--no-coverage` | | skip coverage (and the unused-JS finding) |

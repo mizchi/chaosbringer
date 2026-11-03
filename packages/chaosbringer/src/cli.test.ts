@@ -111,6 +111,7 @@ describe("usage errors", () => {
     [[...URL_ARG, "--seed-from-sitemap", "missing-sitemap.xml"], "--seed-from-sitemap missing-sitemap.xml: no such file"],
     // Refused by validateOptions, which used to throw from inside main().
     [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
+    [[...URL_ARG, "--invariants", "data-safety,xss"], '--invariants: unknown invariant "xss" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
     [[], "--url is required"],
     // A Repro: line's `# + …` note, pasted into a zsh without interactivecomments.
     [
@@ -204,6 +205,7 @@ describe("usage errors", () => {
     [["scan", ...URL_ARG, "--exclude", "("], "scan", '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
     [["scan", ...URL_ARG, "--storage-state", "missing-state.json"], "scan", "--storage-state missing-state.json: no such file"],
     [["scan", ...URL_ARG, "--sitemap", "missing-sitemap.xml"], "scan", "--sitemap missing-sitemap.xml: no such file"],
+    [["scan", ...URL_ARG, "--invariants", "nope"], "scan", '--invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
     [["flake"], "flake", "--url is required"],
     [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
     // These started Run 1/3 and failed inside the crawler with exit 1, which

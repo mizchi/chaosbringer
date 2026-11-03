@@ -654,6 +654,44 @@ const ERROR_RULES: Record<
   },
 };
 
+/**
+ * The data-safety presets (`--invariants`, `invariants.dataSafety()`), by
+ * the names they report under. Hostile data that ran, reached the DOM as
+ * markup or polluted `Object.prototype` is a security bug, `high` like an
+ * uncaught exception; garbage text or a blank page stays `medium`, as every
+ * other invariant does. The category stays `bug`, and so does the rule
+ * (`invariant-violation`): the title names the preset.
+ */
+const DATA_SAFETY_FINDINGS: Readonly<Record<string, { severity: ScanSeverity; hint: string }>> = {
+  "data.xss-marker": {
+    severity: "high",
+    hint: "A payload in the data ran as script. Put data into the page as text (textContent, a framework's default interpolation), never into an HTML string or a template that is evaluated.",
+  },
+  "data.injected-markup": {
+    severity: "high",
+    hint: "Data reached the DOM as markup or as a javascript: URL. Put it into the page as text, and allow only http(s) URLs in links and sources.",
+  },
+  "data.prototype-pollution": {
+    severity: "high",
+    hint: "A __proto__ key in the data reached Object.prototype through a merge or a query parser. Skip __proto__ / constructor / prototype keys, or build objects with Object.create(null) or a Map.",
+  },
+  "data.rendered-garbage": {
+    severity: "medium",
+    hint: "A value was rendered without a check: undefined, NaN, [object Object] or Invalid Date on screen. Check the value where it enters and show a fallback.",
+  },
+  "data.not-blank": {
+    severity: "medium",
+    hint: "The page rendered nothing (or an error screen): usually an error caught and swallowed. Show an error state instead.",
+  },
+};
+
+/** The data-safety preset a cluster of invariant violations is from, if any. */
+function dataSafetyRule(c: ErrorCluster): { severity: ScanSeverity; hint: string } | undefined {
+  if (c.type !== "invariant-violation") return undefined;
+  const name = (c.invariantNames ?? []).find((n) => Object.hasOwn(DATA_SAFETY_FINDINGS, n));
+  return name === undefined ? undefined : DATA_SAFETY_FINDINGS[name];
+}
+
 function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): ScanFinding[] {
   const out: ScanFinding[] = [];
   // Documents that answered 4xx/5xx: the browser logs each as "Failed to load
@@ -666,6 +704,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
       continue;
     }
     const isAxe = c.type === "invariant-violation" && (c.invariantNames ?? []).some((n) => n.startsWith("a11y"));
+    const data = dataSafetyRule(c);
     const auth = c.type === "console" && /Failed to load resource: the server responded with a status of 40[13]\b/.test(c.sample.message);
     const thirdParty = thirdPartyScript(c, report.baseUrl);
     const knockOn =
@@ -680,7 +719,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
       rule: isAxe ? "a11y-violation" : r.rule,
       // A 401 / 403 is usually an auth check answering a logged-out visitor;
       // a third-party script's error is the embed's, though the site chose it.
-      severity: auth ? "low" : thirdParty && r.severity === "high" ? "medium" : r.severity,
+      severity: auth ? "low" : (data?.severity ?? (thirdParty && r.severity === "high" ? "medium" : r.severity)),
       category: isAxe ? "a11y" : r.category,
       title: `${isAxe ? "Accessibility violation" : r.title}: ${truncate(c.sample.message, 120)}`,
       ...placesOf(c.urls),
@@ -697,7 +736,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
         ...resources.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`),
       ],
       ...unlistedOf(resources.length),
-      hint: r.hint,
+      hint: data?.hint ?? r.hint,
     });
   }
   return out;
@@ -721,7 +760,11 @@ function resilienceFindings(
   for (const { fault, report } of runs) {
     for (const c of report.errorClusters ?? []) {
       if (known.has(c.key)) continue;
-      if (c.type === "network" || c.type === "invariant-violation") continue;
+      // An invariant's other than the data-safety presets' is left to the
+      // bug findings (an axe violation of an error state is still the
+      // page's). A data-safety one only under a fault is what the fault
+      // made the page show: `undefined` where a field was, a blank page.
+      if (c.type === "network" || (c.type === "invariant-violation" && !dataSafetyRule(c))) continue;
       if (c.type === "console" && FAULT_ECHO.test(c.sample.message)) continue;
       if (!isSiteError(c)) continue;
       const entry = fresh.get(c.key) ?? { c, count: 0, urls: new Set<string>(), faults: [] };
@@ -736,8 +779,9 @@ function resilienceFindings(
     out.push({
       rule: "fault-new-error",
       // A console.error is the app catching the failure and logging it: worth
-      // a look at what the UI showed, not a crash.
-      severity: severe ? "high" : "low",
+      // a look at what the UI showed, not a crash. A data-safety violation
+      // is what the UI showed.
+      severity: severe ? "high" : c.type === "invariant-violation" ? "medium" : "low",
       category: "resilience",
       title: `Only when an API request fails: ${ERROR_RULES[c.type].title}: ${truncate(c.sample.message, 100)}`,
       ...placesOf([...urls]),
@@ -746,7 +790,12 @@ function resilienceFindings(
         `${count}× under ${faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")}; never in the clean crawl`,
         ...(c.sample.stack ? [truncate(firstStackFrame(c.sample.stack), 160)] : []),
       ],
-      hint: "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
+      // Nothing threw for a data-safety one: the page caught the failure
+      // and rendered what the response left behind.
+      hint:
+        c.type === "invariant-violation"
+          ? "The code assumes the request succeeds: when it fails, the page renders what the failed response left (undefined, NaN, nothing). Check response.ok and show an error state (message + retry) instead."
+          : "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
     });
   }
 

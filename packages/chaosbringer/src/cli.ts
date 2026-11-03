@@ -168,6 +168,12 @@ OPTIONS:
   --axe                 Enable axe-core accessibility scan on every page (requires axe-core
                         installed: without it the run is refused, exit 2)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
+  --invariants <list>   Run these checks on every page (comma-separated, repeatable): data-safety
+                        (xss-marker, injected-markup, prototype-pollution and rendered-garbage;
+                        not not-blank), any of those or not-blank by name, axe (= --axe). Each
+                        runs with its defaults: set options through the library
+                        (invariants.dataSafety({ ... })). A violation fails the run
+  --data-safety         Shorthand for --invariants data-safety
   --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires
                         pixelmatch + pngjs: without them the run is refused, exit 2)
   --visual-threshold <n>   pixelmatch color threshold 0..1 (default 0.1)
@@ -212,10 +218,11 @@ EXIT CODES:
   0  nothing failed
   1  the run found something: a page that failed or timed out, an invariant violation,
      a renderer crash, --strict errors, --baseline-strict regressions
-  2  the run was refused before a browser started: an unknown flag, a malformed value, an
-     input file (--storage-state, --har-replay, --trace-replay, --perf-budgets, a
-     --seed-from-sitemap path) that is missing or does not parse, a peer --axe /
-     --visual-baseline needs that is not installed; or nothing answered at --url
+  2  the run was refused before a browser started: an unknown flag or --invariants name, a
+     malformed value, an input file (--storage-state, --har-replay, --trace-replay,
+     --perf-budgets, a --seed-from-sitemap path) that is missing or does not parse, a peer
+     --axe (or --invariants axe) / --visual-baseline needs that is not installed; or nothing
+     answered at --url
 
 SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
 ${formatSubcommandList()}

@@ -123,6 +123,36 @@ describe("analyzeScan: bugs", () => {
     const [f] = analyzeScan(fakeReport([], [], { errorClusters: [c] })).findings;
     expect([f!.rule, f!.category]).toEqual(["a11y-violation", "a11y"]);
   });
+
+  // `scan --invariants data-safety`: a payload that ran was a medium finding,
+  // which `--fail-on high` let through, beside a `high` js-exception.
+  it("files the data-safety presets as bugs, high when hostile data ran or reached the DOM", () => {
+    const data = (name: string, message: string) => ({
+      ...cluster("invariant-violation", `[${name}] ${message}`),
+      invariantNames: [name],
+    });
+    const r = analyzeScan(
+      fakeReport([], [], {
+        errorClusters: [
+          data("data.rendered-garbage", 'rendered garbage: NaN in "Total: NaN EUR"'),
+          data("data.not-blank", "blank page: 0 characters of visible text in body, fewer than 1"),
+          data("data.xss-marker", "XSS marker set: window.__cb_xss_fired"),
+          data("data.injected-markup", "injected markup: <b data-cb-injected>"),
+          data("data.prototype-pollution", "Object.prototype polluted: cbPolluted"),
+          { ...cluster("invariant-violation", "[cart-total] total is wrong"), invariantNames: ["cart-total"] },
+        ],
+      }),
+    );
+    expect(r.findings.map((f) => [f.rule, f.severity, f.category, f.title.split(":")[1]?.trim()])).toEqual([
+      ["invariant-violation", "high", "bug", "[data.xss-marker] XSS marker set"],
+      ["invariant-violation", "high", "bug", "[data.injected-markup] injected markup"],
+      ["invariant-violation", "high", "bug", "[data.prototype-pollution] Object.prototype polluted"],
+      ["invariant-violation", "medium", "bug", '[data.rendered-garbage] rendered garbage'],
+      ["invariant-violation", "medium", "bug", "[data.not-blank] blank page"],
+      ["invariant-violation", "medium", "bug", "[cart-total] total is wrong"],
+    ]);
+    expect(r.findings[0]!.hint).toMatch(/as text/);
+  });
 });
 
 describe("analyzeScan: resilience", () => {
@@ -155,6 +185,29 @@ describe("analyzeScan: resilience", () => {
     expect(merged.occurrences).toBe(3);
     expect(merged.where).toEqual([`${U}/`, `${U}/list`]);
     expect(merged.evidence[0]).toBe("3× under HTTP 500, network failure; never in the clean crawl");
+  });
+
+  // The chaos crawls run the scan's invariants too, and a page that shows
+  // `undefined` once its API answers 500 was dropped with the other
+  // invariant violations.
+  it("reports a data-safety violation that appears only under a fault, but not an axe one", () => {
+    const data = { ...cluster("invariant-violation", '[data.rendered-garbage] rendered garbage: undefined in "Hello, undefined"'), invariantNames: ["data.rendered-garbage"] };
+    const axe = { ...cluster("invariant-violation", "[a11y-axe] color-contrast"), invariantNames: ["a11y-axe"] };
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("console", "already there"), data, axe] });
+    const r = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(r.findings.map((f) => [f.rule, f.severity, f.category])).toEqual([
+      ["console-error", "medium", "bug"],
+      ["fault-new-error", "medium", "resilience"],
+    ]);
+    expect(r.findings[1]!.title).toBe(
+      'Only when an API request fails: Invariant violated: [data.rendered-garbage] rendered garbage: undefined in "Hello, undefined"',
+    );
+    // Nothing threw: the hint is about what the page rendered, not a throw.
+    expect(r.findings[1]!.hint).toContain("renders what the failed response left");
+    expect(r.findings[1]!.hint).not.toContain("throwing");
+    // In the clean crawl too: the bug finding has it, not resilience.
+    const both = analyzeScan({ ...clean, errorClusters: [...clean.errorClusters, data] }, [{ fault: "status", report: chaos }]);
+    expect(both.findings.map((f) => f.rule)).not.toContain("fault-new-error");
   });
 
   it("reports pages that load clean but break under faults", () => {

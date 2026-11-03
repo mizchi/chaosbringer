@@ -11,6 +11,7 @@ import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
 import { PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
+import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag } from "./cli-invariants.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { readInputJson } from "./input-files.js";
 import { axe } from "./invariants.js";
@@ -51,6 +52,8 @@ export const CRAWL_CLI_OPTIONS = {
   "storage-state": { type: "string" },
   budget: { type: "string", multiple: true },
   axe: { type: "boolean", default: false },
+  invariants: { type: "string", multiple: true },
+  "data-safety": { type: "boolean", default: false },
   "aria-targets": { type: "boolean", default: false },
   bind: { type: "boolean", default: false },
   "bind-title": { type: "string" },
@@ -419,16 +422,24 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
  * before the browser starts: the crawl's own check of the invariants they
  * become names the invariant, not the flag.
  */
-export function crawlCliPeerNeeds(values: Pick<CrawlCliValues, "axe" | "visual-baseline">): PeerNeed[] {
+export function crawlCliPeerNeeds(values: Pick<CrawlCliValues, "axe" | "invariants" | "visual-baseline">): PeerNeed[] {
   const needs: PeerNeed[] = [];
   if (values.axe) needs.push({ by: "--axe", peers: AXE_PEERS });
+  else if (parseInvariantsFlag(values.invariants).axe) needs.push({ by: "--invariants axe", peers: AXE_PEERS });
   if (values["visual-baseline"]) needs.push({ by: "--visual-baseline", peers: VISUAL_REGRESSION_PEERS });
   return needs;
 }
 
+/**
+ * The invariants the flags build: `--axe` (or `--invariants axe`), then the
+ * `--invariants` / `--data-safety` presets (`cli-invariants.ts`), then
+ * `--visual-baseline`. Throws a `UsageError` on a name `--invariants` does
+ * not know.
+ */
 function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
   const list: Invariant[] = [];
-  if (values.axe) {
+  const flag = parseInvariantsFlag(values.invariants, values["data-safety"]);
+  if (values.axe || flag.axe) {
     list.push(
       axe({
         tags: values["axe-tags"]
@@ -440,6 +451,7 @@ function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
       })
     );
   }
+  list.push(...buildInvariantPresets(flag.presets));
   if (values["visual-baseline"]) {
     list.push(
       visualRegression({
@@ -469,18 +481,23 @@ function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
 /**
  * The flags that change the run or its exit code in a form
  * `buildReproCommand` cannot read back from the options: the CLI applies
- * `--strict` itself, `--axe` / `--visual-*` become invariant closures, and
- * `--allow-settle-mismatch` lifts a refusal the CLI makes. Left out:
+ * `--strict` itself, `--axe` / `--invariants` / `--data-safety` /
+ * `--visual-*` become invariant closures, and `--allow-settle-mismatch` lifts
+ * a refusal the CLI makes. `--invariants axe` is carried as `--axe`, and
+ * `--data-safety` and every `--invariants` as one canonical `--invariants`
+ * value (`formatInvariantsFlag`). Left out:
  * `--visual-diff-dir` only writes files, and a repro run with
  * `--visual-update` would rewrite the baselines and hide the diff it is
  * meant to reproduce.
  */
 function cliOnlyReproFlags(values: CrawlCliValues): ReproFlag[] {
   const out: ReproFlag[] = [];
-  if (values.axe) {
+  const invariants = parseInvariantsFlag(values.invariants, values["data-safety"]);
+  if (values.axe || invariants.axe) {
     out.push({ flag: "--axe" });
     if (values["axe-tags"] !== undefined) out.push({ flag: "--axe-tags", value: values["axe-tags"] });
   }
+  if (invariants.presets.length > 0) out.push({ flag: "--invariants", value: formatInvariantsFlag(invariants.presets) });
   if (values["visual-baseline"]) {
     out.push({ flag: "--visual-baseline", value: values["visual-baseline"], path: true });
     for (const name of ["visual-threshold", "visual-max-diff-pixels", "visual-max-diff-ratio"] as const) {

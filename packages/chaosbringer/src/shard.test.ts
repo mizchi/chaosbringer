@@ -299,6 +299,10 @@ describe("shard CLI", () => {
       message: "--max-pages must be >= 1 (got 0)",
     });
     await expect(checkWorkerArgs(args(["--count", "2"]))).rejects.toMatchObject({ message: "--url is required" });
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--invariants", "nope"]))).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--invariants: unknown invariant "nope" \(known: data-safety, /),
+    });
     expect(() => args(["--url", "http://x.test/"])).toThrow(UsageError);
   });
 

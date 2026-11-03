@@ -14,6 +14,7 @@ import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } 
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UnreachableTargetError, unreachableTarget } from "../unreachable-target.js";
 import { checkDeviceFlag, checkRegexFlag } from "../cli-crawl-options.js";
+import { parseInvariantsFlag } from "../cli-invariants.js";
 import { checkInputFiles } from "../input-files.js";
 import { AXE_PEERS, assertPeers } from "../peers.js";
 import { validateOptions } from "../validate.js";
@@ -41,6 +42,14 @@ OPTIONS:
   --faults <list>         Which fault crawls to run (default 500,abort,hang)
   --seed <n>              Seed for every crawl (default random; printed)
   --axe                   Run axe-core accessibility checks (needs axe-core; exit 2 without it)
+  --invariants <list>     Run these checks on every page of every crawl (comma-separated,
+                          repeatable): data-safety (xss-marker, injected-markup,
+                          prototype-pollution and rendered-garbage; not not-blank), or any of
+                          those and not-blank by name; axe is --axe. Each with its defaults
+                          (set options through runScan's crawler.invariants). A violation
+                          is an invariant-violation finding: high for xss-marker,
+                          injected-markup and prototype-pollution, medium otherwise
+  --data-safety           Shorthand for --invariants data-safety
   --bind                  Serve each crawl's browser to other Playwright clients
                           (npx playwright cli attach <title>; the endpoint is printed)
   --bind-title <title>    Name to attach by (default chaosbringer)
@@ -88,6 +97,8 @@ export const SCAN_CLI_OPTIONS = {
   faults: { type: "string" },
   seed: { type: "string" },
   axe: { type: "boolean", default: false },
+  invariants: { type: "string", multiple: true },
+  "data-safety": { type: "boolean", default: false },
   "aria-targets": { type: "boolean", default: false },
   bind: { type: "boolean", default: false },
   "bind-title": { type: "string" },
@@ -129,7 +140,7 @@ export async function runScanCli(argv: string[]): Promise<void> {
   const options = scanOptionsFromCli(values);
   // What the crawls read and import, before the clean crawl's browser starts.
   checkInputFiles(options.crawler ?? {}, { seedFromSitemap: "--sitemap" });
-  assertPeers(values.axe ? [{ by: "--axe", peers: AXE_PEERS }] : []);
+  assertPeers(options.axe ? [{ by: values.axe ? "--axe" : "--invariants axe", peers: AXE_PEERS }] : []);
   const failOn = values["fail-on"];
 
   const result = await runScan({ ...options, onProgress: values.quiet ? undefined : (line) => console.error(line) });
@@ -173,6 +184,7 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
     throw new UsageError(`--network must be one of ${NETWORK_PROFILES.filter((p) => p !== "offline").join(", ")} (got ${JSON.stringify(network)})`);
   }
   const faults = values.faults === undefined ? undefined : parseFaults(values.faults);
+  const invariants = parseInvariantsFlag(values.invariants, values["data-safety"]);
 
   const ignoreErrorPatterns = [...(values["ignore-error"] ?? [])];
   if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
@@ -200,7 +212,8 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
     chaos: !values["no-chaos"],
     ...(faults ? { faults } : {}),
     seed,
-    axe: values.axe,
+    axe: values.axe || invariants.axe,
+    ...(invariants.presets.length > 0 ? { invariants: invariants.presets } : {}),
     coverage: !values["no-coverage"],
     hangReleaseMs,
     crawler: {
