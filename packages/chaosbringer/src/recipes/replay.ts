@@ -15,7 +15,13 @@
 import type { Page } from "playwright";
 import type { ExpectClause, ActionRecipe, RecipeStep, ReplayResult } from "./types.js";
 import { escapeRegExp } from "../filters.js";
-import { hasTemplates, substituteSteps, type RecipeVars } from "./templating.js";
+import {
+  hasTemplates,
+  type RecipeVars,
+  substituteConditions,
+  substituteStep,
+  UndefinedVariableError,
+} from "./templating.js";
 
 const DEFAULT_EXPECT_TIMEOUT_MS = 5000;
 /**
@@ -28,10 +34,13 @@ const DEFAULT_ACTION_TIMEOUT_MS = 5000;
 
 export interface RunRecipeOptions {
   /**
-   * Variable bag for template substitution. Templated values in
-   * recipe steps (`{{email}}` etc.) are resolved against this map
-   * before each step executes. Throws if a referenced variable is
-   * missing — silent fallback would let typos bypass form fills.
+   * Variable bag for template substitution. Templated values in recipe
+   * steps (`{{email}}` etc.) and postconditions are resolved against this
+   * map before the first step runs; without it, against `{}`. A
+   * referenced variable it lacks fails the replay at the first step (or
+   * postcondition) that uses it, before anything runs: `failedAt.reason`
+   * is `variable "email" is not defined`. Typing the braces, as replay
+   * did without vars, reported ok for a fill that never was.
    */
   vars?: RecipeVars;
   /**
@@ -53,7 +62,29 @@ export async function runRecipe(
   // Rebased before substitution: a `{{var}}` is not part of any origin,
   // and a substituted value is the caller's, not the recording's.
   const rebased = opts.baseUrl ? rebaseRecipe(recipe, opts.baseUrl) : recipe;
-  const steps = opts.vars ? substituteSteps(rebased.steps, opts.vars) : rebased.steps;
+  const vars = opts.vars ?? {};
+  const undefinedVariable = (index: number, err: unknown): ReplayResult => {
+    if (!(err instanceof UndefinedVariableError)) throw err;
+    return {
+      ok: false,
+      durationMs: performance.now() - start,
+      failedAt: { index, reason: `variable "${err.variable}" is not defined` },
+    };
+  };
+  const steps: RecipeStep[] = [];
+  for (const [i, step] of rebased.steps.entries()) {
+    try {
+      steps.push(substituteStep(step, vars));
+    } catch (err) {
+      return undefinedVariable(i, err);
+    }
+  }
+  let postconditions: ActionRecipe["postconditions"];
+  try {
+    postconditions = substituteConditions(rebased.postconditions, vars);
+  } catch (err) {
+    return undefinedVariable(steps.length, err);
+  }
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
     try {
@@ -84,7 +115,8 @@ export async function runRecipe(
   // `urlPattern` is a regex source tested against `page.url()`, as
   // `preconditionHolds` and repair's goal read it, and waited for like the
   // other clauses: the last step's navigation may still be under way.
-  for (const p of rebased.postconditions) {
+  // A substituted value in a `urlPattern` was escaped: it matches as text.
+  for (const p of postconditions) {
     const failed = (reason: string): ReplayResult => ({
       ok: false,
       durationMs: performance.now() - start,

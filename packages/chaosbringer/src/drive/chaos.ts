@@ -27,6 +27,7 @@ import { fingerprintError } from "../clusters.js";
 import { errorMessage } from "../errors.js";
 import { applyFaultRules } from "../fault-router.js";
 import { runRecipe } from "../recipes/replay.js";
+import { type RecipeVars, substituteStep } from "../recipes/templating.js";
 import type { ActionRecipe, RecipeStep } from "../recipes/types.js";
 import { SCAN_FAULT_KINDS, SCAN_FAULT_LABELS, type ScanFaultKind } from "../scan/analyze.js";
 import { endpointsFromRequests, endpointsPattern, type RequestLike, type ScanEndpoint } from "../scan/endpoints.js";
@@ -37,6 +38,12 @@ import { type DriveProblem, siteProblems, watchProblems } from "./problems.js";
 
 export interface RecipeChaosOptions {
   recipe: ActionRecipe;
+  /**
+   * Values for the recipe's `{{var}}` placeholders (`RunRecipeOptions.vars`).
+   * `drive` records a password field as `{{password}}`: pass its
+   * `result.secretValues()` here.
+   */
+  vars?: RecipeVars;
   /** The goal's success condition, checked after each replay. */
   until?: DriveUntil;
   /** Default: all three (`status`, `abort`, `hang`). */
@@ -162,11 +169,12 @@ async function replayOnce(
       const [first, ...rest] = opts.recipe.steps;
       let steps = opts.recipe.steps;
       if (first?.kind === "navigate") {
-        await page.goto(first.url, { waitUntil: "domcontentloaded", timeout: opts.navigationTimeoutMs ?? 30_000 });
+        const url = (substituteStep(first, opts.vars ?? {}) as typeof first).url;
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts.navigationTimeoutMs ?? 30_000 });
         steps = rest;
       }
       const offset = opts.recipe.steps.length - steps.length;
-      const r0 = await runRecipe(page, { ...opts.recipe, steps, postconditions: [] });
+      const r0 = await runRecipe(page, { ...opts.recipe, steps, postconditions: [] }, { vars: opts.vars });
       const r = r0.failedAt ? { ...r0, failedAt: { ...r0.failedAt, index: r0.failedAt.index + offset } } : r0;
       replay = r.ok
         ? { ok: true }

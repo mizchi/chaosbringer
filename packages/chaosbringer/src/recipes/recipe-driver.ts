@@ -23,6 +23,7 @@ import { runRecipeWithRequires } from "./composition.js";
 import { preconditionsHold } from "./match.js";
 import { runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
+import { type RecipeVars, substituteConditions, UndefinedVariableError } from "./templating.js";
 import type { ActionRecipe } from "./types.js";
 
 /**
@@ -96,6 +97,14 @@ export interface RecipeDriverOptions {
    * staging, and its navigations belong there too, not on localhost.
    */
   baseUrl?: string;
+  /**
+   * Values for the recipes' `{{var}}` placeholders, in their steps and
+   * their pre- and postconditions (`RunRecipeOptions.vars`), passed down
+   * `requires` chains too. A recipe whose preconditions use a variable
+   * these do not define never matches (it could not replay): it is
+   * skipped, with a log line under `verbose`, and its stats are left alone.
+   */
+  vars?: RecipeVars;
 }
 
 export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
@@ -123,8 +132,17 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
       const candidates = pickCandidates(opts.store, opts.goal, opts.filter);
       if (candidates.length === 0) return null;
 
+      const vars = opts.vars ?? {};
       for (const recipe of candidates) {
-        const ok = await preconditionsHold(step.page, recipe.preconditions);
+        let preconditions: ActionRecipe["preconditions"];
+        try {
+          preconditions = substituteConditions(recipe.preconditions, vars);
+        } catch (err) {
+          if (!(err instanceof UndefinedVariableError)) throw err;
+          log(`skipped ${recipe.name}: variable "${err.variable}" is not defined`);
+          continue;
+        }
+        const ok = await preconditionsHold(step.page, preconditions);
         if (!ok) continue;
         log(`matched ${recipe.name}`);
         // A page off http(s) (about:blank, a file) has no origin to move to.
@@ -146,7 +164,7 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
 
             if (!chain || recipe.requires.filter((d) => !d.startsWith("__")).length === 0) {
               // Fast path: no deps to resolve.
-              const result = await runRecipe(page, recipe, { baseUrl });
+              const result = await runRecipe(page, recipe, { baseUrl, vars });
               if (result.ok) {
                 opts.store.recordSuccess(recipe.name, result.durationMs);
                 recordFiring(recipe.name, true, result.durationMs);
@@ -181,6 +199,7 @@ export function recipeDriver(opts: RecipeDriverOptions): RecipeDriverInstance {
                 store: opts.store,
                 alreadyRan: replayed,
                 baseUrl,
+                vars,
                 onProgress: (ev) => {
                   if (ev.kind === "complete") {
                     if (ev.result.ok) {

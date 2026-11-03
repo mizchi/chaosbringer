@@ -194,6 +194,13 @@ not become a remote-code-execution vector.
   url~/\/thanks/`). Before 0.16 a postcondition's `urlPattern` was not
   checked at all, so a recipe promoted then can be demoted the next time
   `recipes verify` runs it.
+- **A templated recipe needs its vars.** A recipe with `{{password}}` (as
+  `chaosbringer drive` records a password field) replays with the values
+  `recipeDriver({ store, vars: { password } })` gives; one whose
+  preconditions use a variable `vars` lacks never matches, and one whose
+  steps do fails at that step (`variable "password" is not defined`) and
+  is recorded as a failure. Before 0.16 a replay without `vars` typed the
+  braces and reported ok.
 - **Recipes don't compose automatically.** `requires: ["auth/login"]` is
   metadata — the driver does not chain. Either inline the prerequisite
   steps or run the prerequisite recipe explicitly before the dependent one.

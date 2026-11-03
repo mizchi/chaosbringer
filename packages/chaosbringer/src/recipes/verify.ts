@@ -18,6 +18,7 @@ import type { Page } from "playwright";
 import { unreachableNavigation, watchDocumentRequests } from "../load/unreachable.js";
 import { recipeOrigin, runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
+import type { RecipeVars } from "./templating.js";
 import type { ActionRecipe } from "./types.js";
 
 export interface VerifyOptions {
@@ -39,6 +40,13 @@ export interface VerifyOptions {
    * recorded on, and a pass there promotes it for a site it never ran on.
    */
   baseUrl?: string;
+  /**
+   * Values for the recipe's `{{var}}` placeholders (`RunRecipeOptions.vars`).
+   * A run of a recipe that uses one these do not define fails at that step
+   * (`variable "password" is not defined`) and is recorded as a failure:
+   * check `recipeVariables(recipe)` first to refuse it instead.
+   */
+  vars?: RecipeVars;
   /** Logger for visibility — defaults to `console.log` if `verbose`, else silent. */
   verbose?: boolean;
 }
@@ -80,7 +88,7 @@ export async function verifyAndPromote(
     const { page, cleanup } = await opts.setupPage();
     const lastDocument = watchDocumentRequests(page);
     try {
-      const result = await runRecipe(page, recipe, { baseUrl: opts.baseUrl });
+      const result = await runRecipe(page, recipe, { baseUrl: opts.baseUrl, vars: opts.vars });
       outcomes.push({
         ok: result.ok,
         durationMs: result.durationMs,

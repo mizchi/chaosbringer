@@ -28,9 +28,13 @@ import {
   COMMON_OPTIONS,
   intFlag,
   openStore,
+  parseVarFlags,
   requireBaseUrl,
   requireRecipe,
+  requireVars,
   requireVersion,
+  VAR_OPTIONS,
+  varsHelp,
   warnRebased,
 } from "./cli-common.js";
 import { diffRecipes, formatRecipeDiff } from "./diff.js";
@@ -56,7 +60,8 @@ Subcommands:
   prune <name>        Trim a recipe's history (--keep-last N)
   rollback <name>     Restore a historical version (--to-version N)
   harvest <url>       Read window.__chaosbringer, upsert into store
-  verify <name>       Run K verification replays (--runs N --base-url URL)
+  verify <name>       Run K verification replays (--runs N --base-url URL
+                      [--var NAME=VALUE] [--vars-file FILE])
   diff <name>         Diff two versions (--from-version M --to-version N)
                       or two recipes (\`diff <nameA>..<nameB>\`)
   lint [name]         Lint a recipe (or every recipe when no name given)
@@ -385,6 +390,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
       runs: { type: "string" },
       "min-success-rate": { type: "string" },
       "base-url": { type: "string" },
+      ...VAR_OPTIONS,
       ...HEADLESS_OPTIONS,
     },
     allowPositionals: true,
@@ -393,15 +399,21 @@ async function verifyCmd(argv: string[]): Promise<void> {
   const name = positionals[0];
   if (values.help) {
     console.log(
-      "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]\n\n" +
+      "recipes verify <name> --base-url URL [--runs N] [--min-success-rate 0..1]\n" +
+        "               [--var NAME=VALUE ...] [--vars-file FILE]\n\n" +
         "  Replays on --base-url's origin: the recipe's navigations to the origin it\n" +
         "  was recorded on go there instead, path and query kept (with a warning).\n" +
-        "  Exit: 0 promoted, 1 not promoted, 2 base URL unreachable — a replay could\n" +
-        "  not connect to it, and the recipe's stats and status are left as they were.",
+        "  A recipe's {{NAME}} placeholders are filled in from --var / --vars-file:\n" +
+        `${varsHelp("  ")}\n` +
+        "  Exit: 0 promoted, 1 not promoted, 2 refused before the browser starts (a\n" +
+        "  bad flag, a placeholder no --var or --vars-file defines) or base URL\n" +
+        "  unreachable — a replay could not connect to it, and the recipe's stats\n" +
+        "  and status are left as they were.",
     );
     return;
   }
   if (!name) throw new UsageError("expected a recipe name");
+  const vars = parseVarFlags(values);
   const baseUrl = values["base-url"];
   if (!baseUrl) throw new UsageError("--base-url is required");
   requireBaseUrl(baseUrl);
@@ -414,6 +426,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
   }
   const store = openStore(values);
   const recipe = requireRecipe(store, name);
+  requireVars([recipe], vars);
   if (!values.quiet) warnRebased("verify", [recipe], baseUrl);
 
   const browser = await chromium.launch({ headless: resolveHeadless(values) });
@@ -424,6 +437,7 @@ async function verifyCmd(argv: string[]): Promise<void> {
       runs,
       minSuccessRate,
       baseUrl,
+      vars,
       verbose: !values.quiet,
       setupPage: async () => {
         const { page, close } = await newIsolatedPage(browser);
@@ -567,6 +581,7 @@ async function repairCmd(argv: string[]): Promise<void> {
       "start-url": { type: "string" },
       "repair-budget": { type: "string" },
       seed: { type: "string" },
+      ...VAR_OPTIONS,
       ...HEADLESS_OPTIONS,
     },
     allowPositionals: true,
@@ -575,19 +590,26 @@ async function repairCmd(argv: string[]): Promise<void> {
   const name = positionals[0];
   if (values.help) {
     console.log(
-      "recipes repair <name> --base-url URL [--start-url URL] [--repair-budget N] [--seed N]\n\n" +
+      "recipes repair <name> --base-url URL [--start-url URL] [--repair-budget N] [--seed N]\n" +
+        "               [--var NAME=VALUE ...] [--vars-file FILE]\n\n" +
         "  Uses the weighted-random driver to discover a working tail after the\n" +
         "  failing step. For LLM-driven repair, call repairRecipe() programmatically\n" +
         "  with `driver: aiDriver(...)` instead. With --base-url, the recipe replays\n" +
-        "  on that origin, as `recipes verify` does, and the repaired version keeps it.",
+        "  on that origin, as `recipes verify` does, and the repaired version keeps it.\n" +
+        "  The recipe's {{NAME}} placeholders are filled in as `recipes verify` does\n" +
+        "  (a placeholder neither flag defines is refused with exit 2); the repaired\n" +
+        "  version keeps them:\n" +
+        varsHelp("  "),
     );
     return;
   }
   if (!name) throw new UsageError("expected a recipe name");
   const seed = intFlag("--seed", values.seed, 0);
   const budget = intFlag("--repair-budget", values["repair-budget"], 1);
+  const vars = parseVarFlags(values);
   const store = openStore(values);
   const recipe = requireRecipe(store, name);
+  requireVars([recipe], vars);
   const baseUrl = values["base-url"];
   const startUrl = values["start-url"];
   if (!baseUrl && !startUrl && recipe.steps[0]?.kind !== "navigate") {
@@ -606,6 +628,7 @@ async function repairCmd(argv: string[]): Promise<void> {
       browser,
       baseUrl,
       startUrl,
+      vars,
       repairBudget: budget,
       seed,
       verbose: !values.quiet,

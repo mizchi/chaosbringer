@@ -16,11 +16,16 @@ import {
   isRecipeStatus,
   openStore,
   RECIPE_SELECTIONS,
+  parseVarFlags,
   RECIPE_STATUSES,
   requireBaseUrl,
+  requireVars,
+  VAR_OPTIONS,
+  varsHelp,
   warnRebased,
 } from "./cli-common.js";
 import { scenarioLoadFromStore, storeScenarioRecipes, type RecipeSelection } from "./load-bridge.js";
+import type { RecipeVars } from "./templating.js";
 import type { RecipeStatus } from "./types.js";
 
 const HELP = `chaosbringer load --base-url URL [options]
@@ -37,6 +42,9 @@ Options:
   --filter-status STATUS  replay recipes of this status: verified (default) |
                           candidate | demoted
   --max-iterations N      hard cap on iterations per worker (default: unbounded)
+${varsHelp("  ", 22)}
+                          (every iteration gets the same values; a recipe
+                          with a placeholder neither defines is refused)
   --no-record             leave the store as it was (default: each replay's
                           outcome is recorded into it, which promotes and
                           demotes recipes; a replay that could not connect to
@@ -54,8 +62,9 @@ chain resolution), and aggregates step / iteration / network samples. For
 chaos faults or SLO gating, use scenarioLoadFromStore() programmatically.
 
 Exit codes: 0 every iteration passed; 1 an iteration or step failed; 2 the
-run could not do its job — no recipe of --filter-status in the store
-(checked before the browser starts), or the run stopped early: 3 iterations
+run could not do its job — no recipe of --filter-status in the store, or one
+that uses a {{NAME}} no --var or --vars-file defines (both checked before the
+browser starts), or the run stopped early: 3 iterations
 in a row could not connect to --base-url ("base URL unreachable"), or the
 recipes ran out mid-run. A run that started prints its report, and writes it
 to --output, either way.`;
@@ -69,6 +78,7 @@ interface ParsedArgs {
   selection: RecipeSelection;
   filterStatus: RecipeStatus;
   maxIterations?: number;
+  vars: RecipeVars;
   record: boolean;
   store: ReturnType<typeof openStore>;
   output?: string;
@@ -92,6 +102,7 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     );
     process.exit(2);
   }
+  requireVars(recipes, parsed.vars);
   if (!parsed.quiet) warnRebased("load", recipes, parsed.baseUrl);
   const result = await scenarioLoadFromStore({
     baseUrl: parsed.baseUrl,
@@ -103,6 +114,7 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     selection: parsed.selection,
     status: parsed.filterStatus,
     record: parsed.record,
+    vars: parsed.vars,
     store: parsed.store,
     thinkTime: parsed.thinkTime,
   });
@@ -148,6 +160,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
       selection: { type: "string" },
       "filter-status": { type: "string" },
       "max-iterations": { type: "string" },
+      ...VAR_OPTIONS,
       "no-record": { type: "boolean" },
       dir: { type: "string" },
       global: { type: "boolean" },
@@ -182,6 +195,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
   if (!isRecipeSelection(selectionStr)) {
     throw new UsageError(`--selection must be ${RECIPE_SELECTIONS.join("|")}`);
   }
+  const vars = parseVarFlags(values);
   const store = openStore({
     dir: values.dir,
     global: values.global,
@@ -201,6 +215,7 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     maxIterations: values["max-iterations"]
       ? parsePositiveInt("--max-iterations", values["max-iterations"])
       : undefined,
+    vars,
     record: !values["no-record"],
     store,
     output: values.output,

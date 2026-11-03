@@ -76,7 +76,7 @@ Rules currently enforced:
 | `empty-preconditions` | warn | recipe is eligible everywhere |
 | `missing-expect-after` | warn | click/fill/select with no post-step assertion |
 | `long-raw-wait` | warn | `wait.ms` ≥ 2000ms (prefer `waitFor`) |
-| `hardcoded-credentials` | warn | password-looking field with a non-templated value |
+| `hardcoded-credentials` | warn | password-looking field with a non-templated value (`drive` templates the ones it types, so this is for recipes written by hand) |
 | `adjacent-duplicate-wait` | info | two `wait` steps in a row |
 
 ## Replaying on another host
@@ -112,6 +112,47 @@ leaves the recipe's stats and status as they were. `load` stops once 3
 iterations in a row could not connect, writes its report, and exits 2
 with `load: base URL unreachable: …`. A replay that reached the site and
 failed there still counts against the recipe.
+
+## Recipes with variables
+
+A recipe can hold `{{name}}` placeholders (see [templating](./load-from-recipe-store.md#recipe-templating)):
+`chaosbringer drive` records a password it typed as `{{password}}`, and a
+hand-written recipe keeps its credentials out of the file the same way.
+`recipes verify`, `recipes repair` and `load` fill them in from
+`--var NAME=VALUE` (repeatable) and `--vars-file FILE`, a JSON object of
+names to strings, numbers or booleans (a number or boolean is typed as
+`String(value)`). A `--var` wins over the file.
+
+```sh
+pnpm chaosbringer recipes verify auth/login --base-url http://localhost:3000 \
+  --vars-file .secrets/login.json            # written by drive --save-secrets
+pnpm chaosbringer recipes verify auth/login --base-url http://localhost:3000 \
+  --var password="$QA_PASSWORD"
+pnpm chaosbringer load --base-url http://localhost:3000 --vars-file vars.json
+```
+
+A recipe that uses a placeholder neither flag defines is refused before the
+browser starts, with exit 2 and the name of each variable it needs:
+
+```
+chaosbringer recipes verify: auth/login: variable "password" is not defined (pass --var password=VALUE, or --vars-file FILE) (see chaosbringer recipes verify --help)
+```
+
+So is a `--var` with no `=` or a name a placeholder cannot use (letters,
+digits, `_ . -`, starting with a letter or `_`), and a `--vars-file` that is
+missing, not JSON, or not an object of plain values. `load` checks every
+recipe it may replay (each of `--filter-status`, and what their `requires`
+chains run first), and gives every iteration the same values; for
+per-iteration values, use `scenarioLoadFromStore({ vars })`.
+
+> **Behaviour change:** replay used to fill placeholders in only when it was
+> given vars, and none of these commands could give them: a fill of
+> `{{password}}` typed the braces, the step reported ok, and `recipes verify`
+> could promote a recipe whose login never happened. Every replay now fills
+> them in. From code, a recipe that uses a variable its `vars` lack fails at
+> that step (`ok: false`, `failedAt.reason` `variable "password" is not
+> defined`) instead of typing the braces, and with `vars: {}` it fails the
+> same way instead of throwing.
 
 ## Auto-repair (CLI form)
 
