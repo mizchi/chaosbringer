@@ -85,8 +85,9 @@ page. The presets run with their defaults; set their options through
 > before the flag did. Their violations used to be `medium`
 > `invariant-violation` findings, below `--fail-on high`; the three hostile-data
 > ones are now `high`. One seen only in a chaos crawl used to be dropped and is
-> now a `medium` `fault-new-error` finding. A `failOn` gate that passed can
-> fail, and `analyzeScan` re-grades an old report the same way.
+> now a `medium` `fault-new-error` finding. Code that gates on the findings'
+> severity and passed can fail, and `analyzeScan` re-grades an old report the
+> same way.
 
 ## Reading the report
 
