@@ -51,6 +51,12 @@ export function renderDrivePrompt(template: string, input: DriveInput): string {
     stepIndex: String(input.stepIndex),
     stepsLeft: String(input.stepsLeft),
     feedback: input.feedback ? `Note: ${input.feedback}\n` : "",
+    // Not re-read for placeholders: `String.replace` with a function inserts
+    // what it returns as it is.
+    secrets:
+      input.secrets && input.secrets.length > 0
+        ? `Secrets you can type by name: ${input.secrets.map((n) => `{{${n}}}`).join(", ")}. Fill with exactly that text; the value is typed for you.\n`
+        : "",
     history,
     problems,
     outline: input.outline,

@@ -49,4 +49,13 @@ describe("public package exports (this branch's additions)", () => {
       "data.rendered-garbage",
     ]);
   });
+
+  it("re-exports recipe templating and drive's secrets", () => {
+    expect(typeof api.recipeVariables).toBe("function");
+    expect(typeof api.substituteConditions).toBe("function");
+    expect(typeof api.UndefinedVariableError).toBe("function");
+    expect(api.VARIABLE_NAME_RE.test("user.email")).toBe(true);
+    expect(api.classifySecretField("password", null)).toBe("password");
+    expect(new api.DriveSecrets({ a: "b" }).names()).toEqual(["a"]);
+  });
 });

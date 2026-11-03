@@ -347,9 +347,15 @@ export {
   seedToGoal,
   SNAPSHOT_FORMAT_VERSION,
   snapshotPath,
+  recipeVariables,
+  substituteCondition,
+  substituteConditions,
   substituteStep,
   substituteSteps,
   substituteString,
+  templateNames,
+  UndefinedVariableError,
+  VARIABLE_NAME_RE,
   recipeDriver,
   recipeFilename,
   RecipeStore,
@@ -672,6 +678,7 @@ export {
   type DriveStatus,
   type DriveUntil,
 } from "./drive/drive.js";
+export { classifySecretField, DriveSecrets, type SecretFieldKind } from "./drive/secrets.js";
 export {
   anthropicDecider,
   openRouterDecider,

@@ -263,7 +263,11 @@ operates the browser towards the goal. A model (or a `--plan` file of steps)
 reads the page's accessibility snapshot and picks one action at a time. The
 crawl's error checks run on every step. A run that reaches the goal writes a
 recipe with role selectors; `chaosbringer recipes verify` replays and
-promotes it. `--video` records the run with each action annotated. Use it to
+promotes it. A password it types is recorded as `{{password}}` and kept out
+of every output; `--save-secrets <file>` writes the value for `recipes
+verify --vars-file <file>`, and `--secret name=ENV_VAR` lets a plan type
+`{{name}}` without the secret in the plan. `--video` records the run with
+each action annotated. Use it to
 get a first replayable journey, then put the journey under faults. Details:
 `docs/recipes/drive.md`.
 

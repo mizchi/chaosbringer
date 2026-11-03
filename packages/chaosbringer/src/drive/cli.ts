@@ -3,8 +3,8 @@
  * towards a goal and report what broke on the way. See `drive()`.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { accessSync, closeSync, constants, fchmodSync, lstatSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UsageError } from "../cli-usage.js";
@@ -12,6 +12,7 @@ import { errorMessage } from "../errors.js";
 import { checkInputFiles, readInputJson } from "../input-files.js";
 import { recipeOrigin } from "../recipes/replay.js";
 import { RecipeStore } from "../recipes/store.js";
+import { type RecipeVars, templateNames, VARIABLE_NAME_RE } from "../recipes/templating.js";
 import type { ActionRecipe } from "../recipes/types.js";
 import { shellQuote } from "../repro-command.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
@@ -60,6 +61,12 @@ OPTIONS:
   --out <dir>               Write drive-report.json (and recipe.json) here
   --save-recipe [name]      Store the recipe of a successful run in the recipe store
   --dir <path>              Recipe store directory (default ./chaosbringer-recipes)
+  --secret <name>=<ENV>     A secret typed by name (repeatable): a --plan value (or a model's
+                            fill) of {{name}} types the value of environment variable ENV.
+                            It must be set and not empty
+  --save-secrets <file>     Write the secrets the recipe needs to <file> (JSON, mode 0600), for
+                            \`recipes verify --vars-file <file>\`. Overwrites a regular file;
+                            refuses a directory, a symlink or one it cannot write
   --storage-state <path>    Playwright storageState to start logged in
   --bind                    Serve the browser to other Playwright clients while driving:
                             npx playwright cli attach <title>, or an MCP client with
@@ -77,9 +84,20 @@ OPTIONS:
   --quiet                   Only print the summary
   --help                    Show this help
 
+SECRETS:
+  What drive types into a password field (type=password, autocomplete *-password) or a
+  one-time-code field, and every --secret, is recorded as a placeholder: {{password}}
+  ({{password_2}} for a second, different value), {{one_time_code}}, or the --secret's name.
+  The value is replaced by that placeholder in what drive prints, drive-report.json,
+  recipe.json, the recipe store, the video's action titles and what the model is shown.
+  It is not taken out of what the app itself sends or logs, nor out of screenshots or video
+  frames of a field the page does not mask (a one-time code shows as typed).
+
 Exit code: 0 when the goal was reached (or the model said done), 1 otherwise,
 2 when it refuses to start (no --url or --goal, no model, a bad value, a
---plan or --storage-state file that is missing or does not parse).
+--plan or --storage-state file that is missing or does not parse, a --plan
+value with a {{name}} no --secret names, a --secret whose variable is unset,
+a --save-secrets path it cannot write).
 Only drive sites you own or are allowed to test.
 `;
 
@@ -103,6 +121,8 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       "save-recipe": { type: "string" },
       dir: { type: "string" },
       "storage-state": { type: "string" },
+      secret: { type: "string", multiple: true },
+      "save-secrets": { type: "string" },
       chaos: { type: "boolean", default: false },
       bind: { type: "boolean", default: false },
       "bind-title": { type: "string" },
@@ -128,8 +148,12 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   // Read before the browser starts: a missing one failed inside Playwright
   // as `drive failed: …` and exit 1, which is "the goal was not reached".
   checkInputFiles({ storageState: values["storage-state"] });
+  const secrets = parseSecretFlags(values.secret ?? [], process.env);
+  if (values["save-secrets"] !== undefined) checkSecretsPath(values["save-secrets"]);
 
-  const decider = values.plan ? planFrom(values.plan) : modelDecider(values.provider, values.model, values.vision ?? false);
+  const decider = values.plan
+    ? planFrom(values.plan, new Set(Object.keys(secrets)))
+    : modelDecider(values.provider, values.model, values.vision ?? false);
   const until: DriveUntil = {
     ...(values["until-url"] ? { urlIncludes: values["until-url"] } : {}),
     ...(values["until-url-matches"] ? { urlMatches: values["until-url-matches"] } : {}),
@@ -146,6 +170,7 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     ...(values.video ? { video: values.video } : {}),
     ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
     ...(values["save-recipe"] ? { recipeName: values["save-recipe"] } : {}),
+    ...(Object.keys(secrets).length > 0 ? { secrets } : {}),
     headless: resolveHeadless(values),
     ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true, onBind: (b: BoundBrowser) => console.log(attachHint(b)) } : {}),
     ...(values["keep-open"]
@@ -172,11 +197,32 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     writeFileSync(join(values.out, "drive-report.json"), JSON.stringify(result, null, 2));
     if (result.recipe) writeFileSync(join(values.out, "recipe.json"), JSON.stringify(result.recipe, null, 2));
   }
+  // The values the recipe's placeholders need, and only those.
+  const needed: RecipeVars = Object.fromEntries(
+    Object.entries(result.secretValues()).filter(([name]) => result.variables.includes(name)),
+  );
+  let secretsFile: string | undefined;
+  if (values["save-secrets"] !== undefined) {
+    if (result.recipe) {
+      writeSecretsFile(values["save-secrets"], needed);
+      secretsFile = values["save-secrets"];
+      console.log(`secrets saved: ${secretsFile} (${result.variables.length > 0 ? result.variables.join(", ") : "none needed"}; mode 0600)`);
+    } else {
+      console.log(`no secrets saved: ${result.recipeSkipped ?? "the goal was not reached"}`);
+    }
+  }
   if (values["save-recipe"] !== undefined) {
     if (result.recipe) {
       const store = new RecipeStore({ localDir: values.dir ?? join(process.cwd(), DEFAULT_RECIPE_DIR), globalDir: false });
       store.upsert(result.recipe);
-      console.log(`recipe saved: ${result.recipe.name} (verify with: ${verifyCommand(result.recipe, values.dir)})`);
+      console.log(
+        `recipe saved: ${result.recipe.name} (verify with: ${verifyCommand(result.recipe, values.dir, { variables: result.variables, varsFile: secretsFile })})`,
+      );
+      if (result.variables.length > 0 && secretsFile === undefined) {
+        console.log(
+          `  the recipe types ${result.variables.map((n) => `{{${n}}}`).join(", ")}: give each value with --var, or pass --save-secrets <file> to drive to write a --vars-file`,
+        );
+      }
     } else {
       console.log(`no recipe saved: ${result.recipeSkipped ?? "the goal was not reached"}`);
     }
@@ -191,6 +237,7 @@ export async function runDriveCli(argv: string[]): Promise<void> {
         recipe: result.recipe,
         ...(Object.keys(until).length > 0 ? { until } : {}),
         faults,
+        vars: result.secretValues(),
         ...(values.exclude ? { exclude: values.exclude } : {}),
         ...(hangReleaseMs !== undefined ? { hangReleaseMs } : {}),
         ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
@@ -212,13 +259,88 @@ export async function runDriveCli(argv: string[]): Promise<void> {
  * requires `--base-url`: the origin the recipe was recorded on, which a
  * reader swaps for another host to verify it there. `--dir` only when
  * the store is not verify's default, which it would not find otherwise.
+ * A recipe with placeholders (`variables`) needs their values: the
+ * `--vars-file` drive wrote them to, or else a `--var NAME=VALUE` for each,
+ * VALUE for the reader to fill in (verify refuses to run without them).
  */
-export function verifyCommand(recipe: ActionRecipe, dir: string | undefined): string {
+export function verifyCommand(
+  recipe: ActionRecipe,
+  dir: string | undefined,
+  vars: { variables?: readonly string[]; varsFile?: string } = {},
+): string {
   const words = ["chaosbringer", "recipes", "verify", shellQuote(recipe.name)];
   const origin = recipeOrigin(recipe);
   if (origin) words.push("--base-url", shellQuote(origin));
   if (dir !== undefined && resolve(dir) !== resolve(DEFAULT_RECIPE_DIR)) words.push("--dir", shellQuote(dir));
+  if (vars.varsFile !== undefined) words.push("--vars-file", shellQuote(vars.varsFile));
+  else for (const name of vars.variables ?? []) words.push("--var", `${name}=VALUE`);
   return words.join(" ");
+}
+
+/**
+ * `--secret name=ENV_VAR` flags as the `secrets` `drive()` types by name.
+ * A `UsageError` naming the flag for a pair that is not `name=ENV_VAR`, a
+ * name a placeholder cannot use, a name given twice, or a variable that is
+ * unset or empty: refused before the browser starts, not typed as nothing.
+ */
+export function parseSecretFlags(flags: readonly string[], env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const flag of flags) {
+    const eq = flag.indexOf("=");
+    const name = flag.slice(0, eq);
+    const variable = flag.slice(eq + 1);
+    if (eq <= 0 || variable === "") throw new UsageError(`--secret ${JSON.stringify(flag)}: expected NAME=ENV_VAR`);
+    if (!VARIABLE_NAME_RE.test(name)) {
+      throw new UsageError(`--secret ${JSON.stringify(flag)}: ${JSON.stringify(name)} is not a variable name (letters, digits, _ . -, starting with a letter or _)`);
+    }
+    if (Object.hasOwn(out, name)) throw new UsageError(`--secret ${JSON.stringify(flag)}: ${name} is given twice`);
+    const value = env[variable];
+    if (value === undefined) throw new UsageError(`--secret ${JSON.stringify(flag)}: environment variable ${variable} is not set`);
+    if (value === "") throw new UsageError(`--secret ${JSON.stringify(flag)}: environment variable ${variable} is empty`);
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * A `UsageError` unless `--save-secrets` can be written once the run is
+ * over: a path that does not exist (its directory is created), or a regular
+ * file this process can write, which is overwritten. A directory, a symlink
+ * (writing through it would put the secrets wherever it points) or anything
+ * else is refused before the browser starts.
+ */
+export function checkSecretsPath(path: string): void {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if ((err as { code?: unknown }).code === "ENOENT") return;
+    throw new UsageError(`--save-secrets ${path}: cannot be checked (${errorMessage(err)})`);
+  }
+  if (st.isSymbolicLink()) throw new UsageError(`--save-secrets ${path}: is a symlink; give the file itself`);
+  if (!st.isFile()) throw new UsageError(`--save-secrets ${path}: exists and is not a regular file`);
+  try {
+    accessSync(path, constants.W_OK);
+  } catch {
+    throw new UsageError(`--save-secrets ${path}: exists and cannot be written`);
+  }
+}
+
+/**
+ * Write `vars` to `path` as JSON readable by its owner only. The mode is
+ * set before anything is written, also on a file that already existed with
+ * a wider one (`open`'s mode only applies to a file it creates).
+ */
+export function writeSecretsFile(path: string, vars: RecipeVars): void {
+  checkSecretsPath(path);
+  mkdirSync(dirname(resolve(path)), { recursive: true });
+  const fd = openSync(path, "w", 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeSync(fd, JSON.stringify(vars, null, 2) + "\n");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function formatChaosSummary(c: RecipeChaosResult): string {
@@ -289,7 +411,7 @@ function modelDecider(provider: string | undefined, model: string | undefined, v
  * Anything wrong with it is a `UsageError` naming `--plan` (exit 2): as a
  * plain Error it was `drive failed: …` and exit 1, "the goal was not reached".
  */
-export function planFrom(path: string): DriveDecider {
+export function planFrom(path: string, secrets: ReadonlySet<string> = new Set()): DriveDecider {
   const raw = readInputJson("--plan", path, "plan");
   if (!Array.isArray(raw)) throw new UsageError(`--plan ${path}: expected a JSON array of steps`);
   const pattern = (v: unknown, i: number): string | RegExp => {
@@ -302,12 +424,23 @@ export function planFrom(path: string): DriveDecider {
       throw new UsageError(`--plan ${path}: step ${i}'s target ${JSON.stringify(v)} is not a valid regex (${errorMessage(err)})`);
     }
   };
+  // A `{{name}}` in a value is a secret's placeholder: one no --secret
+  // names would fail its step, after the steps before it had run.
+  const value = (v: string, i: number): string => {
+    const unknown = templateNames(v).filter((n) => !secrets.has(n));
+    if (unknown.length > 0) {
+      throw new UsageError(
+        `--plan ${path}: step ${i}'s value uses {{${unknown[0]}}}, which no --secret names (add --secret ${unknown[0]}=ENV_VAR)`,
+      );
+    }
+    return v;
+  };
   const steps = raw.map((s: unknown, i): DrivePlanStep => {
     if (typeof s !== "object" || s === null) throw new UsageError(`--plan ${path}: step ${i} is not an object`);
     const step = s as Record<string, unknown>;
     if ("click" in step) return { click: pattern(step.click, i) };
-    if ("fill" in step && typeof step.value === "string") return { fill: pattern(step.fill, i), value: step.value, ...(step.submit === true ? { submit: true } : {}) };
-    if ("select" in step && typeof step.value === "string") return { select: pattern(step.select, i), value: step.value };
+    if ("fill" in step && typeof step.value === "string") return { fill: pattern(step.fill, i), value: value(step.value, i), ...(step.submit === true ? { submit: true } : {}) };
+    if ("select" in step && typeof step.value === "string") return { select: pattern(step.select, i), value: value(step.value, i) };
     if ("press" in step && typeof step.press === "string") return { press: step.press, ...(step.on !== undefined ? { on: pattern(step.on, i) } : {}) };
     throw new UsageError(`--plan ${path}: step ${i} is not click / fill+value / select+value / press`);
   });

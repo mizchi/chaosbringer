@@ -10,6 +10,7 @@ Rules:
 - "press" sends a key (Escape, Enter, Tab, ArrowDown…), to a candidate when "index" is given, otherwise to the page.
 - Close banners and dialogs that stand in the way (cookie consent: prefer the choice that declines optional cookies).
 - Never enter real personal data or payment details unless the goal gives them. Use obviously fake test values otherwise.
+- A value shown as {{name}} is a secret: the field was filled, its value is kept from you. To type a secret listed under "Secrets", fill with its {{name}} as written.
 - Answer "done" when the page shows the goal is reached; "give_up" when it cannot be reached from here (say why).
 - If an action did not change anything, try something else instead of repeating it.
 
@@ -25,7 +26,7 @@ Goal: {{goal}}
 URL: {{url}}
 Title: {{title}}
 Step {{stepIndex}} ({{stepsLeft}} left)
-{{feedback}}
+{{feedback}}{{secrets}}
 Done so far:
 {{history}}
 

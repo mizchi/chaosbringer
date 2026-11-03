@@ -237,6 +237,12 @@ describe("usage errors", () => {
     // not reach; the storage state only failed once the browser was up.
     [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--storage-state", "missing-state.json"], "drive", "--storage-state missing-state.json: no such file"],
     [["drive", ...URL_ARG, "--goal", "x", "--plan", "missing-plan.json"], "drive", "--plan missing-plan.json: no such file"],
+    // The commands that replay recipes read --var / --vars-file before the
+    // store or a browser; drive its --secret environment variables.
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--secret", "pw=CB_TEST_UNSET_SECRET"], "drive", '--secret "pw=CB_TEST_UNSET_SECRET": environment variable CB_TEST_UNSET_SECRET is not set'],
+    [["load", "--base-url", "http://a.test", "--vars-file", "missing-vars.json"], "load", "--vars-file missing-vars.json: no such file"],
+    [["recipes", "verify", "x", "--base-url", "http://a.test", "--var", "password"], "recipes verify", '--var "password": expected NAME=VALUE'],
+    [["recipes", "repair", "x", "--var", "=x"], "recipes repair", '--var "=x": expected NAME=VALUE'],
     [["recipes", "show"], "recipes show", "expected a recipe name"],
     [["recipes", "rollback", "x"], "recipes rollback", "--to-version N is required"],
     [["recipes", "verify", "x", "--base-url", "staging.test"], "recipes verify", '--base-url must be an absolute http(s) URL, got "staging.test"'],

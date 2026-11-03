@@ -25,6 +25,14 @@
  *   on a later load where the snapshot's refs do not;
  * - with `video`, a recording (Playwright's `page.screencast`) with every
  *   action annotated on screen and the goal as an opening title.
+ *
+ * Secrets (`secrets.ts`): what it types into a password or one-time-code
+ * field, and the `secrets` a decider types by name (`{{name}}`), are
+ * recorded as placeholders and scrubbed from everything it returns, shows
+ * the decider or annotates on the video. Their values are only in
+ * `secretValues()`. What it cannot scrub: the page's own pixels (a
+ * `vision` screenshot, the video's frames of a field the page does not
+ * mask) and what the app does with the value (requests it sends, its logs).
  */
 
 import { chromium, type Browser, type BrowserContextOptions, type Page } from "playwright";
@@ -34,9 +42,11 @@ import { newIsolatedPage } from "../browser-session.js";
 import { errorMessage } from "../errors.js";
 import { toRegExp } from "../fault-router.js";
 import { extractCandidate } from "../recipes/capture.js";
+import { type RecipeVars, recipeVariables, UndefinedVariableError } from "../recipes/templating.js";
 import type { ActionRecipe, ActionTrace, RecipeStep } from "../recipes/types.js";
 import { DEFAULT_SETTLE_QUIET_MS, pageSettleEnv, settleAdaptive, trackPageRequests } from "../settle.js";
 import { type DriveProblem, safeUrl, siteProblems, watchProblems } from "./problems.js";
+import { DriveSecrets, secretFieldKind } from "./secrets.js";
 
 export type { DriveProblem } from "./problems.js";
 
@@ -69,6 +79,10 @@ export interface DriveHistoryEntry {
   action: DriveDecision["action"];
   /** The control's description. */
   target?: string;
+  /**
+   * What was typed, selected or pressed. A secret is its placeholder
+   * (`{{password}}`), never its value.
+   */
   value?: string;
   ok: boolean;
   error?: string;
@@ -92,6 +106,12 @@ export interface DriveInput {
   problems: ReadonlyArray<DriveProblem>;
   /** Set when the previous answer was refused: why. */
   feedback?: string;
+  /**
+   * Secrets the decider can type by name: a fill of `{{name}}` types the
+   * value, which the decider is never shown. The `secrets` option's names,
+   * then each field secret drive has kept (`password`, `one_time_code`).
+   */
+  secrets?: ReadonlyArray<string>;
   /** Lazy viewport capture, for deciders that read pixels. */
   screenshot: () => Promise<Buffer>;
 }
@@ -144,6 +164,15 @@ export interface DriveOptions {
   settleCapMs?: number;
   /** Name for the recipe of a successful run. Default `drive/<host>/<goal slug>`. */
   recipeName?: string;
+  /**
+   * Values a decider types by name: a fill (or select) of `{{name}}` types
+   * `secrets[name]`. The recipe records `{{name}}`, and the value is
+   * scrubbed from everything drive returns or shows (see `secrets.ts`). A
+   * decision that uses a `{{name}}` this does not define fails its step.
+   * Names follow the recipe placeholder grammar (`VARIABLE_NAME_RE`).
+   */
+  secrets?: Readonly<Record<string, string>>;
+  /** After each action. The decision's value and reasoning are scrubbed of secrets, as the entry is. */
   onStep?: (entry: DriveHistoryEntry, decision: DriveDecision) => void;
   /**
    * Serve the browser to other Playwright clients while driving
@@ -186,8 +215,19 @@ export interface DriveResult {
   finalUrl: string;
   durationMs: number;
   video?: string;
-  /** The run as a recipe, when it reached its goal (`reached` or `done`). */
+  /**
+   * The run as a recipe, when it reached its goal (`reached` or `done`). A
+   * secret it typed is a placeholder: replay it with `vars: secretValues()`.
+   */
   recipe: ActionRecipe | null;
+  /** The placeholders `recipe` uses (`["password"]`), `[]` without a recipe. */
+  variables: string[];
+  /**
+   * The value of each secret the run typed or was given, by name: the vars
+   * that replay `recipe`. A function, so that `JSON.stringify(result)` (the
+   * CLI's drive-report.json) never carries them.
+   */
+  secretValues: () => RecipeVars;
   /** Why there is no recipe for a successful run. */
   recipeSkipped?: string;
   decider: string;
@@ -227,6 +267,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     await page.screencast.showActions({ position: "top-right" });
   }
 
+  const secrets = new DriveSecrets(opts.secrets);
   const history: DriveHistoryEntry[] = [];
   const recipeSteps: (RecipeStep | null)[] = [];
   let status: DriveStatus = "out-of-steps";
@@ -248,14 +289,19 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
 
   const reached = async (): Promise<boolean> => (opts.until ? untilHolds(page, opts.until) : false);
   const finish = async (): Promise<DriveResult> => {
+    // Scrubbed again at the end: a value typed into a plain field first and
+    // into a password field later was kept as a secret only at that later step.
+    const scrub = (text: string) => secrets.scrub(text);
     const result: DriveResult = {
       status,
-      ...(reason !== undefined ? { reason } : {}),
-      steps: history,
-      problems,
-      finalUrl: safeUrl(page),
+      ...(reason !== undefined ? { reason: scrub(reason) } : {}),
+      steps: history.map((h) => scrubEntry(h, secrets)),
+      problems: problems.map((p) => ({ ...p, message: scrub(p.message) })),
+      finalUrl: scrub(safeUrl(page)),
       durationMs: Date.now() - started,
       recipe: null,
+      variables: [],
+      secretValues: () => secrets.vars(),
       decider: opts.decider.name,
       ...(bound ? { bound } : {}),
     };
@@ -263,7 +309,13 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       const missing = recipeSteps.findIndex((s) => s === null);
       if (history.length === 0) result.recipeSkipped = "the goal held on arrival: there is nothing to replay";
       else if (missing >= 0) result.recipeSkipped = `step ${missing} acted on a control with no role or name to find it by on a later load`;
-      else result.recipe = toRecipe(opts, recipeSteps as RecipeStep[], result.finalUrl);
+      else {
+        const steps = (recipeSteps as RecipeStep[]).map((st) =>
+          st.kind === "fill" || st.kind === "select" ? { ...st, value: secrets.template(st.value) } : st,
+        );
+        result.recipe = toRecipe(opts, steps, result.finalUrl);
+        result.variables = recipeVariables(result.recipe);
+      }
     }
     detach();
     if (opts.keepOpen) await opts.keepOpen(result).catch(() => {});
@@ -324,17 +376,20 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       status = "error";
       break;
     }
+    // The outline shows a filled field's value (`textbox "Password":
+    // hunter2`): the decider gets every text scrubbed of secrets.
     const input: DriveInput = {
       goal: opts.goal,
-      url: safeUrl(page),
-      title: await page.title().catch(() => ""),
+      url: secrets.scrub(safeUrl(page)),
+      title: secrets.scrub(await page.title().catch(() => "")),
       stepIndex: step,
       stepsLeft: maxSteps - step,
-      outline: view.outline,
-      candidates: view.candidates.map(({ index, description, type }) => ({ index, description, type })),
+      outline: secrets.scrub(view.outline),
+      candidates: view.candidates.map(({ index, description, type }) => ({ index, description: secrets.scrub(description), type })),
       history,
-      problems: siteProblems(problems.slice(seenProblems)),
+      problems: siteProblems(problems.slice(seenProblems)).map((p) => ({ ...p, message: secrets.scrub(p.message) })),
       ...(feedback !== undefined ? { feedback } : {}),
+      secrets: secrets.names(),
       screenshot: async () => Buffer.from(await page.screenshot()),
     };
     seenProblems = problems.length;
@@ -362,7 +417,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
       }
       continue;
     }
-    if (decision.reasoning) reason = decision.reasoning;
+    if (decision.reasoning) reason = secrets.scrub(decision.reasoning);
 
     if (decision.action === "give_up") {
       status = "gave-up";
@@ -410,21 +465,29 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
     refused = { done: 0, index: 0, none: 0 };
     watch.setStep(step);
     const before = problems.length;
-    const entry: DriveHistoryEntry = {
-      step,
-      action: decision.action,
-      ...(candidate ? { target: candidate.description } : {}),
-      ...("value" in decision ? { value: decision.value } : decision.action === "press" ? { value: decision.key } : {}),
-      ok: true,
-      url: "",
-      problems: [],
-    };
-    const recorded = recordStep(decision, candidate);
+    // The decision as the history and the recipe keep it: each secret value
+    // written as its placeholder. What is typed has them filled in.
+    let kept: DriveDecision = "value" in decision ? { ...decision, value: secrets.template(decision.value) } : decision;
+    let error: string | undefined;
     try {
       if (candidate?.href && isExcluded(new URL(candidate.href, safeUrl(page)).href)) {
         throw new Error(`refused: ${candidate.href} is excluded`);
       }
-      await perform(page, decision, candidate, actionTimeout);
+      // Read at the moment of the fill, from the element it fills, so a
+      // password field's value is a placeholder before anything records it.
+      if (kept.action === "fill" && candidate && kept.value !== "" && !secrets.isTemplated(kept.value)) {
+        const kind = await secretFieldKind(page.locator(`aria-ref=${candidate.ref}`), actionTimeout);
+        if (kind) kept = { ...kept, value: secrets.register(kept.value, kind) };
+      }
+      const typed: DriveDecision = "value" in kept ? { ...kept, value: resolveSecret(secrets, kept.value) } : kept;
+      const secret = "value" in typed && "value" in kept && typed.value !== kept.value;
+      // The video's action title is `Fill "<value>"`: not for a secret.
+      if (secret && opts.video) await page.screencast.hideActions().catch(() => {});
+      try {
+        await perform(page, typed, candidate, actionTimeout);
+      } finally {
+        if (secret && opts.video) await page.screencast.showActions({ position: "top-right" }).catch(() => {});
+      }
       await settle();
       if (isExcluded(safeUrl(page))) {
         const landed = safeUrl(page);
@@ -433,15 +496,23 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
         throw new Error(`landed on excluded ${landed}; went back`);
       }
     } catch (err) {
-      entry.ok = false;
-      entry.error = errorMessage(err).split("\n")[0];
+      error = secrets.scrub(errorMessage(err).split("\n")[0]!);
     }
     await drainRejections();
-    entry.url = safeUrl(page);
-    entry.problems = siteProblems(problems.slice(before)).map((p) => `${p.kind}: ${p.message}`);
+    const entry: DriveHistoryEntry = {
+      step,
+      action: kept.action,
+      ...(candidate ? { target: secrets.scrub(candidate.description) } : {}),
+      ...("value" in kept ? { value: kept.value } : kept.action === "press" ? { value: kept.key } : {}),
+      ok: error === undefined,
+      ...(error !== undefined ? { error } : {}),
+      url: secrets.scrub(safeUrl(page)),
+      problems: siteProblems(problems.slice(before)).map((p) => secrets.scrub(`${p.kind}: ${p.message}`)),
+    };
+    const recorded = recordStep(kept, candidate);
     if (entry.ok) recipeSteps.push(...withExpect(recorded, entry.url, history.at(-1)?.url ?? opts.url));
     history.push(entry);
-    opts.onStep?.(entry, decision);
+    opts.onStep?.(entry, { ...kept, ...(kept.reasoning !== undefined ? { reasoning: secrets.scrub(kept.reasoning) } : {}) });
     step++;
 
     if (await reached()) {
@@ -451,6 +522,30 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   }
   if (status === "out-of-steps") reason = `used all ${maxSteps} steps without reaching the goal`;
   return finish();
+}
+
+/**
+ * The text to type for a recorded `value`. A placeholder no secret defines
+ * fails the step, naming it, as a replay would.
+ */
+function resolveSecret(secrets: DriveSecrets, value: string): string {
+  try {
+    return secrets.resolve(value);
+  } catch (err) {
+    if (err instanceof UndefinedVariableError) throw new Error(`variable "${err.variable}" is not defined (no secret has that name)`);
+    throw err;
+  }
+}
+
+function scrubEntry(h: DriveHistoryEntry, secrets: DriveSecrets): DriveHistoryEntry {
+  return {
+    ...h,
+    ...(h.target !== undefined ? { target: secrets.scrub(h.target) } : {}),
+    ...(h.value !== undefined ? { value: secrets.template(h.value) } : {}),
+    ...(h.error !== undefined ? { error: secrets.scrub(h.error) } : {}),
+    url: secrets.scrub(h.url),
+    problems: h.problems.map((p) => secrets.scrub(p)),
+  };
 }
 
 /** `value` floored, and at least `min`; `fallback` when it is unset or not a number. */

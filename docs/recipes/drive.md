@@ -88,11 +88,93 @@ lands on one is undone with a history back.
   status as they were, and `load` records none of those replays. A run
   that acted on a control with no role and no name cannot be replayed, so
   it produces no recipe, and the summary says which step.
+  A password the run typed is in the recipe as `{{password}}` (see
+  [Secrets](#secrets)), and `verify` refuses to run it until it has the
+  value: the command `drive` prints passes the `--vars-file` it saved with
+  `--save-secrets`, or a `--var password=VALUE` for you to fill in.
 - **A video** with `--video`, recorded with Playwright's `page.screencast`.
   It shows each action annotated on screen and opens with the goal as a
   title card.
 - **`drive-report.json`** in `--out`, containing every step, each step's
   problems, the final URL and the model's reasoning.
+
+## Secrets
+
+What `drive` types into a password field (`type=password`, or an
+`autocomplete` token ending in `-password`, such as `current-password`) or a
+one-time-code field (`autocomplete="one-time-code"`) is a secret, and so is
+each `--secret`. A secret is recorded as a placeholder, never as its value:
+
+| Typed into | Recorded as |
+| --- | --- |
+| a password field | `{{password}}`; a second, different value `{{password_2}}`, then `{{password_3}}`. The same value again (a "confirm password" field) reuses its name |
+| a one-time-code field | `{{one_time_code}}` (`{{one_time_code_2}}`, …) |
+| any field, as `{{name}}` with `--secret name=ENV_VAR` | `{{name}}`; the value typed is `$ENV_VAR`'s |
+
+The value is replaced by its placeholder in the recipe, the recipe store,
+`recipe.json`, `drive-report.json`, the progress lines, the video's action
+titles (Playwright annotates a fill as `Fill "<value>"`, so drive hides the
+title of a secret one) and everything the model is shown: the history, and
+the accessibility outline, which shows a filled field's value
+(`textbox "Password": {{password}}`). The model still sees that the field
+was filled. Every other text drive writes (problems, URLs, the model's
+reasoning) has each secret value replaced too, as written and as a URL
+encodes it.
+
+`--secret` keeps a secret out of the plan and out of the model's view
+entirely: the plan (or the goal you give the model) says `{{pw}}`, and the
+value comes from the environment at run time. A `--secret` whose variable
+is unset or empty, and a plan value with a `{{name}}` no `--secret` names,
+are refused before the browser starts (exit 2).
+
+```sh
+# plan.json: [{"fill": "textbox \"Email\"", "value": "qa@example.test"},
+#             {"fill": "textbox \"Password\"", "value": "{{pw}}"},
+#             {"click": "button \"Sign in\""}]
+QA_PASSWORD=… chaosbringer drive --url http://localhost:3000/login --goal "log in" \
+  --plan plan.json --secret pw=QA_PASSWORD --until-url /dashboard \
+  --save-recipe auth/login --save-secrets .secrets/login.json
+# recipe saved: auth/login (verify with: chaosbringer recipes verify auth/login --base-url http://localhost:3000 --vars-file .secrets/login.json)
+```
+
+The real values are written only with `--save-secrets <file>`: a JSON object
+of the recipe's placeholders and their values, created (or overwritten) with
+mode 0600, which `recipes verify`, `recipes repair` and `load` read as
+`--vars-file <file>`. drive refuses, before the browser starts, a path that
+is a directory, a symlink or a file it cannot write. Keep the file out of
+version control. Without `--save-secrets`, the `verify with:` hint names
+each variable for you to supply (`--var password=VALUE`). `--chaos` replays
+the recipe with the values the run had.
+
+From code, `drive({ secrets: { pw: process.env.QA_PASSWORD! } })` does what
+`--secret` does, `result.variables` names the placeholders the recipe uses,
+and `result.secretValues()` returns the values: a function, so that
+`JSON.stringify(result)` leaves them out. Replay the recipe with
+`runRecipe(page, result.recipe, { vars: result.secretValues() })`.
+
+What drive cannot take a secret out of:
+
+- what the app does with it: the requests it sends (a login `POST` body, a
+  `GET` form that puts it in the URL the server logs), its own logs and
+  storage. A Playwright trace or HAR you record yourself holds those too;
+- pixels: a `--vision` screenshot and the video's frames show a field the page
+  does not mask (a one-time code is shown as typed; a password field shows
+  dots);
+- a secret it does not know is one: a value typed into a plain text field
+  without `--secret`. `recipes lint` still warns about a credential-looking
+  fill whose value is not templated (`hardcoded-credentials`), for recipes
+  written by hand.
+
+A very short secret is replaced wherever its text appears, so a one- or
+two-character one makes the report hard to read: use test credentials of a
+realistic length.
+
+> **Behaviour change:** drive used to record what it typed into a password
+> field as it was, in the recipe and every output. Such a recipe now holds
+> `{{password}}`, and replaying it needs the value (`recipes verify
+> --vars-file`, `runRecipe(…, { vars: result.secretValues() })`). A plan or
+> model value with a `{{name}}` in it is a secret's placeholder now, not text
+> to type: a plan that typed literal `{{…}}` text needs a `--secret` for it.
 
 ## Then break it: `--chaos`
 
