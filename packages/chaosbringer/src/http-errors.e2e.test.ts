@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { chaos } from "./chaos.js";
+import { chaos, type ChaosRunOptions } from "./chaos.js";
 import { ChaosCrawler } from "./crawler.js";
 import { faults } from "./faults.js";
 import { buildGithubAnnotations } from "./github.js";
+import { shouldSaveArtifacts } from "./failure-artifacts.js";
+import { flakeReport } from "./flake.js";
 import { exitReasons, formatCompactReport, formatQuietReport } from "./reporter.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 import type { CrawlerOptions, CrawlReport, FaultRule, PageError } from "./types.js";
@@ -30,6 +32,9 @@ beforeAll(async () => {
     switch (req.url) {
       case "/sub":
         html(page(`await fetch("/api/broken", { method: "POST" }).catch(() => {});`, `<img src="/missing.png" alt="">`));
+        return;
+      case "/css":
+        html(page("", `<link rel="stylesheet" href="/missing.css"><script src="/missing.js"></script>`));
         return;
       case "/netfail":
         html(page(`await fetch("/api/destroy").catch(() => {});`));
@@ -142,6 +147,20 @@ describe("4xx / 5xx subresource and API responses", () => {
     expect(exitReasons(report, { http: "4xx" })[0]).toContain("1 HTTP response >= 400");
   }, 60_000);
 
+  it("a 404 stylesheet or script is one HTTP error each, not a network error too", async () => {
+    // Chromium also fails each as net::ERR_ABORTED, which was recorded as a
+    // `network` error: --fail-on-network failed on a missing CSS file, and
+    // --ignore-http did not stop it.
+    const report = await crawl("/css");
+    expect(errorsOf(report).filter((e) => e.type === "network")).toEqual([]);
+    expect(report.summary.httpErrors).toEqual({ total: 2, "4xx": 2, "5xx": 0, byStatus: { "404": 2 } });
+    expect(exitReasons(report, { network: true })).toEqual([]);
+    expect(exitReasons(report, { http: "4xx" })[0]).toMatch(/^--fail-on-http 4xx: 2 HTTP responses >= 400 /);
+    const ignored = await crawl("/css", { ignoreHttpPatterns: ["missing\\.(css|js)$"] });
+    expect(errorsOf(ignored)).toEqual([]);
+    expect(exitReasons(ignored, { network: true, http: "4xx", strict: true })).toEqual([]);
+  }, 60_000);
+
   it("a fetch whose socket is destroyed is a network error, not an HTTP one; annotated as error only when it fails the run", async () => {
     const report = await crawl("/netfail");
     const network = errorsOf(report).filter((e) => e.type === "network");
@@ -198,6 +217,14 @@ describe("the echo of a fault the run injected", () => {
     expect(report.summary.faultEchoes).toBe(1);
     expect(report.errorClusters).toEqual([]);
     expect(report.faultInjections).toEqual([{ rule: "items-500", matched: 1, injected: 1, echoes: 1 }]);
+    // Nor do the page-level readings: the page passed.
+    const [result] = report.pages;
+    expect(result!.hasErrors).toBe(false);
+    expect(shouldSaveArtifacts(result!)).toBe(false);
+    const clean = { ...report, pages: [{ ...result!, errors: [], hasErrors: false }] };
+    expect(flakeReport([report, clean]).flakyPages).toEqual([]);
+    // The raw count still has it.
+    expect(report.totalErrors).toBe(1);
   }, 60_000);
 
   it("still fails strict on a real 500 from another URL", async () => {
@@ -239,6 +266,26 @@ describe("the echo of a fault the run injected", () => {
     expect(report.summary.consoleErrors).toBe(6 - stats!.injected);
     expect(report.summary.httpErrors?.["5xx"]).toBe(6 - stats!.injected);
     expect(exitReasons(report, { strict: true })).toEqual([`--strict: ${6 - stats!.injected} console error${6 - stats!.injected === 1 ? "" : "s"}`]);
+  }, 60_000);
+
+  it("does not tag a real 500 a delay rule passed on: a delay answers nothing", async () => {
+    const report = await crawl("/items-and-other", {
+      faultInjection: [faults.delay(50, { urlPattern: /\/api\/other$/, name: "other-delay" })],
+    });
+    expect(report.faultInjections).toEqual([{ rule: "other-delay", matched: 1, injected: 1 }]);
+    expect(resourceLines(report).map((e) => [e.resourceUrl, e.causedByFault])).toEqual([[`${server.url}/api/other`, undefined]]);
+    expect(report.summary.faultEchoes).toBe(0);
+    expect(exitReasons(report, { strict: true })).toEqual(["--strict: 1 console error"]);
+  }, 60_000);
+
+  it("tags the network error and console line of a released hang", async () => {
+    const report = await crawl("/items", {
+      faultInjection: [faults.hang({ urlPattern: /\/api\/items$/, name: "items-hang", releaseAfterMs: 300 })],
+    });
+    const errors = errorsOf(report);
+    expect(errors.map((e) => e.type).sort()).toEqual(["console", "network"]);
+    expect(errors.every((e) => e.causedByFault === "items-hang")).toBe(true);
+    expect(exitReasons(report, { strict: true, network: true })).toEqual([]);
   }, 60_000);
 
   it("tags an abort's network error and its console line", async () => {
@@ -296,6 +343,12 @@ describe("dead links", () => {
     const report = await crawl("/home", { maxPages: 2, seedFromSitemap: undefined });
     const dead = report.summary.discovery!.deadLinks;
     expect(dead.map((d) => [d.url, d.statusCode])).toEqual([[`${server.url}/gone`, 404]]);
+    // The page's own document is a dead link, not an HTTP error of it too:
+    // --fail-on-http 4xx would fail on every dead link.
+    expect(report.summary.httpErrors).toEqual({ total: 0, "4xx": 0, "5xx": 0, byStatus: {} });
+    expect(resourceLines(report).length).toBeGreaterThan(0);
+    expect(resourceLines(report).every((e) => e.status === undefined && e.method === undefined)).toBe(true);
+    expect(exitReasons(report, { http: "4xx" })).toEqual([]);
     const line = `  Dead links: 1 (first: ${server.url}/gone <- ${server.url}/home)`;
     expect(exitReasons(report, {})).toEqual([]);
     expect(formatCompactReport(report).split("\n")).toContain(line);
@@ -310,5 +363,28 @@ describe("dead links", () => {
       buildGithubAnnotations(report, opts).find((a) => a.title.startsWith("Dead link"))!.level;
     expect(level({})).toBe("warning");
     expect(level({ deadLinks: true })).toBe("error");
+  }, 60_000);
+});
+
+describe("chaos() applies its exit options", () => {
+  const run = (path: string, over: Partial<ChaosRunOptions>) =>
+    chaos({ baseUrl: `${server.url}${path}`, maxPages: 1, maxActionsPerPage: 0, headless: true, seed: 1, ...over });
+
+  it("failOnHttp fails on a real 5xx and names it", async () => {
+    const { report, passed, exitCode } = await run("/sub", { failOnHttp: "5xx" });
+    expect(passed).toBe(false);
+    expect(exitCode).toBe(1);
+    expect(exitReasons(report, { http: "5xx" })[0]).toContain(`POST ${server.url}/api/broken 500`);
+    expect((await run("/sub", {})).passed).toBe(true);
+  }, 60_000);
+
+  it("failOnNetwork fails on a transport failure", async () => {
+    const { passed, exitCode } = await run("/netfail", { failOnNetwork: true });
+    expect([passed, exitCode]).toEqual([false, 1]);
+  }, 60_000);
+
+  it("failOnDeadLinks fails on a dead link", async () => {
+    const { passed, exitCode } = await run("/home", { maxPages: 2, failOnDeadLinks: true });
+    expect([passed, exitCode]).toEqual([false, 1]);
   }, 60_000);
 });

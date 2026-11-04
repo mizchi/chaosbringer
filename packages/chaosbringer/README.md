@@ -508,11 +508,11 @@ const { passed, report } = await chaos({
 // report.faultInjections → [{ rule: "cart-500", matched: 1, injected: 1, echoes: 1 }]
 ```
 
-The match is by request, not by URL pattern or message: a 500 the server really returned on the same endpoint, on a request the rule let through (`probability`, `schedule`), is no echo and fails `--strict` as before. Every layer that answers or aborts a request tags its echoes: the page's route, the service-worker route (matched by method and URL, one page request per firing), a `faults.hang` whose `releaseAfterMs` aborts it, and a server-side `5xx` that `@mizchi/server-faults` reports in its `x-chaos-fault-*` headers under `server: { mode: "remote" }` (tagged `server:5xx`). A `delay` passes the request on, so what the server answers after it is the server's.
+The match is by request, not by URL pattern or message: a 500 the server really returned on the same endpoint, on a request the rule let through (`probability`, `schedule`), is no echo and fails `--strict` as before. Every layer that answers or aborts a request tags its echoes: the page's route, the service-worker route (matched by method and URL: each firing is spent on the next page request of that method and URL the worker serves, and tags it only when it ended as the fault ends a request, so a firing the worker's fallback absorbed tags nothing), a `faults.hang` whose `releaseAfterMs` aborts it, and a server-side `5xx` that `@mizchi/server-faults` reports in its `x-chaos-fault-*` headers under `server: { mode: "remote" }` (tagged `server:5xx`). A `delay` passes the request on, so what the server answers after it is the server's.
 
 `strictCountsFaultEchoes: true` (on `ChaosCrawler`, `chaos()` and the fixture's `chaosOptions`) records them untagged and counts them everywhere, as before this option existed; the rule's `echoes` still counts them.
 
-> **Behaviour change:** the echo of a fault the run injected used to be an ordinary console / network error: it failed `--strict` (and the fixture's `strict`), appeared in `errorClusters` and the `--baseline` diff, and was counted in `summary.consoleErrors` / `networkErrors` and the `N errors` of the verdict line. It is now tagged and counted only as `summary.faultEchoes`. A `--baseline` written before shows those clusters as resolved, which fails nothing. An ignore pattern written for it (`"Failed to load resource.*503"`) still works but is no longer needed, and it also hid the app's own 503s.
+> **Behaviour change:** the echo of a fault the run injected used to be an ordinary console / network error: it failed `--strict` (and the fixture's `strict`), appeared in `errorClusters` and the `--baseline` diff, and was counted in `summary.consoleErrors` / `networkErrors` and the `N errors` of the verdict line. It is now tagged, counted as `summary.faultEchoes`, and left out of `PageResult.hasErrors`, flake's page status, the failure bundles and the fixture's `expectNoErrors` / `chaosExpect.toHaveNoErrors` too. It stays in `page.errors`, in `report.totalErrors` (the raw count) and in the `--junit` output, which writes a `<failure>` per error for flaker as it always did. A `--baseline` written before shows those clusters as resolved, which fails nothing. An ignore pattern written for it (`"Failed to load resource.*503"`) still works but is no longer needed, and it also hid the app's own 503s.
 
 The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
 
@@ -1155,9 +1155,9 @@ Opt in with `--github-annotations` and chaosbringer prints a [workflow command](
 chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
-The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not. Invariant violations, failed navigations and crashes fail every run and are always `::error`, as are JS exceptions. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
+The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not, with one exception: a JS exception is always `::error`, also on a run without `--strict` that exits 0. Invariant violations, failed navigations and crashes fail every run and are always `::error`. Under `--baseline-strict`, a cluster the baseline did not have is `::error`. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
 
-> **Behaviour change:** network errors and dead links used to annotate as `::error` on a run that exited 0. They are `::warning` unless `--fail-on-network` / `--fail-on-dead-links` fails the run on them.
+> **Behaviour change:** network errors and dead links used to annotate as `::error` on a run that exited 0. They are `::warning` unless `--fail-on-network` / `--fail-on-dead-links` fails the run on them. And a console cluster that failed a `--baseline-strict` run as new used to be `::warning`; it is `::error`.
 
 ## Model-driven fault coverage
 
@@ -1252,7 +1252,7 @@ A subresource or API request that answers 4xx / 5xx (an image's 404, a `fetch`'s
 
 `--ignore-http <regex>` (repeatable; `ignoreHttpPatterns`) takes a request URL out: its 4xx / 5xx is not counted and its "Failed to load resource" line is dropped. That line names no URL, so `--ignore-error` cannot single out one endpoint (a logged-out session check's 401, a missing favicon); this can. A transport failure of the same URL is still recorded.
 
-A request that fails at the transport level (`net::ERR_CONNECTION_RESET`, a socket the server destroyed) is a `network` error, with its `method`. No rule fails a run on network errors by default, `--strict` included; `--fail-on-network` (`chaos({ failOnNetwork: true })`) does.
+A request that fails at the transport level (`net::ERR_CONNECTION_RESET`, a socket the server destroyed) is a `network` error, with its `method`. A stylesheet or script that answered 4xx / 5xx also fails as `net::ERR_ABORTED`; that is the HTTP error again, and not recorded as a `network` error (it used to be). No rule fails a run on network errors by default, `--strict` included; `--fail-on-network` (`chaos({ failOnNetwork: true })`) does.
 
 ## Exit codes
 
@@ -1562,11 +1562,11 @@ chaosbringer --url http://localhost:3000 \
 | `--perf-out <dir>` | Write each page's full perf report (+ trace / coverage) to `<dir>`; implies `--perf` | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
-| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link, `::error` for what fails the run under its rules and `::warning` otherwise | false |
+| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link, `::error` for what fails the run under its rules (and every JS exception) and `::warning` otherwise | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors, JS exceptions and unhandled rejections (not on the [echo of a fault](#fault-echoes) the run injected) | false |
 | `--fail-on-http <5xx\|4xx>` | Fail on a subresource / API response of 500 and up (`5xx`) or 400 and up (`4xx`). See [HTTP errors](#http-errors) | — |
-| `--fail-on-network` | Fail on a request that failed at the transport level (`net::ERR_…`) | false |
+| `--fail-on-network` | Fail on a request that failed at the transport level (`net::ERR_…`; not the `ERR_ABORTED` of a stylesheet or script that answered 4xx / 5xx, which is an HTTP error) | false |
 | `--fail-on-dead-links` | Fail on a crawled link that answered 404 / 5xx | false |
 | `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), any dead links (`Dead links: 1 (first: <url> <- <source>)`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
 | `--help`, `-h` | Show help, with a line for every subcommand | — |

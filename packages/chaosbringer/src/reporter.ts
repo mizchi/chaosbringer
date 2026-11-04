@@ -408,18 +408,20 @@ function rankByVerdict(report: CrawlReport, strict: boolean | ExitCodeOptions, f
 }
 
 /**
- * Whether a rule of `opts` other than `--baseline-strict` counts `cluster`'s
- * errors: an always-failing type, a `--strict` type under `--strict`, a
- * network error under `--fail-on-network`, and under `--fail-on-http` a
- * console cluster with a response at or over its status (read off the
- * pages, as one cluster can hold a page's own document and an API answering
- * the same status). What the compact report lists first and what the GitHub
- * annotations mark as `error`.
+ * Whether a rule of `opts` counts `cluster`'s errors: an always-failing
+ * type, a `--strict` type under `--strict`, a network error under
+ * `--fail-on-network`, under `--fail-on-http` a console cluster with a
+ * response at or over its status (read off the pages, as one cluster can
+ * hold a page's own document and an API answering the same status), and
+ * under `--baseline-strict` a cluster `report.diff` says is new. What the
+ * compact report lists first and what the GitHub annotations mark as
+ * `error`.
  */
 export function clusterFailsRun(
-  report: Partial<Pick<CrawlReport, "pages">>,
+  report: Partial<Pick<CrawlReport, "pages" | "diff">>,
   opts: ExitCodeOptions,
 ): (cluster: Pick<ErrorCluster, "key" | "type">) => boolean {
+  const fresh = new Set(opts.baselineStrict ? report.diff?.newClusters.map((c) => c.key) : []);
   const httpKeys = new Set<string>();
   const floor = opts.http ? HTTP_FLOORS[opts.http] : undefined;
   if (floor !== undefined) {
@@ -431,7 +433,8 @@ export function clusterFailsRun(
     ALWAYS_FAILING_CLUSTER_TYPES.has(c.type) ||
     (!!opts.strict && STRICT_CLUSTER_TYPES.has(c.type)) ||
     (!!opts.network && c.type === "network") ||
-    httpKeys.has(c.key);
+    httpKeys.has(c.key) ||
+    fresh.has(c.key);
 }
 
 /**

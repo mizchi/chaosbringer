@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
 import { fakePage } from "./perf-fixtures.test-helpers.js";
-import { isFaultEcho, ResourceLinePairing, type ResourceOutcome, resourceLineKind } from "./resource-outcomes.js";
+import { copyRequestFields, isFaultEcho, ResourceLinePairing, type ResourceOutcome, resourceLineKind } from "./resource-outcomes.js";
 import type { PageError } from "./types.js";
 
 const URL = "http://x/api";
@@ -14,10 +14,7 @@ const outcome = (over: Partial<ResourceOutcome> = {}): ResourceOutcome => ({ url
 /** A pairing that applies the way the crawler does, without the echo bookkeeping. */
 function pairing() {
   return new ResourceLinePairing((o, l) => {
-    if (!o.document && o.status !== undefined) {
-      l.status = o.status;
-      l.method = o.method;
-    }
+    copyRequestFields(o, l);
     if (o.fault !== undefined) l.causedByFault = o.fault;
   });
 }
@@ -74,6 +71,8 @@ describe("ResourceLinePairing", () => {
     expect(lines.every((l) => l.status === 500)).toBe(true);
   });
 
+  // copyRequestFields is the crawler's; whether an outcome is the page's
+  // document is pinned end to end (http-errors.e2e.test.ts, dead links).
   it("leaves a page's own document without status or method", () => {
     const p = pairing();
     const doc = status500();

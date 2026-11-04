@@ -13,6 +13,7 @@ import { writeFileSync } from "node:fs";
 import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import type { CrawlReport, PageError } from "./types.js";
 import { UnreachableTargetError, unreachableTarget } from "./unreachable-target.js";
 
@@ -122,8 +123,10 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
         pageFailedSet.set(page.url, rec);
       }
       rec.visited[idx] = true;
+      // The echo of a fault the run injected is not the page failing, as in
+      // diff.ts: a probability fault would make every page it hit "flaky".
       const isFailed =
-        page.errors.length > 0 || page.status === "error" || page.status === "timeout";
+        page.errors.some((e) => !isFaultEcho(e)) || page.status === "error" || page.status === "timeout";
       rec.failed[idx] = isFailed;
     }
   });

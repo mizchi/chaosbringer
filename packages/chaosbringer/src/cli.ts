@@ -211,13 +211,15 @@ OPTIONS:
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
   --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link:
-                        ::error for what fails the run under its rules, ::warning otherwise
+                        ::error for what fails the run under its rules (and every JS
+                        exception), ::warning otherwise
   --compact             Compact output format
   --strict              Fail on console errors, JS exceptions and unhandled rejections
                         (not on the browser's echo of a fault the run injected)
   --fail-on-http <5xx|4xx>  Fail on a subresource or API response of 500 and up (5xx) or 400
                         and up (4xx); the page's own document is a dead link instead
-  --fail-on-network     Fail on a request that failed at the transport level (net::ERR_…)
+  --fail-on-network     Fail on a request that failed at the transport level (net::ERR_…;
+                        not a 4xx / 5xx file's ERR_ABORTED, which is an HTTP error)
   --fail-on-dead-links  Fail on a crawled link that answered 404 / 5xx
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help

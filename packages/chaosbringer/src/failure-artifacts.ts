@@ -17,6 +17,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { formatReproFlags } from "./repro-command.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import { fnv1a } from "./shard.js";
 import { serializeTrace, type TraceEntry } from "./trace.js";
 import type { FailureArtifactsOptions, PageResult, ReproFlag } from "./types.js";
@@ -24,7 +25,8 @@ import type { FailureArtifactsOptions, PageResult, ReproFlag } from "./types.js"
 /**
  * True when this page result should trigger a failure bundle. We bundle on
  * any of: navigation error, timeout, crashed page, an HTTP 4xx/5xx status,
- * or any collected PageError (console / exception / network / invariant).
+ * or any collected PageError (console / exception / network / invariant)
+ * other than a fault echo (`PageError.causedByFault`).
  *
  * The HTTP-status check matters because the crawler hooks this *before*
  * the recovery branch flips a 404/5xx response from `status: "success"`
@@ -38,7 +40,8 @@ export function shouldSaveArtifacts(result: PageResult): boolean {
   if (typeof result.statusCode === "number" && result.statusCode >= 400) {
     return true;
   }
-  if (result.errors.length > 0) return true;
+  // Not for the echo of a fault the run injected alone: the page passed.
+  if (result.errors.some((e) => !isFaultEcho(e))) return true;
   return false;
 }
 

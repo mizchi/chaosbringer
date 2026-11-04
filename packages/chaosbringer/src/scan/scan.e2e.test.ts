@@ -82,6 +82,9 @@ describe("runScan", () => {
     expect(fragile.length).toBeGreaterThan(0);
     expect(fragile.every((f) => f.category === "resilience")).toBe(true);
     expect(fragile.some((f) => f.where.includes(`${base}/list`))).toBe(true);
+    // The browser's lines about the requests the status, abort and hang
+    // faults answered are their echoes, tagged by the crawl: no finding.
+    expect(fragile.filter((f) => /Failed to load resource/.test(f.title))).toEqual([]);
     // The clean crawl renders the list without an error.
     expect(result.analysis.findings.some((f) => f.category === "bug" && f.where.includes(`${base}/list`))).toBe(false);
 

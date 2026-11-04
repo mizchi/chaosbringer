@@ -78,6 +78,8 @@ export interface CrawlerOptions {
    * match. That line names no URL, so `ignoreErrorPatterns` cannot single
    * out one endpoint (a session check's 401, a missing favicon); this does.
    * A transport failure of the same URL (`net::ERR_…`) is still recorded.
+   * (The `net::ERR_ABORTED` a stylesheet or script also fails with after a
+   * 4xx / 5xx is not a transport failure: it is never a `network` error.)
    */
   ignoreHttpPatterns?: string[];
   /**
@@ -90,8 +92,12 @@ export interface CrawlerOptions {
    * tagged `causedByFault` and left out of the summary counts, the error
    * clusters, `--strict`, `--fail-on-http` and `--fail-on-network`: it is
    * the fault, not something the app did. It is counted as
-   * `summary.faultEchoes` and the rule's `faultInjections[].echoes`.
-   * `true` records it untagged and counts it everywhere, so a strict test
+   * `summary.faultEchoes` and the rule's `faultInjections[].echoes`, and
+   * left out of `PageResult.hasErrors`, flake's page status, the failure
+   * bundles and the Playwright fixture's `expectNoErrors` /
+   * `chaosExpect.toHaveNoErrors`. It stays in `page.errors`, in
+   * `totalErrors` (the raw count) and in the JUnit output, whose
+   * `<failure>` per error flaker reads. `true` records it untagged and counts it everywhere, so a strict test
    * of a status fault fails on it again (the rule's `echoes` still counts it).
    */
   strictCountsFaultEchoes?: boolean;
@@ -1079,7 +1085,11 @@ export interface PageResult {
   statusCode?: number;
   loadTime: number;
   errors: PageError[];
-  /** True when `errors.length > 0`. Computed once when the result is built. */
+  /**
+   * True when `errors` holds an error other than a fault echo
+   * (`PageError.causedByFault`), as `summary.pagesWithErrors` counts.
+   * Computed once when the result is built.
+   */
   hasErrors: boolean;
   warnings: string[];
   metrics?: PerformanceMetrics;
@@ -1432,6 +1442,7 @@ export interface CrawlReport {
   endTime: number;
   duration: number;
   pagesVisited: number;
+  /** Every `PageError` of `pages`, fault echoes (`PageError.causedByFault`) included. */
   totalErrors: number;
   totalWarnings: number;
   blockedExternalNavigations: number;

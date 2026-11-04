@@ -33,11 +33,12 @@ export interface AnnotationLine {
  * the run fails it on that cluster (`clusterFailsRun`: invariant violations,
  * failed navigations and renderer crashes always; console errors and
  * rejections under `--strict`; network errors under `--fail-on-network`; a
- * console cluster of HTTP responses under the `--fail-on-http` it meets),
- * so the annotation level matches the exit code. Exceptions stay `error` in
- * every mode. Otherwise a console error, rejection or network error is a
- * warning, and anything else a notice. A network error used to be `error`
- * on a run that exited 0.
+ * console cluster of HTTP responses under the `--fail-on-http` it meets; a
+ * cluster the baseline did not have under `--baseline-strict`), so the
+ * annotation level matches the exit code. Exceptions stay `error` in every
+ * mode, also on a run that exits 0. Otherwise a console error, rejection or
+ * network error is a warning, and anything else a notice. A network error
+ * used to be `error` on a run that exited 0.
  */
 function levelForCluster(cluster: CrawlReport["errorClusters"][number], fails: (c: typeof cluster) => boolean): AnnotationLine["level"] {
   if (cluster.type === "exception" || fails(cluster)) return "error";

@@ -25,8 +25,9 @@ exceptions and unhandled rejections; `--fail-on-http 5xx` (or `4xx`) an API's
 or a subresource's own error status (`summary.httpErrors`, with each one's
 `status` and `method` on its console error); `--fail-on-network` a request that
 failed at the transport level; `--fail-on-dead-links` a crawled link that
-answered 404 / 5xx. `--github-annotations` prints `::error` only for what one
-of those rules fails the run on, `::warning` for the rest.
+answered 404 / 5xx. `--github-annotations` prints `::error` for what one of
+those rules (or `--baseline-strict`) fails the run on, and for every JS
+exception even on a run that exits 0; `::warning` for the rest.
 
 Working *inside* the chaosbringer repo, the CLI lives at
 `packages/chaosbringer/dist/cli.js` and `dist/` is gitignored — so

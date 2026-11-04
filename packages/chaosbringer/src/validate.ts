@@ -105,7 +105,10 @@ function rejectNearMissOptions(
   names: readonly string[] = KNOWN_OPTION_NAMES,
   what = "option",
 ): void {
-  const known: ReadonlySet<string> = new Set<string>(names === KNOWN_OPTION_NAMES ? [...names, ...CHAOS_RUN_OPTION_NAMES] : names);
+  // The chaos() keys are suggested too: a typo'd `failOnHtp` reached the
+  // crawler, which ignored it, and the run passed without the gate.
+  const candidates = names === KNOWN_OPTION_NAMES ? [...names, ...CHAOS_RUN_OPTION_NAMES] : names;
+  const known: ReadonlySet<string> = new Set<string>(candidates);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
     const lower = key.toLowerCase();
@@ -115,13 +118,14 @@ function rejectNearMissOptions(
     // smaller edit distance.
     let suggestion: string | undefined;
     let best = Number.POSITIVE_INFINITY;
-    for (const name of names) {
+    for (const name of candidates) {
       const n = name.toLowerCase();
       // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
       // plural/singular slip (`faultInjections` for `faultInjection`).
       const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
       const distance = editDistance(lower, n, 2);
-      const score = prefix ? 0 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+      // Between two prefixes, the closer: `baselineStric` is `baselineStrict`, not `baseline`.
+      const score = prefix ? distance / 10 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
       if (score < best) {
         best = score;
         suggestion = name;

@@ -102,7 +102,7 @@ import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
 import { ServerFaultCollector } from "./server-fault-collector.js";
-import { ResourceLinePairing, resourceLineKind } from "./resource-outcomes.js";
+import { copyRequestFields, isFaultEcho, ResourceLinePairing, resourceLineKind } from "./resource-outcomes.js";
 import { shouldSaveArtifacts, writeFailureBundle } from "./failure-artifacts.js";
 import {
   TRACE_FORMAT_VERSION,
@@ -312,18 +312,23 @@ export class ChaosCrawler {
   private heldRoutes: Route[] = [];
   private heldRequests = 0;
   /**
-   * The requests a fault answered or aborted (or a `hang` holds), by the
-   * label `faultInjections[].rule` gives the rule, or `server:5xx`: what the
-   * page's console line and `network` error about the request are the echo
-   * of. A `delay` passes the request on, and is not here.
+   * The requests a fault answered or aborted (or a `hang` holds), with the
+   * label `faultInjections[].rule` gives the rule and the outcome the fault
+   * gives the request: what the page's console line and `network` error
+   * about the request are the echo of. A `delay` passes the request on, and
+   * is not here.
    */
-  private readonly faultedRequests = new WeakMap<Request, string>();
+  private readonly faultedRequests = new WeakMap<Request, FaultFiring>();
   /**
-   * Faults the service-worker route applied, by `METHOD url`, oldest first.
-   * The page's own request is not the worker's, so it is matched by URL and
-   * method, and each firing tags one page request at most.
+   * Faults the service-worker route applied during the current page, by
+   * `METHOD url`, oldest first; null between pages. The page's own request
+   * is not the worker's, and Playwright reports it only once the worker has
+   * answered it, so each firing is bound to the next page outcome of that
+   * method and URL the worker served, whatever it was: one the worker's
+   * fallback absorbed spends the firing, which used to wait for the URL's
+   * next error and tag a real 500 on a request the rule let through.
    */
-  private readonly workerFaultFirings = new Map<string, string[]>();
+  private workerFaultFirings: Map<string, FaultFiring[]> | null = null;
   /** Echoes per fault label, for `faultInjections[].echoes`. */
   private readonly faultEchoCounts = new Map<string, number>();
   /**
@@ -391,8 +396,9 @@ export class ChaosCrawler {
   private replayFidelity: ReplayFidelity | null = null;
   /**
    * Buffers server-side fault events parsed from response headers when
-   * `options.server.mode === "remote"`. Null otherwise so the per-page
-   * `page.on("response")` listener can be skipped in the common case.
+   * `options.server.mode === "remote"`, and null otherwise. The per-page
+   * `page.on("response")` listener runs either way, for the HTTP status of
+   * every response >= 400; it forwards headers here only when there is one.
    */
   private readonly serverFaultCollector: ServerFaultCollector | null;
   /**
@@ -1627,7 +1633,8 @@ export class ChaosCrawler {
         // `faultInjections[].rule`'s, so the two join by name.
         const label = winner.rule.name ?? winner.pattern.toString();
         this.perf.noteRequestFault(label, url, seq);
-        if (answersRequest(winner.rule.fault)) this.faultedRequests.set(request, label);
+        const firing = faultFiring(winner.rule.fault, label);
+        if (firing) this.faultedRequests.set(request, firing);
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
@@ -1697,9 +1704,11 @@ export class ChaosCrawler {
       }
       const label = winner.rule.name ?? winner.pattern.toString();
       this.perf.noteFault(label);
-      if (answersRequest(winner.rule.fault)) {
-        const key = `${request.method().toUpperCase()} ${request.url()}`;
-        this.workerFaultFirings.set(key, [...(this.workerFaultFirings.get(key) ?? []), label]);
+      const firing = faultFiring(winner.rule.fault, label);
+      const firings = this.workerFaultFirings;
+      if (firing && firings) {
+        const key = requestKey(request);
+        firings.set(key, [...(firings.get(key) ?? []), firing]);
       }
       await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
     });
@@ -1878,10 +1887,7 @@ export class ChaosCrawler {
     // and method (a subresource's only: the page's own document is its
     // status), and the fault that answered it. See resource-outcomes.ts.
     const resources = new ResourceLinePairing((outcome, line) => {
-      if (!outcome.document && outcome.status !== undefined) {
-        line.status = outcome.status;
-        line.method = outcome.method;
-      }
+      copyRequestFields(outcome, line);
       if (outcome.fault !== undefined) this.noteFaultEcho(line, outcome.fault);
     });
 
@@ -1941,8 +1947,15 @@ export class ChaosCrawler {
     // it used to be registered only for the collector, and an API's 500 was
     // known only by the console line, without its method.
     const collector = this.serverFaultCollector;
+    // The requests that answered >= 400: a stylesheet or script that did
+    // also fails as net::ERR_ABORTED, which is the HTTP error again (and
+    // `ignoreHttpPatterns`'), not a transport failure.
+    const answeredWithError = new WeakSet<Request>();
     const onResponse = (response: Response) => {
       if (!collecting) return;
+      const request = response.request();
+      if (response.fromServiceWorker()) this.bindWorkerFiring(request);
+      if (response.status() >= 400) answeredWithError.add(request);
       let serverFault: string | undefined;
       if (collector) {
         // Playwright's APIResponse / Response gives a plain object via headers().
@@ -1956,21 +1969,24 @@ export class ChaosCrawler {
       if (status < 400) return;
       const url = response.url();
       if (this.isIgnoredHttp(url)) return;
-      const request = response.request();
       resources.outcome({
         url,
         method: request.method().toUpperCase(),
         status,
         document: isMainDocument(request, page),
-        fault: this.faultOf(request, serverFault),
+        fault: this.faultOf(request, status, serverFault),
       });
     };
     page.on("response", onResponse);
 
+    // This page's service-worker firings, which no later page inherits.
+    const workerFirings = new Map<string, FaultFiring[]>();
+    this.workerFaultFirings = workerFirings;
+
     await betweenRegistrations();
 
     const onRequestFailed = (request: Request) => {
-      if (!collecting) return;
+      if (!collecting || answeredWithError.has(request)) return;
       const requestUrl = request.url();
       // Test the pattern against the *message* — `"<url> - <errorText>"` — not
       // the URL alone. The doc on `ignoreErrorPatterns` promised
@@ -1981,7 +1997,10 @@ export class ChaosCrawler {
       const failure = request.failure();
       const message = `${requestUrl} - ${failure?.errorText || "Unknown error"}`;
       const method = request.method().toUpperCase();
-      const fault = this.faultOf(request);
+      // A failed request has no response to say the worker served it: the
+      // abort the worker's fetch met is the page's failure too.
+      this.bindWorkerFiring(request);
+      const fault = this.faultOf(request, undefined);
       // Before the checks below, which drop the network error and not the
       // console line about the same request.
       resources.outcome({ url: requestUrl, method, document: isMainDocument(request, page), fault });
@@ -2041,6 +2060,7 @@ export class ChaosCrawler {
         page.off("pageerror", onPageError);
         page.off("response", onResponse);
         page.off("requestfailed", onRequestFailed);
+        if (this.workerFaultFirings === workerFirings) this.workerFaultFirings = null;
         page.off("crash", onCrash);
         lastDocument.stop();
       },
@@ -2248,7 +2268,7 @@ export class ChaosCrawler {
         statusCode: response?.status(),
         loadTime,
         errors,
-        hasErrors: errors.length > 0,
+        hasErrors: hasCountedErrors(errors),
         warnings,
         metrics,
         links,
@@ -2317,7 +2337,7 @@ export class ChaosCrawler {
           status: isTimeout ? "timeout" : "error",
           loadTime,
           errors: combinedErrors,
-          hasErrors: combinedErrors.length > 0,
+          hasErrors: hasCountedErrors(combinedErrors),
           warnings,
           links: [],
           ...this.blockedNavigationsField(),
@@ -2361,7 +2381,7 @@ export class ChaosCrawler {
     this.backedOutActions = [];
     if (result.errors.some((e) => e.url !== undefined && this.isForbiddenUrl(e.url))) {
       result.errors = result.errors.filter((e) => e.url === undefined || !this.isForbiddenUrl(e.url));
-      result.hasErrors = result.errors.length > 0;
+      result.hasErrors = hasCountedErrors(result.errors);
     }
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
@@ -3390,24 +3410,31 @@ export class ChaosCrawler {
   }
 
   /**
-   * The fault that answered `request`, if one did: the page route's, the
-   * service-worker route's for the same method and URL (each firing once),
-   * or the server's (`server`, from its `x-chaos-fault-*` headers).
+   * The fault that answered `request` with `status` (undefined: the request
+   * failed), if one did: the page route's, the service-worker route's bound
+   * to it when it fired, or the server's (`server`, from its
+   * `x-chaos-fault-*` headers).
    */
-  private faultOf(request: Request, server?: string): string | undefined {
-    const known = this.faultedRequests.get(request);
-    if (known !== undefined) return known;
-    let fault = server;
-    if (fault === undefined) {
-      const key = `${request.method().toUpperCase()} ${request.url()}`;
-      const firings = this.workerFaultFirings.get(key);
-      fault = firings?.shift();
-      if (firings && firings.length === 0) this.workerFaultFirings.delete(key);
-    }
-    // A request that answered and then failed (a stylesheet's 404 is also an
-    // ERR_ABORTED) is one firing.
-    if (fault !== undefined) this.faultedRequests.set(request, fault);
-    return fault;
+  private faultOf(request: Request, status: number | undefined, server?: string): string | undefined {
+    if (server !== undefined) return server;
+    const firing = this.faultedRequests.get(request);
+    // Only an outcome the fault makes: a worker can answer its own fetch's
+    // failure with a fallback, and the page's request then ends as the app
+    // made it end.
+    return firing !== undefined && firing.status === status ? firing.label : undefined;
+  }
+
+  /**
+   * Bind the oldest service-worker firing of `request`'s method and URL to
+   * it, if one is waiting: a page outcome the worker served.
+   */
+  private bindWorkerFiring(request: Request): void {
+    const firings = this.workerFaultFirings;
+    if (!firings || this.faultedRequests.has(request)) return;
+    const key = requestKey(request);
+    const firing = firings.get(key)?.shift();
+    if (firings.get(key)?.length === 0) firings.delete(key);
+    if (firing) this.faultedRequests.set(request, firing);
   }
 
   /**
@@ -3488,12 +3515,35 @@ function documentContentType(response: Response | null): string | undefined {
 }
 
 /**
- * Whether a fault answers the request rather than passing it on: what makes
- * the browser's error about the request the fault's echo. A `hang` counts:
- * a released one aborts it.
+ * A fault that answered a request, and the outcome it gives it: `status`
+ * for a status fault's response, undefined for a request it fails.
  */
-function answersRequest(fault: Fault): boolean {
-  return fault.kind === "status" || fault.kind === "abort" || fault.kind === "hang";
+interface FaultFiring {
+  label: string;
+  status?: number;
+}
+
+/**
+ * The firing of `fault`, when it answers the request rather than passing it
+ * on: what makes the browser's error about the request the fault's echo. A
+ * `hang` counts: a released one aborts it. A `delay` does not.
+ */
+function faultFiring(fault: Fault, label: string): FaultFiring | undefined {
+  if (fault.kind === "status") return { label, status: fault.status };
+  return fault.kind === "abort" || fault.kind === "hang" ? { label } : undefined;
+}
+
+/**
+ * `PageResult.hasErrors`: an error other than the echo of a fault the run
+ * injected, as `summary.pagesWithErrors` counts.
+ */
+function hasCountedErrors(errors: readonly PageError[]): boolean {
+  return errors.some((e) => !isFaultEcho(e));
+}
+
+/** `METHOD url`: how a page request and the service worker's request for it match. */
+function requestKey(request: Request): string {
+  return `${request.method().toUpperCase()} ${request.url()}`;
 }
 
 /** Whether `request` is `page`'s own main-frame document. */

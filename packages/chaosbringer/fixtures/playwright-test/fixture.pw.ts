@@ -95,6 +95,10 @@ chaosTest.describe("strict with a status fault", () => {
   chaosTest("passes without an ignore pattern: the fault's echo is not the page's error", async ({ page, chaos }) => {
     const result = await chaos.testPage(page, "/stock");
     expect(result.errors.map((e) => [e.status, e.causedByFault])).toEqual([[503, "stock-down"]]);
+    expect(result.hasErrors).toBe(false);
+    // The assertions a strict test reaches for next: they threw on the echo.
+    chaos.expectNoErrors(result);
+    chaosExpect.toHaveNoErrors(result);
     await expect(page.getByRole("status")).toHaveText("Stock unavailable");
   });
 

@@ -86,6 +86,17 @@ export class ResourceLinePairing {
 }
 
 /**
+ * Put the request's status and method on its line: a subresource's only, as
+ * the page's own document's status is the page's (a dead link, a recovered
+ * page), not an HTTP error of it.
+ */
+export function copyRequestFields(outcome: ResourceOutcome, line: PageError): void {
+  if (outcome.document || outcome.status === undefined) return;
+  line.status = outcome.status;
+  line.method = outcome.method;
+}
+
+/**
  * Whether an error is the browser's echo of a fault the run injected, which
  * the counts, the clusters and the exit rules leave out.
  */

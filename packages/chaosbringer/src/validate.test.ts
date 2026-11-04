@@ -589,6 +589,21 @@ describe("a misspelled option is an error, not silence", () => {
     expect(() => validateOptions({ ...base, invariant: [] } as never)).toThrow(/invariants/);
   });
 
+  it("names the chaos() exit options a typo meant", () => {
+    // chaos() hands a key it does not know to the crawler, which ignores it:
+    // the run passed without the gate the caller asked for.
+    for (const [typo, meant] of [
+      ["failOnHtp", "failOnHttp"],
+      ["failOnDeadLink", "failOnDeadLinks"],
+      ["failOnNetworks", "failOnNetwork"],
+      ["baselineStric", "baselineStrict"],
+    ]) {
+      expect(() => validateOptions({ ...base, [typo!]: true } as never)).toThrow(
+        new RegExp(`unknown option "${typo}".*did you mean "${meant}"`, "s"),
+      );
+    }
+  });
+
   it("suggests the nearest name, not the first one that scores", () => {
     // `shard` used to suggest `har` — two edits, and earlier in the list than
     // `shardIndex`. A suggestion that makes no sense is worse than none.
