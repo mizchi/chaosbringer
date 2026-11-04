@@ -16,7 +16,9 @@ has to:
    fixed variant's runs, with the default [floors](../../docs/recipes/perf.md#repeated-runs-chaosbringer-perf),
    hold a fresh batch of fixed runs (gated on its medians) on that metric, and
    `perf gate` still fails the slow variant on it. This costs one more batch
-   of fixed crawls per such pattern.
+   of fixed crawls per such pattern (two when the fresh batch misses a budget
+   the ×1.25 headroom set rather than a floor: that batch is measured again
+   once, since the floors play no part there).
 
 Some patterns are **chaos-only**: the page is fine while the network is
 healthy, and the problem appears only under an injected fault

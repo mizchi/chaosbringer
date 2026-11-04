@@ -7,7 +7,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,12 +68,41 @@ function writeReports(dir: string, name: string, reports: readonly CrawlReport[]
   });
 }
 
-/** `perf emit-budgets` with the default headroom and floors; the budgets file's path. */
-export async function emitBudgetsCli(dir: string, reports: readonly CrawlReport[]): Promise<string> {
-  const out = join(dir, "budgets.json");
-  const r = await run(["perf", "emit-budgets", ...writeReports(dir, "base", reports), "--out", out]);
+/**
+ * `perf emit-budgets` with the default floors, and the default headroom
+ * unless `headroom` is given; the budgets file's path.
+ */
+export async function emitBudgetsCli(
+  dir: string,
+  reports: readonly CrawlReport[],
+  { headroom, name = "budgets" }: { headroom?: number; name?: string } = {},
+): Promise<string> {
+  const out = join(dir, `${name}.json`);
+  const args = ["perf", "emit-budgets", ...writeReports(dir, `${name}-base`, reports), "--out", out];
+  if (headroom !== undefined) args.push("--headroom", String(headroom));
+  const r = await run(args);
   if (r.code !== 0) throw new Error(`perf emit-budgets exited ${r.code}: ${r.stderr.trim() || r.stdout.trim()}`);
   return out;
+}
+
+/**
+ * Whether every finding's budget was set by the headroom term,
+ * ceil(median × headroom), rather than by the floor term, ceil(median +
+ * floor). With `--headroom 1` emit-budgets writes the floor term alone, so a
+ * budget above that one is the headroom's.
+ */
+export async function headroomSetAll(
+  dir: string,
+  reports: readonly CrawlReport[],
+  findings: readonly GateFinding[],
+): Promise<boolean> {
+  const floorOnly = JSON.parse(
+    readFileSync(await emitBudgetsCli(dir, reports, { headroom: 1, name: "floor-only" }), "utf-8"),
+  ) as { budgets: Record<string, Record<string, number>> };
+  return findings.every((f) => {
+    const floorTerm = floorOnly.budgets[f.scope]?.[f.metric];
+    return floorTerm !== undefined && f.limit > floorTerm;
+  });
 }
 
 /** `perf gate --json` of `reports` (their medians) against a budgets file. */

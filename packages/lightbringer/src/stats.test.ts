@@ -248,6 +248,10 @@ describe("spanMedians / emitBudgets", () => {
       a: { scriptMs: 5, blockingMs: 0 },
     });
   });
+  it("rounds median + a fractional floor up once, to an integer budget", () => {
+    // ceil(4.2 + 8.5) = 13, not ceil(4.2) + 8.5 = 13.5.
+    expect(emitBudgets({ a: { scriptMs: 4.2 } }, { floors: { scriptMs: 8.5 } })).toEqual({ a: { scriptMs: 13 } });
+  });
   it("has a default floor for every metric it emits", () => {
     expect(Object.keys(DEFAULT_BUDGET_FLOORS).sort()).toEqual(Object.keys(EMIT_BUDGET_METRICS).sort());
     for (const v of Object.values(DEFAULT_BUDGET_FLOORS)) expect(v).toBeGreaterThanOrEqual(0);

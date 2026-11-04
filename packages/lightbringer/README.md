@@ -167,7 +167,9 @@ Each budget is the larger of `ceil(median × 1.25)` and `ceil(median + floor)`:
 the floor is an absolute minimum of room per metric (`DEFAULT_BUDGET_FLOORS`:
 `durationMs` 34, `scriptMs` 8, `blockingMs` 5, `layoutCount` 2, `recalcStyleMs`
 7, `encodedKB` 5, `requestCount` 1, `interactionMs` 16), so a 0 ms `blockingMs`
-median gets a budget of 5 ms, not 0, and a clean rerun passes. `--floor <metric>=<n>`
+median gets a budget of 5 ms, not 0, and the medians of a clean `--repeat 3`
+(or more) rerun stay within budget; a `--repeat 1` gate can still fail now and
+then on one outlier run. `--floor <metric>=<n>`
 (repeatable, `n` ≥ 0) sets one floor; `--floor <metric>=0` turns it off. A
 malformed `--floor` stops the CLI before anything runs, with exit 1 like its other
 usage errors. The file records `{ "headroom", "floors" }` under a `"$emit"` key

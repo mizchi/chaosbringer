@@ -558,7 +558,7 @@ export function emitBudgets(
   return out;
 }
 
-/** "durationMs+34 scriptMs+5 …", for the line an emit prints. */
+/** "durationMs+34 scriptMs+8 …", for the line an emit prints. */
 export function formatBudgetFloors(floors: BudgetFloors): string {
   return Object.entries(floors)
     .map(([k, v]) => `${k}+${v}`)

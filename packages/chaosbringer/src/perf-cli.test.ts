@@ -468,6 +468,10 @@ describe("runPerfCli", () => {
       command: "perf emit-budgets",
       message,
     });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("emit-budgets refuses a --floor with no value", async () => {
     await expect(runPerfCli(["emit-budgets", join(dir, "missing.json"), "--floor"])).rejects.toMatchObject({
       code: "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
       command: "perf emit-budgets",

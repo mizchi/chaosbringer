@@ -642,8 +642,9 @@ const PERF_BUDGET_RULE_KEYS = new Set(["match", "budget", "exact"]);
  * lightbringer's `BUDGET_METRIC` keys — read from there, not copied, so a
  * metric lightbringer adds is accepted here the day it lands. Unknown keys
  * are refused outright: a misspelt `blockingMS` would otherwise be a budget
- * that never fires. A limit of 0 is allowed (`perf emit-budgets` writes 0
- * for a metric whose median was 0, e.g. no requests on a click).
+ * that never fires. A limit of 0 is allowed: a hand-set "no requests on this
+ * click" rule, and `perf emit-budgets --floor requestCount=0` writes 0 for a
+ * click that made none, as every emit did before floors existed.
  */
 export function validatePerfBudgets(rules: unknown): void {
   if (!Array.isArray(rules)) {
