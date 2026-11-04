@@ -4,6 +4,9 @@
  *   slow  → the problem is measured on the expected perfKey
  *   fixed → the expected metric improves by at least `minImprovement`,
  *           and the crawl still reaches the same pages with no new error clusters
+ *   budgets → when emit-budgets budgets the pattern's metric: the budgets
+ *           `perf emit-budgets` writes from the fixed runs hold a fresh batch
+ *           of fixed runs on that metric, and `perf gate` fails the slow runs on it
  *
  * Patterns run one after another (see vitest.config.ts). `PATTERN=<id>` runs one;
  * `PATTERN_SHARD=<i>/<n>` runs the i-th of n round-robin shards (CI splits the
@@ -11,7 +14,16 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { measurePattern, type PatternMeasurement } from "./src/measure.js";
+import { compilePerfKeyGlob } from "chaosbringer";
+import {
+  budgetsWorkdir,
+  EMITTED_BUDGET_METRIC,
+  emitBudgetsCli,
+  gateCli,
+  headroomSetAll,
+  type GateFinding,
+} from "./src/budgets.js";
+import { measurePattern, measureVariant, type PatternMeasurement } from "./src/measure.js";
 import { loadPatterns, shardPatterns } from "./src/registry.js";
 
 const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
@@ -70,6 +82,52 @@ describe("perf patterns", () => {
         const added = m.fixed.clustersPerRun.flat().filter((k) => !slowClusters.has(k));
         expect(added, "new error clusters on the fixed variant").toEqual([]);
       });
+
+      // emit-budgets' floors, on the pattern's own key and metric, from both
+      // sides: a fresh batch of fixed runs must stay within the budgets
+      // emitted from the fixed runs above, and the slow variant must still
+      // break them (or the floors would be too loose to catch the pattern).
+      // Only patterns whose metric emit-budgets budgets (page.*, settledMs,
+      // memory and the like it does not). The fresh side is a batch gated on
+      // its medians, as perf.md tells CI to gate, not one run: one run's
+      // scriptMs on a ~44 ms click read 77, an outlier no floor below the
+      // pattern's own 10 ms threshold can absorb. Its other metrics are
+      // printed, not failed, for the same reason (a ~100 ms fixed task reads
+      // blockingMs 0 or 53 depending on whether it crosses 50 ms).
+      const budgeted = EMITTED_BUDGET_METRIC[pattern.expect.metric];
+      if (budgeted) {
+        it(`budgets from the fixed runs pass fresh fixed runs and fail the slow ones on ${budgeted}`, async () => {
+          expect(m, "measurement failed").toBeDefined();
+          const key = compilePerfKeyGlob(pattern.expect.key);
+          const onPattern = (v: GateFinding) => v.metric === budgeted && key.test(v.scope);
+          const work = budgetsWorkdir(pattern.id);
+          try {
+            const budgets = await emitBudgetsCli(work.dir, m.fixed.reports);
+            let fresh = await measureVariant(pattern, "fixed", { runs });
+            let rerun = await gateCli(work.dir, "fresh", fresh.reports, budgets);
+            // The floors are what this checks. Where a budget is ceil(median ×
+            // 1.25) instead (intl-formatter-per-row's ~44 ms scriptMs click),
+            // the floor plays no part, and batch medians there move by up to
+            // ±25% between clean batches (44 → 57 was seen), so such a miss
+            // gets one fresh batch more. A miss on a floor-set budget fails.
+            const missed = rerun.violations.filter(onPattern);
+            if (missed.length > 0 && (await headroomSetAll(work.dir, m.fixed.reports, missed))) {
+              console.log(`[${pattern.id}] fresh fixed runs over a headroom-set budget, measuring once more: ${JSON.stringify(missed)}`);
+              fresh = await measureVariant(pattern, "fixed", { runs });
+              rerun = await gateCli(work.dir, "fresh-again", fresh.reports, budgets);
+            }
+            const other = rerun.violations.filter((v) => !onPattern(v));
+            if (other.length) console.log(`[${pattern.id}] fresh fixed runs, outside ${budgeted}: ${JSON.stringify(other)}`);
+            expect(rerun.violations.filter(onPattern), "fresh fixed runs failed the budgets emitted from the fixed runs").toEqual([]);
+            const slow = await gateCli(work.dir, "slow", m.slow.reports, budgets);
+            const hit = slow.violations.filter(onPattern);
+            expect(hit.length, `slow variant passed ${budgeted} on ${pattern.expect.key}: ${JSON.stringify(slow.violations)}`).toBeGreaterThan(0);
+            expect(slow.exitCode).toBe(1);
+          } finally {
+            work.dispose();
+          }
+        });
+      }
     });
   }
 });

@@ -26,18 +26,22 @@ import {
   analyseDrilldown,
   BUDGET_METRIC,
   median,
+  DEFAULT_BUDGET_FLOORS,
   DEFAULT_BUDGET_HEADROOM,
   DEFAULT_REGRESS_THRESHOLD,
   DRILLDOWN_TOP_N,
   EMIT_BUDGET_METRICS,
   emitBudgets,
+  formatBudgetFloors,
   formatDrilldown,
   formatRegress,
   gate,
   MEDIAN_BUDGET_STAT,
+  parseBudgetFloors,
   regress,
   spanMedians,
   type Budget,
+  type BudgetFloors,
   type BudgetMetric,
   type DrilldownTraceEvent,
   type GateFinding,
@@ -164,15 +168,21 @@ export interface EmitResult {
 }
 
 /**
- * Budgets per perfKey: `ceil(median × headroom)` of the metrics lightbringer's
- * `--emit-budgets` writes (EMIT_BUDGET_METRICS). A key that appears in fewer
+ * Budgets per perfKey: `max(ceil(median × headroom), ceil(median + floor))` of
+ * the metrics lightbringer's `--emit-budgets` writes (EMIT_BUDGET_METRICS),
+ * with lightbringer's floors (DEFAULT_BUDGET_FLOORS) unless `floors` replaces
+ * them; the floors are recorded in the file. A key that appears in fewer
  * than half the reports is skipped — a budget from one run of five is a
  * single sample, and a key that comes and goes (a random action target) is
  * not one CI can hold to — and reported in `skipped`.
  */
 export function emitPerfBudgets(
   reports: readonly (Pick<CrawlReport, "pages" | "actions"> & { perf?: Pick<NonNullable<CrawlReport["perf"]>, "keyVersion"> })[],
-  { headroom = DEFAULT_BUDGET_HEADROOM, settle }: { headroom?: number; settle?: PerfSettleRecord } = {},
+  {
+    headroom = DEFAULT_BUDGET_HEADROOM,
+    floors = DEFAULT_BUDGET_FLOORS,
+    settle,
+  }: { headroom?: number; floors?: BudgetFloors; settle?: PerfSettleRecord } = {},
 ): EmitResult {
   const runs = reports.map(keyedRun);
   const seenIn = new Map<string, number>();
@@ -187,11 +197,14 @@ export function emitPerfBudgets(
       delete medians[key];
     }
   }
-  const budgets = emitBudgets(medians, { headroom, metrics: Object.keys(EMIT_BUDGET_METRICS) });
+  const budgets = emitBudgets(medians, { headroom, floors, metrics: Object.keys(EMIT_BUDGET_METRICS) });
   return {
     file: {
       version: 1,
       headroom,
+      // A record of how the budgets were made, for the reader of the file:
+      // gate reads only `budgets`, so files without it gate the same way.
+      floors: { ...floors } as PerfBudgetsFile["floors"],
       budgets: budgets as PerfBudgetsFile["budgets"],
       // Recorded so `perf gate` can refuse reports settled another way.
       ...(settle ? { settle: { ...settle } } : {}),
@@ -866,11 +879,15 @@ grouped by perfKey ("<urlPattern> :: <kind>"); every number is a median over
 the reports given, with lightbringer's noise rules.
 
 Subcommands:
-  emit-budgets <report.json...> [--headroom 1.25] [--out ${DEFAULT_PERF_BUDGETS_PATH}]
-      Budgets per perfKey: ceil(median × headroom) of durationMs, scriptMs,
-      blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount and
-      interactionMs. Keys seen in fewer than half the reports are skipped
-      (and listed). The reports' settle mode is written into the file.
+  emit-budgets <report.json...> [--headroom 1.25] [--floor <metric>=<n>]... [--out ${DEFAULT_PERF_BUDGETS_PATH}]
+      Budgets per perfKey of durationMs, scriptMs, blockingMs, layoutCount,
+      recalcStyleMs, encodedKB, requestCount and interactionMs: the larger of
+      ceil(median × headroom) and ceil(median + floor), so a 0 or tiny median
+      still leaves room for a clean rerun's noise. Default floors:
+      ${formatBudgetFloors(DEFAULT_BUDGET_FLOORS)}
+      --floor <metric>=<n> (repeatable) sets one; <metric>=0 turns it off.
+      Keys seen in fewer than half the reports are skipped (and listed). The
+      reports' settle mode and the floors are written into the file.
 
   gate <report.json...> --budgets <file> [--json]
       Medians vs budgets (an emit-budgets file or a perfBudgets array of
@@ -922,6 +939,15 @@ function parseNumber(flag: string, raw: string | undefined, def: number, min: nu
   return n;
 }
 
+/** `--floor <metric>=<n>` flags over lightbringer's default floors; a malformed one is a usage error. */
+function parseFloors(raw: readonly string[]): BudgetFloors {
+  try {
+    return parseBudgetFloors(raw);
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
+}
+
 /**
  * A refused invocation (a missing operand or flag, an unknown sub) is a
  * `UsageError`: one `chaosbringer perf <sub>: …` line and exit 2, from
@@ -959,6 +985,7 @@ function runEmit(argv: string[]): void {
     allowPositionals: true,
     options: {
       headroom: { type: "string" },
+      floor: { type: "string", multiple: true },
       out: { type: "string" },
       "allow-settle-mismatch": { type: "boolean", default: false },
       "allow-key-mismatch": { type: "boolean", default: false },
@@ -972,6 +999,7 @@ function runEmit(argv: string[]): void {
   if (positionals.length === 0) throw new UsageError("expected at least one report path");
   // Below 1 a budget would sit under the median it was measured from.
   const headroom = parseNumber("--headroom", values.headroom, DEFAULT_BUDGET_HEADROOM, 1);
+  const floors = parseFloors(values.floor ?? []);
   const { paths, skipped: skippedFiles } = expandReportPaths(positionals);
   const reports = paths.map(loadCrawlReport);
   if (skippedFiles.length > 0) {
@@ -985,7 +1013,7 @@ function runEmit(argv: string[]): void {
   // Only a mode every report recorded is written: a file claiming one mode
   // for budgets measured partly under another would make gate's check lie.
   const recorded = settle.mismatch || settle.unrecorded.length > 0 ? undefined : settle.agreed;
-  const result = emitPerfBudgets(reports, { headroom, ...(recorded ? { settle: recorded } : {}) });
+  const result = emitPerfBudgets(reports, { headroom, floors, ...(recorded ? { settle: recorded } : {}) });
   const out = values.out ?? DEFAULT_PERF_BUDGETS_PATH;
   const n = Object.keys(result.file.budgets).length;
   if (result.skipped.length > 0) {
@@ -1004,7 +1032,9 @@ function runEmit(argv: string[]): void {
     return;
   }
   writeFileSync(out, `${JSON.stringify(result.file, null, 2)}\n`);
-  console.log(`[perf emit-budgets] ${n} key(s) from ${reports.length} report(s), headroom ×${headroom} → ${out}`);
+  console.log(
+    `[perf emit-budgets] ${n} key(s) from ${reports.length} report(s), headroom ×${headroom}, floors ${formatBudgetFloors(floors)} → ${out}`,
+  );
 }
 
 function runGate(argv: string[]): void {

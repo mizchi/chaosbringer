@@ -20,6 +20,7 @@ import {
   runPerfCli,
   splitCurrentOperands,
 } from "./perf-cli.js";
+import { DEFAULT_BUDGET_FLOORS } from "lightbringer/core";
 import { appRun, fakeAction, fakePage, fakeReport, fakeSpan } from "./perf-fixtures.test-helpers.js";
 import type { CrawlReport, PerfSettleRecord, PerfSpanReport } from "./types.js";
 
@@ -57,7 +58,7 @@ function settled(report: CrawlReport, settle: PerfSettleRecord): CrawlReport {
 }
 
 describe("emitPerfBudgets", () => {
-  it("writes ceil(median × headroom) per key for lightbringer's emit metrics", () => {
+  it("writes max(ceil(median × headroom), ceil(median + floor)) per key for lightbringer's emit metrics", () => {
     const runs = [
       appRun({ durationMs: 100, blockingMs: 10, interactionMs: 40 }),
       appRun({ durationMs: 120, blockingMs: 20, interactionMs: 60 }),
@@ -68,18 +69,29 @@ describe("emitPerfBudgets", () => {
     expect(skipped).toEqual([]);
     expect(file.version).toBe(1);
     expect(file.headroom).toBe(1.25);
+    expect(file.floors).toEqual(DEFAULT_BUDGET_FLOORS);
     expect(file.budgets["/app :: click #go"]).toEqual({
-      durationMs: Math.ceil(110 * 1.25),
-      scriptMs: 0,
+      // 110 + 34 > 110 × 1.25
+      durationMs: 110 + 34,
+      scriptMs: 8,
+      // 20 × 1.25 = 25 > 20 + 5
       blockingMs: Math.ceil(20 * 1.25),
-      layoutCount: 0,
-      recalcStyleMs: 0,
-      encodedKB: 0,
-      requestCount: 0,
-      interactionMs: Math.ceil(50 * 1.25),
+      layoutCount: 2,
+      recalcStyleMs: 7,
+      encodedKB: 5,
+      requestCount: 1,
+      // 50 + 16 = 66 > 50 × 1.25
+      interactionMs: 50 + 16,
     });
     // No interaction on the load span: no interactionMs budget for it.
     expect(file.budgets["/app :: load"]).not.toHaveProperty("interactionMs");
+  });
+
+  it("takes caller floors and records them; a floor of 0 is the headroom rule alone", () => {
+    const floors = { ...DEFAULT_BUDGET_FLOORS, requestCount: 0, blockingMs: 50 };
+    const { file } = emitPerfBudgets([appRun({ blockingMs: 10 })], { floors });
+    expect(file.floors).toEqual(floors);
+    expect(file.budgets["/app :: click #go"]).toMatchObject({ requestCount: 0, blockingMs: 60, scriptMs: 8 });
   });
 
   it("skips keys seen in fewer than half the reports, and says which", () => {
@@ -415,6 +427,56 @@ describe("runPerfCli", () => {
     expect(process.exitCode).toBe(1);
     expect(logged()).toContain("✗ /app :: click #go  blockingMs median=160 > budget 18");
     expect(errored()).toContain("[perf gate] FAILED: 1 violation(s)");
+  });
+
+  it("emit-budgets --floor overrides a floor, records the floors, and gate reads the file", async () => {
+    const runs = [1, 2, 3].map((i) => write(`f${i}.json`, appRun({})));
+    const out = join(dir, "floors.json");
+    await runPerfCli(["emit-budgets", ...runs, "--floor", "requestCount=0", "--floor", "scriptMs=20", "--out", out]);
+    expect(process.exitCode).toBe(0);
+    const file = JSON.parse(readFileSync(out, "utf-8"));
+    expect(file).toMatchObject({ version: 1, headroom: 1.25, floors: { ...DEFAULT_BUDGET_FLOORS, requestCount: 0, scriptMs: 20 } });
+    expect(file.budgets["/app :: click #go"]).toMatchObject({ requestCount: 0, scriptMs: 20, blockingMs: 5 });
+    expect(logged()).toContain("floors durationMs+34 scriptMs+20");
+    // A fresh run with a few ms of scheduler noise passes; one more request fails.
+    await runPerfCli(["gate", write("fresh.json", appRun({ blockingMs: 4, durationMs: 30 })), "--budgets", out]);
+    expect(process.exitCode).toBe(0);
+    await runPerfCli(["gate", write("req.json", appRun({ requestCount: 1 })), "--budgets", out]);
+    expect(process.exitCode).toBe(1);
+    expect(logged()).toContain("✗ /app :: click #go  requestCount median=1 > budget 0");
+  });
+
+  it("gate still reads a budgets file written before floors were recorded", async () => {
+    const old = write("old.json", { version: 1, headroom: 1.25, budgets: { "/app :: click #go": { blockingMs: 0 } } });
+    await runPerfCli(["gate", write("r.json", appRun({})), "--budgets", old]);
+    expect(process.exitCode).toBe(0);
+    await runPerfCli(["gate", write("b.json", appRun({ blockingMs: 3 })), "--budgets", old]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  // Checked before any report is read: the report path here does not exist.
+  it.each([
+    [["--floor", "scriptMs"], '--floor "scriptMs": expected <metric>=<n>'],
+    [["--floor", "bogusMs=3"], '--floor "bogusMs=3": unknown metric "bogusMs" (expected one of durationMs, scriptMs, blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount, interactionMs)'],
+    [["--floor", "scriptMs=-1"], '--floor "scriptMs=-1": n must be a number >= 0'],
+    [["--floor", "scriptMs=abc"], '--floor "scriptMs=abc": n must be a number >= 0'],
+    [["--floor=scriptMs="], '--floor "scriptMs=": n must be a number >= 0'],
+  ])("emit-budgets refuses %j as a usage error before reading a report", async (flags, message) => {
+    const out = join(dir, "never.json");
+    await expect(runPerfCli(["emit-budgets", join(dir, "missing.json"), ...flags, "--out", out])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf emit-budgets",
+      message,
+    });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("emit-budgets refuses a --floor with no value", async () => {
+    await expect(runPerfCli(["emit-budgets", join(dir, "missing.json"), "--floor"])).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+      command: "perf emit-budgets",
+    });
+    expect(process.exitCode).toBe(0);
   });
 
   it("emit-budgets logs the skipped keys", async () => {

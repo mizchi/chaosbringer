@@ -6,7 +6,9 @@
 // scenario.json: { url, viewport?, settle?, steps: [{ name, goto?, click?, fill?,
 //   text?, drag?, by?, press?, waitFor?, wait?, settle? }] }
 // Each step becomes one measured span. Flags below; --emit-budgets writes a budget
-// file from the measured medians and --gate fails against it (no hand-set numbers).
+// file from the measured medians (each budget max(median × 1.25, median + floor),
+// --floor <metric>=<n> to change a floor) and --gate fails against it (no
+// hand-set numbers).
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -15,13 +17,15 @@ import { chromium, type Page, type BrowserContextOptions } from "playwright";
 import {
   startSession,
   logSummary,
-  emitBudgets,
+  DEFAULT_BUDGET_HEADROOM,
+  formatBudgetFloors,
   formatGateViolation,
   gate,
   spanMedians,
+  type BudgetFloors,
   type PerfReport,
-  type SpanMedians,
 } from "./core";
+import { emitSlugBudgets, floorsFromArgv, slugBudgets, type SlugBudgetsFile } from "./cli-budgets";
 import { RUN_REPORT_RE, runArtifactPath, slugOfRunReport, slugify } from "./artifacts";
 import { sessionOptionsFromEnv, toSessionOptions } from "./config";
 import { netProfileByName } from "./defaults";
@@ -56,8 +60,17 @@ if (argv[0] !== "run" || !argv[1]) {
       "       (a .json runs a declarative scenario; anything else runs an existing\n" +
       "        Playwright spec via `playwright test` + the repo's own config)\n" +
       "       [--gpu] [--cpu N] [--net slow-3g|fast-3g|4g] [--cov] [--mem] [--css]\n" +
-      "       [--trace] [--headed] [--emit-budgets] [--gate]",
+      "       [--trace] [--headed] [--emit-budgets [--floor <metric>=<n>]...] [--gate]",
   );
+  process.exit(1);
+}
+// Checked before anything runs, like the usage line above (and with its exit
+// code, 1): a typo in a floor must not cost a whole --repeat of measuring.
+let floors: BudgetFloors;
+try {
+  floors = floorsFromArgv(argv);
+} catch (e) {
+  console.error(`[lightbringer] ${e instanceof Error ? e.message : e}`);
   process.exit(1);
 }
 const scenarioPath = argv[1];
@@ -172,11 +185,8 @@ async function runOnce(index: number): Promise<PerfReport> {
 }
 
 // ── median + budgets ──────────────────────────────────────────────────────
-// Medians, ×1.25 budgets and the gate come from src/stats.ts, the same
-// functions scripts/median.mjs and chaosbringer's `perf` subcommands use.
-
-/** slug → span → metric → budget (lightbringer.budgets.json) */
-type SlugBudgets = Record<string, SpanMedians>;
+// Medians, budgets (×1.25 or + the floor) and the gate come from src/stats.ts,
+// the same functions scripts/median.mjs and chaosbringer's `perf` subcommands use.
 
 /** Read the per-run report files written by the run (scenario or spec). */
 function loadRunsBySlug(): Map<string, PerfReport[]> {
@@ -191,25 +201,29 @@ function loadRunsBySlug(): Map<string, PerfReport[]> {
   return m;
 }
 
-/** Emit budgets from medians (×1.25) and/or gate against them. Keyed slug→span→metric. */
+/** Emit budgets from medians (×1.25, + floors) and/or gate against them. Keyed slug→span→metric. */
 function emitOrGate(bySlug: Map<string, PerfReport[]>) {
   const budgetsPath = path.join(outDir, "lightbringer.budgets.json");
   if (emitBudgetsFlag) {
-    const budgets: SlugBudgets = {};
-    for (const [s, runs] of bySlug) budgets[s] = emitBudgets(spanMedians(runs));
-    fs.writeFileSync(budgetsPath, JSON.stringify(budgets, null, 2));
-    console.log(`\n[lightbringer] wrote budgets → ${path.relative(process.cwd(), budgetsPath)} (median ×1.25)`);
+    const headroom = DEFAULT_BUDGET_HEADROOM;
+    // The file records { headroom, floors } under "$emit"; see cli-budgets.ts.
+    const file = emitSlugBudgets(bySlug, { headroom, floors });
+    fs.writeFileSync(budgetsPath, JSON.stringify(file, null, 2));
+    console.log(
+      `\n[lightbringer] wrote budgets → ${path.relative(process.cwd(), budgetsPath)} ` +
+        `(max(median ×${headroom}, median + floor); floors ${formatBudgetFloors(floors)})`,
+    );
   }
   if (gateFlag) {
     if (!fs.existsSync(budgetsPath)) {
       console.error(`[lightbringer] --gate: no budgets at ${budgetsPath} (run --emit-budgets first)`);
       process.exit(1);
     }
-    const budgets = JSON.parse(fs.readFileSync(budgetsPath, "utf8")) as SlugBudgets;
+    const budgets = JSON.parse(fs.readFileSync(budgetsPath, "utf8")) as SlugBudgetsFile;
     const violations: string[] = [];
     for (const [s, runs] of bySlug) {
       // Bare medians (no IQR band), so this gate has hard violations only.
-      const r = gate(spanMedians(runs), budgets[s] ?? {});
+      const r = gate(spanMedians(runs), slugBudgets(budgets, s));
       violations.push(...r.violations.map((f) => formatGateViolation(s, f)));
     }
     if (violations.length) {
