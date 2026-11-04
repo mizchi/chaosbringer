@@ -111,6 +111,8 @@ describe("usage errors", () => {
     [[...URL_ARG, "--seed-from-sitemap", "missing-sitemap.xml"], "--seed-from-sitemap missing-sitemap.xml: no such file"],
     // Refused by validateOptions, which used to throw from inside main().
     [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
+    // A level it does not know would have failed nothing.
+    [[...URL_ARG, "--fail-on-http", "500"], '--fail-on-http must be one of 4xx, 5xx (got "500"): 5xx fails on a response of 500 and up, 4xx on one of 400 and up'],
     [[...URL_ARG, "--invariants", "data-safety,xss"], '--invariants: unknown invariant "xss" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
     [[], "--url is required"],
     // A Repro: line's `# + …` note, pasted into a zsh without interactivecomments.

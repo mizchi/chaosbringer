@@ -160,11 +160,12 @@ describe("analyzeScan: resilience", () => {
     errorClusters: [cluster("console", "already there")],
   });
 
-  it("reports errors that appear only under faults, minus the browser's echo of the fault", () => {
+  it("reports errors that appear only under faults; the browser's echo of the fault is in no cluster", () => {
+    // The echo itself is tagged `causedByFault` by the crawl and clustered
+    // nowhere, so it never reaches this: what a chaos report clusters is the app's.
     const chaos = fakeReport(clean.pages, [], {
       errorClusters: [
         cluster("console", "already there"),
-        cluster("console", "Failed to load resource: the server responded with a status of 500"),
         cluster("network", `${U}/api/items - net::ERR_FAILED`),
         cluster("unhandled-rejection", "SyntaxError: Unexpected token"),
         cluster("console", "render failed"),
@@ -185,6 +186,17 @@ describe("analyzeScan: resilience", () => {
     expect(merged.occurrences).toBe(3);
     expect(merged.where).toEqual([`${U}/`, `${U}/list`]);
     expect(merged.evidence[0]).toBe("3× under HTTP 500, network failure; never in the clean crawl");
+  });
+
+  // The regex that stood in for the tag dropped every "Failed to load
+  // resource" and "status of 5xx" cluster, the app's own included.
+  it("reports a real 5xx that only shows under a fault, which is no echo of it", () => {
+    const real = cluster("console", "Failed to load resource: the server responded with a status of 502 (Bad Gateway)");
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("console", "already there"), real] });
+    const r = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(r.findings.filter((f) => f.rule === "fault-new-error").map((f) => [f.severity, f.title])).toEqual([
+      ["low", "Only when an API request fails: console.error: Failed to load resource: the server responded with a status of 502 (Bad Gateway)"],
+    ]);
   });
 
   // The chaos crawls run the scan's invariants too, and a page that shows

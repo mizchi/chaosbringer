@@ -120,6 +120,13 @@ describe("diffReports", () => {
     expect(diff.resolvedFailedPages).toHaveLength(0);
   });
 
+  it("does not flag a page whose only errors are the echo of a fault the run injected", () => {
+    const echo: PageError = { type: "console", message: "Failed to load resource: net::ERR_FAILED", timestamp: 0, causedByFault: "api-abort" };
+    const prev = makeReport({ pages: [page({ url: "http://x/a", status: "success" })] });
+    const curr = makeReport({ pages: [page({ url: "http://x/a", status: "success", errors: [echo] })] });
+    expect(diffReports(prev, curr).newFailedPages).toEqual([]);
+  });
+
   it("flags a page that was failing but is now clean as resolved", () => {
     const err: PageError = { type: "console", message: "boom", timestamp: 0 };
     const prev = makeReport({ pages: [page({ url: "http://x/a", status: "error", errors: [err] })] });

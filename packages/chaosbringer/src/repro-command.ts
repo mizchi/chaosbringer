@@ -156,6 +156,9 @@ export function reproFlags(options: Required<CrawlerOptions>, seed: number): Rep
     push("--spa", p);
   }
   flags.push(...ignoreReproFlags(options.ignoreErrorPatterns ?? []));
+  for (const p of options.ignoreHttpPatterns ?? []) {
+    push("--ignore-http", p);
+  }
   if (options.storageState) {
     pushPath("--storage-state", options.storageState);
   }

@@ -23,12 +23,12 @@ import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
 import { randomSeed } from "./random.js";
-import { formatQuietReport, printReport, getExitCode } from "./reporter.js";
+import { type ExitCodeOptions, formatQuietReport, printReport, getExitCode } from "./reporter.js";
 import type {
   ActionResult,
   CrawlReport,
   DiscoveryMetrics,
-  FaultInjectionStats,
+  CrawlFaultInjectionStats,
   PageResult,
   PerfSettleRecord,
 } from "./types.js";
@@ -128,13 +128,14 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   const errorClusters = clusterErrors(mergedPages.flatMap((p) => p.errors));
 
   // Merge fault-injection stats by rule name.
-  const faultByRule = new Map<string, FaultInjectionStats>();
+  const faultByRule = new Map<string, CrawlFaultInjectionStats>();
   for (const r of reports) {
     for (const f of r.faultInjections ?? []) {
       const existing = faultByRule.get(f.rule);
       if (existing) {
         existing.matched += f.matched;
         existing.injected += f.injected;
+        if (f.echoes) existing.echoes = (existing.echoes ?? 0) + f.echoes;
       } else {
         faultByRule.set(f.rule, { ...f });
       }
@@ -299,12 +300,21 @@ export function parseShardCliArgs(argv: string[]): ShardCliArgs | null {
  * main command writes from its report, which the coordinator writes again
  * from the merged one.
  */
-export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: number; files: ShardReportFiles }> {
+export async function checkWorkerArgs(
+  args: ShardCliArgs,
+): Promise<{ seed: number; files: ShardReportFiles; exitOptions: ExitCodeOptions }> {
   // Imported on demand, like perf-cli in cli.ts: the library's
   // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
   // imports `parseShardArg` from it.
-  const { crawlCliExtras, crawlCliPeerNeeds, crawlerOptionsFromCli, crawlUrlFromArgs, parseCrawlArgs, readCrawlPerfBudgets } =
-    await import("./cli-crawl-options.js");
+  const {
+    crawlCliExtras,
+    crawlCliPeerNeeds,
+    crawlerOptionsFromCli,
+    crawlUrlFromArgs,
+    exitOptionsFromCli,
+    parseCrawlArgs,
+    readCrawlPerfBudgets,
+  } = await import("./cli-crawl-options.js");
   const { validateOptions } = await import("./validate.js");
   const { checkInputFiles } = await import("./input-files.js");
   const { assertPeers, isMissingPeerError } = await import("./peers.js");
@@ -314,6 +324,9 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: numbe
     const { values, positionals } = parseCrawlArgs([...args.forward, "--shard", `0/${args.count}`]);
     const options = crawlerOptionsFromCli(values, crawlUrlFromArgs(values, positionals));
     const { clusterMinCount } = crawlCliExtras(values);
+    // The merged report is judged by the workers' rules: --fail-on-http and
+    // the rest are forwarded like any other flag, and read here.
+    const exitOptions = exitOptionsFromCli(values);
     const budgets = await readCrawlPerfBudgets(values, options.settle);
     if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
     if (budgets) options.perfBudgets = budgets.rules;
@@ -326,7 +339,7 @@ export async function checkWorkerArgs(args: ShardCliArgs): Promise<{ seed: numbe
       ...(values["heatmap-out"] ? { heatmapOut: values["heatmap-out"] } : {}),
       ...(values["cluster-artifacts"] && bundleDir ? { clusterBundles: { bundleDir, minCount: clusterMinCount } } : {}),
     };
-    return { seed: options.seed ?? randomSeed(), files };
+    return { seed: options.seed ?? randomSeed(), files, exitOptions };
   } catch (err) {
     throw isUsageError(err) || isMissingPeerError(err) ? err : new UsageError(errorMessage(err));
   }
@@ -470,7 +483,7 @@ function runShardWorker(args: {
 export async function runShardCli(argv: string[]): Promise<void> {
   const args = parseShardCliArgs(argv);
   if (!args) return;
-  const { seed, files } = await checkWorkerArgs(args);
+  const { seed, files, exitOptions } = await checkWorkerArgs(args);
   const workdir = mkdtempSync(join(tmpdir(), "chaos-shard-"));
 
   try {
@@ -548,7 +561,6 @@ export async function runShardCli(argv: string[]): Promise<void> {
 
     // The main CLI's output modes: --quiet is the verdict, why it failed
     // and the paths written. It printed the whole merged report.
-    const exitOptions = { strict: args.strict, baselineStrict: args.baselineStrict };
     if (args.quiet) console.log(formatQuietReport(merged, exitOptions));
     else printReport(merged, args.compact, exitOptions);
     const announce = (line: string) => console.log(args.quiet ? line : `\n${line}`);

@@ -36,7 +36,8 @@ import { validatePerf } from "./perf-options.js";
  */
 export const KNOWN_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
-  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
+  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "ignoreHttpPatterns", "strictCountsFaultEchoes",
+  "spaPatterns", "viewport",
   "userAgent", "traceparent", "actionWeights", "ariaTargets", "bind", "logFile", "logLevel", "logToConsole",
   "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
@@ -66,7 +67,7 @@ void _allOptionsListed;
  */
 export const CHAOS_TEST_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "ignoreErrorPatterns", "blockExternalNavigation",
-  "strict", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
+  "strict", "strictCountsFaultEchoes", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults",
 ] as const;
 
@@ -92,12 +93,19 @@ function editDistance(a: string, b: string, cap = 3): number {
   return prev[b.length]!;
 }
 
+/**
+ * The keys `chaos()` takes beside `CrawlerOptions` and destructures out:
+ * no typo, though `strict` is a prefix of `strictCountsFaultEchoes`, and a
+ * caller may hand the same object straight to `ChaosCrawler`.
+ */
+const CHAOS_RUN_OPTION_NAMES = ["strict", "baseline", "baselineStrict", "setup", "failOnHttp", "failOnNetwork", "failOnDeadLinks"];
+
 function rejectNearMissOptions(
   options: object,
   names: readonly string[] = KNOWN_OPTION_NAMES,
   what = "option",
 ): void {
-  const known: ReadonlySet<string> = new Set<string>(names);
+  const known: ReadonlySet<string> = new Set<string>(names === KNOWN_OPTION_NAMES ? [...names, ...CHAOS_RUN_OPTION_NAMES] : names);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
     const lower = key.toLowerCase();
@@ -254,6 +262,13 @@ export function validateOptions(options: CrawlerOptions): void {
 
   for (const p of options.excludePatterns ?? []) assertRegexString(`excludePatterns entry`, p);
   for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
+  for (const p of options.ignoreHttpPatterns ?? []) assertRegexString(`ignoreHttpPatterns entry`, p);
+  // A string "false" would turn it on.
+  if (options.strictCountsFaultEchoes !== undefined && typeof options.strictCountsFaultEchoes !== "boolean") {
+    throw new Error(
+      `chaosbringer: "strictCountsFaultEchoes" must be a boolean (got ${JSON.stringify(options.strictCountsFaultEchoes)})`,
+    );
+  }
   for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
   for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {

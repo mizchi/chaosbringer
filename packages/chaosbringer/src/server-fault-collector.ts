@@ -16,15 +16,18 @@ export class ServerFaultCollector {
 
   constructor(private readonly prefix: string) {}
 
-  observe(args: ObserveArgs): void {
+  /** Buffer the fault the headers describe, and return it (null for none). */
+  observe(args: ObserveArgs): ServerFaultEvent | null {
     const parsed = parseServerFaultHeaders(args.headers, this.prefix);
-    if (!parsed) return;
-    this.buffer.push({
+    if (!parsed) return null;
+    const event: ServerFaultEvent = {
       traceId: parsed.traceId,
       attrs: parsed.attrs,
       observedAt: Date.now(),
       pageUrl: args.pageUrl,
-    });
+    };
+    this.buffer.push(event);
+    return event;
   }
 
   drain(): ServerFaultEvent[] {

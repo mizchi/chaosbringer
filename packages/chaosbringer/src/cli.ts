@@ -33,6 +33,7 @@ import {
   crawlCliExtras,
   crawlCliPeerNeeds,
   crawlerOptionsFromCli,
+  exitOptionsFromCli,
   crawlUrlFromArgs,
   parseCrawlArgs,
   readCrawlPerfBudgets,
@@ -48,7 +49,7 @@ import {
 } from "./cli-usage.js";
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
-import { formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
+import { type ExitCodeOptions, formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -150,6 +151,8 @@ OPTIONS:
                         facebook.net, and net::ERR_FAILED)
   --ignore-preset <p>   Apply a named ignore-error preset (can be repeated; comma-separated).
                         Known: analytics, maps, media-embeds, pdf-orb, iframe-sandbox
+  --ignore-http <pattern>  Request URLs (regex) whose 4xx / 5xx answer is not an HTTP error:
+                        not counted, and its "Failed to load resource" line dropped (can be repeated)
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
   --log-level <level>   Log level: debug, info, warn, error (default: info)
@@ -207,9 +210,15 @@ OPTIONS:
   --allow-settle-mismatch  Enforce such --perf-budgets anyway, with a warning
   --baseline <path>     Diff this run against a previous report (warns if missing)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
-  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
+  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link:
+                        ::error for what fails the run under its rules, ::warning otherwise
   --compact             Compact output format
   --strict              Fail on console errors, JS exceptions and unhandled rejections
+                        (not on the browser's echo of a fault the run injected)
+  --fail-on-http <5xx|4xx>  Fail on a subresource or API response of 500 and up (5xx) or 400
+                        and up (4xx); the page's own document is a dead link instead
+  --fail-on-network     Fail on a request that failed at the transport level (net::ERR_…)
+  --fail-on-dead-links  Fail on a crawled link that answered 404 / 5xx
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
@@ -217,7 +226,8 @@ OPTIONS:
 EXIT CODES:
   0  nothing failed
   1  the run found something: a page that failed or timed out, an invariant violation,
-     a renderer crash, --strict errors, --baseline-strict regressions
+     a renderer crash, --strict errors, --baseline-strict regressions, what a
+     --fail-on-http / --fail-on-network / --fail-on-dead-links rule fails on
   2  the run was refused before a browser started: an unknown flag or --invariants name, a
      malformed value, an input file (--storage-state, --har-replay, --trace-replay,
      --perf-budgets, a --seed-from-sitemap path) that is missing or does not parse, a peer
@@ -274,9 +284,11 @@ try {
 let options: CrawlerOptions;
 let heatmapTop: number;
 let clusterMinCount: number | undefined;
+let exitOptions: ExitCodeOptions;
 try {
   options = crawlerOptionsFromCli(values, baseUrl);
   ({ heatmapTop, clusterMinCount } = crawlCliExtras(values));
+  exitOptions = exitOptionsFromCli(values);
 } catch (err) {
   exitWithUsageError(err);
 }
@@ -312,9 +324,7 @@ const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
 const isTTY = process.stdout.isTTY === true;
-const isStrict = values.strict;
 const baselinePath = values.baseline;
-const isBaselineStrict = values["baseline-strict"];
 const emitGithub = values["github-annotations"];
 
 async function main() {
@@ -384,7 +394,6 @@ async function main() {
     // Print report first, then save + announce the file. This way the main
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
-    const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
     // --quiet is the verdict, why it failed, and where the files went: what
     // a script or a CI step shows, and the paths it reads next. It used to
     // print the whole report, so the flag only dropped the per-page lines.
@@ -393,7 +402,8 @@ async function main() {
     // A path line, set off from the report by a blank line unless --quiet.
     const announce = (line: string) => console.log(isQuiet ? line : `\n${line}`);
     if (emitGithub) {
-      printGithubAnnotations(report, { strict: isStrict });
+      // At the level the exit rules give each one: `error` only for what fails the run.
+      printGithubAnnotations(report, exitOptions);
     }
 
     const wantsHeatmap = values.heatmap || Boolean(values["heatmap-out"]);

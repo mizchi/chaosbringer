@@ -9,6 +9,7 @@
  */
 
 import { stripAnsi, withoutCallLog } from "./error-text.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import type { PageError } from "./types.js";
 
 export interface ErrorCluster {
@@ -69,10 +70,15 @@ export function fingerprintError(err: PageError): string {
   return msg.slice(0, 160);
 }
 
-/** Collapse a list of errors into stable clusters. */
+/**
+ * Collapse a list of errors into stable clusters. The browser's echoes of a
+ * fault the run injected (`PageError.causedByFault`) are left out: they are
+ * the fault, and a cluster of them is what a strict fault test failed on.
+ */
 export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
   const bucket = new Map<string, ErrorCluster>();
   for (const err of errors) {
+    if (isFaultEcho(err)) continue;
     const fp = fingerprintError(err);
     const key = `${err.type}|${fp}`;
     const existing = bucket.get(key);

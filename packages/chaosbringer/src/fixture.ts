@@ -84,6 +84,7 @@ function crawlerOptions(options: ChaosTestOptions, baseUrl: string, maxPages: nu
     maxPages,
     maxActionsPerPage: options.maxActionsPerPage ?? 5,
     ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
+    strictCountsFaultEchoes: options.strictCountsFaultEchoes,
     blockExternalNavigation: options.blockExternalNavigation ?? true,
     actionWeights: options.actionWeights,
     perf: options.perf,

@@ -141,7 +141,11 @@ describe("network faults behind a service worker", () => {
 
     // Before: matched 0, the page showed "api 200 live", and the server was hit.
     expect(seen).toEqual(["api 503 injected"]);
-    expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1 }]);
+    // The page's own request is not the worker's: its console line is the
+    // fault's echo by method and URL, once per firing.
+    expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1, echoes: 1 }]);
+    expect(report.pages[0]?.errors.map((e) => [e.type, e.status, e.causedByFault])).toEqual([["console", 503, "api-down"]]);
+    expect(report.errorClusters).toEqual([]);
     expect(apiHits).toBe(0);
     expect(report.pages[0]?.serviceWorker).toBe("routed");
   }, 60_000);
@@ -239,7 +243,7 @@ describe("network faults behind a service worker", () => {
       }).start();
 
       expect(seen).toEqual(["api 503 injected"]);
-      expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1 }]);
+      expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1, echoes: 1 }]);
     }, 60_000);
 
     it("hands the HAR a worker's request no rule claims", async () => {

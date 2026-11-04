@@ -744,9 +744,6 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
 
 // ---------------------------------------------------------- resilience
 
-/** Console noise a fault itself produces: the browser logging the failed request. */
-const FAULT_ECHO = /Failed to load resource|net::ERR_|status of 5\d\d/i;
-
 function resilienceFindings(
   baseline: CrawlReport,
   runs: readonly ScanChaosRun[],
@@ -765,7 +762,11 @@ function resilienceFindings(
       // page's). A data-safety one only under a fault is what the fault
       // made the page show: `undefined` where a field was, a blank page.
       if (c.type === "network" || (c.type === "invariant-violation" && !dataSafetyRule(c))) continue;
-      if (c.type === "console" && FAULT_ECHO.test(c.sample.message)) continue;
+      // The browser's own line about a request the fault answered is in no
+      // cluster: the crawl tags it with the fault (`PageError.causedByFault`)
+      // and leaves it out. This used to drop every console cluster matching
+      // `Failed to load resource|net::ERR_|status of 5xx`, which also hid a
+      // real 500 from another endpoint that only failed under the fault.
       if (!isSiteError(c)) continue;
       const entry = fresh.get(c.key) ?? { c, count: 0, urls: new Set<string>(), faults: [] };
       entry.count += c.count;

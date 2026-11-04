@@ -320,6 +320,33 @@ describe("shard CLI", () => {
     ).toEqual({ junit: "j.xml", heatmapOut: "h.json", clusterBundles: { bundleDir: "fa", minCount: 2 } });
   });
 
+  // The merged report was judged by --strict / --baseline-strict alone: a
+  // forwarded --fail-on-http failed each worker's own report, and not the
+  // merged one, whose verdict line said PASS.
+  it("judges the merged report by the exit rules forwarded to the workers", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    expect((await run(["--strict", "--fail-on-http", "5xx", "--fail-on-network", "--fail-on-dead-links"])).exitOptions).toEqual({
+      strict: true,
+      baselineStrict: false,
+      http: "5xx",
+      network: true,
+      deadLinks: true,
+    });
+    expect((await run([])).exitOptions).toEqual({ strict: false, baselineStrict: false });
+    await expect(run(["--fail-on-http", "500"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--fail-on-http must be one of 4xx, 5xx \(got "500"\)/),
+    });
+    await expect(run(["--ignore-http", "("])).rejects.toMatchObject({ name: "UsageError", message: expect.stringContaining("--ignore-http") });
+    // Forwarded as given, the value with its flag.
+    expect(args(["--count", "2", "--url", "http://x.test/", "--fail-on-http", "4xx"]).forward).toEqual([
+      "--url",
+      "http://x.test/",
+      "--fail-on-http",
+      "4xx",
+    ]);
+  });
+
   it("reruns the whole sharded run from the merged Repro line", () => {
     expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --max-pages 3 --shard 1/4 --strict", 4)).toBe(
       "chaosbringer shard --count 4 --url http://x.test/ --seed 7 --max-pages 3 --strict",

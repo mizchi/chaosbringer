@@ -7,7 +7,7 @@
 import { chromium, type Page } from "playwright";
 import { ChaosCrawler } from "./crawler.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
-import { getExitCode } from "./reporter.js";
+import { getExitCode, HTTP_FAIL_LEVELS, type HttpFailLevel } from "./reporter.js";
 import type {
   CrawlerEvents,
   CrawlerOptions,
@@ -50,6 +50,16 @@ export interface ChaosRunOptions extends CrawlerOptions {
   /** When true, new regressions vs the baseline force exitCode=1. */
   baselineStrict?: boolean;
   /**
+   * Fail on a subresource or API response of 500 and up (`"5xx"`) or 400
+   * and up (`"4xx"`): the CLI's `--fail-on-http`. The browser's echo of a
+   * `faults.status` rule's answer does not count.
+   */
+  failOnHttp?: HttpFailLevel;
+  /** Fail on a request that failed at the transport level: the CLI's `--fail-on-network`. */
+  failOnNetwork?: boolean;
+  /** Fail on a crawled link that answered 404 / 5xx: the CLI's `--fail-on-dead-links`. */
+  failOnDeadLinks?: boolean;
+  /**
    * Pre-run hook that fires before any chaos action or fault rolls. Receives
    * a Playwright page in a disposable browser context. Typical use is REST
    * seeding via `page.request.post(...)` so the crawler has navigable state
@@ -84,7 +94,13 @@ export async function chaos(
   options: ChaosRunOptions,
   events: CrawlerEvents = {}
 ): Promise<ChaosResult> {
-  const { strict, baseline, baselineStrict, setup, server, ...crawlerOptions } = options;
+  const { strict, baseline, baselineStrict, failOnHttp, failOnNetwork, failOnDeadLinks, setup, server, ...crawlerOptions } =
+    options;
+  // Before anything runs, like the crawler's own options: a typo'd level
+  // would otherwise fail nothing.
+  if (failOnHttp !== undefined && !HTTP_FAIL_LEVELS.includes(failOnHttp)) {
+    throw new Error(`chaosbringer: "failOnHttp" must be one of ${HTTP_FAIL_LEVELS.join(", ")} (got ${JSON.stringify(failOnHttp)})`);
+  }
 
   // Construct the crawler before invoking the setup hook so that
   // CrawlerOptions validation (bad maxPages, malformed fault regex,
@@ -108,7 +124,13 @@ export async function chaos(
     }
   }
 
-  const exitCode = getExitCode(report, { strict, baselineStrict });
+  const exitCode = getExitCode(report, {
+    strict,
+    baselineStrict,
+    http: failOnHttp,
+    network: failOnNetwork,
+    deadLinks: failOnDeadLinks,
+  });
   return { report, passed: exitCode === 0, exitCode };
 }
 

@@ -94,7 +94,7 @@ describe("buildGithubAnnotations", () => {
     expect(buildGithubAnnotations(report, { strict: true })[0]!.level).toBe("error");
   });
 
-  it("adds a separate error annotation for each dead link", () => {
+  it("adds a separate annotation for each dead link: error only when --fail-on-dead-links fails the run on it", () => {
     const report = makeReport({
       summary: makeSummary({
         discovery: {
@@ -116,9 +116,11 @@ describe("buildGithubAnnotations", () => {
     });
     const out = buildGithubAnnotations(report);
     expect(out).toHaveLength(1);
-    expect(out[0]!.level).toBe("error");
+    // It was `error` on a run that exited 0.
+    expect(out[0]!.level).toBe("warning");
     expect(out[0]!.title).toContain("Dead link");
     expect(out[0]!.message).toContain("HTTP 404");
+    expect(buildGithubAnnotations(report, { deadLinks: true })[0]!.level).toBe("error");
   });
 
   it("includes cluster URL count in the message when multiple URLs are involved", () => {
