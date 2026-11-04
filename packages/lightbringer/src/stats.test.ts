@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   aggregateRuns,
   checkMedianBudgets,
+  DEFAULT_BUDGET_FLOORS,
+  EMIT_BUDGET_METRICS,
   emitBudgets,
+  parseBudgetFloors,
   formatMedianSummary,
   formatStat,
   gate,
@@ -216,8 +219,60 @@ describe("spanMedians / emitBudgets", () => {
       },
     });
   });
-  it("emits ceil(median × 1.25)", () => {
+  it("emits ceil(median × 1.25) for a metric with no floor", () => {
     expect(emitBudgets({ a: { x: 15.5, y: 0, z: 4 } })).toEqual({ a: { x: 20, y: 0, z: 5 } });
     expect(emitBudgets({ a: { x: 10, y: 10 } }, { headroom: 2, metrics: ["x"] })).toEqual({ a: { x: 20 } });
+  });
+  it("gives a median of 0 its floor, so a same-seed rerun has room for scheduler noise", () => {
+    expect(emitBudgets({ a: { scriptMs: 0, blockingMs: 0, requestCount: 0, interactionMs: 0 } })).toEqual({
+      a: { scriptMs: 8, blockingMs: 5, requestCount: 1, interactionMs: 16 },
+    });
+  });
+  it("adds the floor to a small median and keeps the headroom rule for a large one", () => {
+    // 4 ms × 1.25 = 5 (1 ms of slack) → 4 + 8 = 12; 1.1 + 7 = 8.1 → 9.
+    expect(emitBudgets({ a: { scriptMs: 4, recalcStyleMs: 1.1, layoutCount: 3 } })).toEqual({
+      a: { scriptMs: 12, recalcStyleMs: 9, layoutCount: 5 },
+    });
+    // 400 × 1.25 = 500 > 400 + 8: the floor changes nothing.
+    expect(emitBudgets({ a: { scriptMs: 400, encodedKB: 800, requestCount: 40 } })).toEqual({
+      a: { scriptMs: 500, encodedKB: 1000, requestCount: 50 },
+    });
+  });
+  it("takes caller floors over the defaults; a floor of 0 turns it off", () => {
+    const floors = { ...DEFAULT_BUDGET_FLOORS, scriptMs: 20, requestCount: 0 };
+    expect(emitBudgets({ a: { scriptMs: 4, requestCount: 0, blockingMs: 0 } }, { floors })).toEqual({
+      a: { scriptMs: 24, requestCount: 0, blockingMs: 5 },
+    });
+    // A partial table means "only these floors": the others are 0.
+    expect(emitBudgets({ a: { scriptMs: 4, blockingMs: 0 } }, { floors: { scriptMs: 1 } })).toEqual({
+      a: { scriptMs: 5, blockingMs: 0 },
+    });
+  });
+  it("has a default floor for every metric it emits", () => {
+    expect(Object.keys(DEFAULT_BUDGET_FLOORS).sort()).toEqual(Object.keys(EMIT_BUDGET_METRICS).sort());
+    for (const v of Object.values(DEFAULT_BUDGET_FLOORS)) expect(v).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("parseBudgetFloors (--floor metric=n)", () => {
+  it("overrides the named floors over the defaults, the last one winning", () => {
+    expect(parseBudgetFloors([])).toEqual(DEFAULT_BUDGET_FLOORS);
+    expect(parseBudgetFloors(["scriptMs=12", "requestCount=0", "scriptMs=8.5"])).toEqual({
+      ...DEFAULT_BUDGET_FLOORS,
+      scriptMs: 8.5,
+      requestCount: 0,
+    });
+  });
+  it.each([
+    ["scriptMs", '--floor "scriptMs": expected <metric>=<n>'],
+    ["=5", '--floor "=5": expected <metric>=<n>'],
+    ["scriptMS=5", '--floor "scriptMS=5": unknown metric "scriptMS" (expected one of durationMs, scriptMs, blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount, interactionMs)'],
+    ["scriptMs=-1", '--floor "scriptMs=-1": n must be a number >= 0'],
+    ["scriptMs=abc", '--floor "scriptMs=abc": n must be a number >= 0'],
+    // Number("") is 0: `--floor "scriptMs=$F"` with F unset must not turn the floor off.
+    ["scriptMs=", '--floor "scriptMs=": n must be a number >= 0'],
+    ["scriptMs=Infinity", '--floor "scriptMs=Infinity": n must be a number >= 0'],
+  ])("refuses %j", (raw, message) => {
+    expect(() => parseBudgetFloors([raw])).toThrow(message);
   });
 });

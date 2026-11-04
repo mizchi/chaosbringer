@@ -489,22 +489,108 @@ export function spanMedians(
 /** Default headroom of emitted budgets over the measured median. */
 export const DEFAULT_BUDGET_HEADROOM = 1.25;
 
+/** metric → absolute floor of its emitted budget, in the metric's own unit */
+export type BudgetFloors = Readonly<Record<string, number>>;
+
 /**
- * Budgets from medians: ceil(median × headroom) per span and metric, so a
- * budget is never tighter than what was measured and is always an integer.
- * `metrics` restricts which metrics get a budget (default: all present).
+ * Default absolute floors of emitted budgets: a budget is at least
+ * `median + floor`. Headroom alone is relative, so it is thinnest exactly
+ * where timer granularity and scheduler jitter are largest: without floors a
+ * 0 ms median got a budget of 0 and a 4 ms one 1 ms of slack, and most clean
+ * reruns of the same seed failed the gate on them.
+ *
+ * Taken from regress's floors (REGRESS_SPAN_METRICS) and raised for a gate
+ * that may see a single run rather than a median of several, from what
+ * clean reruns of examples/perf-patterns' fixed variants drifted by:
+ * - scriptMs 8, recalcStyleMs 7 (regress: 2): in 136 clean single runs,
+ *   scriptMs read up to +5 ms over its median and recalcStyleMs +6 ms (one
+ *   outlier +9 ms, which a floor below the patterns' 8 ms cannot cover).
+ * - blockingMs 5 (as regress): it reads 0 until a task passes 50 ms and then
+ *   jumps by the whole task, so no floor below a real long task separates
+ *   noise from one.
+ * - interactionMs 16 (as regress): one frame.
+ * - durationMs 34 (regress: 5, crawls 17): a span ends on its settle wait, so
+ *   its wall time moves in whole frames, and one run can be two frames late.
+ * - layoutCount 2 (regress: 5), requestCount 1 (as regress), encodedKB 5
+ *   (regress: 10): counts and bytes barely move between clean runs of a
+ *   seed, and a "no request stays no request" budget of 0 becomes 1, not more.
+ * Each one is below the smallest improvement a perf-patterns pattern on that
+ * metric must show (scriptMs 10, recalcStyleMs 8, blockingMs 50, layoutCount
+ * 15, requestCount 2, encodedKB 200, interactionMs 80), so a budget emitted
+ * from a fixed variant still fails its slow one: the example's test checks it.
+ */
+export const DEFAULT_BUDGET_FLOORS = {
+  durationMs: 34,
+  scriptMs: 8,
+  blockingMs: 5,
+  layoutCount: 2,
+  recalcStyleMs: 7,
+  encodedKB: 5,
+  requestCount: 1,
+  interactionMs: 16,
+} as const satisfies Record<(typeof EMIT_KEYS)[number], number>;
+
+/**
+ * Budgets from medians: per span and metric,
+ * `max(ceil(median × headroom), ceil(median + floor))`, so a budget is never
+ * tighter than what was measured, leaves at least `floor` of room above it,
+ * and is always an integer. `floors` replaces the defaults
+ * (DEFAULT_BUDGET_FLOORS); a metric it leaves out, or sets to 0, gets the
+ * headroom rule only. `metrics` restricts which metrics get a budget
+ * (default: all present).
  */
 export function emitBudgets(
   medians: SpanMedians,
-  { headroom = DEFAULT_BUDGET_HEADROOM, metrics }: { headroom?: number; metrics?: readonly string[] } = {},
+  {
+    headroom = DEFAULT_BUDGET_HEADROOM,
+    floors = DEFAULT_BUDGET_FLOORS,
+    metrics,
+  }: { headroom?: number; floors?: BudgetFloors; metrics?: readonly string[] } = {},
 ): SpanMedians {
   const out: SpanMedians = {};
   for (const [span, values] of Object.entries(medians)) {
     out[span] = {};
     for (const [k, v] of Object.entries(values)) {
       if (metrics && !metrics.includes(k)) continue;
-      out[span]![k] = Math.ceil(v * headroom);
+      out[span]![k] = Math.max(Math.ceil(v * headroom), Math.ceil(v + (floors[k] ?? 0)));
     }
   }
   return out;
+}
+
+/** "durationMs+34 scriptMs+5 …", for the line an emit prints. */
+export function formatBudgetFloors(floors: BudgetFloors): string {
+  return Object.entries(floors)
+    .map(([k, v]) => `${k}+${v}`)
+    .join(" ");
+}
+
+/**
+ * The floors of `--floor <metric>=<n>` flags (repeatable) over the defaults,
+ * the last flag for a metric winning; `<metric>=0` turns that floor off.
+ * Throws on a value without `=`, a metric emit-budgets does not write, or an
+ * `n` that is not a finite number >= 0. Shared by `lightbringer run
+ * --emit-budgets` and `chaosbringer perf emit-budgets`, which report the
+ * message as their own usage error.
+ */
+export function parseBudgetFloors(specs: readonly string[]): BudgetFloors {
+  const floors: Record<string, number> = { ...DEFAULT_BUDGET_FLOORS };
+  for (const spec of specs) {
+    const eq = spec.indexOf("=");
+    const metric = eq > 0 ? spec.slice(0, eq).trim() : "";
+    if (!metric) throw new Error(`--floor ${JSON.stringify(spec)}: expected <metric>=<n>`);
+    if (!Object.hasOwn(DEFAULT_BUDGET_FLOORS, metric)) {
+      throw new Error(
+        `--floor ${JSON.stringify(spec)}: unknown metric ${JSON.stringify(metric)} (expected one of ${EMIT_KEYS.join(", ")})`,
+      );
+    }
+    const raw = spec.slice(eq + 1);
+    const n = Number(raw);
+    // `Number("")` is 0: `--floor "scriptMs=$F"` with F unset would turn the floor off.
+    if (raw.trim() === "" || !Number.isFinite(n) || n < 0) {
+      throw new Error(`--floor ${JSON.stringify(spec)}: n must be a number >= 0`);
+    }
+    floors[metric] = n;
+  }
+  return floors;
 }

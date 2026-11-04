@@ -162,8 +162,17 @@ pnpm dlx lightbringer run scenario.json --repeat 5 --gate           # fail if a 
 ```
 
 `--emit-budgets` derives `lightbringer.budgets.json` from the measured medians
-(×1.25 headroom) — **you never hand-write a number** — and `--gate` fails the run
-against it. Step fields: `goto`, `click`, `fill`+`text`, `press`, `drag`+`by`,
+— **you never hand-write a number** — and `--gate` fails the run against it.
+Each budget is the larger of `ceil(median × 1.25)` and `ceil(median + floor)`:
+the floor is an absolute minimum of room per metric (`DEFAULT_BUDGET_FLOORS`:
+`durationMs` 34, `scriptMs` 8, `blockingMs` 5, `layoutCount` 2, `recalcStyleMs`
+7, `encodedKB` 5, `requestCount` 1, `interactionMs` 16), so a 0 ms `blockingMs`
+median gets a budget of 5 ms, not 0, and a clean rerun passes. `--floor <metric>=<n>`
+(repeatable, `n` ≥ 0) sets one floor; `--floor <metric>=0` turns it off. A
+malformed `--floor` stops the CLI before anything runs, with exit 1 like its other
+usage errors. The file records `{ "headroom", "floors" }` under a `"$emit"` key
+next to the slugs; `--gate` reads only the slugs, so a file written before it
+gates as before. Step fields: `goto`, `click`, `fill`+`text`, `press`, `drag`+`by`,
 `waitFor`, `wait`, and a per-step `settle` (`networkidle` (default) / `load` /
 `raf` / a number of ms). Flags: `--repeat N`, `--out DIR`, `--gpu`, `--cpu N`,
 `--net slow-3g|fast-3g|4g`, `--cov`, `--mem`, `--css`, `--trace`, `--headed`.
@@ -640,7 +649,8 @@ wait, not one per read.
 driver that has its own run reports: `stat` / `median` / `percentile`
 (median + p25..p75 band, `noisy` when the IQR exceeds 25% of a median above 5),
 `aggregateRuns` (→ the `<slug>.median.json` shape), `checkMedianBudgets`, `gate`,
-`spanMedians` + `emitBudgets` (ceil(median × 1.25)), `regress` + `formatRegress`
+`spanMedians` + `emitBudgets` (max(ceil(median × 1.25), ceil(median + floor)), with
+`DEFAULT_BUDGET_FLOORS` and `parseBudgetFloors` for `--floor` values), `regress` + `formatRegress`
 (threshold 0.15 plus per-metric absolute floors), `analyseDrilldown` +
 `formatDrilldown`, and `unionCoverage` + `formatCoverageUnion`.
 
@@ -675,7 +685,8 @@ the scenario DSL; anything else runs through `playwright test` with your config.
 | `--repeat N` | run N times (→ `--repeat-each=N` in spec mode) |
 | `--out DIR` | report output dir (default `perf-results`) |
 | `--config FILE` | Playwright config to reuse (spec mode) |
-| `--emit-budgets` | write `lightbringer.budgets.json` from the medians (×1.25 headroom) |
+| `--emit-budgets` | write `lightbringer.budgets.json` from the medians (×1.25 headroom, at least median + floor) |
+| `--floor metric=n` | with `--emit-budgets`: that metric's absolute floor (repeatable; `=0` turns it off) |
 | `--gate` | fail if a median exceeds the emitted budget |
 | `--gpu` | hardware GL (real GPU / paint numbers) |
 | `--cpu N` | throttle CPU N× |
