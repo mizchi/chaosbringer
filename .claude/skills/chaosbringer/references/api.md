@@ -19,6 +19,15 @@ from code only: `chaos({ faultInjection, runtimeFaults, … })`, `ChaosCrawler`,
 `applyFaults`, or `model run`. If you want breadth *with* faults, that is
 `chaos()` with `probability` rules and a seed, not this command.
 
+Without flags it exits 1 only on a page that failed to load or timed out, a
+renderer crash or an invariant violation. `--strict` adds console errors, JS
+exceptions and unhandled rejections; `--fail-on-http 5xx` (or `4xx`) an API's
+or a subresource's own error status (`summary.httpErrors`, with each one's
+`status` and `method` on its console error); `--fail-on-network` a request that
+failed at the transport level; `--fail-on-dead-links` a crawled link that
+answered 404 / 5xx. `--github-annotations` prints `::error` only for what one
+of those rules fails the run on, `::warning` for the rest.
+
 Working *inside* the chaosbringer repo, the CLI lives at
 `packages/chaosbringer/dist/cli.js` and `dist/` is gitignored — so
 `pnpm -F chaosbringer build` first. If you get type errors mentioning
@@ -346,13 +355,15 @@ against the config's `use.baseURL`, or `chaosOptions.baseUrl` when set.
 and `runtimeFaults`; on `testPage()` the fault rules are routed on your page
 and the runtime faults installed on it before it navigates, and both stay on
 it for the rest of the test. `strict: true` fails the test by the CLI's `--strict` rule, and every
-`crawl()` attaches its report as `chaos-report.json`. That rule counts the
-console error Chromium logs for an error status a `faults.status` rule
-answered ("Failed to load resource: … 503"), so a strict fault test ignores
-it, spreading the defaults since the option replaces them:
+`crawl()` attaches its report as `chaos-report.json`. That rule does not count
+the console error Chromium logs for an error status a `faults.status` rule
+answered ("Failed to load resource: … 503"): it is tagged as the rule's echo
+(`causedByFault`), so a strict fault test needs no ignore pattern for it.
+`strictCountsFaultEchoes: true` in `chaosOptions` counts it again. To add an
+ignore pattern of your own, spread the defaults, since the option replaces them:
 
 ```ts
-ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"],
+ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "third-party-widget"],
 ```
 
 `testPage` uses a page *you* own, and releases anything a `hang` parked before

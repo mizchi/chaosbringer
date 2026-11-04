@@ -53,7 +53,7 @@ when an API call fails.
 
 | rule | what it means |
 |---|---|
-| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl, or, with `--invariants`, a data-safety violation (`undefined` on screen, a blank page) that only the fault produced. The browser's own "Failed to load resource" line for the injected fault is not counted. The code assumes the request succeeds. |
+| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl, or, with `--invariants`, a data-safety violation (`undefined` on screen, a blank page) that only the fault produced. The browser's own "Failed to load resource" line (and network error) for a request the fault answered is not counted: the crawl tags it as the fault's echo (`PageError.causedByFault`) and clusters it nowhere. A real error status from another endpoint that only failed under the fault is counted. The code assumes the request succeeds. |
 | `fault-page-broken` | A page that loaded clean and fails or times out when its API call fails. |
 | `no-request-timeout` | A step that was still waiting when the hung request was finally failed, while the same step was fast in the clean crawl. The request has no client deadline. |
 
