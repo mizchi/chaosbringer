@@ -97,8 +97,9 @@ export interface CrawlerOptions {
    * bundles and the Playwright fixture's `expectNoErrors` /
    * `chaosExpect.toHaveNoErrors`. It stays in `page.errors`, in
    * `totalErrors` (the raw count) and in the JUnit output, whose
-   * `<failure>` per error flaker reads. `true` records it untagged and counts it everywhere, so a strict test
-   * of a status fault fails on it again (the rule's `echoes` still counts it).
+   * `<failure>` per error flaker reads. `true` records it untagged and
+   * counts it everywhere, so a strict test of a status fault fails on it
+   * again (the rule's `echoes` still counts it).
    */
   strictCountsFaultEchoes?: boolean;
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */
@@ -1564,7 +1565,10 @@ export interface CrawlSummary {
   errorPages: number;
   timeoutPages: number;
   recoveredPages: number;
-  /** Pages where `errors.length > 0`, independent of navigation status. */
+  /**
+   * Pages with an error other than a fault echo (`PageError.causedByFault`),
+   * independent of navigation status: `PageResult.hasErrors`.
+   */
   pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
