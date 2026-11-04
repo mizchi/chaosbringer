@@ -228,7 +228,7 @@ SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
 ${formatSubcommandList()}
 
 PERF SUBCOMMANDS (read crawl reports written with --perf):
-  chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]
+  chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--floor <metric>=<n>]... [--out <file>]
   chaosbringer perf gate <report.json...> --budgets <file> [--json]
   chaosbringer perf regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15]
   chaosbringer perf drilldown <report.json> <perfKey> [--top N]

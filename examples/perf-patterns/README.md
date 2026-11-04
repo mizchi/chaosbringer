@@ -9,7 +9,14 @@ has to:
    measured on the expected step (its [perfKey](../../docs/recipes/perf.md#perfkey-the-key-that-survives-a-rerun));
 2. **show the fix**: the same metric on the same key improves by at least the
    pattern's threshold on the fixed variant, and the fixed crawl still visits
-   the same pages with no new error clusters.
+   the same pages with no new error clusters;
+3. **survive a budget gate** (patterns whose metric `perf emit-budgets`
+   budgets: `scriptMs`, `blockingMs`, `recalcStyleMs`, `layoutCount`,
+   `requestCount`, `encodedKB`, `interactionMs`): budgets emitted from the
+   fixed variant's runs, with the default [floors](../../docs/recipes/perf.md#repeated-runs-chaosbringer-perf),
+   hold a fresh batch of fixed runs (gated on its medians) on that metric, and
+   `perf gate` still fails the slow variant on it. This costs one more batch
+   of fixed crawls per such pattern.
 
 Some patterns are **chaos-only**: the page is fine while the network is
 healthy, and the problem appears only under an injected fault

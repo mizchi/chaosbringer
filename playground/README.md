@@ -135,7 +135,7 @@ node $CLI perf regress base --current reg       # exit 1: /users :: load
 kill %1
 ```
 
-`--headroom 2` rather than the default 1.25 because every span here is tiny: a 4 ms `scriptMs` median gets a 5 ms budget at ×1.25, and a clean same-seed rerun lands on 5.1–5.7 ms about half the time (3 of 6 clean batches failed `perf gate` at ×1.25, 0 of 6 at ×2). `perf regress` needs no headroom: its per-metric absolute floors absorb the same jitter (0 of 6 clean batches failed).
+`--headroom 2` rather than the default 1.25 because every span here is tiny: a 4 ms `scriptMs` median gets a 5 ms budget at ×1.25, and a clean same-seed rerun lands on 5.1–5.7 ms about half the time (3 of 6 clean batches failed `perf gate` at ×1.25, 0 of 6 at ×2). `perf regress` needs no headroom: its per-metric absolute floors absorb the same jitter (0 of 6 clean batches failed). Those numbers predate the absolute floors `perf emit-budgets` now adds (a 4 ms `scriptMs` median gets 4 + 8 = 12 ms at ×1.25, see [perf.md](../docs/recipes/perf.md#how-much-noise-to-expect)); the batches were not re-run with them, so `--headroom 2` is kept here.
 
 ## Sub-agent prompt template
 

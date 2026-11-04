@@ -94,7 +94,8 @@ export function checkPerfBudgets(
 
 /**
  * What `chaosbringer perf emit-budgets` writes: per-perfKey limits, each
- * `ceil(median × headroom)` over the runs it read.
+ * `max(ceil(median × headroom), ceil(median + floors[metric]))` over the runs
+ * it read.
  */
 export interface PerfBudgetsFile {
   version: 1;
@@ -113,6 +114,14 @@ export interface PerfBudgetsFile {
    * Absent in files written before it was recorded, which are version 1.
    */
   keyVersion?: number;
+  /**
+   * The absolute floor of each metric's budget: every budget is
+   * `max(ceil(median × headroom), ceil(median + floor))` (lightbringer's
+   * `DEFAULT_BUDGET_FLOORS`, with `--floor` overrides). A record of how the
+   * file was emitted; nothing reads it back. Absent in files written before
+   * floors existed, whose budgets are `ceil(median × headroom)`.
+   */
+  floors?: Partial<Record<BudgetMetric, number>>;
 }
 
 /**
