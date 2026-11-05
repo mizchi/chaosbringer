@@ -47,6 +47,7 @@ import { decideFault } from "./schedule.js";
 import {
   applyFault,
   compileFaultRules,
+  isWebSocketOnlyPattern,
   pickFaultRule,
   toRegExp,
   type CompiledFaultRule,
@@ -88,7 +89,8 @@ import {
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
-import { faultWarnings } from "./firings.js";
+import { faultRunWarnings, faultWarnings } from "./firings.js";
+import { addRunWarning, type RunWarning, type RunWarningInput } from "./run-warnings.js";
 import { collectRawLinks, resolvePageLinks } from "./links.js";
 import {
   collectRawTargets,
@@ -159,6 +161,9 @@ import { contextOptions, installKeepNamesHelper } from "./browser-session.js";
 import { bindBrowser, resolveBind } from "./browser-bind.js";
 import { ariaOutline, readAria } from "./aria-snapshot.js";
 import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
+
+/** Distinct WebSocket URLs a run remembers for `CrawlFaultInjectionStats.webSocket`. */
+const MAX_WEBSOCKET_URLS = 200;
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -312,6 +317,25 @@ export class ChaosCrawler {
   private heldRoutes: Route[] = [];
   private heldRequests = 0;
   /**
+   * The setup problems raised during the run (`report.warnings`), in order,
+   * identical ones folded. The ones read off the run's end state (faults
+   * that never fired, an incomplete flow) are added by `collectWarnings`.
+   */
+  private runWarnings: RunWarning[] = [];
+  /**
+   * `fault_rule_shadowed` pairs, found once: the rules do not change. A
+   * warning on every run the crawler makes, `testPage()` included.
+   */
+  private readonly faultShadows: ReturnType<typeof findFaultRuleShadows>;
+  /**
+   * WebSocket URLs the pages opened, with how many times, while a network
+   * fault rule is configured: a rule that matched nothing and matches one of
+   * these was aimed at traffic no route sees. Capped, like any per-run list.
+   */
+  private webSocketUrls = new Map<string, number>();
+  /** Server fault events seen (`server: { mode: "remote" }`), for `server-faults-unseen`. */
+  private serverFaultEventsSeen = 0;
+  /**
    * The requests a fault answered or aborted (or a `hang` holds), with the
    * label `faultInjections[].rule` gives the rule and the outcome the fault
    * gives the request: what the page's console line and `network` error
@@ -454,6 +478,7 @@ export class ChaosCrawler {
     this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
     this.compiledRuntimeFaults = compileRuntimeFaults(options.runtimeFaults);
     this.compiledIframeFaults = compileIframeFaults(options.iframeFaults);
+    this.faultShadows = findFaultRuleShadows(this.compiledFaultRules);
     if (options.coverageFeedback?.enabled) {
       this.coverageFeedback = {
         enabled: true,
@@ -496,7 +521,8 @@ export class ChaosCrawler {
       };
     }
 
-    // Initialize logger
+    // Initialize logger. `logToConsole` alone writes to stderr, from `warn`
+    // up: it used to need `logFile` too, and without one was a silent no-op.
     if (options.logFile) {
       this.logger = new Logger({
         logFile: options.logFile,
@@ -504,6 +530,8 @@ export class ChaosCrawler {
         console: options.logToConsole || false,
         jsonFormat: true,
       });
+    } else if (options.logToConsole) {
+      this.logger = new Logger({ level: options.logLevel || "warn", console: true, stderr: true, jsonFormat: true });
     } else {
       this.logger = createNullLogger();
     }
@@ -662,6 +690,9 @@ export class ChaosCrawler {
     this.pageCoverageDeltas = [];
     this.targetNovelty = new Map();
     this.perf.reset();
+    this.runWarnings = [];
+    this.webSocketUrls = new Map();
+    this.serverFaultEventsSeen = 0;
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
@@ -716,7 +747,7 @@ export class ChaosCrawler {
     // evaluated top-to-bottom, first-match-wins, so a broad catch-all
     // placed before a specific override will silently swallow every
     // request the override expected.
-    for (const shadow of findFaultRuleShadows(this.compiledFaultRules)) {
+    for (const shadow of this.faultShadows) {
       this.logger.warn("fault_rule_shadowed", {
         earlierRule: shadow.earlierName,
         laterRule: shadow.laterName,
@@ -912,6 +943,7 @@ export class ChaosCrawler {
     for (const { event, data } of faultWarnings(report)) {
       this.logger.warn(event, data);
     }
+    report.warnings = this.collectWarnings(report);
 
     // Log crawl end
     this.logger.logCrawlEnd({
@@ -1156,9 +1188,11 @@ export class ChaosCrawler {
     try {
       urls = await fetchSitemapUrls(source);
     } catch (err) {
-      this.logger.warn("sitemap_fetch_failed", {
+      const reason = errorMessage(err);
+      this.warn("sitemap_fetch_failed", { source, reason }, {
+        code: "sitemap-unreadable",
+        message: `sitemap ${source} could not be read (${reason}), so the crawl started from the base URL alone`,
         source,
-        reason: errorMessage(err),
       });
       return;
     }
@@ -1166,6 +1200,9 @@ export class ChaosCrawler {
     const queuedUrls = new Set(this.queue.map((q) => normalizeUrl(q.url)));
     let added = 0;
     let skippedExternal = 0;
+    // URLs on the crawl's origin, before this shard's share is taken: a
+    // shard that owns none of them is working as asked.
+    let onOrigin = 0;
     for (const raw of urls) {
       let normalized: string;
       try {
@@ -1181,6 +1218,7 @@ export class ChaosCrawler {
       } catch {
         continue;
       }
+      onOrigin++;
       if (queuedUrls.has(normalizeUrl(normalized))) continue;
       if (!this.ownsUrl(normalized)) continue;
       queuedUrls.add(normalizeUrl(normalized));
@@ -1188,6 +1226,87 @@ export class ChaosCrawler {
       added++;
     }
     this.logger.info("sitemap_seeded", { source, added, skippedExternal, total: urls.length });
+    if (onOrigin === 0) {
+      const listed =
+        urls.length === 0
+          ? "listed no URL"
+          : `listed ${urls.length} URL(s), none of them on ${baseOrigin}` +
+            (skippedExternal > 0 ? ` (${skippedExternal} on other origins)` : "");
+      this.warn("sitemap_empty", { source, total: urls.length, skippedExternal }, {
+        code: "sitemap-empty",
+        message: `sitemap ${source} ${listed}, so the crawl started from the base URL alone`,
+        source,
+      });
+    }
+  }
+
+  /**
+   * Log a setup problem as the logger event it always was, and record it as
+   * a `report.warnings` entry.
+   */
+  private warn(event: string, data: Record<string, unknown>, warning: RunWarningInput): void {
+    this.logger.warn(event, data);
+    addRunWarning(this.runWarnings, warning);
+  }
+
+  /**
+   * `report.warnings` for a run whose stats `stats` holds: the problems
+   * raised as it went, then the shadowed fault rules, the faults that did
+   * not take effect (`faultRunWarnings`, `unfiredFaults`' words), the
+   * driver's journeys that ended early, and a remote server that sent no
+   * fault header.
+   */
+  private collectWarnings(stats: Parameters<typeof faultRunWarnings>[0]): RunWarning[] {
+    const out: RunWarning[] = this.runWarnings.map((w) => ({ ...w }));
+    for (const shadow of this.faultShadows) {
+      addRunWarning(out, {
+        code: "fault-shadowed",
+        message:
+          `network fault "${shadow.laterName}" is shadowed by "${shadow.earlierName}" ahead of it: a request it ` +
+          `matches (e.g. ${shadow.sampleUrl}) matches "${shadow.earlierName}" first, and the first rule that matches decides`,
+        rule: shadow.laterName,
+        layer: "network",
+      });
+    }
+    for (const w of faultRunWarnings(stats)) addRunWarning(out, w);
+    for (const flow of this.driver?.stats?.() ?? []) {
+      const done = flow.laps > 0 && !flow.halted;
+      if (done) continue;
+      const at = `step ${flow.completed}/${flow.total}`;
+      addRunWarning(out, {
+        code: "flow-incomplete",
+        message: flow.halted
+          ? `flow "${flow.driver}" stopped at ${at}, "${flow.halted.step}", which threw: ${flow.halted.error}`
+          : `flow "${flow.driver}" ended at ${at}: "${flow.next ?? "?"}" never ran, its urlPattern / when never ` +
+            `matched a page the crawl reached`,
+        driver: flow.driver,
+      });
+    }
+    if (this.serverFaultCollector && this.results.length > 0 && this.serverFaultEventsSeen === 0) {
+      const prefix = this.options.server?.responseHeaderPrefix ?? "x-chaos-fault";
+      addRunWarning(out, {
+        code: "server-faults-unseen",
+        message:
+          `server: { mode: "remote" } saw no ${prefix}-* response header in the whole run: the server does not ` +
+          `send them (server-faults' metadataHeader option), sends another prefix (responseHeaderPrefix), or injected no fault`,
+        layer: "server",
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The run's `report.warnings` so far: after `testPage()`, which returns no
+   * report, the way to read them. A crawl's report carries its own.
+   */
+  getWarnings(): RunWarning[] {
+    return this.collectWarnings({
+      faultInjections: this.getFaultStats(),
+      lifecycleFaults: lifecycleStatsFrom(this.compiledLifecycleFaults),
+      runtimeFaults: this.getRuntimeFaultStats(),
+      iframeFaults: this.getIframeFaultStats(),
+      pages: this.results,
+    });
   }
 
   /**
@@ -1463,9 +1582,11 @@ export class ChaosCrawler {
       const client = await cdp.session();
       await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
     } catch (err) {
-      this.logger.warn("network_profile_failed", {
-        profile,
-        reason: errorMessage(err),
+      const reason = errorMessage(err);
+      this.warn("network_profile_failed", { profile, reason }, {
+        code: "network-profile-failed",
+        message: `network profile "${profile}" could not be applied (${reason}), so the page ran unthrottled`,
+        url: page.url(),
       });
     }
   }
@@ -1523,7 +1644,11 @@ export class ChaosCrawler {
         await cdp.enable("Network");
         await (await cdp.session()).send("Network.setCacheDisabled", { cacheDisabled: true });
       } catch (err) {
-        this.logger.warn("http_cache_disable_failed", { reason: errorMessage(err) });
+        const reason = errorMessage(err);
+        this.warn("http_cache_disable_failed", { reason }, {
+          code: "http-cache-disable-failed",
+          message: `httpCache: false could not turn the HTTP cache off (${reason}), so the page loaded with it on`,
+        });
       }
     }
   }
@@ -1963,6 +2088,7 @@ export class ChaosCrawler {
         const h = new Headers();
         for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
         const event = collector.observe({ headers: h, pageUrl: page.url() });
+        if (event) this.serverFaultEventsSeen++;
         if (event?.attrs.kind === "5xx") serverFault = "server:5xx";
       }
       const status = response.status();
@@ -2048,6 +2174,18 @@ export class ChaosCrawler {
     };
     page.on("crash", onCrash);
 
+    // WebSocket connections, for a network fault rule aimed at one: routes
+    // never see them, and the rule just matched nothing. Only while a rule is
+    // configured, and only the URL.
+    const onWebSocket = (ws: { url(): string }) => {
+      if (!collecting) return;
+      const wsUrl = ws.url();
+      if (this.webSocketUrls.has(wsUrl) || this.webSocketUrls.size < MAX_WEBSOCKET_URLS) {
+        this.webSocketUrls.set(wsUrl, (this.webSocketUrls.get(wsUrl) ?? 0) + 1);
+      }
+    };
+    if (this.compiledFaultRules.length > 0) page.on("websocket", onWebSocket);
+
     // The goto error names the URL navigated to, not the host that failed:
     // a start URL that redirects to a host that is down (an SSO not up yet)
     // fails as `net::ERR_CONNECTION_REFUSED at <start URL>` too.
@@ -2062,6 +2200,7 @@ export class ChaosCrawler {
         page.off("requestfailed", onRequestFailed);
         if (this.workerFaultFirings === workerFirings) this.workerFaultFirings = null;
         page.off("crash", onCrash);
+        page.off("websocket", onWebSocket);
         lastDocument.stop();
       },
       recordCrash,
@@ -2946,9 +3085,12 @@ export class ChaosCrawler {
       try {
         pick = await driver.selectAction(step);
       } catch (err) {
-        this.logger.warn("driver_threw", {
+        const error = errorMessage(err);
+        this.warn("driver_threw", { driver: driver.name, error }, {
+          code: "driver-threw",
+          message: `driver "${driver.name}" threw in selectAction (${error}), so the step was skipped`,
           driver: driver.name,
-          error: errorMessage(err),
+          url,
         });
         pick = null;
       }
@@ -2981,7 +3123,14 @@ export class ChaosCrawler {
       } else {
         const selectedTarget = targets[pick.index];
         if (!selectedTarget) {
-          this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
+          this.warn("driver_out_of_range", { driver: driver.name, index: pick.index }, {
+            code: "driver-out-of-range",
+            message:
+              `driver "${driver.name}" picked a candidate index that is not in the step's candidates, ` +
+              `so the pick was refused and the driver asked again`,
+            driver: driver.name,
+            url,
+          });
           continue;
         }
         if (pick.operation === "clear" && selectedTarget.type !== "input") {
@@ -2989,11 +3138,18 @@ export class ChaosCrawler {
           // and a thrown action is recorded against the page under test.
           // An unsupported operation is the driver's mistake, so it reads
           // like an out-of-range index — the step is not spent.
-          this.logger.warn("driver_operation_unsupported", {
-            driver: driver.name,
-            operation: pick.operation,
-            targetType: selectedTarget.type,
-          });
+          this.warn(
+            "driver_operation_unsupported",
+            { driver: driver.name, operation: pick.operation, targetType: selectedTarget.type },
+            {
+              code: "driver-operation-unsupported",
+              message:
+                `driver "${driver.name}" asked to ${pick.operation} a ${selectedTarget.type} candidate, which only an ` +
+                `input takes, so the pick was refused and the driver asked again`,
+              driver: driver.name,
+              url,
+            },
+          );
           continue;
         }
         selectorForCoverage = selectedTarget.selector;
@@ -3018,9 +3174,12 @@ export class ChaosCrawler {
       try {
         driver.onActionComplete?.(result, step);
       } catch (err) {
-        this.logger.warn("driver_onActionComplete_threw", {
+        const error = errorMessage(err);
+        this.warn("driver_onActionComplete_threw", { driver: driver.name, error }, {
+          code: "driver-threw",
+          message: `driver "${driver.name}" threw in onActionComplete (${error})`,
           driver: driver.name,
-          error: errorMessage(err),
+          url,
         });
       }
 
@@ -3399,14 +3558,35 @@ export class ChaosCrawler {
     return this.compiledFaultRules.map((c) => {
       const rule = c.rule.name ?? c.pattern.toString();
       const echoes = this.faultEchoCounts.get(rule) ?? 0;
+      const webSocket = c.matched === 0 ? this.webSocketReach(c.pattern) : undefined;
       return {
         rule,
         matched: c.matched,
         injected: c.injected,
         ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
         ...(echoes > 0 ? { echoes } : {}),
+        ...(webSocket ? { webSocket } : {}),
       };
     });
+  }
+
+  /**
+   * The WebSocket connections the pages opened that `pattern` matches, for a
+   * rule that matched nothing: undefined unless there were some, or the
+   * pattern names only `ws:` / `wss:` URLs.
+   */
+  private webSocketReach(pattern: RegExp): CrawlFaultInjectionStats["webSocket"] {
+    let connections = 0;
+    let first: string | undefined;
+    for (const [url, n] of this.webSocketUrls) {
+      pattern.lastIndex = 0;
+      if (!pattern.test(url)) continue;
+      connections += n;
+      first ??= url;
+    }
+    const webSocketOnly = isWebSocketOnlyPattern(pattern);
+    if (connections === 0 && !webSocketOnly) return undefined;
+    return { connections, ...(first !== undefined ? { first } : {}), webSocketOnly };
   }
 
   /**

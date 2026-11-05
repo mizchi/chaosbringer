@@ -67,7 +67,7 @@ void _allOptionsListed;
  */
 export const CHAOS_TEST_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "ignoreErrorPatterns", "blockExternalNavigation",
-  "strict", "strictCountsFaultEchoes", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
+  "strict", "strictCountsFaultEchoes", "failOnWarnings", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults",
 ] as const;
 
@@ -98,7 +98,10 @@ function editDistance(a: string, b: string, cap = 3): number {
  * no typo, though `strict` is a prefix of `strictCountsFaultEchoes`, and a
  * caller may hand the same object straight to `ChaosCrawler`.
  */
-const CHAOS_RUN_OPTION_NAMES = ["strict", "baseline", "baselineStrict", "setup", "failOnHttp", "failOnNetwork", "failOnDeadLinks"];
+const CHAOS_RUN_OPTION_NAMES = [
+  "strict", "baseline", "baselineStrict", "baselineMissing", "setup", "failOnHttp", "failOnNetwork", "failOnDeadLinks",
+  "failOnWarnings",
+];
 
 function rejectNearMissOptions(
   options: object,

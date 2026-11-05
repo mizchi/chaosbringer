@@ -13,7 +13,7 @@
  * patterns without bespoke wiring.
  */
 import type { ActionResult } from "../types.js";
-import type { Driver, DriverPick, DriverStep } from "./types.js";
+import type { Driver, DriverPick, DriverStats, DriverStep } from "./types.js";
 
 export interface CompositeDriverOptions {
   /** Optional name override. Default: "composite". */
@@ -44,6 +44,9 @@ export function compositeDriver(
     },
     onPageEnd(url: string) {
       for (const d of drivers) d.onPageEnd?.(url);
+    },
+    stats(): DriverStats[] {
+      return drivers.flatMap((d) => d.stats?.() ?? []);
     },
   };
 }
@@ -86,6 +89,9 @@ export function samplingDriver(options: SamplingDriverOptions): Driver {
     onPageEnd(url) {
       inner.onPageEnd?.(url);
     },
+    stats() {
+      return inner.stats?.() ?? [];
+    },
   };
 }
 
@@ -114,6 +120,9 @@ export function probabilityDriver(options: ProbabilityDriverOptions): Driver {
     },
     onPageEnd(url) {
       inner.onPageEnd?.(url);
+    },
+    stats() {
+      return inner.stats?.() ?? [];
     },
   };
 }

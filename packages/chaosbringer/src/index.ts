@@ -20,6 +20,17 @@ export {
 } from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
+// `report.warnings`: what was set up wrong for a run, not what it found.
+export {
+  addRunWarning,
+  BASELINE_MISSING_MODES,
+  mergeRunWarnings,
+  RUN_WARNING_CODES,
+  type BaselineMissingMode,
+  type RunWarning,
+  type RunWarningCode,
+  type RunWarningInput,
+} from "./run-warnings.js";
 export {
   faults,
   type FaultHelperOptions,
@@ -294,6 +305,7 @@ export {
   type DriverProviderCandidate,
   type DriverProviderInput,
   type DriverProviderResult,
+  type DriverStats,
   type DriverStep,
   type FieldValueProvider,
   type FlowDriverOptions,
@@ -557,6 +569,7 @@ export {
 // "Did my fault actually fire?", in one shape across all four layers.
 export {
   faultFirings,
+  faultRunWarnings,
   faultWarnings,
   unfiredFaults,
   type Firing,
@@ -600,6 +613,7 @@ export type {
   FaultSchedule,
   FaultInjectionStats,
   CrawlFaultInjectionStats,
+  FaultWebSocketReach,
   LifecycleAction,
   LifecycleFault,
   LifecycleFaultStats,

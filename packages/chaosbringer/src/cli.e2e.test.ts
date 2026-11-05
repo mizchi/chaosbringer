@@ -335,6 +335,71 @@ describe("HTTP status and dead-link rules", () => {
   }, 120_000);
 });
 
+// A sitemap that 404s and a baseline that is not there: the run passed in
+// silence, and --log-console printed nothing without --log-file.
+describe("warnings on the CLI", () => {
+  let server: TestServer;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-warn-"));
+    server = await startTestServer((req, res) => {
+      if (req.url === "/") {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(`<!doctype html><title>home</title><p>home</p>`);
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+    });
+  }, 30_000);
+
+  afterAll(async () => {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const crawl = () => [
+    "--url", `${server.url}/`, "--max-pages", "1", "--max-actions", "0", "--seed", "1",
+    "--seed-from-sitemap", `${server.url}/sitemap.xml`, "--baseline", join(dir, "no-baseline.json"),
+  ];
+
+  it("passes, names them in --quiet and as ::warning annotations, and --log-console alone logs to stderr", async () => {
+    const output = join(dir, "quiet.json");
+    const r = await cli([...crawl(), "--quiet", "--github-annotations", "--log-console", "--output", output]);
+    expect(r.status).toBe(0);
+    const sitemap = `sitemap ${server.url}/sitemap.xml could not be read (sitemap fetch ${server.url}/sitemap.xml failed: HTTP 404), ` +
+      "so the crawl started from the base URL alone";
+    expect(r.stdout.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^\[PASS\] 1 pages, 0 errors, /),
+      `  Warnings: 2 (first: ${sitemap})`,
+      `::warning title=chaosbringer warning%3A sitemap-unreadable::${sitemap}`,
+      expect.stringMatching(/^::warning title=chaosbringer warning%3A baseline-missing::baseline .*no-baseline\.json not found, so no diff was made/),
+      `Report saved to: ${output}`,
+    ]);
+    // The logger's own line, which needed --log-file to go anywhere.
+    const logged = r.stderr.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as { level: string; event: string });
+    expect(logged).toContainEqual(expect.objectContaining({ level: "warn", event: "sitemap_fetch_failed" }));
+    // From warn up, by default: no info lines.
+    expect(logged.every((e) => e.level === "warn" || e.level === "error")).toBe(true);
+    expect(r.stderr).not.toContain("Baseline not found");
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.warnings?.map((w) => w.code)).toEqual(["sitemap-unreadable", "baseline-missing"]);
+  }, 120_000);
+
+  it("--fail-on-warnings fails with exit 1 and names the first; the repro keeps the flag", async () => {
+    const output = join(dir, "fail.json");
+    const r = await cli([...crawl(), "--compact", "--fail-on-warnings", "--output", output]);
+    expect(r.status).toBe(1);
+    const lines = r.stdout.split("\n");
+    expect(lines).toContainEqual(expect.stringMatching(/^\[FAIL\] 1 pages, 0 errors, /));
+    expect(lines).toContainEqual(expect.stringMatching(new RegExp(`^  Failed: --fail-on-warnings: 2 warnings \\(first: ${escapeRegExp(`sitemap ${server.url}/sitemap.xml could not be read`)}`)));
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.reproCommand).toMatch(/ --fail-on-warnings$/);
+    expect(lines).toContain(`  Repro: ${report.reproCommand}`);
+  }, 120_000);
+});
+
 describe("a page whose connection the server drops", () => {
   let server: TestServer;
   let dir: string;

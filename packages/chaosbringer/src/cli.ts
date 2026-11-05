@@ -30,6 +30,7 @@
 import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
 import {
+  baselineMissingFromCli,
   crawlCliExtras,
   crawlCliPeerNeeds,
   crawlerOptionsFromCli,
@@ -50,6 +51,7 @@ import {
 import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { type ExitCodeOptions, formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
+import { addRunWarning, baselineMissingWarning } from "./run-warnings.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -155,8 +157,9 @@ OPTIONS:
                         not counted, and its "Failed to load resource" line dropped (can be repeated)
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
-  --log-level <level>   Log level: debug, info, warn, error (default: info)
-  --log-console         Also output logs to console
+  --log-level <level>   Log level: debug, info, warn, error (default: info; warn for
+                        --log-console without --log-file)
+  --log-console         Also output logs to the console; without --log-file, to stderr
   --seed <n>            Seed for deterministic action selection (reproduces a run)
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
@@ -208,11 +211,13 @@ OPTIONS:
                         \`perf emit-budgets\` file; a breach is a perf-budget.<metric> violation (implies --perf).
                         An emit-budgets file measured under another --settle mode is refused (exit 2)
   --allow-settle-mismatch  Enforce such --perf-budgets anyway, with a warning
-  --baseline <path>     Diff this run against a previous report (warns if missing)
+  --baseline <path>     Diff this run against a previous report (a missing one is a warning)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
-  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link:
-                        ::error for what fails the run under its rules (and every JS
-                        exception), ::warning otherwise
+  --baseline-missing <warn|fail>  A missing --baseline file: warn (default; the first run,
+                        whose report becomes the baseline) or fail (refused, exit 2)
+  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link /
+                        warning: ::error for what fails the run under its rules (and every
+                        JS exception), ::warning otherwise
   --compact             Compact output format
   --strict              Fail on console errors, JS exceptions and unhandled rejections
                         (not on the browser's echo of a fault the run injected)
@@ -221,6 +226,9 @@ OPTIONS:
   --fail-on-network     Fail on a request that failed at the transport level (net::ERR_…;
                         not a 4xx / 5xx file's ERR_ABORTED, which is an HTTP error)
   --fail-on-dead-links  Fail on a crawled link that answered 404 / 5xx
+  --fail-on-warnings    Fail on a run with warnings: what made it test less than it was set
+                        up to (a fault rule that never fired, a sitemap that could not be
+                        read, a --network profile that failed, a missing --baseline)
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
@@ -229,10 +237,12 @@ EXIT CODES:
   0  nothing failed
   1  the run found something: a page that failed or timed out, an invariant violation,
      a renderer crash, --strict errors, --baseline-strict regressions, what a
-     --fail-on-http / --fail-on-network / --fail-on-dead-links rule fails on
+     --fail-on-http / --fail-on-network / --fail-on-dead-links / --fail-on-warnings rule
+     fails on
   2  the run was refused before a browser started: an unknown flag or --invariants name, a
      malformed value, an input file (--storage-state, --har-replay, --trace-replay,
-     --perf-budgets, a --seed-from-sitemap path) that is missing or does not parse, a peer
+     --perf-budgets, a --seed-from-sitemap path, a --baseline under --baseline-missing fail)
+     that is missing or does not parse, a peer
      --axe (or --invariants axe) / --visual-baseline needs that is not installed; or nothing
      answered at --url
 
@@ -314,9 +324,11 @@ try {
 // inside main() after "Starting chaos crawl" was already printed. So are the
 // files the crawl reads (a missing `--storage-state` failed once the browser
 // was up, with exit 1) and the packages `--axe` / `--visual-baseline` need.
+let baselineMissing: ReturnType<typeof baselineMissingFromCli>;
 try {
   validateOptions(options);
   checkInputFiles(options);
+  baselineMissing = baselineMissingFromCli(values);
   assertPeers(crawlCliPeerNeeds(values));
 } catch (err) {
   exitWithUsageError(err);
@@ -386,10 +398,16 @@ async function main() {
       const prev = loadBaseline(baselinePath);
       if (prev) {
         report.diff = diffReports(prev, report, { baselinePath });
-      } else if (!isQuiet) {
+      } else if (baselineMissing === "fail") {
+        // Checked before the browser started; gone since.
+        console.error(`chaosbringer: --baseline ${baselinePath}: not found, and --baseline-missing fail refuses a run without it`);
+        process.exit(2);
+      } else {
         // First CI run won't have a baseline yet. Warn, but keep going — the
-        // report we write here becomes the baseline for next time.
-        console.warn(`Baseline not found at ${baselinePath} — skipping diff.`);
+        // report we write here becomes the baseline for next time. A
+        // `report.warnings` entry, so --quiet shows it too (the stderr line it
+        // was left out there) and --fail-on-warnings can refuse it.
+        addRunWarning((report.warnings ??= []), baselineMissingWarning(baselinePath));
       }
     }
 

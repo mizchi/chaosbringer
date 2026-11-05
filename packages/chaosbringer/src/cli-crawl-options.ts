@@ -6,6 +6,7 @@
  * through `reproCommand` or is left out of it on purpose, and a flag added
  * here without either fails `repro-command.test.ts`.
  */
+import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
@@ -15,6 +16,7 @@ import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag } from
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { readInputJson } from "./input-files.js";
 import { HTTP_FAIL_LEVELS, type ExitCodeOptions, type HttpFailLevel } from "./reporter.js";
+import { BASELINE_MISSING_MODES, type BaselineMissingMode } from "./run-warnings.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg, resolveSettle } from "./settle.js";
@@ -78,6 +80,7 @@ export const CRAWL_CLI_OPTIONS = {
   "seed-from-sitemap": { type: "string" },
   baseline: { type: "string" },
   "baseline-strict": { type: "boolean", default: false },
+  "baseline-missing": { type: "string" },
   "github-annotations": { type: "boolean", default: false },
   shard: { type: "string" },
   heatmap: { type: "boolean", default: false },
@@ -96,6 +99,7 @@ export const CRAWL_CLI_OPTIONS = {
   "fail-on-http": { type: "string" },
   "fail-on-network": { type: "boolean", default: false },
   "fail-on-dead-links": { type: "boolean", default: false },
+  "fail-on-warnings": { type: "boolean", default: false },
   quiet: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
   version: { type: "boolean", short: "V", default: false },
@@ -427,7 +431,8 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
 /**
  * The exit rules the flags ask for, which the CLI applies to the report
  * (`getExitCode`) and the GitHub annotations: `--strict`, `--baseline-strict`,
- * `--fail-on-http`, `--fail-on-network`, `--fail-on-dead-links`. Throws a
+ * `--fail-on-http`, `--fail-on-network`, `--fail-on-dead-links`,
+ * `--fail-on-warnings`. Throws a
  * `UsageError` on a `--fail-on-http` that is not `4xx` or `5xx`, before a
  * browser starts; `shard` checks its workers' arguments with it too.
  */
@@ -445,7 +450,39 @@ export function exitOptionsFromCli(values: CrawlCliValues): ExitCodeOptions {
     ...(http !== undefined ? { http: http as HttpFailLevel } : {}),
     ...(values["fail-on-network"] ? { network: true } : {}),
     ...(values["fail-on-dead-links"] ? { deadLinks: true } : {}),
+    ...(values["fail-on-warnings"] ? { warnings: true } : {}),
   };
+}
+
+/**
+ * `--baseline-missing`: `warn` (the default: the bootstrap run, whose report
+ * becomes the first baseline) or `fail`. Throws a `UsageError` on another
+ * value, and under `fail` on a `--baseline` file that is not there (or no
+ * `--baseline` at all: an unset variable in `--baseline "$PREV"`), before a
+ * browser starts: a CI cache miss or a typo'd path turned a
+ * `--baseline-strict` gate green. `shard` checks its workers' arguments with
+ * it too.
+ */
+export function baselineMissingFromCli(values: Pick<CrawlCliValues, "baseline" | "baseline-missing">): BaselineMissingMode {
+  const raw = values["baseline-missing"];
+  if (raw !== undefined && !(BASELINE_MISSING_MODES as readonly string[]).includes(raw)) {
+    throw new UsageError(
+      `--baseline-missing must be one of ${BASELINE_MISSING_MODES.join(", ")} (got ${JSON.stringify(raw)}): ` +
+        "warn runs without a diff and warns, fail refuses the run",
+    );
+  }
+  const mode = (raw ?? "warn") as BaselineMissingMode;
+  if (mode === "fail") {
+    const path = values.baseline;
+    if (!path) throw new UsageError("--baseline-missing fail needs a --baseline <path> to require");
+    if (!existsSync(path)) {
+      throw new UsageError(
+        `--baseline ${path}: not found, and --baseline-missing fail refuses a run without it ` +
+          "(drop the flag, or pass --baseline-missing warn, for the first run, whose report becomes the baseline)",
+      );
+    }
+  }
+  return mode;
 }
 
 /**
@@ -542,5 +579,6 @@ function cliOnlyReproFlags(values: CrawlCliValues): ReproFlag[] {
   if (values["fail-on-http"] !== undefined) out.push({ flag: "--fail-on-http", value: values["fail-on-http"] });
   if (values["fail-on-network"]) out.push({ flag: "--fail-on-network" });
   if (values["fail-on-dead-links"]) out.push({ flag: "--fail-on-dead-links" });
+  if (values["fail-on-warnings"]) out.push({ flag: "--fail-on-warnings" });
   return out;
 }

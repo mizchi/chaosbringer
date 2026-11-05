@@ -325,12 +325,15 @@ describe("shard CLI", () => {
   // merged one, whose verdict line said PASS.
   it("judges the merged report by the exit rules forwarded to the workers", async () => {
     const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
-    expect((await run(["--strict", "--fail-on-http", "5xx", "--fail-on-network", "--fail-on-dead-links"])).exitOptions).toEqual({
+    expect(
+      (await run(["--strict", "--fail-on-http", "5xx", "--fail-on-network", "--fail-on-dead-links", "--fail-on-warnings"])).exitOptions,
+    ).toEqual({
       strict: true,
       baselineStrict: false,
       http: "5xx",
       network: true,
       deadLinks: true,
+      warnings: true,
     });
     expect((await run([])).exitOptions).toEqual({ strict: false, baselineStrict: false });
     await expect(run(["--fail-on-http", "500"])).rejects.toMatchObject({
@@ -345,6 +348,21 @@ describe("shard CLI", () => {
       "--fail-on-http",
       "4xx",
     ]);
+  });
+
+  // Each worker would have run without its baseline and warned.
+  it("refuses --baseline-missing fail on a baseline that is not there, once, before a worker starts", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    await expect(run(["--baseline", "no-such-baseline.json", "--baseline-missing", "fail"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--baseline no-such-baseline\.json: not found, and --baseline-missing fail refuses a run without it/),
+    });
+    await expect(run(["--baseline-missing", "sometimes"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--baseline-missing must be one of warn, fail \(got "sometimes"\)/),
+    });
+    // The bootstrap run: warn is the default.
+    await expect(run(["--baseline", "no-such-baseline.json"])).resolves.toBeDefined();
   });
 
   it("reruns the whole sharded run from the merged Repro line", () => {

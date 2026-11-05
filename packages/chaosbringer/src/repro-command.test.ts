@@ -87,6 +87,7 @@ const ROUND_TRIPS: Record<string, string[]> = {
   "fail-on-http": ["--fail-on-http", "4xx"],
   "fail-on-network": ["--fail-on-network"],
   "fail-on-dead-links": ["--fail-on-dead-links"],
+  "fail-on-warnings": ["--fail-on-warnings"],
 };
 
 /**
@@ -115,6 +116,7 @@ const LEFT_OUT: Record<string, string> = {
   // machine does not have; the repro reproduces the run's own failures.
   baseline: "compares against another report",
   "baseline-strict": "compares against another report",
+  "baseline-missing": "compares against another report",
   "github-annotations": "output format",
   heatmap: "output format",
   "heatmap-top": "output format",

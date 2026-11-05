@@ -25,6 +25,12 @@ export interface LoggerOptions {
   level?: LogLevel;
   /** Also write to console */
   console?: boolean;
+  /**
+   * Write every console line to stderr, whatever its level, instead of
+   * `console.log` / `console.warn` / `console.error` by level. What a crawl
+   * with `logToConsole` and no `logFile` does: its stdout is the report.
+   */
+  stderr?: boolean;
   /** Use JSON format for file output */
   jsonFormat?: boolean;
 }
@@ -47,6 +53,7 @@ export class Logger {
       level: options.level || "info",
       console: options.console ?? false,
       jsonFormat: options.jsonFormat ?? true,
+      stderr: options.stderr ?? false,
     };
 
     if (this.options.logFile) {
@@ -91,7 +98,9 @@ export class Logger {
       this.stream.write(formatted + "\n");
     }
 
-    if (this.options.console) {
+    if (this.options.console && this.options.stderr) {
+      process.stderr.write(`${formatted}\n`);
+    } else if (this.options.console) {
       const consoleFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
       consoleFn(formatted);
     }

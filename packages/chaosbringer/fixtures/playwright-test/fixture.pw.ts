@@ -113,6 +113,30 @@ chaosTest.describe("strict with a status fault", () => {
   });
 });
 
+// A fault rule that matched nothing failed nothing and said nothing.
+chaosTest.describe("warnings", () => {
+  const dead = faults.status(503, { urlPattern: /\/api\/nope/, name: "dead" });
+  chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, strict: true, faultInjection: [dead] } });
+
+  chaosTest("are on the report and chaos.warnings(), and strict does not fail on them", async ({ page, chaos }) => {
+    const report = await chaos.crawl("/");
+    expect(report.warnings?.map((w) => [w.code, w.rule])).toEqual([["fault-unmatched", "dead"]]);
+    expect(chaos.warnings()).toEqual(report.warnings);
+    await chaos.testPage(page, "/about");
+  });
+
+  chaosTest.describe("with failOnWarnings", () => {
+    chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, failOnWarnings: true, faultInjection: [dead] } });
+
+    chaosTest("fails crawl() and testPage() on them", async ({ page, chaos }) => {
+      await expect(chaos.crawl("/")).rejects.toThrow(
+        /fails under failOnWarnings[\s\S]*\[fault-unmatched\] network fault "dead" never matched anything/,
+      );
+      await expect(chaos.testPage(page, "/about")).rejects.toThrow(/chaos\.testPage\(.*\/about\) fails under failOnWarnings/);
+    });
+  });
+});
+
 chaosTest("without strict, the same error is only reported", async ({ chaos }) => {
   const report = await chaos.crawl("/boom");
   expect(report.summary.consoleErrors).toBe(1);

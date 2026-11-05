@@ -24,6 +24,8 @@ import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
 import { randomSeed } from "./random.js";
 import { type ExitCodeOptions, formatQuietReport, printReport, getExitCode } from "./reporter.js";
+import { faultRunWarnings } from "./firings.js";
+import { addRunWarning, mergeRunWarnings, type RunWarning, type RunWarningCode } from "./run-warnings.js";
 import type {
   ActionResult,
   CrawlReport,
@@ -62,7 +64,10 @@ export function shardOwns(url: string, shardIndex: number, shardCount: number): 
  * wins), actions concatenated, error clusters re-merged by stable key with
  * counts summed and url/invariantName sets unioned. Scalars (duration,
  * blockedExternalNavigations, recoveryCount) fold as makes physical sense:
- * counts sum, duration is max-end minus min-start (wall-clock).
+ * counts sum, duration is max-end minus min-start (wall-clock). Fault stats
+ * of every layer sum by rule, and `warnings` merge identical ones, but the
+ * faults that did not take effect are diagnosed again from the summed stats:
+ * a rule one shard never saw a request for may have fired in another.
  */
 export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   if (reports.length === 0) {
@@ -135,13 +140,43 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
       if (existing) {
         existing.matched += f.matched;
         existing.injected += f.injected;
+        if (f.suppressed) existing.suppressed = (existing.suppressed ?? 0) + f.suppressed;
         if (f.echoes) existing.echoes = (existing.echoes ?? 0) + f.echoes;
+        if (f.webSocket) {
+          const ws = existing.webSocket;
+          existing.webSocket = ws
+            ? { connections: ws.connections + f.webSocket.connections, first: ws.first ?? f.webSocket.first, webSocketOnly: ws.webSocketOnly }
+            : { ...f.webSocket };
+        }
       } else {
-        faultByRule.set(f.rule, { ...f });
+        faultByRule.set(f.rule, { ...f, ...(f.webSocket ? { webSocket: { ...f.webSocket } } : {}) });
       }
     }
   }
+  // A rule that matched once merged matched nothing the WebSocket note is about.
+  for (const f of faultByRule.values()) if (f.matched > 0) delete f.webSocket;
   const faultInjections = faultByRule.size > 0 ? [...faultByRule.values()] : undefined;
+  const lifecycleFaults = sumByName(reports.map((r) => r.lifecycleFaults), (f) => f.name, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+    a.errored += b.errored;
+  });
+  const runtimeFaults = sumByName(reports.map((r) => r.runtimeFaults), (f) => f.rule, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+    if (b.suppressed) a.suppressed = (a.suppressed ?? 0) + b.suppressed;
+  });
+  const iframeFaults = sumByName(reports.map((r) => r.iframeFaults), (f) => f.rule, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+  });
+  const warnings = mergeShardWarnings(reports, {
+    faultInjections,
+    lifecycleFaults,
+    runtimeFaults,
+    iframeFaults,
+    pages: mergedPages,
+  });
 
   const totalErrors = mergedPages.reduce((sum, p) => sum + p.errors.length, 0);
   const totalWarnings = mergedPages.reduce((sum, p) => sum + p.warnings.length, 0);
@@ -162,13 +197,57 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
     actions,
     summary,
     faultInjections,
+    ...(lifecycleFaults ? { lifecycleFaults } : {}),
+    ...(runtimeFaults ? { runtimeFaults } : {}),
+    ...(iframeFaults ? { iframeFaults } : {}),
     errorClusters,
     har: first.har,
     diff: undefined,
+    warnings,
     // Rebuilt from the merged pages, like the clusters: a per-shard summary
     // cannot be added up (percentiles do not sum).
     perf: buildCrawlPerfSummary(mergedPages, actions, { settle: agreedSettle(reports) }),
   };
+}
+
+/**
+ * Rows of one fault layer summed by name across shards (a copy of the first
+ * row, `add` folding in the rest); undefined when no shard had the layer.
+ */
+function sumByName<T extends object>(
+  lists: ReadonlyArray<readonly T[] | undefined>,
+  name: (row: T) => string,
+  add: (into: T, row: T) => void,
+): T[] | undefined {
+  if (lists.every((l) => l === undefined)) return undefined;
+  const byName = new Map<string, T>();
+  for (const row of lists.flatMap((l) => l ?? [])) {
+    const existing = byName.get(name(row));
+    if (existing) add(existing, row);
+    else byName.set(name(row), { ...row });
+  }
+  return [...byName.values()];
+}
+
+/** The warnings `faultRunWarnings` writes, which a merge diagnoses again. */
+const FAULT_STATS_CODES: ReadonlySet<RunWarningCode> = new Set(["fault-unmatched", "fault-unfired", "fault-uncounted", "fault-websocket"]);
+
+/**
+ * The shards' warnings as one list: the fault diagnoses again from the
+ * merged stats (a rule that matched nothing on one shard may have fired on
+ * another); `server-faults-unseen` only when every shard that crawled saw no
+ * header; the rest merged, identical ones folded and their counts added.
+ */
+function mergeShardWarnings(reports: readonly CrawlReport[], merged: Parameters<typeof faultRunWarnings>[0]): RunWarning[] | undefined {
+  if (reports.every((r) => r.warnings === undefined)) return undefined;
+  const unseen = reports.every((r) => (r.warnings ?? []).some((w) => w.code === "server-faults-unseen"));
+  const out = mergeRunWarnings(
+    reports.map((r) =>
+      (r.warnings ?? []).filter((w) => !FAULT_STATS_CODES.has(w.code) && (unseen || w.code !== "server-faults-unseen")),
+    ),
+  );
+  for (const w of faultRunWarnings(merged)) addRunWarning(out, w);
+  return out;
 }
 
 /**
@@ -307,6 +386,7 @@ export async function checkWorkerArgs(
   // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
   // imports `parseShardArg` from it.
   const {
+    baselineMissingFromCli,
     crawlCliExtras,
     crawlCliPeerNeeds,
     crawlerOptionsFromCli,
@@ -327,6 +407,9 @@ export async function checkWorkerArgs(
     // The merged report is judged by the workers' rules: --fail-on-http and
     // the rest are forwarded like any other flag, and read here.
     const exitOptions = exitOptionsFromCli(values);
+    // A --baseline-missing fail whose --baseline is not there, once rather
+    // than in each worker.
+    baselineMissingFromCli(values);
     const budgets = await readCrawlPerfBudgets(values, options.settle);
     if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
     if (budgets) options.perfBudgets = budgets.rules;

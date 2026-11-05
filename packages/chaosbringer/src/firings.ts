@@ -14,7 +14,8 @@
  * These functions normalise the four into one vocabulary. They are pure
  * report readers: nothing here touches a browser.
  */
-import type { CrawlReport } from "./types.js";
+import type { RunWarningInput } from "./run-warnings.js";
+import type { CrawlReport, FaultWebSocketReach } from "./types.js";
 
 /** Which layer produced a firing row. */
 export type FaultLayer = "network" | "runtime" | "lifecycle" | "iframe";
@@ -146,6 +147,96 @@ function unmatchedBehindServiceWorker(name: string, sw: ServiceWorkerReach): str
 }
 
 /**
+ * The `matched: 0` diagnosis for a network rule whose pattern names
+ * WebSocket URLs (`CrawlFaultInjectionStats.webSocket`).
+ */
+function unmatchedWebSocket(name: string, ws: FaultWebSocketReach): string {
+  const why =
+    ws.connections > 0
+      ? `the run's pages opened ${ws.connections} WebSocket connection(s) its pattern matches` +
+        (ws.first ? ` (first: ${ws.first})` : "")
+      : "its pattern names only ws: / wss: URLs";
+  return (
+    `network fault "${name}" never matched anything, and ${why}: network faults route HTTP requests, ` +
+    `and Playwright's routes do not see WebSocket traffic, so no network fault reaches it`
+  );
+}
+
+/** One fault that did not take effect: the row, its diagnosis and its logger event. */
+interface FaultDiagnosis {
+  firing: Firing;
+  event: FaultWarning["event"];
+  data: FaultWarning["data"];
+  message: string;
+  /** Set for the WebSocket case of `fault_rule_unmatched`. */
+  webSocket?: FaultWebSocketReach;
+}
+
+/**
+ * The faults of `report` that did not take effect, each with the message
+ * `unfiredFaults` returns and the event `faultWarnings` returns. One place,
+ * so the assertion, the log and `report.warnings` say the same thing.
+ */
+function diagnoseFaults(report: FaultStatsReport): FaultDiagnosis[] {
+  const out: FaultDiagnosis[] = [];
+  const sw = serviceWorkerReach(report);
+  const networkRows = report.faultInjections ?? [];
+  let networkIndex = 0;
+  for (const f of faultFirings(report)) {
+    // `faultFirings` lists the network rows first, in order.
+    const row = f.layer === "network" ? networkRows[networkIndex++] : undefined;
+    if (f.fired > 0) continue;
+    if (!f.counted) {
+      // A third case, and it used to be reported as the second: the row
+      // carries no usable counters, so the firing policy was never consulted.
+      // Unmeasured is not the same as didn't-fire.
+      out.push({
+        firing: f,
+        event: "fault_rule_uncounted",
+        data: { rule: f.name, layer: f.layer },
+        message:
+          `${f.layer} fault "${f.name}" reported no usable counters — nothing measured whether ` +
+          `it fired, so this run decides nothing about it`,
+      });
+      continue;
+    }
+    const data = { rule: f.name, layer: f.layer, matched: f.matched };
+    if (f.matched === 0) {
+      const ws = row?.webSocket;
+      if (ws && (ws.connections > 0 || ws.webSocketOnly)) {
+        out.push({ firing: f, event: "fault_rule_unmatched", data: { ...data, webSocket: ws }, message: unmatchedWebSocket(f.name, ws), webSocket: ws });
+      } else if (f.layer === "network" && sw) {
+        out.push({ firing: f, event: "fault_rule_unmatched", data: { ...data, serviceWorker: sw }, message: unmatchedBehindServiceWorker(f.name, sw) });
+      } else {
+        out.push({
+          firing: f,
+          event: "fault_rule_unmatched",
+          data,
+          message:
+            `${f.layer} fault "${f.name}" never matched anything — the pattern did not see the ` +
+            `request (or page, or iframe) you expected`,
+        });
+      }
+    } else {
+      // A lifecycle fault counts a throw as `errored`, not as the policy
+      // declining: "the firing policy said no" sent the reader to the wrong
+      // knob.
+      const because =
+        f.errored > 0
+          ? ` — it threw ${f.errored} time(s) (the lifecycle_fault_failed log events have why)`
+          : ` — the firing policy said no${f.suppressed > 0 ? `; ${f.suppressed} decision(s) lost to a rule ahead of it` : ""}`;
+      out.push({
+        firing: f,
+        event: "fault_rule_unfired",
+        data: f.suppressed > 0 ? { ...data, suppressed: f.suppressed } : data,
+        message: `${f.layer} fault "${f.name}" matched ${f.matched}x and never fired${because}`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * The faults that never took effect, with the reason visible in the message.
  *
  * Pass this straight into whatever your test framework uses for a failure —
@@ -157,50 +248,24 @@ function unmatchedBehindServiceWorker(name: string, sw: ServiceWorkerReach): str
  *   a service worker controlled (`PageResult.serviceWorker`), a network rule
  *   can also have missed a request the worker took, and the message says so
  *   instead of blaming the pattern. Pass `pages` with the stats to get that
- *   on a hand-built report: `{ faultInjections, pages: [result] }`.
+ *   on a hand-built report: `{ faultInjections, pages: [result] }`. A rule
+ *   whose pattern names WebSocket URLs (`faultInjections[].webSocket`) is
+ *   told that network faults do not reach WebSocket traffic.
  * - matched but never fired — the pattern is right and the firing policy said
  *   no. A schedule shorter than the number of calls, a `probability` that did
- *   not roll, or (with `suppressed` non-zero) a rule ahead of this one
- *   answering first.
+ *   not roll, (with `suppressed` non-zero) a rule ahead of this one answering
+ *   first, or (a lifecycle fault with `errored` non-zero) the fault threw.
  *
  * `only` restricts the check to the names you care about, for a run that
  * deliberately configures a fault it does not expect to fire.
+ *
+ * A finished crawl's `report.warnings` carries the same messages, unasked.
  */
 export function unfiredFaults(report: FaultStatsReport, only?: readonly string[]): string[] {
   const wanted = only ? new Set(only) : null;
-  const problems: string[] = [];
-  const sw = serviceWorkerReach(report);
-  for (const f of faultFirings(report)) {
-    if (wanted && !wanted.has(f.name)) continue;
-    if (f.fired > 0) continue;
-    if (!f.counted) {
-      // A third case, and it used to be reported as the second: the row
-      // carries no usable counters, so the firing policy was never consulted.
-      // Unmeasured is not the same as didn't-fire.
-      problems.push(
-        `${f.layer} fault "${f.name}" reported no usable counters — nothing measured whether ` +
-          `it fired, so this run decides nothing about it`,
-      );
-      continue;
-    }
-    if (f.matched === 0 && f.layer === "network" && sw) {
-      problems.push(unmatchedBehindServiceWorker(f.name, sw));
-    } else if (f.matched === 0) {
-      problems.push(
-        `${f.layer} fault "${f.name}" never matched anything — the pattern did not see the ` +
-          `request (or page, or iframe) you expected`,
-      );
-    } else {
-      const because =
-        f.suppressed > 0
-          ? `; ${f.suppressed} decision(s) lost to a rule ahead of it`
-          : "";
-      problems.push(
-        `${f.layer} fault "${f.name}" matched ${f.matched}x and never fired — the firing ` +
-          `policy said no${because}`,
-      );
-    }
-  }
+  const problems = diagnoseFaults(report)
+    .filter((d) => !wanted || wanted.has(d.firing.name))
+    .map((d) => d.message);
   if (wanted) {
     const seen = new Set(faultFirings(report).map((f) => f.name));
     for (const name of wanted) {
@@ -213,6 +278,26 @@ export function unfiredFaults(report: FaultStatsReport, only?: readonly string[]
     }
   }
   return problems;
+}
+
+/**
+ * `report.warnings`' entries for the faults that did not take effect: the
+ * `unfiredFaults` messages, with codes. `fault-websocket` is the
+ * `fault_rule_unmatched` event of a rule whose pattern names WebSocket URLs.
+ */
+export function faultRunWarnings(report: FaultStatsReport): RunWarningInput[] {
+  return diagnoseFaults(report).map((d) => ({
+    code: d.webSocket
+      ? "fault-websocket"
+      : d.event === "fault_rule_unmatched"
+        ? "fault-unmatched"
+        : d.event === "fault_rule_unfired"
+          ? "fault-unfired"
+          : "fault-uncounted",
+    message: d.message,
+    rule: d.firing.name,
+    layer: d.firing.layer,
+  }));
 }
 
 /** One logger event for one fault that did not take effect. */
@@ -243,6 +328,12 @@ export interface FaultWarning {
      * was waiting for (see `PageResult.serviceWorker`).
      */
     serviceWorker?: ServiceWorkerReach;
+    /**
+     * On a network `fault_rule_unmatched` only, when the rule's pattern names
+     * WebSocket URLs, which no network fault sees
+     * (`CrawlFaultInjectionStats.webSocket`).
+     */
+    webSocket?: FaultWebSocketReach;
   };
 }
 
@@ -263,26 +354,5 @@ export interface FaultWarning {
  * could not check.
  */
 export function faultWarnings(report: FaultStatsReport): FaultWarning[] {
-  const out: FaultWarning[] = [];
-  const sw = serviceWorkerReach(report);
-  for (const f of faultFirings(report)) {
-    if (f.fired > 0) continue;
-    if (!f.counted) {
-      out.push({ event: "fault_rule_uncounted", data: { rule: f.name, layer: f.layer } });
-      continue;
-    }
-    const data = { rule: f.name, layer: f.layer, matched: f.matched };
-    if (f.matched === 0) {
-      out.push({
-        event: "fault_rule_unmatched",
-        data: f.layer === "network" && sw ? { ...data, serviceWorker: sw } : data,
-      });
-    } else {
-      out.push({
-        event: "fault_rule_unfired",
-        data: f.suppressed > 0 ? { ...data, suppressed: f.suppressed } : data,
-      });
-    }
-  }
-  return out;
+  return diagnoseFaults(report).map(({ event, data }) => ({ event, data }));
 }

@@ -252,6 +252,30 @@ export interface Driver {
   onActionComplete?(action: ActionResult, step: DriverStep): void;
   onPageStart?(url: string): void;
   onPageEnd?(url: string): void;
+  /**
+   * Optional: how far the scripted journeys in this driver got, one row per
+   * journey (`flowDriver` returns its own; the combinators return their
+   * children's). Read by the crawler once the run is over: a journey that
+   * ended before its last step is a `flow-incomplete` entry of
+   * `report.warnings`.
+   */
+  stats?(): DriverStats[];
+}
+
+/** One scripted journey's progress: `Driver.stats()`. */
+export interface DriverStats {
+  /** The driver's `name`. */
+  driver: string;
+  /** Steps done in the current pass (all of them once a pass completed). */
+  completed: number;
+  /** Steps in the journey. */
+  total: number;
+  /** Passes completed; a `loop` journey counts each one. */
+  laps: number;
+  /** The step the journey waits for, while it is not done. */
+  next?: string;
+  /** Set when a step threw and the journey stopped there (a non-`optional` step). */
+  halted?: { step: string; error: string };
 }
 
 /**
