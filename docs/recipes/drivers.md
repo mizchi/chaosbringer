@@ -183,6 +183,8 @@ await chaos({
 });
 ```
 
+A journey that ends before its last step (a step whose `urlPattern` / `when` never matched a page the crawl reached, or a non-`optional` step that threw) is a `flow-incomplete` entry of `report.warnings`: `flow "flow(3)" ended at step 1/3: "verify" never ran, …`. `flowDriver(...).stats()` returns how far it got (`{ driver, completed, total, laps, next?, halted? }`), and the combinators forward their children's (`Driver.stats()`), which is what the crawler reads. A driver whose `selectAction` throws, or that picks an index outside the candidates, is a `driver-threw` / `driver-out-of-range` warning, once however many steps it happened on. Pass `failOnWarnings: true` to fail the run on them.
+
 ### Parallel drivers — different bug classes in one wall-clock window
 
 ```ts

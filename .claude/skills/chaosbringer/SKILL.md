@@ -107,6 +107,11 @@ service worker, `matched: 0` on a network rule can also mean the worker took
 the request where no route sees it — `testPage()` on your own context, or a
 response from the worker's cache; `unfiredFaults` says so when the page's
 `serviceWorker` is set, and a runtime fault fires ahead of the worker either way.
+A finished crawl says it without being asked: every fault that did not take
+effect is a `report.warnings` entry (`fault-unmatched`, `fault-unfired`, …,
+the `unfiredFaults` words), shown in the compact and `--quiet` output, and
+`chaos({ failOnWarnings: true })` / `--fail-on-warnings` fails the run on it.
+A network rule cannot reach a WebSocket (`fault-websocket`).
 
 ## Which layer
 

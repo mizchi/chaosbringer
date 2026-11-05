@@ -25,9 +25,14 @@ exceptions and unhandled rejections; `--fail-on-http 5xx` (or `4xx`) an API's
 or a subresource's own error status (`summary.httpErrors`, with each one's
 `status` and `method` on its console error); `--fail-on-network` a request that
 failed at the transport level; `--fail-on-dead-links` a crawled link that
-answered 404 / 5xx. `--github-annotations` prints `::error` for what one of
-those rules (or `--baseline-strict`) fails the run on, and for every JS
-exception even on a run that exits 0; `::warning` for the rest.
+answered 404 / 5xx; `--fail-on-warnings` a run with `report.warnings` (a
+setup that tested less than it said: a fault rule that never fired, a
+`--seed-from-sitemap` that could not be read, a `--network` profile that
+failed, a missing `--baseline`). `--github-annotations` prints `::error` for
+what one of those rules (or `--baseline-strict`) fails the run on, and for
+every JS exception even on a run that exits 0; `::warning` for the rest.
+`--baseline-missing fail` refuses (exit 2) a `--baseline` that is not there,
+which is otherwise a warning. `--log-console` alone logs to stderr.
 
 Working *inside* the chaosbringer repo, the CLI lives at
 `packages/chaosbringer/dist/cli.js` and `dist/` is gitignored — so
@@ -115,10 +120,14 @@ Prefer the readers that normalise it — `session.firings()`, or
 yourself.
 
 A finished crawl also warns on its own, without being asked: one
-`fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` event
-per fault that did not take effect, on all four layers, each carrying `rule`
-and `layer`. `faultWarnings(report)` returns the same events for a report you
-already hold.
+`report.warnings` entry per fault that did not take effect, on all four
+layers (`code: "fault-unmatched" | "fault-unfired" | "fault-uncounted"`, or
+`"fault-websocket"` for a network rule aimed at a WebSocket, which no route
+sees), with `rule`, `layer` and the `unfiredFaults` message, and one
+`fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` logger
+event. `faultWarnings(report)` returns the same events for a report you
+already hold. `chaos()` returns the warnings as `result.warnings` with
+`passed` still true; `failOnWarnings: true` fails the run on them.
 
 Note `session.stats` is a **function**: `JSON.stringify(session.stats)` is
 `undefined`, which looks exactly like "nothing fired".
@@ -373,6 +382,8 @@ on the crawler drains on demand. It returns no report, so read the counters
 off the crawler (`chaos.crawler.getFaultStats()`, `getRuntimeFaultStats()`),
 or hand them to `unfiredFaults` with the result:
 `unfiredFaults({ faultInjections: crawler.getFaultStats(), pages: [result] })`.
+`chaos.warnings()` (`crawler.getWarnings()`) has the run's warnings so far;
+`chaosOptions.failOnWarnings` fails the test on them, `strict` alone does not.
 The crawler leaves your context alone, so on a page a service worker controls
 the network rules see none of the requests the worker takes:
 `result.serviceWorker` is `"unrouted"` and `unfiredFaults` names the worker
