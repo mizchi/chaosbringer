@@ -44,6 +44,12 @@ await chaos({
   cache, and nothing it takes on `testPage()` in your context. A page's
   `serviceWorker` field says which; a runtime fault fires ahead of the worker
   either way.
+- WebSocket traffic is out of reach: Playwright's routes see HTTP requests
+  only. A rule aimed at a `ws:` / `wss:` URL matches nothing, and its
+  `report.warnings` entry (`fault-websocket`) says so.
+- A rule that never fired is a `report.warnings` entry on every layer
+  (`fault-unmatched` / `fault-unfired`), shown in the compact and `--quiet`
+  output; `failOnWarnings: true` / `--fail-on-warnings` fails the run on it.
 
 ## Runtime — `runtimeFaults` (in-page monkey patches)
 

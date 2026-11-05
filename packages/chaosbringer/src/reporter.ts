@@ -8,6 +8,7 @@ import { fingerprintError, type ErrorCluster } from "./clusters.js";
 import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
 import { isFaultEcho } from "./resource-outcomes.js";
+import { type RunWarning, warningTimes } from "./run-warnings.js";
 import type { CrawlReport, PageError, PageResult, PerfDegradationEntry } from "./types.js";
 
 /** Failed files listed under an error cluster; the JSON has them all. */
@@ -310,6 +311,17 @@ export function formatReport(report: CrawlReport): string {
     }
   }
 
+  // Last, so it is what a terminal shows of a long report: each one means
+  // the run tested less than it was set up to.
+  const warnings = report.warnings ?? [];
+  if (warnings.length > 0) {
+    lines.push("");
+    lines.push("-".repeat(40));
+    lines.push("WARNINGS (the run tested less than it was set up to)");
+    lines.push("-".repeat(40));
+    for (const w of warnings) lines.push(`  [${w.code}] ${w.message}${warningTimes(w)}`);
+  }
+
   lines.push("");
   lines.push("=".repeat(60));
 
@@ -324,6 +336,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
     deadLinksLine(report),
+    warningsLine(report),
   ].filter(Boolean);
   if (reasons.length > 0) {
     // Compact mode prints nothing else about the run, so a bare [FAIL] left
@@ -351,7 +364,12 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
  */
 export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
   const reasons = exitReasons(report, strict);
-  return [formatVerdictLine(report, strict), deadLinksLine(report), ...(reasons.length > 0 ? [failedLine(reasons)] : [])]
+  return [
+    formatVerdictLine(report, strict),
+    deadLinksLine(report),
+    warningsLine(report),
+    ...(reasons.length > 0 ? [failedLine(reasons)] : []),
+  ]
     .filter(Boolean)
     .join("\n");
 }
@@ -364,6 +382,22 @@ export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCod
 function deadLinksLine(report: Pick<CrawlReport, "summary">): string {
   const dead = report.summary.discovery?.deadLinks ?? [];
   return dead.length > 0 ? `  Dead links: ${dead.length}${firstDeadLink(dead)}` : "";
+}
+
+/**
+ * `  Warnings: N (first: <message>)`, or "" with none: on stdout with the
+ * rest of the verdict block, like the dead-link line, whether or not
+ * `--fail-on-warnings` fails the run on them.
+ */
+function warningsLine(report: Pick<CrawlReport, "warnings">): string {
+  const warnings = report.warnings ?? [];
+  return warnings.length > 0 ? `  Warnings: ${warnings.length}${firstWarning(warnings)}` : "";
+}
+
+/** ` (first: <message>)`. */
+function firstWarning(warnings: readonly RunWarning[]): string {
+  const first = warnings[0];
+  return first ? ` (first: ${first.message})` : "";
 }
 
 /** ` (first: <url> <- <source>)`. */
@@ -646,17 +680,24 @@ export interface ExitCodeOptions {
   network?: boolean;
   /** `--fail-on-dead-links`: fail on a crawled link that answered 404 / 5xx (`summary.discovery.deadLinks`). */
   deadLinks?: boolean;
+  /**
+   * `--fail-on-warnings`: fail on a run that has warnings (`report.warnings`),
+   * the setup problems that made it test less than asked: a fault that never
+   * fired, a sitemap that could not be read, a driver that threw.
+   */
+  warnings?: boolean;
 }
 
 /** What `getExitCode` / `exitReasons` read from a report. */
-type ExitCodeReport = Pick<CrawlReport, "summary" | "diff"> & Partial<Pick<CrawlReport, "pages">>;
+type ExitCodeReport = Pick<CrawlReport, "summary" | "diff"> & Partial<Pick<CrawlReport, "pages" | "warnings">>;
 
 // CI-friendly exit code helper. The second argument is accepted as either a
 // boolean (legacy `strict`) or an options object so callers can opt into
 // baseline-strict without a larger API change. The verdict reads only
-// `summary` and `diff`, so a caller judging something smaller than a crawl —
-// the Playwright fixture's single `testPage()` — applies this rule rather than
-// a copy of it; `pages`, when given, only names the first failing URL.
+// `summary`, `diff` and (under `warnings`) `warnings`, so a caller judging
+// something smaller than a crawl — the Playwright fixture's single
+// `testPage()` — applies this rule rather than a copy of it; `pages`, when
+// given, only names the first failing URL.
 export function getExitCode(report: ExitCodeReport, strict: boolean | ExitCodeOptions = false): number {
   return exitReasons(report, strict).length > 0 ? 1 : 0;
 }
@@ -711,6 +752,10 @@ export function exitReasons(report: ExitCodeReport, strict: boolean | ExitCodeOp
   const dead = s.discovery?.deadLinks ?? [];
   if (opts.deadLinks && dead.length > 0) {
     out.push(`--fail-on-dead-links: ${plural(dead.length, "dead link")}${firstDeadLink(dead)}`);
+  }
+  const warnings = report.warnings ?? [];
+  if (opts.warnings && warnings.length > 0) {
+    out.push(`--fail-on-warnings: ${plural(warnings.length, "warning")}${firstWarning(warnings)}`);
   }
   if (opts.baselineStrict && report.diff) {
     const found = [

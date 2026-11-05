@@ -14,6 +14,7 @@ import { parseNumberFlag } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
 import { isFaultEcho } from "./resource-outcomes.js";
+import { mergeRunWarnings, type RunWarning, warningTimes } from "./run-warnings.js";
 import type { CrawlReport, PageError } from "./types.js";
 import { UnreachableTargetError, unreachableTarget } from "./unreachable-target.js";
 
@@ -60,6 +61,11 @@ export interface FlakeAnalysis {
   flakyPages: PageOccurrence[];
   /** Per-run duration in ms, in input order. */
   durations: number[];
+  /**
+   * The runs' warnings (`CrawlReport.warnings`), identical ones folded across
+   * runs, their counts added: what made the runs test less than asked.
+   */
+  warnings: RunWarning[];
 }
 
 /**
@@ -81,6 +87,7 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
       flakyClusters: [],
       flakyPages: [],
       durations: [],
+      warnings: [],
     };
   }
 
@@ -150,6 +157,7 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
     flakyClusters,
     flakyPages,
     durations: reports.map((r) => r.duration),
+    warnings: mergeRunWarnings(reports.map((r) => r.warnings)),
   };
 }
 
@@ -197,6 +205,13 @@ export function formatFlakeReport(analysis: FlakeAnalysis): string {
     lines.push(`  ${p.url}  failed=${p.failedInRuns}/${p.visitedInRuns}`);
   }
   lines.push("");
+  // Once, however many runs raised each.
+  const warnings = analysis.warnings ?? [];
+  if (warnings.length > 0) {
+    lines.push(`Warnings (the runs tested less than they were set up to): ${warnings.length}`);
+    for (const w of warnings) lines.push(`  [${w.code}] ${w.message}${warningTimes(w)}`);
+    lines.push("");
+  }
   return lines.join("\n");
 }
 

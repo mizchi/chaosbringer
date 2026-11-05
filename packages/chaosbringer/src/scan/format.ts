@@ -5,6 +5,7 @@
 
 import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
 import type { ScanEndpoint } from "./endpoints.js";
+import { warningTimes } from "../run-warnings.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
 const PERF_PATTERN_URL = "https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns";
@@ -51,6 +52,7 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   const { high, medium, low } = analysis.counts;
   lines.push(`**${analysis.findings.length} finding${analysis.findings.length === 1 ? "" : "s"}**: ${ICON.high} ${high} high · ${ICON.medium} ${medium} medium · ${ICON.low} ${low} low`, "");
   for (const w of analysis.coverageWarnings) lines.push(`> ⚠️ ${w}`, "");
+  for (const w of analysis.warnings ?? []) lines.push(`> ⚠️ Crawl warning (\`${w.code}\`): ${w.message}${warningTimes(w)}`, "");
   for (const e of analysis.environment) {
     const hosts = e.hosts.length > 0 ? ` (${e.hosts.join(", ")})` : "";
     lines.push(
@@ -118,6 +120,9 @@ export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
   const { high, medium, low } = analysis.counts;
   const lines = [`scan: ${analysis.findings.length} findings (${high} high, ${medium} medium, ${low} low)`];
   for (const w of analysis.coverageWarnings) lines.push(`  ⚠️  ${w}`);
+  // What made a crawl test less than it was set up to: the crawls'
+  // `report.warnings`, which a scan used to leave in its JSON files.
+  for (const w of analysis.warnings ?? []) lines.push(`  ⚠️  crawl warning: ${w.message}${warningTimes(w)}`);
   for (const f of analysis.findings.slice(0, max)) {
     lines.push(`  ${ICON[f.severity]} [${f.category}] ${f.title} — ${shortWhere(f)}`);
   }

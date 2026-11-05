@@ -119,7 +119,16 @@ describe("flakeReport", () => {
       flakyClusters: [],
       flakyPages: [],
       durations: [],
+      warnings: [],
     });
+  });
+
+  it("lists the runs' warnings once each, their counts added, and prints them", () => {
+    const warning = { code: "sitemap-unreadable" as const, message: "sitemap s could not be read", count: 1 };
+    const run = (warnings?: (typeof warning)[]) => makeReport({ warnings });
+    const analysis = flakeReport([run([warning]), run([warning]), run(undefined)]);
+    expect(analysis.warnings).toEqual([{ ...warning, count: 2 }]);
+    expect(formatFlakeReport(analysis)).toContain("  [sitemap-unreadable] sitemap s could not be read (×2)");
   });
 
   it("refuses to call anything stable or flaky from a single run", () => {

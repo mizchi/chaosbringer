@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { formatScanSummary } from "./format.js";
 import { runScan } from "./run.js";
 import type { ScanReportFile } from "./run.js";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
@@ -115,4 +116,27 @@ describe("runScan", () => {
     expect(md).toContain(`, rerun with \`${status}\``);
     expect(result.baseline.reproCommand).toMatch(new RegExp(`^chaosbringer --url ${base}/ --seed 7 `));
   }, 180_000);
+
+  // Each crawl's report had them, and the scan's output said nothing.
+  it("shows its crawls' warnings in its summary, its Markdown and its JSON", async () => {
+    const dir = join(outDir, "warned");
+    const missing = join(outDir, "no-such-sitemap.xml");
+    const result = await runScan({
+      url: `${base}/docs/`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      seed: 7,
+      outDir: dir,
+      coverage: false,
+      chaos: false,
+      crawler: { headless: true, seedFromSitemap: missing },
+    });
+    const message = result.baseline.warnings?.[0]?.message ?? "";
+    expect(message).toMatch(new RegExp(`^sitemap ${missing} could not be read`));
+    expect(result.analysis.warnings).toEqual([expect.objectContaining({ code: "sitemap-unreadable", message })]);
+    expect(formatScanSummary(result.analysis).split("\n")).toContain(`  ⚠️  crawl warning: ${message}`);
+    expect(readFileSync(result.files.markdown, "utf-8")).toContain(`> ⚠️ Crawl warning (\`sitemap-unreadable\`): ${message}`);
+    const file = JSON.parse(readFileSync(result.files.json, "utf-8")) as ScanReportFile;
+    expect(file.warnings?.map((w) => w.code)).toEqual(["sitemap-unreadable"]);
+  }, 120_000);
 });

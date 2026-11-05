@@ -146,6 +146,10 @@ describe("chaosbringer/fixture under Playwright Test", () => {
     expectPassed("strict with a status fault");
   });
 
+  it("exposes the run's warnings, failing on them only under failOnWarnings", () => {
+    expectPassed("warnings");
+  });
+
   it("fails toLoadWithin for a page that did not load", () => {
     expectPassed("chaosExpect.toLoadWithin fails a page that did not load");
   });

@@ -1,7 +1,8 @@
 /**
- * GitHub Actions annotation emitter. Renders a run's error clusters + dead
- * links as `::error ...::` / `::warning ...::` workflow commands so GitHub
- * surfaces them on the PR Checks tab without requiring a separate bot.
+ * GitHub Actions annotation emitter. Renders a run's error clusters, dead
+ * links and warnings (`report.warnings`) as `::error ...::` /
+ * `::warning ...::` workflow commands so GitHub surfaces them on the PR
+ * Checks tab without requiring a separate bot.
  *
  * See: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions
  *
@@ -81,6 +82,16 @@ export function buildGithubAnnotations(
       level: opts.deadLinks ? "error" : "warning",
       title: `Dead link: ${truncate(link.url, 80)}`,
       message: `HTTP ${link.statusCode} — found on ${link.sourceUrl || "(initial)"}${link.sourceElement ? ` via ${truncate(link.sourceElement, 40)}` : ""}`,
+    });
+  }
+
+  // The setup problems (`report.warnings`): `error` only when
+  // `--fail-on-warnings` fails the run on them, as for dead links.
+  for (const w of report.warnings ?? []) {
+    out.push({
+      level: opts.warnings ? "error" : "warning",
+      title: `chaosbringer warning: ${w.code}`,
+      message: `${w.message}${w.count > 1 ? ` (×${w.count})` : ""}`,
     });
   }
 

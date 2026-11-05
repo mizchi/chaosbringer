@@ -30,6 +30,7 @@ import { registrableDomain } from "lightbringer/analyze";
 import { escapeRegExp } from "../filters.js";
 import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
 import { SERVED_NOTE } from "./blocked-responses.js";
+import { mergeRunWarnings, type RunWarning } from "../run-warnings.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
 export type ScanCategory = "bug" | "resilience" | "perf" | "a11y";
@@ -87,6 +88,14 @@ export interface ScanAnalysis {
    * findings; this says so instead. Empty when the crawl looked normal.
    */
   coverageWarnings: string[];
+  /**
+   * The warnings of the scan's crawls (`CrawlReport.warnings`), clean and
+   * chaos, identical ones folded: what made a crawl test less than it was set
+   * up to, such as a `crawler.seedFromSitemap` that could not be read, or a
+   * chaos crawl's fault that matched nothing. Optional for an analysis built
+   * elsewhere or read from an older `scan-report.json`.
+   */
+  warnings?: RunWarning[];
 }
 
 /** How many locations a finding lists. */
@@ -404,7 +413,9 @@ export function analyzeScan(
   );
   const counts: Record<ScanSeverity, number> = { high: 0, medium: 0, low: 0 };
   for (const f of findings) counts[f.severity]++;
-  return { findings, counts, environment, coverageWarnings: coverageWarnings(baseline) };
+  // `splitEnvironment` leaves the warnings as they were.
+  const warnings = mergeRunWarnings([baseline.warnings, ...chaos.map((c) => c.report.warnings)]);
+  return { findings, counts, environment, coverageWarnings: coverageWarnings(baseline), warnings };
 }
 
 /** Requests / KB under which a start page is suspiciously empty for a real site. */

@@ -182,5 +182,7 @@ describe("a driver can empty a field it picked", () => {
     expect(report.actions.map((a: ActionResult) => a.type)).not.toContain("clear");
     const failures = report.actions.filter((a: ActionResult) => !a.success);
     expect(failures).toHaveLength(0);
+    // And said so: the driver asked once.
+    expect(report.warnings?.map((w) => [w.code, w.count])).toEqual([["driver-operation-unsupported", 1]]);
   }, 60_000);
 });

@@ -11,6 +11,7 @@ import type {
 } from "lightbringer/core";
 import type { AdvisorConfig } from "./advisor/types.js";
 import type { ServerFaultEventAttrs } from "./server-fault-events.js";
+import type { RunWarning } from "./run-warnings.js";
 
 export type { AdvisorConfig } from "./advisor/types.js";
 
@@ -167,9 +168,18 @@ export interface CrawlerOptions {
   bind?: import("./browser-bind.js").BindSpec;
   /** Log file path (enables file logging) */
   logFile?: string;
-  /** Log level */
+  /**
+   * Log level. Default `info` with `logFile`; `warn` with `logToConsole`
+   * alone.
+   */
   logLevel?: "debug" | "info" | "warn" | "error";
-  /** Also log to console */
+  /**
+   * Also log to the console. With `logFile`, each line goes to the console
+   * by level (`console.log` / `warn` / `error`), as well as to the file.
+   * Alone, every line goes to stderr, from `warn` up unless `logLevel` says
+   * otherwise. The setup problems among them are in `report.warnings`
+   * either way.
+   */
   logToConsole?: boolean;
   /** Enable recovery from 404/dead links */
   enableRecovery?: boolean;
@@ -1445,6 +1455,7 @@ export interface CrawlReport {
   pagesVisited: number;
   /** Every `PageError` of `pages`, fault echoes (`PageError.causedByFault`) included. */
   totalErrors: number;
+  /** The pages' console warnings (`PageResult.warnings`); not `warnings`. */
   totalWarnings: number;
   blockedExternalNavigations: number;
   recoveryCount: number;
@@ -1511,6 +1522,16 @@ export interface CrawlReport {
   har?: HarConfig;
   /** Diff against a baseline report, present only when a baseline was supplied. */
   diff?: ReportDiff;
+  /**
+   * What was set up wrong for the run, not what it found: a fault rule that
+   * never fired, a sitemap that could not be read, a network profile that did
+   * not apply, a driver that threw, a missing baseline (`RunWarning.code`).
+   * Always set on a crawl's report, empty when there is nothing to say;
+   * absent from one an older version wrote. The run passes with warnings
+   * unless `--fail-on-warnings` (`ExitCodeOptions.warnings`) is set. Not the
+   * pages' console warnings, which `totalWarnings` counts.
+   */
+  warnings?: RunWarning[];
   /**
    * Drift signal for `--trace-replay` runs. Present only when traceReplay
    * was set. Reports how many of the recorded trace actions resolved
@@ -1724,6 +1745,24 @@ export interface CrawlFaultInjectionStats extends FaultInjectionStats {
    * (`PageError.causedByFault`). Present only when non-zero.
    */
   echoes?: number;
+  /**
+   * Set on a rule that matched nothing when its pattern names WebSocket URLs:
+   * only `ws:` / `wss:` ones, or ones the run's pages opened. Network faults
+   * route HTTP requests, and Playwright's routes do not see WebSocket
+   * traffic, so the rule could not have matched them; `report.warnings` says
+   * so (`fault-websocket`).
+   */
+  webSocket?: FaultWebSocketReach;
+}
+
+/** `CrawlFaultInjectionStats.webSocket`. */
+export interface FaultWebSocketReach {
+  /** WebSocket connections the run's pages opened whose URL the pattern matches. */
+  connections: number;
+  /** The first of them. */
+  first?: string;
+  /** The pattern can only match `ws:` / `wss:` URLs. */
+  webSocketOnly: boolean;
 }
 
 /** Configuration for Playwright Test integration */
@@ -1756,6 +1795,12 @@ export interface ChaosTestOptions {
    * `CrawlerOptions.strictCountsFaultEchoes`.
    */
   strictCountsFaultEchoes?: boolean;
+  /**
+   * Fail the test when the run has warnings (`CrawlReport.warnings`, or
+   * `chaos.warnings()` after `testPage()`): a fault that never fired, a
+   * driver that threw. `strict` alone does not fail on them.
+   */
+  failOnWarnings?: boolean;
   /** Action weights */
   actionWeights?: ActionWeights;
   /** Per-step performance measurement; see `CrawlerOptions.perf`. */

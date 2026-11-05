@@ -25,6 +25,7 @@ import { summarizePages } from "./filters.js";
 import { COMMON_IGNORE_PATTERNS } from "./ignore-presets.js";
 import { getExitCode } from "./reporter.js";
 import { isFaultEcho } from "./resource-outcomes.js";
+import { warningsRaisedSince, type RunWarning } from "./run-warnings.js";
 import type { ChaosTestOptions, CrawlerOptions, PageError, PageResult, CrawlReport } from "./types.js";
 import { validateChaosTestOptions } from "./validate.js";
 import { runRecipeWithRequires } from "./recipes/composition.js";
@@ -55,6 +56,18 @@ export interface ChaosFixture {
 
   /** Assert no errors were found, the echo of a fault the run injected (`PageError.causedByFault`) aside. */
   expectNoErrors(result: PageResult | CrawlReport): void;
+
+  /**
+   * The test's warnings so far (`CrawlReport.warnings`, `RunWarning`): a
+   * fault rule that never fired, a driver that threw. A `crawl()` report
+   * carries its own; after `testPage()`, which returns no report, this is
+   * where they are. They fail the test only under `chaosOptions.failOnWarnings`:
+   * `crawl()` on any, `testPage()` on the ones the call itself raised (a
+   * lifecycle fault that threw), not on a fault rule that has not fired yet,
+   * which a later `testPage()` may still fire. Check this list at the end of
+   * the test for those.
+   */
+  warnings(): RunWarning[];
 
   /**
    * Assert the crawl discovered no dead links. Prints each dead link's
@@ -122,7 +135,8 @@ function resolveUrl(url: string, base: string | undefined, call: string): string
  * Under `strict`, throw for a run `chaosbringer --strict` would exit 1 on. It
  * asks `getExitCode` itself rather than restating its rule, so the fixture and
  * the CLI cannot disagree about a run. The message lists the run's errors, as
- * `expectNoErrors` does.
+ * `expectNoErrors` does. Under `failOnWarnings`, throw for a run with
+ * warnings, as `--fail-on-warnings` would: `strict` alone does not.
  */
 function enforceStrict(
   options: ChaosTestOptions,
@@ -130,14 +144,25 @@ function enforceStrict(
   run: Pick<CrawlReport, "summary">,
   errors: readonly PageError[],
   attached: boolean,
+  warnings: readonly RunWarning[] = [],
 ): void {
-  if (!options.strict || getExitCode(run, { strict: true }) === 0) return;
-  const lines = errors.map((e) => `[${e.type}] ${e.message}${e.url ? ` (${e.url})` : ""}`);
-  throw new Error(
-    `${call} fails under strict, as \`chaosbringer --strict\` would exit 1 on it — ` +
-      `${errors.length} errors:\n${lines.join("\n")}` +
-      (attached ? "\nThe report is attached to this test as chaos-report.json." : ""),
-  );
+  const attachedNote = attached ? "\nThe report is attached to this test as chaos-report.json." : "";
+  if (options.strict && getExitCode(run, { strict: true }) !== 0) {
+    const lines = errors.map((e) => `[${e.type}] ${e.message}${e.url ? ` (${e.url})` : ""}`);
+    throw new Error(
+      `${call} fails under strict, as \`chaosbringer --strict\` would exit 1 on it — ` +
+        `${errors.length} errors:\n${lines.join("\n")}` +
+        attachedNote,
+    );
+  }
+  if (options.failOnWarnings && warnings.length > 0) {
+    const lines = warnings.map((w) => `[${w.code}] ${w.message}`);
+    throw new Error(
+      `${call} fails under failOnWarnings, as \`chaosbringer --fail-on-warnings\` would exit 1 on it — ` +
+        `${warnings.length} warnings:\n${lines.join("\n")}` +
+        attachedNote,
+    );
+  }
 }
 
 /**
@@ -169,8 +194,19 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
 
         async testPage(testPage: Page, url: string): Promise<PageResult> {
           const target = resolveUrl(url, base, "chaos.testPage");
+          const before = crawler.getWarnings();
           const result = await crawler.testPage(testPage, target);
-          enforceStrict(options, `chaos.testPage(${target})`, { summary: summarizePages([result]) }, result.errors, false);
+          // Only what this call raised: the fault counters so far say a rule
+          // aimed at the test's next page has not fired yet, which is not a
+          // finding about this one. `crawl()` and `chaos.warnings()` have those.
+          enforceStrict(
+            options,
+            `chaos.testPage(${target})`,
+            { summary: summarizePages([result]) },
+            result.errors,
+            false,
+            warningsRaisedSince(before, crawler.getWarnings()),
+          );
           return result;
         },
 
@@ -186,8 +222,12 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
             body: JSON.stringify(report, null, 2),
             contentType: "application/json",
           });
-          enforceStrict(options, `chaos.crawl(${url})`, report, report.pages.flatMap((p) => p.errors), true);
+          enforceStrict(options, `chaos.crawl(${url})`, report, report.pages.flatMap((p) => p.errors), true, report.warnings);
           return report;
+        },
+
+        warnings(): RunWarning[] {
+          return crawler.getWarnings();
         },
 
         expectNoErrors(result: PageResult | CrawlReport): void {
@@ -417,7 +457,7 @@ export async function runChaosTest(
   const url = page.url();
   const crawler = new ChaosCrawler(crawlerOptions(options, url, 1));
   const result = await crawler.testPage(page, url);
-  enforceStrict(options, `runChaosTest(${url})`, { summary: summarizePages([result]) }, result.errors, false);
+  enforceStrict(options, `runChaosTest(${url})`, { summary: summarizePages([result]) }, result.errors, false, crawler.getWarnings());
   return result;
 }
 

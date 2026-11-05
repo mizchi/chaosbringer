@@ -271,6 +271,12 @@ navigation errors (`page.goto: Timeout …`, PageError type `navigation`) are
 not reported as the site's exceptions; the page that failed to load is. A page that fails in a chaos
 crawl counts against the fault only if the fault hit that page's load.
 
+The crawls' own `report.warnings` (what made a crawl test less than it was
+set up to: a `crawler.seedFromSitemap` that could not be read, a chaos
+crawl's fault that matched nothing) are listed once each in the terminal
+summary (`⚠️  crawl warning: …`), in the Markdown, and as `warnings` in
+`scan-report.json`.
+
 A same-site URL that redirects to another origin (a `/chat` that 302s to a
 Discord invite) is recorded with the page's `redirectedTo` and counted as a
 blocked external navigation; nothing of the other site is crawled or

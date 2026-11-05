@@ -16,9 +16,9 @@ import type { Page } from "playwright";
 import { mergeCoverageArtifacts, type CoverageArtifact, type SpanHandle } from "lightbringer/core";
 import { checkPerfBudgets } from "./budget.js";
 import { errorMessage } from "./errors.js";
-import type { Logger } from "./logger.js";
 import { PagePerf } from "./perf.js";
 import type { ResolvedPerfOptions } from "./perf-options.js";
+import type { RunWarningInput } from "./run-warnings.js";
 import type {
   ActionResult,
   LastActionPerf,
@@ -64,7 +64,12 @@ export class CrawlPerf {
 
   constructor(
     private readonly perfOptions: ResolvedPerfOptions | null,
-    private readonly logger: Logger,
+    /**
+     * The crawler's own: logs the event and records the `report.warnings`
+     * entry. A page measurement that did not happen is a setup problem, not
+     * a log line: `perfBudgets` checked nothing on that page.
+     */
+    private readonly warn: (event: string, data: Record<string, unknown>, warning: RunWarningInput) => void,
     private readonly perfBudgets: readonly PerfBudgetRule[] | undefined,
   ) {}
 
@@ -88,8 +93,9 @@ export class CrawlPerf {
 
   /**
    * Open the page's perf session and its load span. A session that fails to
-   * open (the CDP attach failed, the page is already gone) is logged and the
-   * page is crawled unmeasured: measurement must never be why a page fails.
+   * open (the CDP attach failed, the page is already gone) is a
+   * `perf-session-failed` warning and the page is crawled unmeasured:
+   * measurement must never be why a page fails.
    */
   async beginPage(
     page: Page,
@@ -112,9 +118,11 @@ export class CrawlPerf {
       for (const name of this.pendingFaults) perf.noteFault(name, { persistent: true });
       this.page = perf;
     } catch (err) {
-      this.logger.warn("perf_session_failed", {
+      const reason = errorMessage(err);
+      this.warn("perf_session_failed", { url, reason }, {
+        code: "perf-session-failed",
+        message: `perf measurement could not start on a page (${reason}), so that page has no perf spans and perfBudgets checked nothing on it`,
         url,
-        reason: errorMessage(err),
       });
     }
   }
@@ -204,9 +212,11 @@ export class CrawlPerf {
     try {
       spans = await perf.finish(result, { navigationFailed });
     } catch (err) {
-      this.logger.warn("perf_finish_failed", {
+      const reason = errorMessage(err);
+      this.warn("perf_finish_failed", { url, reason }, {
+        code: "perf-session-failed",
+        message: `perf measurement of a page could not finish (${reason}), so that page has no perf spans and perfBudgets checked nothing on it`,
         url,
-        reason: errorMessage(err),
       });
       return [];
     }

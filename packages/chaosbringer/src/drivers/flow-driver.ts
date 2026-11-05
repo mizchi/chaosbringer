@@ -11,10 +11,16 @@
  * so the flow drives the happy path while random exploration runs in
  * parallel on pages the flow doesn't claim. Once every step in the
  * journey has completed, the driver returns null forever (one-shot).
+ *
+ * `stats()` says how far it got. A crawl reads it when it is over and turns
+ * a journey that ended before its last step (a step whose `urlPattern` /
+ * `when` never matched a page the crawl reached, or a step that threw) into
+ * a `flow-incomplete` warning: the run tested less of the journey than the
+ * test says, and before this nothing told.
  */
 import type { Page } from "playwright";
 import type { ActionResult } from "../types.js";
-import type { Driver, DriverPick, DriverStep } from "./types.js";
+import type { Driver, DriverPick, DriverStats, DriverStep } from "./types.js";
 
 export interface FlowStep {
   /** Human-readable label, used in trace + logs. */
@@ -63,10 +69,12 @@ export function flowDriver(options: FlowDriverOptions): Driver {
   }
   const loop = options.loop ?? false;
   let cursor = 0;
-  let halted = false;
+  let laps = 0;
+  let halted: DriverStats["halted"];
+  const name = options.name ?? `flow(${options.steps.length})`;
 
   return {
-    name: options.name ?? `flow(${options.steps.length})`,
+    name,
 
     async selectAction(ctx: DriverStep): Promise<DriverPick | null> {
       if (halted) return null;
@@ -88,6 +96,7 @@ export function flowDriver(options: FlowDriverOptions): Driver {
           try {
             await step.run(page, ctx);
             cursor += 1;
+            if (cursor === options.steps.length) laps += 1;
             return {
               type: "input",
               target: `flow:${step.name}`,
@@ -95,16 +104,18 @@ export function flowDriver(options: FlowDriverOptions): Driver {
               timestamp,
             };
           } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
             if (step.optional) {
               cursor += 1;
+              if (cursor === options.steps.length) laps += 1;
             } else {
-              halted = true;
+              halted = { step: step.name, error };
             }
             return {
               type: "input",
               target: `flow:${step.name}`,
               success: false,
-              error: err instanceof Error ? err.message : String(err),
+              error,
               timestamp,
             };
           }
@@ -116,6 +127,15 @@ export function flowDriver(options: FlowDriverOptions): Driver {
       // Stateful flows reset nothing here; the cursor is intentionally
       // preserved across page transitions because the journey IS
       // cross-page.
+    },
+
+    stats(): DriverStats[] {
+      const total = options.steps.length;
+      // A completed pass reads as all of it until the next pass starts: a
+      // `loop` flow parks its cursor at the end until it is next asked.
+      const completed = cursor >= total ? total : cursor;
+      const next = completed < total && !halted ? options.steps[completed]?.name : undefined;
+      return [{ driver: name, completed, total, laps, ...(next !== undefined ? { next } : {}), ...(halted ? { halted } : {}) }];
     },
   };
 }
