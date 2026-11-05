@@ -151,6 +151,18 @@ describe("validateOptions", () => {
     );
   });
 
+  it("rejects an invalid ignoreHttpPatterns regex", () => {
+    expect(() => validateOptions(base({ ignoreHttpPatterns: ["("] }))).toThrow(/ignoreHttpPatterns entry has invalid regex/);
+    expect(() => validateOptions(base({ ignoreHttpPatterns: ["/favicon\\.ico$"] }))).not.toThrow();
+  });
+
+  it("rejects a strictCountsFaultEchoes that is not a boolean", () => {
+    expect(() => validateOptions(base({ strictCountsFaultEchoes: "false" as unknown as boolean }))).toThrow(
+      /"strictCountsFaultEchoes" must be a boolean/,
+    );
+    expect(() => validateOptions(base({ strictCountsFaultEchoes: true }))).not.toThrow();
+  });
+
   it("accepts a RegExp literal for fault urlPattern", () => {
     expect(() =>
       validateOptions(
@@ -577,6 +589,21 @@ describe("a misspelled option is an error, not silence", () => {
     expect(() => validateOptions({ ...base, invariant: [] } as never)).toThrow(/invariants/);
   });
 
+  it("names the chaos() exit options a typo meant", () => {
+    // chaos() hands a key it does not know to the crawler, which ignores it:
+    // the run passed without the gate the caller asked for.
+    for (const [typo, meant] of [
+      ["failOnHtp", "failOnHttp"],
+      ["failOnDeadLink", "failOnDeadLinks"],
+      ["failOnNetworks", "failOnNetwork"],
+      ["baselineStric", "baselineStrict"],
+    ]) {
+      expect(() => validateOptions({ ...base, [typo!]: true } as never)).toThrow(
+        new RegExp(`unknown option "${typo}".*did you mean "${meant}"`, "s"),
+      );
+    }
+  });
+
   it("suggests the nearest name, not the first one that scores", () => {
     // `shard` used to suggest `har` — two edits, and earlier in the list than
     // `shardIndex`. A suggestion that makes no sense is worse than none.
@@ -595,7 +622,7 @@ describe("a misspelled option is an error, not silence", () => {
     // `chaos()` destructures these out before the crawler sees them, but a
     // caller who hands the same object straight to `ChaosCrawler` must not be
     // punished for it.
-    for (const key of ["strict", "baseline", "baselineStrict", "setup", "server"]) {
+    for (const key of ["strict", "baseline", "baselineStrict", "setup", "server", "failOnHttp", "failOnNetwork", "failOnDeadLinks"]) {
       expect(() => validateOptions({ ...base, [key]: 1 } as never)).not.toThrow();
     }
   });

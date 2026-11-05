@@ -70,6 +70,38 @@ export interface CrawlerOptions {
    * copy standing.)
    */
   ignoreErrorPatterns?: string[];
+  /**
+   * Request URL patterns (regex strings) whose 4xx / 5xx responses are not
+   * HTTP errors: not in `summary.httpErrors`, not under `--fail-on-http`, and
+   * the browser's "Failed to load resource: the server responded with a
+   * status of …" line about the file is dropped like an `ignoreErrorPatterns`
+   * match. That line names no URL, so `ignoreErrorPatterns` cannot single
+   * out one endpoint (a session check's 401, a missing favicon); this does.
+   * A transport failure of the same URL (`net::ERR_…`) is still recorded.
+   * (The `net::ERR_ABORTED` a stylesheet or script also fails with after a
+   * 4xx / 5xx is not a transport failure: it is never a `network` error.)
+   */
+  ignoreHttpPatterns?: string[];
+  /**
+   * Count the browser's echo of a fault this run injected as an ordinary
+   * error, as versions before this option did. By default a console
+   * "Failed to load resource" line or a `network` error about a request one
+   * of the run's own fault rules answered (a `faults.status` / `abort` /
+   * released `hang`, on the page or its service worker, or a server-side
+   * `5xx` from `@mizchi/server-faults` in `server: { mode: "remote" }`) is
+   * tagged `causedByFault` and left out of the summary counts, the error
+   * clusters, `--strict`, `--fail-on-http` and `--fail-on-network`: it is
+   * the fault, not something the app did. It is counted as
+   * `summary.faultEchoes` and the rule's `faultInjections[].echoes`, and
+   * left out of `PageResult.hasErrors`, flake's page status, the failure
+   * bundles and the Playwright fixture's `expectNoErrors` /
+   * `chaosExpect.toHaveNoErrors`. It stays in `page.errors`, in
+   * `totalErrors` (the raw count) and in the JUnit output, whose
+   * `<failure>` per error flaker reads. `true` records it untagged and
+   * counts it everywhere, so a strict test of a status fault fails on it
+   * again (the rule's `echoes` still counts it).
+   */
+  strictCountsFaultEchoes?: boolean;
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */
   spaPatterns?: string[];
   /** Viewport size */
@@ -912,6 +944,28 @@ export interface PageError {
    */
   resourceUrl?: string;
   /**
+   * The HTTP status of the response a console "Failed to load resource:
+   * the server responded with a status of …" line is about, when that is a
+   * subresource or API request (not the page's own document, which is the
+   * page's `statusCode` and, at 404 / 5xx, a dead link). With `method`, what
+   * `summary.httpErrors` and `--fail-on-http` count. `message` is untouched,
+   * so the error's cluster key is the same as before this field.
+   */
+  status?: number;
+  /** The request's method (`GET`, `POST`, …), with `status`, and on a `network` error. */
+  method?: string;
+  /**
+   * The fault this error is the browser's echo of: the name of the fault
+   * rule (as `faultInjections[].rule` names it) that answered or aborted the
+   * request, or `server:5xx` for a server-side fault. Such an error is left
+   * out of the summary counts, the clusters and the exit rules (see
+   * `CrawlerOptions.strictCountsFaultEchoes`). Matched by request: a real
+   * 500 from the same endpoint is not tagged. Set on a console line when the
+   * response it is about arrives, which is almost always before the line; an
+   * `onError` hook can see one without it when it is not.
+   */
+  causedByFault?: string;
+  /**
    * Only on a `navigation` error, when the navigation followed a redirect
    * and where it pointed is what failed. The message names the URL
    * navigated to, not the host that failed, so this is what tells a start
@@ -1032,7 +1086,11 @@ export interface PageResult {
   statusCode?: number;
   loadTime: number;
   errors: PageError[];
-  /** True when `errors.length > 0`. Computed once when the result is built. */
+  /**
+   * True when `errors` holds an error other than a fault echo
+   * (`PageError.causedByFault`), as `summary.pagesWithErrors` counts.
+   * Computed once when the result is built.
+   */
   hasErrors: boolean;
   warnings: string[];
   metrics?: PerformanceMetrics;
@@ -1385,6 +1443,7 @@ export interface CrawlReport {
   endTime: number;
   duration: number;
   pagesVisited: number;
+  /** Every `PageError` of `pages`, fault echoes (`PageError.causedByFault`) included. */
   totalErrors: number;
   totalWarnings: number;
   blockedExternalNavigations: number;
@@ -1393,7 +1452,7 @@ export interface CrawlReport {
   actions: ActionResult[];
   summary: CrawlSummary;
   /** Per-rule fault injection stats (present only when rules were configured). */
-  faultInjections?: FaultInjectionStats[];
+  faultInjections?: CrawlFaultInjectionStats[];
   /**
    * Requests parked by a `hang` fault — the ones with no `releaseAfterMs`.
    * The crawler aborts them when it tears down a page it owns, and before
@@ -1506,7 +1565,10 @@ export interface CrawlSummary {
   errorPages: number;
   timeoutPages: number;
   recoveredPages: number;
-  /** Pages where `errors.length > 0`, independent of navigation status. */
+  /**
+   * Pages with an error other than a fault echo (`PageError.causedByFault`),
+   * independent of navigation status: `PageResult.hasErrors`.
+   */
   pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
@@ -1524,6 +1586,19 @@ export interface CrawlSummary {
   crashes: number;
   unhandledRejections: number;
   invariantViolations: number;
+  /**
+   * Subresource and API responses that answered 4xx / 5xx (`PageError.status`),
+   * a subset of `consoleErrors`. Not the pages' own documents: those are
+   * `recoveredPages` and `discovery.deadLinks`. Absent from a report an older
+   * version wrote.
+   */
+  httpErrors?: HttpErrorSummary;
+  /**
+   * Errors that were the browser's echo of a fault the run injected
+   * (`PageError.causedByFault`), and are not in the counts above. Absent
+   * from a report an older version wrote.
+   */
+  faultEchoes?: number;
   avgLoadTime: number;
   avgMetrics?: {
     ttfb: number;
@@ -1532,6 +1607,18 @@ export interface CrawlSummary {
   };
   /** Discovery metrics - how links were found */
   discovery?: DiscoveryMetrics;
+}
+
+/** `CrawlSummary.httpErrors`. */
+export interface HttpErrorSummary {
+  /** Every 4xx / 5xx response counted. */
+  total: number;
+  /** Status 400–499. */
+  "4xx": number;
+  /** Status 500 and up. */
+  "5xx": number;
+  /** Count per status code, e.g. `{ "404": 2, "500": 1 }`. */
+  byStatus: Record<string, number>;
 }
 
 /** How a URL was discovered */
@@ -1629,6 +1716,16 @@ export interface ServerFaultEvent {
   pageUrl: string;
 }
 
+/** A rule's `FaultInjectionStats` in a crawl's report. */
+export interface CrawlFaultInjectionStats extends FaultInjectionStats {
+  /**
+   * The browser's echoes of this rule's faults: console "Failed to load
+   * resource" lines and `network` errors about a request it answered
+   * (`PageError.causedByFault`). Present only when non-zero.
+   */
+  echoes?: number;
+}
+
 /** Configuration for Playwright Test integration */
 export interface ChaosTestOptions {
   /**
@@ -1654,6 +1751,11 @@ export interface ChaosTestOptions {
    * fails nothing on its own; assert on the result.
    */
   strict?: boolean;
+  /**
+   * Count the browser's echo of an injected fault under `strict` too; see
+   * `CrawlerOptions.strictCountsFaultEchoes`.
+   */
+  strictCountsFaultEchoes?: boolean;
   /** Action weights */
   actionWeights?: ActionWeights;
   /** Per-step performance measurement; see `CrawlerOptions.perf`. */

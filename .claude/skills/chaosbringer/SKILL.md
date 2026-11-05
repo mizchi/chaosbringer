@@ -179,7 +179,16 @@ isn't.
 crash (`crash` error, `summary.crashes`), and any invariant violation, fail in
 every mode. Console errors, JS exceptions and
 unhandled rejections fail only under `strict: true` — so if your finding is
-"a rejection escaped", you need `strict`. `ignoreErrorPatterns` matches
+"a rejection escaped", you need `strict`. Chromium's console line about a
+request a fault answered ("Failed to load resource: … 500", or `net::ERR_FAILED`
+for an abort) is that fault's echo: tagged `causedByFault: "<rule>"`, counted
+as the rule's `echoes`, and left out of `strict` and the clusters, so a strict
+fault test needs no ignore pattern for it (`strictCountsFaultEchoes: true`
+counts it again). A real 500 on a request the rule let through still counts.
+An API's own 4xx / 5xx carries `status` and `method` on that console error;
+`failOnHttp: "5xx"` (or `"4xx"`) fails on them without `strict`, and
+`failOnDeadLinks` / `failOnNetwork` fail on dead links / transport failures.
+`ignoreErrorPatterns` matches
 `PageError.message`, which for a network error is `"<url> - <errorText>"`, so a
 pattern can name either half. Silencing a known unrelated defect with it is
 fine; say so out loud, because a silenced error and a fixed one look identical

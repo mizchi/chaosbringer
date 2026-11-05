@@ -279,6 +279,62 @@ describe("main CLI output on a pipe", () => {
   }, 120_000);
 });
 
+describe("HTTP status and dead-link rules", () => {
+  let server: TestServer;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-cli-http-"));
+    server = await startTestServer((req, res) => {
+      if (req.url === "/") {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(
+          `<!doctype html><title>home</title><img src="/missing.png" alt=""><a href="/gone">gone</a>` +
+            `<script>fetch("/api/broken").catch(() => {})</script>`,
+        );
+        return;
+      }
+      res.writeHead(req.url === "/api/broken" ? 500 : 404, { "content-type": "text/plain" });
+      res.end("no");
+    });
+  }, 30_000);
+
+  afterAll(async () => {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const crawl = () => ["--url", `${server.url}/`, "--max-pages", "2", "--max-actions", "0", "--seed", "1"];
+
+  it("passes without a rule, and still names the dead link in --compact", async () => {
+    const r = await cli([...crawl(), "--compact", "--output", join(dir, "pass.json")]);
+    expect(r.status).toBe(0);
+    const lines = r.stdout.split("\n");
+    expect(lines).toContainEqual(expect.stringMatching(/^\[PASS\] 2 pages, /));
+    expect(lines).toContain(`  Dead links: 1 (first: ${server.url}/gone <- ${server.url}/)`);
+  }, 120_000);
+
+  it("--fail-on-http 5xx and --fail-on-dead-links fail with exit 1, name the first of each, and annotate them as errors", async () => {
+    const output = join(dir, "fail.json");
+    const r = await cli([...crawl(), "--fail-on-http", "5xx", "--fail-on-dead-links", "--quiet", "--github-annotations", "--output", output]);
+    expect(r.status).toBe(1);
+    const lines = r.stdout.trimEnd().split("\n");
+    expect(lines.slice(0, 3)).toEqual([
+      expect.stringMatching(/^\[FAIL\] 2 pages, \d+ errors, /),
+      `  Dead links: 1 (first: ${server.url}/gone <- ${server.url}/)`,
+      `  Failed: --fail-on-http 5xx: 1 HTTP response >= 500 (first: GET ${server.url}/api/broken 500 on ${server.url}/); ` +
+        `--fail-on-dead-links: 1 dead link (first: ${server.url}/gone <- ${server.url}/)`,
+    ]);
+    const annotations = lines.filter((l) => l.startsWith("::"));
+    expect(annotations).toContainEqual(expect.stringMatching(/^::error title=\[console\] Failed to load resource%3A .*Internal Server Error/));
+    // The 404s (the image, and the dead link's own line) fail no rule of this run.
+    expect(annotations).toContainEqual(expect.stringMatching(/^::warning title=\[console\] ×2 Failed to load resource%3A .*Not Found/));
+    expect(annotations).toContainEqual(expect.stringMatching(/^::error title=Dead link%3A /));
+    const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
+    expect(report.reproCommand).toMatch(/ --fail-on-http 5xx --fail-on-dead-links$/);
+  }, 120_000);
+});
+
 describe("a page whose connection the server drops", () => {
   let server: TestServer;
   let dir: string;

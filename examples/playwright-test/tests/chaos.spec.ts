@@ -59,18 +59,17 @@ chaosTest.describe("with the stock API down", () => {
       maxActionsPerPage: 0,
       // Every request to /api/stock is answered 503 before it reaches the site.
       faultInjection: [faults.status(503, { urlPattern: /\/api\/stock$/ })],
-      // Chromium logs the 503 as a console error. That is the fault itself,
-      // not something the page did wrong.
-      ignoreErrorPatterns: ["Failed to load resource.*(404|503)"],
-      // Fail the test on anything else the CLI's `--strict` fails a run on —
-      // a JS exception or an unhandled rejection from the failed fetch.
+      // Fail the test on anything the CLI's `--strict` fails a run on — a JS
+      // exception or an unhandled rejection from the failed fetch. The console
+      // line Chromium logs for the 503 is the fault's own echo, which strict
+      // does not count, so it needs no ignore pattern.
       strict: true,
     },
   });
 
   chaosTest("the stock page shows a fallback", async ({ page, chaos }) => {
     await chaos.testPage(page, "/stock");
-    expect(chaos.crawler.getFaultStats()[0]?.injected).toBe(1);
+    expect(chaos.crawler.getFaultStats()[0]).toMatchObject({ injected: 1, echoes: 1 });
     await expect(page.getByRole("status")).toHaveText("Stock unavailable");
   });
 });

@@ -14,6 +14,7 @@ import { errorMessage } from "./errors.js";
 import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag } from "./cli-invariants.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { readInputJson } from "./input-files.js";
+import { HTTP_FAIL_LEVELS, type ExitCodeOptions, type HttpFailLevel } from "./reporter.js";
 import { axe } from "./invariants.js";
 import { perfOptionsFromCliFlags } from "./perf-options.js";
 import { parseSettleArg, resolveSettle } from "./settle.js";
@@ -40,6 +41,7 @@ export const CRAWL_CLI_OPTIONS = {
   output: { type: "string" },
   exclude: { type: "string", multiple: true },
   "ignore-error": { type: "string", multiple: true },
+  "ignore-http": { type: "string", multiple: true },
   "ignore-analytics": { type: "boolean", default: false },
   "ignore-preset": { type: "string", multiple: true },
   spa: { type: "string", multiple: true },
@@ -91,6 +93,9 @@ export const CRAWL_CLI_OPTIONS = {
   "allow-settle-mismatch": { type: "boolean", default: false },
   compact: { type: "boolean", default: false },
   strict: { type: "boolean", default: false },
+  "fail-on-http": { type: "string" },
+  "fail-on-network": { type: "boolean", default: false },
+  "fail-on-dead-links": { type: "boolean", default: false },
   quiet: { type: "boolean", default: false },
   help: { type: "boolean", short: "h", default: false },
   version: { type: "boolean", short: "V", default: false },
@@ -356,6 +361,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
 
   checkRegexFlag("--exclude", values.exclude);
   checkRegexFlag("--ignore-error", values["ignore-error"]);
+  checkRegexFlag("--ignore-http", values["ignore-http"]);
   checkRegexFlag("--spa", values.spa);
   checkDeviceFlag(values.device);
 
@@ -385,6 +391,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     screenshotDir: values["screenshot-dir"],
     excludePatterns: values.exclude,
     ignoreErrorPatterns: ignoreErrorPatterns.length > 0 ? ignoreErrorPatterns : undefined,
+    ignoreHttpPatterns: values["ignore-http"],
     spaPatterns: values.spa,
     logFile: values["log-file"],
     logLevel: logLevel,
@@ -414,6 +421,30 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
     perf: perfOptionsFromCliFlags(values),
     perfBudgetsFile: values["perf-budgets"],
     ...(cliReproFlags.length > 0 ? { cliReproFlags } : {}),
+  };
+}
+
+/**
+ * The exit rules the flags ask for, which the CLI applies to the report
+ * (`getExitCode`) and the GitHub annotations: `--strict`, `--baseline-strict`,
+ * `--fail-on-http`, `--fail-on-network`, `--fail-on-dead-links`. Throws a
+ * `UsageError` on a `--fail-on-http` that is not `4xx` or `5xx`, before a
+ * browser starts; `shard` checks its workers' arguments with it too.
+ */
+export function exitOptionsFromCli(values: CrawlCliValues): ExitCodeOptions {
+  const http = values["fail-on-http"];
+  if (http !== undefined && !(HTTP_FAIL_LEVELS as readonly string[]).includes(http)) {
+    throw new UsageError(
+      `--fail-on-http must be one of ${HTTP_FAIL_LEVELS.join(", ")} (got ${JSON.stringify(http)}): ` +
+        "5xx fails on a response of 500 and up, 4xx on one of 400 and up",
+    );
+  }
+  return {
+    strict: values.strict,
+    baselineStrict: values["baseline-strict"],
+    ...(http !== undefined ? { http: http as HttpFailLevel } : {}),
+    ...(values["fail-on-network"] ? { network: true } : {}),
+    ...(values["fail-on-dead-links"] ? { deadLinks: true } : {}),
   };
 }
 
@@ -481,7 +512,7 @@ function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
 /**
  * The flags that change the run or its exit code in a form
  * `buildReproCommand` cannot read back from the options: the CLI applies
- * `--strict` itself, `--axe` / `--invariants` / `--data-safety` /
+ * `--strict` and the `--fail-on-*` rules itself, `--axe` / `--invariants` / `--data-safety` /
  * `--visual-*` become invariant closures, and `--allow-settle-mismatch` lifts
  * a refusal the CLI makes. `--invariants axe` is carried as `--axe`, and
  * `--data-safety` and every `--invariants` as one canonical `--invariants`
@@ -508,5 +539,8 @@ function cliOnlyReproFlags(values: CrawlCliValues): ReproFlag[] {
   // Without it the repro refuses the run's --perf-budgets file (exit 2).
   if (values["allow-settle-mismatch"]) out.push({ flag: "--allow-settle-mismatch" });
   if (values.strict) out.push({ flag: "--strict" });
+  if (values["fail-on-http"] !== undefined) out.push({ flag: "--fail-on-http", value: values["fail-on-http"] });
+  if (values["fail-on-network"]) out.push({ flag: "--fail-on-network" });
+  if (values["fail-on-dead-links"]) out.push({ flag: "--fail-on-dead-links" });
   return out;
 }

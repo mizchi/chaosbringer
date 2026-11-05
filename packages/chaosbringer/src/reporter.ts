@@ -4,10 +4,11 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ErrorCluster } from "./clusters.js";
+import { fingerprintError, type ErrorCluster } from "./clusters.js";
 import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
-import type { CrawlReport, PageResult, PerfDegradationEntry } from "./types.js";
+import { isFaultEcho } from "./resource-outcomes.js";
+import type { CrawlReport, PageError, PageResult, PerfDegradationEntry } from "./types.js";
 
 /** Failed files listed under an error cluster; the JSON has them all. */
 const CLUSTER_RESOURCES_SHOWN = 5;
@@ -60,6 +61,17 @@ export function formatReport(report: CrawlReport): string {
   if (report.summary.invariantViolations > 0) {
     lines.push(`Invariant Violations: ${report.summary.invariantViolations}`);
   }
+  const http = report.summary.httpErrors;
+  if (http && http.total > 0) {
+    // Among the console errors above, not on top of them.
+    const statuses = Object.entries(http.byStatus)
+      .map(([status, n]) => `${status}×${n}`)
+      .join(", ");
+    lines.push(`HTTP Errors (of the console errors): ${http.total} (4xx: ${http["4xx"]}, 5xx: ${http["5xx"]}; ${statuses})`);
+  }
+  if ((report.summary.faultEchoes ?? 0) > 0) {
+    lines.push(`Fault echoes (not counted above): ${report.summary.faultEchoes}`);
+  }
   lines.push(`Avg Load Time: ${report.summary.avgLoadTime.toFixed(0)}ms`);
 
   if (report.summary.avgMetrics) {
@@ -89,9 +101,13 @@ export function formatReport(report: CrawlReport): string {
       lines.push("");
       lines.push(`[${page.status.toUpperCase()}] ${page.url}`);
       for (const error of page.errors) {
-        lines.push(`  [${error.type}] ${truncate(error.message, 80)}`);
+        const echo = error.causedByFault !== undefined ? ` (echo of fault ${error.causedByFault})` : "";
+        lines.push(`  [${error.type}] ${truncate(error.message, 80)}${echo}`);
         // "Failed to load resource" alone does not say which file.
-        if (error.resourceUrl) lines.push(`    resource: ${error.resourceUrl}`);
+        if (error.resourceUrl) {
+          const request = error.status !== undefined ? ` (${error.method ?? "?"} ${error.status})` : "";
+          lines.push(`    resource: ${error.resourceUrl}${request}`);
+        }
       }
     }
   }
@@ -200,8 +216,9 @@ export function formatReport(report: CrawlReport): string {
       // `suppressed` only when it happened: on most runs every row would read
       // `suppressed=0` and a reader would stop seeing the column.
       const suppressed = stats.suppressed ? ` suppressed=${stats.suppressed}` : "";
+      const echoes = stats.echoes ? ` echoes=${stats.echoes}` : "";
       lines.push(
-        `  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}${suppressed}`,
+        `  ${stats.rule}: matched=${stats.matched} injected=${stats.injected}${suppressed}${echoes}`,
       );
     }
     if (report.heldRequests) {
@@ -306,6 +323,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
+    deadLinksLine(report),
   ].filter(Boolean);
   if (reasons.length > 0) {
     // Compact mode prints nothing else about the run, so a bare [FAIL] left
@@ -333,7 +351,25 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
  */
 export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
   const reasons = exitReasons(report, strict);
-  return [formatVerdictLine(report, strict), ...(reasons.length > 0 ? [failedLine(reasons)] : [])].join("\n");
+  return [formatVerdictLine(report, strict), deadLinksLine(report), ...(reasons.length > 0 ? [failedLine(reasons)] : [])]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * `  Dead links: N (first: <url> <- <source>)`, or "" with none. In the
+ * compact and quiet output whether or not `--fail-on-dead-links` fails the
+ * run on them: that output said `1 errors` at most, and named no link.
+ */
+function deadLinksLine(report: Pick<CrawlReport, "summary">): string {
+  const dead = report.summary.discovery?.deadLinks ?? [];
+  return dead.length > 0 ? `  Dead links: ${dead.length}${firstDeadLink(dead)}` : "";
+}
+
+/** ` (first: <url> <- <source>)`. */
+function firstDeadLink(dead: NonNullable<CrawlReport["summary"]["discovery"]>["deadLinks"]): string {
+  const first = dead[0];
+  return first ? ` (first: ${first.url} <- ${first.sourceUrl || "(initial)"})` : "";
 }
 
 /** `  Failed: <reason>; <reason>`, from `exitReasons`. */
@@ -361,13 +397,44 @@ const ALWAYS_FAILING_CLUSTER_TYPES: ReadonlySet<ErrorCluster["type"]> = new Set(
  */
 function rankByVerdict(report: CrawlReport, strict: boolean | ExitCodeOptions, fresh: ReadonlySet<string>): ErrorCluster[] {
   const opts: ExitCodeOptions = typeof strict === "boolean" ? { strict } : strict;
+  const failing = clusterFailsRun(report, opts);
   const rank = (c: ErrorCluster): number => {
     if (opts.baselineStrict && fresh.has(c.key)) return 2;
-    if (ALWAYS_FAILING_CLUSTER_TYPES.has(c.type) || (opts.strict && STRICT_CLUSTER_TYPES.has(c.type))) return 1;
+    if (failing(c)) return 1;
     return 0;
   };
   // A stable sort, so the count order errorClusters comes in holds within a rank.
   return [...report.errorClusters].sort((a, b) => rank(b) - rank(a));
+}
+
+/**
+ * Whether a rule of `opts` counts `cluster`'s errors: an always-failing
+ * type, a `--strict` type under `--strict`, a network error under
+ * `--fail-on-network`, under `--fail-on-http` a console cluster with a
+ * response at or over its status (read off the pages, as one cluster can
+ * hold a page's own document and an API answering the same status), and
+ * under `--baseline-strict` a cluster `report.diff` says is new. What the
+ * compact report lists first and what the GitHub annotations mark as
+ * `error`.
+ */
+export function clusterFailsRun(
+  report: Partial<Pick<CrawlReport, "pages" | "diff">>,
+  opts: ExitCodeOptions,
+): (cluster: Pick<ErrorCluster, "key" | "type">) => boolean {
+  const fresh = new Set(opts.baselineStrict ? report.diff?.newClusters.map((c) => c.key) : []);
+  const httpKeys = new Set<string>();
+  const floor = opts.http ? HTTP_FLOORS[opts.http] : undefined;
+  if (floor !== undefined) {
+    for (const e of report.pages?.flatMap((p) => p.errors) ?? []) {
+      if (e.type === "console" && !isFaultEcho(e) && (e.status ?? 0) >= floor) httpKeys.add(`console|${fingerprintError(e)}`);
+    }
+  }
+  return (c) =>
+    ALWAYS_FAILING_CLUSTER_TYPES.has(c.type) ||
+    (!!opts.strict && STRICT_CLUSTER_TYPES.has(c.type)) ||
+    (!!opts.network && c.type === "network") ||
+    httpKeys.has(c.key) ||
+    fresh.has(c.key);
 }
 
 /**
@@ -554,11 +621,31 @@ function truncate(str: string, maxLen: number): string {
   return str.slice(0, maxLen - 3) + "...";
 }
 
+/** `--fail-on-http`'s values: the lowest status that fails the run. */
+export type HttpFailLevel = "4xx" | "5xx";
+export const HTTP_FAIL_LEVELS: readonly HttpFailLevel[] = ["4xx", "5xx"];
+const HTTP_FLOORS: Record<HttpFailLevel, number> = { "4xx": 400, "5xx": 500 };
+
 export interface ExitCodeOptions {
   /** Treat console errors / JS exceptions as failures. */
   strict?: boolean;
   /** Fail when `report.diff` shows new clusters or newly failing pages. */
   baselineStrict?: boolean;
+  /**
+   * `--fail-on-http`: fail on a subresource or API response of status 500
+   * and up (`"5xx"`) or 400 and up (`"4xx"`), `summary.httpErrors`. Not the
+   * page's own document, which is a dead link (`deadLinks`), nor the echo
+   * of a fault the run injected.
+   */
+  http?: HttpFailLevel;
+  /**
+   * `--fail-on-network`: fail on a request that failed at the transport
+   * level (`summary.networkErrors`), which no other rule does, `--strict`
+   * included.
+   */
+  network?: boolean;
+  /** `--fail-on-dead-links`: fail on a crawled link that answered 404 / 5xx (`summary.discovery.deadLinks`). */
+  deadLinks?: boolean;
 }
 
 /** What `getExitCode` / `exitReasons` read from a report. */
@@ -606,6 +693,25 @@ export function exitReasons(report: ExitCodeReport, strict: boolean | ExitCodeOp
     ].filter(Boolean);
     if (found.length > 0) out.push(`--strict: ${found.join(", ")}`);
   }
+  if (opts.http) {
+    const floor = HTTP_FLOORS[opts.http];
+    const n = (opts.http === "5xx" ? s.httpErrors?.["5xx"] : s.httpErrors?.total) ?? 0;
+    if (n > 0) {
+      const first = firstError(report, (e) => e.type === "console" && (e.status ?? 0) >= floor);
+      const where = first ? ` (first: ${first.method ?? "?"} ${first.resourceUrl} ${first.status} on ${first.url})` : "";
+      out.push(`--fail-on-http ${opts.http}: ${n} HTTP response${n === 1 ? "" : "s"} >= ${floor}${where}`);
+    }
+  }
+  if (opts.network && s.networkErrors > 0) {
+    const first = firstError(report, (e) => e.type === "network");
+    // The message is `<url> - <errorText>`.
+    const where = first ? ` (first: ${first.method ? `${first.method} ` : ""}${first.message.replace(" - ", " ")} on ${first.url})` : "";
+    out.push(`--fail-on-network: ${plural(s.networkErrors, "network error")}${where}`);
+  }
+  const dead = s.discovery?.deadLinks ?? [];
+  if (opts.deadLinks && dead.length > 0) {
+    out.push(`--fail-on-dead-links: ${plural(dead.length, "dead link")}${firstDeadLink(dead)}`);
+  }
   if (opts.baselineStrict && report.diff) {
     const found = [
       report.diff.newClusters.length > 0 ? plural(report.diff.newClusters.length, "new cluster") : "",
@@ -624,6 +730,15 @@ function plural(n: number, noun: string): string {
 function firstUrl(report: ExitCodeReport, which: (page: PageResult) => boolean): string {
   const page = report.pages?.find(which);
   return page ? ` (first: ${page.url})` : "";
+}
+
+/** The first error of the report's pages `which` picks that is no fault echo. */
+function firstError(report: ExitCodeReport, which: (error: PageError) => boolean): PageError | undefined {
+  for (const page of report.pages ?? []) {
+    const found = page.errors.find((e) => !isFaultEcho(e) && which(e));
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function crashed(page: PageResult): boolean {

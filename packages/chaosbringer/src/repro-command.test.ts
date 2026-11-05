@@ -53,6 +53,7 @@ const ROUND_TRIPS: Record<string, string[]> = {
   "ignore-error": ["--ignore-error", "third-party", "--ignore-error", "it's \\.js$"],
   "ignore-analytics": ["--ignore-analytics", "--ignore-preset", "analytics"],
   "ignore-preset": ["--ignore-preset", "maps,pdf-orb", "--ignore-preset", "iframe-sandbox"],
+  "ignore-http": ["--ignore-http", "/favicon\\.ico$", "--ignore-http", "/api/me"],
   spa: ["--spa", "/app/.*"],
   "har-replay": ["--har-replay", "net.har"],
   "storage-state": ["--storage-state", "ss.json"],
@@ -83,6 +84,9 @@ const ROUND_TRIPS: Record<string, string[]> = {
   // Without it the repro refuses a budgets file emitted under another --settle.
   "allow-settle-mismatch": ["--perf-budgets", "b.json", "--allow-settle-mismatch"],
   strict: ["--strict"],
+  "fail-on-http": ["--fail-on-http", "4xx"],
+  "fail-on-network": ["--fail-on-network"],
+  "fail-on-dead-links": ["--fail-on-dead-links"],
 };
 
 /**

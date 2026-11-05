@@ -49,6 +49,8 @@ export const DEFAULT_OPTIONS: Required<
   screenshotDir: "./screenshots",
   excludePatterns: [],
   ignoreErrorPatterns: [],
+  ignoreHttpPatterns: [],
+  strictCountsFaultEchoes: false,
   spaPatterns: [],
   viewport: { width: 1280, height: 720 },
   userAgent: "",

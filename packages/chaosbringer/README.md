@@ -42,7 +42,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
 - **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
 - **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
-- **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary.
+- **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary, at the level the run's exit rules give each one.
 - **Playwright Test integration** for when you'd rather run chaos inside an existing test file.
 - **CLI** for running from a shell or CI, with `minimize` / `flake` / `shard` / `diff` / `parity` / `cluster-artifacts` / `recipes` / `load` subcommands.
 
@@ -161,9 +161,9 @@ Every report includes:
 - `report.seed` — the seed actually used (random if you didn't pass one).
 - `report.reproCommand` — a shell-safe invocation that rebuilds the same run from its CLI flags.
 
-Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict` fails on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`.
+Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict`, `--fail-on-http` and `--fail-on-network` fail on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`. A run with dead links, passing or not, says so under the verdict line, in `--compact` and `--quiet` alike: `  Dead links: 1 (first: http://localhost:3000/old-page <- http://localhost:3000/)`; `--fail-on-dead-links` fails the run on them (`Failed: --fail-on-dead-links: 1 dead link (first: … <- …)`).
 
-`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise), the `--axe` / `--invariants` / `--visual-*` checks and `--strict`. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise) and `--ignore-http`, the `--axe` / `--invariants` / `--visual-*` checks, `--strict` and the `--fail-on-http` / `--fail-on-network` / `--fail-on-dead-links` rules. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict`, which compare against another run's report.
 
 Fault rules (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`) and invariants set in code have no flag. The command cannot carry them, and a failure they caused reruns clean without them, so it ends in a comment that counts them and names them as their stats do: `Repro: chaosbringer --url … --seed 42 # + 1 fault rule not expressible on the CLI: api-500`. A shell skips the comment (zsh only with `setopt interactivecomments`; without it the CLI exits 2 and says to drop it). The invariants `--axe`, `--invariants` / `--data-safety` and `--visual-baseline` build are carried as those flags (`--data-safety` and every `--invariants` as one `--invariants` list, `--invariants axe` as `--axe`). To rerun such a run, run its `chaos({...})` / `ChaosCrawler` config again with the printed seed. A `chaosbringer scan` chaos crawl's report holds the `chaosbringer scan … --faults <fault>` command that reruns it instead. Its comment also names the `runScan` options that change the crawls and have no scan flag, as `crawler.<option>` / `perf.<option>`: `crawler.spaPatterns`, a HAR replay's `crawler.har`, `crawler.httpCache: false`, a `crawler.settle` other than scan's adaptive one, `perf.memory`.
 
@@ -493,6 +493,26 @@ Promise-shaped kinds, for the failure modes a network mock cannot express:
 `faults.status(500, { urlPattern })` with no `body` does **not** send an empty body — the default is `{"error":500}` with `content-type: application/json`. That default decides which app bug a 500 finds: a client that skips `res.ok` and calls `res.json()` renders junk out of it and reports success, where an HTML or empty body makes `res.json()` *reject* and the client takes its error path (or leaks an unhandled rejection). Two different defects behind one status code, so both are worth testing; pass `body: ""` or `body: "<html>…"` explicitly for the second.
 
 (The default was originally justified by a spurious `ERR_ABORTED` Chromium was said to emit alongside an empty intercepted body. That does not reproduce on Chromium 147 — no `requestfailed`, no ERR_ABORTED on any channel, the same single console line either way — so treat the body choice as being about your client's parsing path, not about browser noise.)
+
+### Fault echoes
+
+Chromium logs the answer a fault gave as it logs any other: `Failed to load resource: the server responded with a status of 500` for a `faults.status(500)`, `Failed to load resource: net::ERR_FAILED` and a `network` error for a `faults.abort()`. That is the fault, not something the app did, so the crawler tags each such error with the rule that caused it (`PageError.causedByFault: "<rule name>"`, the name `faultInjections[].rule` uses) and leaves it out of the summary counts, the error clusters, `--strict`, `--fail-on-http` and `--fail-on-network`. It is counted as `summary.faultEchoes` and as the rule's `faultInjections[].echoes`, and the text report marks it `(echo of fault <rule>)`. A strict fault test needs no ignore pattern for the status it injects:
+
+```ts
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000/cart",
+  strict: true,
+  faultInjection: [faults.status(500, { urlPattern: /\/api\/cart$/, name: "cart-500" })],
+});
+// passed unless the page did something wrong with the 500 (threw, left a rejection, logged an error)
+// report.faultInjections → [{ rule: "cart-500", matched: 1, injected: 1, echoes: 1 }]
+```
+
+The match is by request, not by URL pattern or message: a 500 the server really returned on the same endpoint, on a request the rule let through (`probability`, `schedule`), is no echo and fails `--strict` as before. Every layer that answers or aborts a request tags its echoes: the page's route, the service-worker route (matched by method and URL: each firing is spent on the next page request of that method and URL the worker serves, and tags it only when it ended as the fault ends a request, so a firing the worker's fallback absorbed tags nothing), a `faults.hang` whose `releaseAfterMs` aborts it, and a server-side `5xx` that `@mizchi/server-faults` reports in its `x-chaos-fault-*` headers under `server: { mode: "remote" }` (tagged `server:5xx`). A `delay` passes the request on, so what the server answers after it is the server's.
+
+`strictCountsFaultEchoes: true` (on `ChaosCrawler`, `chaos()` and the fixture's `chaosOptions`) records them untagged and counts them everywhere, as before this option existed; the rule's `echoes` still counts them.
+
+> **Behaviour change:** the echo of a fault the run injected used to be an ordinary console / network error: it failed `--strict` (and the fixture's `strict`), appeared in `errorClusters` and the `--baseline` diff, and was counted in `summary.consoleErrors` / `networkErrors` and the `N errors` of the verdict line. It is now tagged, counted as `summary.faultEchoes`, and left out of `PageResult.hasErrors`, flake's page status, the failure bundles and the fixture's `expectNoErrors` / `chaosExpect.toHaveNoErrors` too. It stays in `page.errors`, in `report.totalErrors` (the raw count) and in the `--junit` output, which writes a `<failure>` per error for flaker as it always did. A `--baseline` written before shows those clusters as resolved, which fails nothing. An ignore pattern written for it (`"Failed to load resource.*503"`) still works but is no longer needed, and it also hid the app's own 503s.
 
 The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
 
@@ -1135,7 +1155,9 @@ Opt in with `--github-annotations` and chaosbringer prints a [workflow command](
 chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
-Severity maps from cluster type: invariants / exceptions / network errors / failed navigations / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
+The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not, with one exception: a JS exception is always `::error`, also on a run without `--strict` that exits 0. Invariant violations, failed navigations and crashes fail every run and are always `::error`. Under `--baseline-strict`, a cluster the baseline did not have is `::error`. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
+
+> **Behaviour change:** network errors and dead links used to annotate as `::error` on a run that exited 0. They are `::warning` unless `--fail-on-network` / `--fail-on-dead-links` fails the run on them. And a console cluster that failed a `--baseline-strict` run as new used to be `::warning`; it is `::error`.
 
 ## Model-driven fault coverage
 
@@ -1218,6 +1240,20 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 
 The browser's "Failed to load resource" message names no file, so its console error carries the file as `resourceUrl`, and the cluster lists every one as `resourceUrls` (the text report shows the first five). The message itself stays as the browser wrote it, so the cluster key that `--baseline` compares does not depend on which files failed.
 
+## HTTP errors
+
+A subresource or API request that answers 4xx / 5xx (an image's 404, a `fetch`'s 500) is recorded as the browser records it: one console error, `Failed to load resource: the server responded with a status of 500 (Internal Server Error)`. The crawler pairs that line with the response it is about and adds the request's `status` and `method` to it (`PageError.status`, `PageError.method`), so the text report reads `resource: http://localhost:3000/api/cart (POST 500)`. It is still the one error, with the message and cluster key it always had, so a `--baseline` written before still matches. The page's own document is not among them: a crawled page that answers 404 / 5xx is a recovered page and a dead link.
+
+`summary.httpErrors` counts them: `{ total, "4xx", "5xx", byStatus: { "404": 2, "500": 1 } }`. They are console errors, so `--strict` fails on them as before; without `--strict`, `--fail-on-http 5xx` fails the run on a response of 500 and up, and `--fail-on-http 4xx` on one of 400 and up (`chaos({ failOnHttp: "5xx" })`). The reason names the first one:
+
+```
+  Failed: --fail-on-http 5xx: 1 HTTP response >= 500 (first: POST http://localhost:3000/api/cart 500 on http://localhost:3000/cart)
+```
+
+`--ignore-http <regex>` (repeatable; `ignoreHttpPatterns`) takes a request URL out: its 4xx / 5xx is not counted and its "Failed to load resource" line is dropped. That line names no URL, so `--ignore-error` cannot single out one endpoint (a logged-out session check's 401, a missing favicon); this can. A transport failure of the same URL is still recorded.
+
+A request that fails at the transport level (`net::ERR_CONNECTION_RESET`, a socket the server destroyed) is a `network` error, with its `method`. A stylesheet or script that answered 4xx / 5xx also fails as `net::ERR_ABORTED`; that is the HTTP error again, and not recorded as a `network` error (it used to be). No rule fails a run on network errors by default, `--strict` included; `--fail-on-network` (`chaos({ failOnNetwork: true })`) does.
+
 ## Exit codes
 
 | Condition | Exit |
@@ -1228,6 +1264,9 @@ The browser's "Failed to load resource" message names no file, so its console er
 | A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
+| `--fail-on-http 5xx` and a subresource / API response of 500 and up (`4xx`: of 400 and up) | **1** |
+| `--fail-on-network` and a request that failed at the transport level | **1** |
+| `--fail-on-dead-links` and a crawled link that answered 404 / 5xx | **1** |
 | The CLI refused to run: an unknown flag or `--invariants` name, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`, a `--seed-from-sitemap` path; a sitemap URL is fetched best-effort), or an optional peer `--axe` (or `--invariants axe`) / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
 | Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
@@ -1265,6 +1304,8 @@ Every subcommand refuses its arguments the same way: an unknown flag, or a missi
 > `visualRegression()` invariant whose package is not installed, instead of
 > reporting a violation on every page, and so does `scenarioLoad()` instead
 > of failing every iteration.
+
+The echo of a fault the run injected counts in none of these (see [Fault echoes](#fault-echoes)).
 
 > **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
 > used to ignore them, so a run whose entire finding was "the app left a
@@ -1328,7 +1369,7 @@ Every `crawl()` attaches its report to the test as `chaos-report.json`, so it is
 
 ```ts
 import { expect } from "@playwright/test";
-import { COMMON_IGNORE_PATTERNS, faults } from "chaosbringer";
+import { faults } from "chaosbringer";
 import { chaosTest } from "chaosbringer/fixture";
 
 chaosTest.use({
@@ -1338,9 +1379,8 @@ chaosTest.use({
     // wherever a random click would have gone.
     maxActionsPerPage: 0,
     faultInjection: [faults.status(503, { urlPattern: /\/api\/stock/ })],
-    // Chromium logs the injected 503 as a console error. That is the fault,
-    // not the page; ignore it and keep the default patterns.
-    ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "Failed to load resource.*503"],
+    // The console line Chromium logs for the injected 503 is the fault's
+    // echo, which strict does not count: no ignore pattern needed.
     strict: true,
   },
 });
@@ -1351,7 +1391,7 @@ chaosTest("stock page survives a down API", async ({ page, chaos }) => {
 });
 ```
 
-`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. With it, the console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") fails the test like any other, so a strict test of a status fault ignores that message, as above. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them, hence the spread. `lifecycleFaults` and `runtimeFaults` are accepted too. On `testPage()`, `faultInjection` rules are routed on your page and `runtimeFaults` are installed on it as an init script before it navigates; both stay on that page for the rest of the test. `testPage()` returns no report, so read the counters off the crawler: `chaos.crawler.getFaultStats()` for the network rules, `getRuntimeFaultStats()` for the runtime faults — which used to stay at zero on this path, whatever fired (as did `getIframeFaultStats()` on a `ChaosCrawler` of your own). The crawler leaves your context alone, so a request a service worker takes on your page never reaches a `faultInjection` rule (`result.serviceWorker` is `"unrouted"`; see [Service workers](#service-workers)): use `runtimeFaults`, or a context created with `serviceWorkers: "block"`.
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. The console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") is that fault's echo, which it does not count (see [Fault echoes](#fault-echoes)); `strictCountsFaultEchoes: true` counts it again. `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them: spread them in (`[...COMMON_IGNORE_PATTERNS, "…"]`) to add a pattern of your own. `lifecycleFaults` and `runtimeFaults` are accepted too. On `testPage()`, `faultInjection` rules are routed on your page and `runtimeFaults` are installed on it as an init script before it navigates; both stay on that page for the rest of the test. `testPage()` returns no report, so read the counters off the crawler: `chaos.crawler.getFaultStats()` for the network rules, `getRuntimeFaultStats()` for the runtime faults — which used to stay at zero on this path, whatever fired (as did `getIframeFaultStats()` on a `ChaosCrawler` of your own). The crawler leaves your context alone, so a request a service worker takes on your page never reaches a `faultInjection` rule (`result.serviceWorker` is `"unrouted"`; see [Service workers](#service-workers)): use `runtimeFaults`, or a context created with `serviceWorkers: "block"`.
 
 `chaosOptions` is checked for misspelled keys the way `ChaosCrawler` checks its options: `maxActionPerPage` or `stirct` throws `unknown chaosOptions key "stirct" — did you mean "strict"?` as the fixture is set up, and so does `runChaosTest()`. A `ChaosCrawler` option the fixture does not take (`timeout`, `iframeFaults`) throws too. Both used to be dropped without a word: the test ran with 5 actions a page, or without `strict`.
 
@@ -1408,7 +1448,7 @@ chaosbringer shard \
 
 All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are checked before any worker starts, with every check the main command makes before its browser starts (`--heatmap-top`, `--cluster-artifacts` without `--failure-artifacts`, the `--perf-budgets` file), so an unknown flag, a malformed value or a file it cannot use exits 2 once (`chaosbringer shard: unknown option --bogus`) instead of failing in every worker, and are then forwarded verbatim to each worker. Every worker gets the same `--seed`: the one given, or one drawn for the run. That is what makes the merged report's seed, and its `Repro:` line, hold for the whole run: `chaosbringer shard --count 4 --url … --seed 123 …` reruns every shard (it used to be shard 0's line, which reran shard 0 alone). `--quiet` prints the merged verdict, why it failed, the paths the workers wrote and `Merged report saved to:`, and `--compact` the merged compact report and the same lines, as the main command does; neither mixes in the rest of the workers' own output. The failure bundle line sums what the workers wrote to each directory (`Wrote 3 failure bundle(s) to ./failures/`); every shard crawls the base URL, so a failing base URL counts once per shard. `--junit`, `--heatmap-out` and the `--cluster-artifacts` bundles are written again from the merged report once the workers are done, so they cover the whole run rather than whichever shard wrote the shared path last, and their lines come in the main command's order (`JUnit XML saved to:` after `Merged report saved to:`). For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
 
-Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean. When every worker refused because nothing answered at `--url` (each prints its `could not reach …` line), no report is merged and the exit code is 2.
+Exit code is the max of any worker's exit code and the merged report's, by the exit rules forwarded to the workers (`--strict`, `--baseline-strict`, `--fail-on-http`, `--fail-on-network`, `--fail-on-dead-links`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean. When every worker refused because nothing answered at `--url` (each prints its `could not reach …` line), no report is merged and the exit code is 2.
 
 You can also run shards by hand (e.g. as separate CI matrix jobs):
 
@@ -1481,6 +1521,7 @@ chaosbringer --url http://localhost:3000 \
 | `--exclude <pattern>` | Skip URLs matching regex (repeatable) | — |
 | `--ignore-error <pattern>` | Suppress errors matching regex (repeatable) | — |
 | `--ignore-analytics` | Suppress common analytics noise† | false |
+| `--ignore-http <pattern>` | Request URLs (regex, repeatable) whose 4xx / 5xx answer is no HTTP error: not counted, and its "Failed to load resource" line dropped. See [HTTP errors](#http-errors) | — |
 | `--spa <pattern>` | Mark matching URLs as SPA (errors bucketed separately, repeatable) | — |
 | `--log-file <path>` | JSON execution log | — |
 | `--log-level <level>` | `debug` / `info` / `warn` / `error` | info |
@@ -1521,10 +1562,13 @@ chaosbringer --url http://localhost:3000 \
 | `--perf-out <dir>` | Write each page's full perf report (+ trace / coverage) to `<dir>`; implies `--perf` | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
-| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
+| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link, `::error` for what fails the run under its rules (and every JS exception) and `::warning` otherwise | false |
 | `--compact` | Compact output | false |
-| `--strict` | Fail on console errors, JS exceptions and unhandled rejections | false |
-| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
+| `--strict` | Fail on console errors, JS exceptions and unhandled rejections (not on the [echo of a fault](#fault-echoes) the run injected) | false |
+| `--fail-on-http <5xx\|4xx>` | Fail on a subresource / API response of 500 and up (`5xx`) or 400 and up (`4xx`). See [HTTP errors](#http-errors) | — |
+| `--fail-on-network` | Fail on a request that failed at the transport level (`net::ERR_…`; not the `ERR_ABORTED` of a stylesheet or script that answered 4xx / 5xx, which is an HTTP error) | false |
+| `--fail-on-dead-links` | Fail on a crawled link that answered 404 / 5xx | false |
+| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), any dead links (`Dead links: 1 (first: <url> <- <source>)`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
 | `--help`, `-h` | Show help, with a line for every subcommand | — |
 | `--version`, `-V` | Print the installed version | — |
 

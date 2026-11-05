@@ -211,6 +211,9 @@ const SCAN_CRAWLER_REPRO: {
   // `runScan` settles adaptively unless told otherwise.
   settle: (v) => v !== "adaptive",
   spaPatterns: (v) => v.length > 0,
+  ignoreHttpPatterns: (v) => v.length > 0,
+  // The fault crawls' echoes would be findings again.
+  strictCountsFaultEchoes: (v) => v,
   // Recording only writes a file.
   har: (v) => v.mode === "replay",
   performanceBudget: (v) => PERF_BUDGET_KEYS.some((k) => typeof v[k] === "number"),

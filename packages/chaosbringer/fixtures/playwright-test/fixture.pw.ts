@@ -86,6 +86,33 @@ chaosTest.describe("strict", () => {
   });
 });
 
+// Chromium's "Failed to load resource: … 503" for the injected status failed
+// a strict test of it, unless it hand-wrote an ignore pattern for the code.
+chaosTest.describe("strict with a status fault", () => {
+  const stockDown = faults.status(503, { urlPattern: /\/api\/stock/, name: "stock-down" });
+  chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, strict: true, faultInjection: [stockDown] } });
+
+  chaosTest("passes without an ignore pattern: the fault's echo is not the page's error", async ({ page, chaos }) => {
+    const result = await chaos.testPage(page, "/stock");
+    expect(result.errors.map((e) => [e.status, e.causedByFault])).toEqual([[503, "stock-down"]]);
+    expect(result.hasErrors).toBe(false);
+    // The assertions a strict test reaches for next: they threw on the echo.
+    chaos.expectNoErrors(result);
+    chaosExpect.toHaveNoErrors(result);
+    await expect(page.getByRole("status")).toHaveText("Stock unavailable");
+  });
+
+  chaosTest.describe("with strictCountsFaultEchoes", () => {
+    chaosTest.use({
+      chaosOptions: { ...LOAD_ONLY, maxPages: 1, strict: true, strictCountsFaultEchoes: true, faultInjection: [stockDown] },
+    });
+
+    chaosTest("fails on it, as before", async ({ page, chaos }) => {
+      await expect(chaos.testPage(page, "/stock")).rejects.toThrow(/fails under strict[\s\S]*Failed to load resource/);
+    });
+  });
+});
+
 chaosTest("without strict, the same error is only reported", async ({ chaos }) => {
   const report = await chaos.crawl("/boom");
   expect(report.summary.consoleErrors).toBe(1);
@@ -137,7 +164,7 @@ chaosTest.describe("chaosOptions reach the crawler", () => {
   chaosTest("in crawl()", async ({ chaos }) => {
     const report = await chaos.crawl("/stock");
     expect(report.seed).toBe(7);
-    expect(report.faultInjections).toEqual([{ rule: "stock-down", matched: 1, injected: 1 }]);
+    expect(report.faultInjections).toEqual([{ rule: "stock-down", matched: 1, injected: 1, echoes: 1 }]);
     expect(report.lifecycleFaults?.map((f) => [f.name, f.fired])).toEqual([["wipe", 1]]);
     expect(report.runtimeFaults?.map((f) => [f.rule, f.fired])).toEqual([["skew", 1]]);
     expect(report.pages[0]?.errors.map((e) => e.type)).toContain("invariant-violation");
@@ -146,7 +173,7 @@ chaosTest.describe("chaosOptions reach the crawler", () => {
   chaosTest("in testPage()", async ({ page, chaos }) => {
     const result = await chaos.testPage(page, "/stock");
     expect(chaos.crawler.getSeed()).toBe(7);
-    expect(chaos.crawler.getFaultStats()).toEqual([{ rule: "stock-down", matched: 1, injected: 1 }]);
+    expect(chaos.crawler.getFaultStats()).toEqual([{ rule: "stock-down", matched: 1, injected: 1, echoes: 1 }]);
     // It fired on this path before, and was counted only on crawl()'s.
     expect(chaos.crawler.getRuntimeFaultStats().map((f) => [f.rule, f.fired])).toEqual([["skew", 1]]);
     expect(result.errors.map((e) => e.message)).toContain("[stock-shown] no stock count");

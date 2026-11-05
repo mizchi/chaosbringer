@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import { fingerprintError, type ErrorCluster } from "./clusters.js";
 import { CRASHED_PAGE_ERROR, CRAWLER_NAVIGATION_ERROR, RENDERER_CRASHED, stripAnsi } from "./error-text.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import type {
   ClusterDiffEntry,
   CrawlReport,
@@ -57,12 +58,17 @@ function matchKey(c: ErrorCluster): string {
   return `${c.type}|${fingerprintError({ ...sample, type: c.type })}`;
 }
 
+/** A page's errors less the echoes of a fault the run injected, which no cluster or count holds either. */
+function appErrors(page: Pick<PageResult, "errors">): number {
+  return page.errors.filter((e) => !isFaultEcho(e)).length;
+}
+
 function pageFailed(page: Pick<PageResult, "status" | "errors">): boolean {
-  return page.errors.length > 0 || page.status === "error" || page.status === "timeout";
+  return appErrors(page) > 0 || page.status === "error" || page.status === "timeout";
 }
 
 function pageSummary(page: PageResult): PageDiffEntry["after"] {
-  return { errors: page.errors.length, status: page.status };
+  return { errors: appErrors(page), status: page.status };
 }
 
 export function diffReports(

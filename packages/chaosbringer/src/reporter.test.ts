@@ -158,6 +158,52 @@ describe("exitReasons", () => {
     expect(exitReasons(makeReport({ summary: makeSummary({ consoleErrors: 5 }) }))).toEqual([]);
   });
 
+  it("fails on HTTP errors, network errors and dead links only under the rule that asks, each named", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://x/p", undefined, {
+          errors: [
+            // A fault's echo is never the first one named.
+            { type: "console", message: "Failed to load resource: the server responded with a status of 503 (Service Unavailable)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/api/a", status: 503, method: "GET", causedByFault: "a-503" },
+            { type: "console", message: "Failed to load resource: the server responded with a status of 404 (Not Found)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/i.png", status: 404, method: "GET" },
+            { type: "console", message: "Failed to load resource: the server responded with a status of 502 (Bad Gateway)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/api/b", status: 502, method: "PUT" },
+            { type: "network", message: "http://x/api/c - net::ERR_CONNECTION_RESET", url: "http://x/p", timestamp: 0, method: "POST" },
+          ],
+        }),
+      ],
+      summary: makeSummary({
+        consoleErrors: 2,
+        networkErrors: 1,
+        httpErrors: { total: 2, "4xx": 1, "5xx": 1, byStatus: { "404": 1, "502": 1 } },
+        faultEchoes: 1,
+        discovery: {
+          extractedLinks: 1,
+          clickedLinks: 0,
+          uniquePages: 2,
+          deadLinks: [{ url: "http://x/gone", statusCode: 404, sourceUrl: "", method: "extracted" }],
+          spaIssues: [],
+        },
+      }),
+    });
+    expect(exitReasons(report)).toEqual([]);
+    expect(exitReasons(report, { http: "5xx", network: true, deadLinks: true })).toEqual([
+      "--fail-on-http 5xx: 1 HTTP response >= 500 (first: PUT http://x/api/b 502 on http://x/p)",
+      "--fail-on-network: 1 network error (first: POST http://x/api/c net::ERR_CONNECTION_RESET on http://x/p)",
+      "--fail-on-dead-links: 1 dead link (first: http://x/gone <- (initial))",
+    ]);
+    expect(exitReasons(report, { http: "4xx" })).toEqual([
+      "--fail-on-http 4xx: 2 HTTP responses >= 400 (first: GET http://x/i.png 404 on http://x/p)",
+    ]);
+    // No HTTP error of its level: nothing, and a report an older version wrote has no httpErrors at all.
+    expect(exitReasons({ summary: makeSummary({ httpErrors: { total: 1, "4xx": 1, "5xx": 0, byStatus: { "404": 1 } } }) }, { http: "5xx" })).toEqual([]);
+    expect(exitReasons({ summary: makeSummary() }, { http: "4xx" })).toEqual([]);
+    // Without pages, the count alone.
+    expect(exitReasons({ summary: report.summary }, { http: "5xx", network: true })).toEqual([
+      "--fail-on-http 5xx: 1 HTTP response >= 500",
+      "--fail-on-network: 1 network error",
+    ]);
+  });
+
   it("judges a report without pages, as the fixture's testPage() passes one", () => {
     // The Playwright fixture's strict check hands over a summary alone; the
     // verdict is the same, only the first failing URL goes unnamed.
@@ -440,6 +486,30 @@ describe("formatReport: fault injection block", () => {
     // Not a column on every row: `suppressed=0` everywhere is a column a
     // reader learns to skip, which is the opposite of the point.
     expect(text).not.toContain("first: matched=3 injected=2 suppressed=0");
+  });
+
+  it("names a rule's fault echoes, and the request and fault behind a failed load", () => {
+    const echo = {
+      type: "console" as const,
+      message: "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      url: "http://x/",
+      timestamp: 0,
+      resourceUrl: "http://x/api",
+      status: 503,
+      method: "POST",
+      causedByFault: "api-503",
+    };
+    const text = formatReport(
+      makeReport({
+        pages: [fakePage("http://x/", undefined, { errors: [echo] })],
+        summary: makeSummary({ faultEchoes: 1, httpErrors: { total: 0, "4xx": 0, "5xx": 0, byStatus: {} } }),
+        faultInjections: [{ rule: "api-503", matched: 1, injected: 1, echoes: 1 }],
+      }),
+    );
+    expect(text).toContain("api-503: matched=1 injected=1 echoes=1");
+    expect(text).toContain("Fault echoes (not counted above): 1");
+    expect(text).not.toContain("HTTP Errors");
+    expect(text).toContain(`  [console] ${echo.message.slice(0, 77)}... (echo of fault api-503)\n    resource: http://x/api (POST 503)\n`);
   });
 
   it("shows held requests, which used to be JSON-only", () => {

@@ -24,6 +24,7 @@ import { ChaosCrawler } from "./crawler.js";
 import { summarizePages } from "./filters.js";
 import { COMMON_IGNORE_PATTERNS } from "./ignore-presets.js";
 import { getExitCode } from "./reporter.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import type { ChaosTestOptions, CrawlerOptions, PageError, PageResult, CrawlReport } from "./types.js";
 import { validateChaosTestOptions } from "./validate.js";
 import { runRecipeWithRequires } from "./recipes/composition.js";
@@ -52,7 +53,7 @@ export interface ChaosFixture {
    */
   crawl(startUrl: string): Promise<CrawlReport>;
 
-  /** Assert no errors were found */
+  /** Assert no errors were found, the echo of a fault the run injected (`PageError.causedByFault`) aside. */
   expectNoErrors(result: PageResult | CrawlReport): void;
 
   /**
@@ -84,6 +85,7 @@ function crawlerOptions(options: ChaosTestOptions, baseUrl: string, maxPages: nu
     maxPages,
     maxActionsPerPage: options.maxActionsPerPage ?? 5,
     ignoreErrorPatterns: options.ignoreErrorPatterns ?? COMMON_IGNORE_PATTERNS,
+    strictCountsFaultEchoes: options.strictCountsFaultEchoes,
     blockExternalNavigation: options.blockExternalNavigation ?? true,
     actionWeights: options.actionWeights,
     perf: options.perf,
@@ -189,18 +191,21 @@ export function withChaos(defaultOptions: ChaosTestOptions = {}) {
         },
 
         expectNoErrors(result: PageResult | CrawlReport): void {
+          // The echo of a fault the test injected (`causedByFault`) is what
+          // the fault was for, as in the report's counts and `strict`.
           if ("pages" in result) {
             // CrawlReport
-            const allErrors = result.pages.flatMap((p) => p.errors);
+            const allErrors = result.pages.flatMap((p) => p.errors).filter((e) => !isFaultEcho(e));
             if (allErrors.length > 0) {
               const errorMessages = allErrors.map((e) => `[${e.type}] ${e.message}`).join("\n");
               throw new Error(`Found ${allErrors.length} errors:\n${errorMessages}`);
             }
           } else {
             // PageResult
-            if (result.errors.length > 0) {
-              const errorMessages = result.errors.map((e) => `[${e.type}] ${e.message}`).join("\n");
-              throw new Error(`Found ${result.errors.length} errors:\n${errorMessages}`);
+            const errors = result.errors.filter((e) => !isFaultEcho(e));
+            if (errors.length > 0) {
+              const errorMessages = errors.map((e) => `[${e.type}] ${e.message}`).join("\n");
+              throw new Error(`Found ${errors.length} errors:\n${errorMessages}`);
             }
           }
         },
@@ -421,15 +426,9 @@ export async function runChaosTest(
  */
 export const chaosExpect = {
   toHaveNoErrors(result: PageResult | CrawlReport) {
-    if ("pages" in result) {
-      const allErrors = result.pages.flatMap((p) => p.errors);
-      expect(allErrors, `Expected no errors but found: ${JSON.stringify(allErrors)}`).toHaveLength(0);
-    } else {
-      expect(
-        result.errors,
-        `Expected no errors but found: ${JSON.stringify(result.errors)}`
-      ).toHaveLength(0);
-    }
+    // Fault echoes (`causedByFault`) left out, as `expectNoErrors` does.
+    const errors = ("pages" in result ? result.pages.flatMap((p) => p.errors) : result.errors).filter((e) => !isFaultEcho(e));
+    expect(errors, `Expected no errors but found: ${JSON.stringify(errors)}`).toHaveLength(0);
   },
 
   toHaveNoExceptions(result: PageResult | CrawlReport) {

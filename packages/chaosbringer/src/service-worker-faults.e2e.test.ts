@@ -6,6 +6,7 @@ import { type Browser, chromium, type Page } from "playwright";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import { faultWarnings, unfiredFaults } from "./firings.js";
+import { getExitCode } from "./reporter.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 import type { CrawlReport, Invariant } from "./types.js";
 
@@ -43,13 +44,41 @@ const PAGE = `<!doctype html><title>sw</title><body><p id="out">pending</p><a hr
 })();
 </script></body>`;
 
+/**
+ * A page that registers the worker as PAGE does, then fetches each of
+ * `paths` in turn and shows `<status>:<body>` for each.
+ */
+const fetchesPage = (paths: string[]) => `<!doctype html><title>sw</title><body><p id="out">pending</p><script>
+(async () => {
+  if (!navigator.serviceWorker.controller) {
+    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    await new Promise((r) => navigator.serviceWorker.addEventListener("controllerchange", r, { once: true }));
+  }
+  const shown = [];
+  for (const path of ${JSON.stringify(paths)}) {
+    try {
+      const r = await fetch(path);
+      shown.push(r.status + ":" + (await r.text()));
+    } catch (e) {
+      shown.push("failed");
+    }
+  }
+  document.getElementById("out").textContent = shown.join(",");
+})();
+</script></body>`;
+
 // When its forwarded request fails, the worker says so to the server on a
-// request of its own, which no rule here matches.
+// request of its own, which no rule here matches. Under /api/fallback/ it
+// answers the failure with an offline fallback instead, as a PWA would.
 const WORKER = `self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (e) => {
   const path = new URL(e.request.url).pathname;
   if (!path.startsWith("/api/")) return;
+  if (path.startsWith("/api/fallback/")) {
+    e.respondWith(fetch(e.request).catch(() => new Response("offline-fallback", { status: 200 })));
+    return;
+  }
   e.respondWith(fetch(e.request).catch((err) => {
     fetch("/sw-report?failed=" + encodeURIComponent(path));
     throw err;
@@ -57,11 +86,11 @@ self.addEventListener("fetch", (e) => {
 });`;
 
 /** Waits for the page's fetch to settle and records what it showed. */
-function shown(into: string[]): Invariant {
+function shown(into: string[], urlPattern = /\/$/): Invariant {
   return {
     name: "fetched",
     when: "afterLoad",
-    urlPattern: /\/$/,
+    urlPattern,
     check: async ({ page }) => {
       await page.waitForFunction(() => document.getElementById("out")?.textContent !== "pending", null, {
         timeout: 10_000,
@@ -100,6 +129,12 @@ describe("network faults behind a service worker", () => {
         res.end("live");
         return;
       }
+      // A real 500, every time: what the app's own failure looks like.
+      if (path === "/api/real500" || path === "/api/fallback/real500") {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("real-500");
+        return;
+      }
       if (path === "/sw-report") {
         reports.push(req.url ?? "");
         res.writeHead(204);
@@ -112,7 +147,9 @@ describe("network faults behind a service worker", () => {
         return;
       }
       res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-      res.end(path === "/" ? PAGE : `<!doctype html><title>next</title><p>next</p>`);
+      if (path === "/twice") res.end(fetchesPage(["/api/real500", "/api/real500"]));
+      else if (path === "/fallback") res.end(fetchesPage(["/api/fallback/real500", "/api/fallback/real500"]));
+      else res.end(path === "/" ? PAGE : `<!doctype html><title>next</title><p>next</p>`);
     });
     base = server.url;
     dir = mkdtempSync(join(tmpdir(), "cb-sw-"));
@@ -141,9 +178,60 @@ describe("network faults behind a service worker", () => {
 
     // Before: matched 0, the page showed "api 200 live", and the server was hit.
     expect(seen).toEqual(["api 503 injected"]);
-    expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1 }]);
+    // The page's own request is not the worker's: its console line is the
+    // fault's echo by method and URL, once per firing.
+    expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1, echoes: 1 }]);
+    expect(report.pages[0]?.errors.map((e) => [e.type, e.status, e.causedByFault])).toEqual([["console", 503, "api-down"]]);
+    expect(report.errorClusters).toEqual([]);
     expect(apiHits).toBe(0);
     expect(report.pages[0]?.serviceWorker).toBe("routed");
+  }, 60_000);
+
+  it("tags one page request per firing: a real 500 the rule let through is no echo", async () => {
+    const seen: string[] = [];
+    const report = await new ChaosCrawler({
+      baseUrl: `${base}/twice`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      timeout: 10_000,
+      faultInjection: [
+        faults.status(503, { urlPattern: /\/api\/real500/, body: "injected", name: "sw-once", schedule: { decisions: ["inject", "pass"] } }),
+      ],
+      invariants: [shown(seen, /\/twice$/)],
+    }).start();
+
+    expect(seen).toEqual(["503:injected,500:real-500"]);
+    expect(report.faultInjections).toEqual([{ rule: "sw-once", matched: 2, injected: 1, echoes: 1 }]);
+    const lines = report.pages[0]!.errors.filter((e) => e.type === "console").map((e) => [e.status, e.causedByFault]);
+    expect(lines.sort()).toEqual([
+      [500, undefined],
+      [503, "sw-once"],
+    ]);
+    expect(report.summary.consoleErrors).toBe(1);
+    expect(report.errorClusters).toHaveLength(1);
+  }, 60_000);
+
+  it("tags nothing when the worker absorbed the fault: the next real 500 still fails strict", async () => {
+    // Before, the abort's firing waited for the next error from the URL and
+    // was spent on the server's real 500, on a request the rule let through.
+    const seen: string[] = [];
+    const report = await new ChaosCrawler({
+      baseUrl: `${base}/fallback`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      timeout: 10_000,
+      faultInjection: [
+        faults.abort({ urlPattern: /\/api\/fallback\/real500/, name: "api-abort", schedule: { decisions: ["inject", "pass"] } }),
+      ],
+      invariants: [shown(seen, /\/fallback$/)],
+    }).start();
+
+    expect(seen).toEqual(["200:offline-fallback,500:real-500"]);
+    expect(report.faultInjections).toEqual([{ rule: "api-abort", matched: 2, injected: 1 }]);
+    expect(report.pages[0]!.errors.map((e) => [e.type, e.status, e.causedByFault])).toEqual([["console", 500, undefined]]);
+    expect(report.summary.consoleErrors).toBe(1);
+    expect(getExitCode(report, { strict: true })).toBe(1);
+    expect(getExitCode(report, { http: "5xx" })).toBe(1);
   }, 60_000);
 
   it("releases an unbounded hang on the worker's request with the page", async () => {
@@ -239,7 +327,7 @@ describe("network faults behind a service worker", () => {
       }).start();
 
       expect(seen).toEqual(["api 503 injected"]);
-      expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1 }]);
+      expect(report.faultInjections).toEqual([{ rule: "api-down", matched: 1, injected: 1, echoes: 1 }]);
     }, 60_000);
 
     it("hands the HAR a worker's request no rule claims", async () => {

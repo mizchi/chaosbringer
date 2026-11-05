@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
 import { buildGithubAnnotations, formatGithubAnnotation, printGithubAnnotations } from "./github.js";
+import { getExitCode } from "./reporter.js";
 import type { CrawlReport, CrawlSummary, PageError } from "./types.js";
 
 function cluster(over: Partial<ErrorCluster> & { key: string; fingerprint: string; type: PageError["type"] }): ErrorCluster {
@@ -94,7 +95,32 @@ describe("buildGithubAnnotations", () => {
     expect(buildGithubAnnotations(report, { strict: true })[0]!.level).toBe("error");
   });
 
-  it("adds a separate error annotation for each dead link", () => {
+  it("annotates a cluster the baseline did not have as error under --baseline-strict, which fails the run on it", () => {
+    const fresh = cluster({ key: "console|new", type: "console", fingerprint: "new" });
+    const old = cluster({ key: "console|old", type: "console", fingerprint: "old" });
+    const report = makeReport({
+      errorClusters: [fresh, old],
+      diff: {
+        baselineSeed: 1,
+        newClusters: [{ key: fresh.key, type: "console", fingerprint: "new", before: 0, after: 1 }],
+        resolvedClusters: [],
+        unchangedClusters: [{ key: old.key, type: "console", fingerprint: "old", before: 1, after: 1 }],
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(getExitCode(report, { baselineStrict: true })).toBe(1);
+    expect(buildGithubAnnotations(report, { baselineStrict: true }).map((a) => a.level)).toEqual(["error", "warning"]);
+    expect(buildGithubAnnotations(report, {}).map((a) => a.level)).toEqual(["warning", "warning"]);
+  });
+
+  it("annotates a JS exception as error even on a run that exits 0", () => {
+    const report = makeReport({ errorClusters: [cluster({ key: "exception|e", type: "exception", fingerprint: "TypeError" })] });
+    expect(getExitCode(report, {})).toBe(0);
+    expect(buildGithubAnnotations(report, {})[0]!.level).toBe("error");
+  });
+
+  it("adds a separate annotation for each dead link: error only when --fail-on-dead-links fails the run on it", () => {
     const report = makeReport({
       summary: makeSummary({
         discovery: {
@@ -116,9 +142,11 @@ describe("buildGithubAnnotations", () => {
     });
     const out = buildGithubAnnotations(report);
     expect(out).toHaveLength(1);
-    expect(out[0]!.level).toBe("error");
+    // It was `error` on a run that exited 0.
+    expect(out[0]!.level).toBe("warning");
     expect(out[0]!.title).toContain("Dead link");
     expect(out[0]!.message).toContain("HTTP 404");
+    expect(buildGithubAnnotations(report, { deadLinks: true })[0]!.level).toBe("error");
   });
 
   it("includes cluster URL count in the message when multiple URLs are involved", () => {

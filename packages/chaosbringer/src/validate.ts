@@ -36,7 +36,8 @@ import { validatePerf } from "./perf-options.js";
  */
 export const KNOWN_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
-  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
+  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "ignoreHttpPatterns", "strictCountsFaultEchoes",
+  "spaPatterns", "viewport",
   "userAgent", "traceparent", "actionWeights", "ariaTargets", "bind", "logFile", "logLevel", "logToConsole",
   "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
@@ -66,7 +67,7 @@ void _allOptionsListed;
  */
 export const CHAOS_TEST_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "ignoreErrorPatterns", "blockExternalNavigation",
-  "strict", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
+  "strict", "strictCountsFaultEchoes", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults",
 ] as const;
 
@@ -92,12 +93,22 @@ function editDistance(a: string, b: string, cap = 3): number {
   return prev[b.length]!;
 }
 
+/**
+ * The keys `chaos()` takes beside `CrawlerOptions` and destructures out:
+ * no typo, though `strict` is a prefix of `strictCountsFaultEchoes`, and a
+ * caller may hand the same object straight to `ChaosCrawler`.
+ */
+const CHAOS_RUN_OPTION_NAMES = ["strict", "baseline", "baselineStrict", "setup", "failOnHttp", "failOnNetwork", "failOnDeadLinks"];
+
 function rejectNearMissOptions(
   options: object,
   names: readonly string[] = KNOWN_OPTION_NAMES,
   what = "option",
 ): void {
-  const known: ReadonlySet<string> = new Set<string>(names);
+  // The chaos() keys are suggested too: a typo'd `failOnHtp` reached the
+  // crawler, which ignored it, and the run passed without the gate.
+  const candidates = names === KNOWN_OPTION_NAMES ? [...names, ...CHAOS_RUN_OPTION_NAMES] : names;
+  const known: ReadonlySet<string> = new Set<string>(candidates);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
     const lower = key.toLowerCase();
@@ -107,13 +118,14 @@ function rejectNearMissOptions(
     // smaller edit distance.
     let suggestion: string | undefined;
     let best = Number.POSITIVE_INFINITY;
-    for (const name of names) {
+    for (const name of candidates) {
       const n = name.toLowerCase();
       // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
       // plural/singular slip (`faultInjections` for `faultInjection`).
       const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
       const distance = editDistance(lower, n, 2);
-      const score = prefix ? 0 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+      // Between two prefixes, the closer: `baselineStric` is `baselineStrict`, not `baseline`.
+      const score = prefix ? distance / 10 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
       if (score < best) {
         best = score;
         suggestion = name;
@@ -254,6 +266,13 @@ export function validateOptions(options: CrawlerOptions): void {
 
   for (const p of options.excludePatterns ?? []) assertRegexString(`excludePatterns entry`, p);
   for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
+  for (const p of options.ignoreHttpPatterns ?? []) assertRegexString(`ignoreHttpPatterns entry`, p);
+  // A string "false" would turn it on.
+  if (options.strictCountsFaultEchoes !== undefined && typeof options.strictCountsFaultEchoes !== "boolean") {
+    throw new Error(
+      `chaosbringer: "strictCountsFaultEchoes" must be a boolean (got ${JSON.stringify(options.strictCountsFaultEchoes)})`,
+    );
+  }
   for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
   for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {
