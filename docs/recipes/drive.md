@@ -63,6 +63,43 @@ decider is asked at most `max-steps × 3` times.
 `--exclude` URLs are never reached. A link to one is refused, and a step that
 lands on one is undone with a history back.
 
+## The crawl's flags
+
+`drive` takes these flags of the main crawl, parsed and checked as the crawl
+checks them (`DRIVE_CRAWL_FLAGS`; `drive --help` prints the same list): an
+invalid regex, an unknown device or a missing file is refused before the
+browser starts, exit 2.
+
+`--timeout`, `--settle`, `--headless`, `--no-headless`, `--exclude`,
+`--ignore-error`, `--ignore-analytics`, `--ignore-preset`, `--storage-state`,
+`--har-replay`, `--device`, `--network`, `--bind`, `--bind-title`
+
+Where they fit a drive, they mean what they mean in a crawl:
+
+- `--timeout <ms>` is a navigation's: the start page's load, and one a step
+  starts.
+- `--settle adaptive` or `--settle <ms>` sets the quiet window of the adaptive
+  settle drive runs after every step (no request in flight, no long task).
+  `--settle networkidle` is refused: drive never settles that way.
+- `--ignore-error`, `--ignore-analytics` and `--ignore-preset` drop the
+  problems whose message they match, from the summary, the report and what
+  the model is shown.
+- `--device` emulates a Playwright device, `--network` throttles with a CDP
+  preset, and `--har-replay` answers requests from a HAR (what it has no entry
+  for goes to the network).
+
+With `--chaos`, the replays take `--storage-state`, `--device`, `--timeout`
+and the ignore flags too, but not `--har-replay` or `--network`: they would
+answer or slow the very API calls the faults are aimed at.
+
+Left out, because a drive has no use for them: `--seed`, `--max-pages` and
+`--max-actions` (a decider picks each action, up to `--max-steps`, not a
+random driver), `--spa`, `--ignore-http`, `--no-http-cache` and the
+`--invariants`, `--axe`, `--strict` and `--fail-on-*` flags (drive's verdict
+is its goal; it collects problems but judges no page), `--trace-out` /
+`--trace-replay` (a drive is recorded as a recipe, and replayed by
+`recipes verify`), and the output and perf flags.
+
 ## What it produces
 
 - **A recipe** for a run that reached its goal. Each control is recorded by a
