@@ -48,10 +48,9 @@ import {
   type UsageError,
   usageErrorMessage,
 } from "./cli-usage.js";
-import { diffReports, loadBaseline } from "./diff.js";
 import { printGithubAnnotations } from "./github.js";
 import { type ExitCodeOptions, formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
-import { addRunWarning, baselineMissingWarning } from "./run-warnings.js";
+import { applyBaseline } from "./run-warnings.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -227,8 +226,9 @@ OPTIONS:
                         not a 4xx / 5xx file's ERR_ABORTED, which is an HTTP error)
   --fail-on-dead-links  Fail on a crawled link that answered 404 / 5xx
   --fail-on-warnings    Fail on a run with warnings: what made it test less than it was set
-                        up to (a fault rule that never fired, a sitemap that could not be
-                        read, a --network profile that failed, a missing --baseline)
+                        up to (a --seed-from-sitemap that could not be read or listed no
+                        URL, a --network profile or --no-http-cache that did not apply, a
+                        missing --baseline)
   --quiet               Print only the verdict, why a run failed, and the paths written
   --help, -h            Show this help
   --version, -V         Print the version
@@ -394,21 +394,14 @@ async function main() {
       process.exit(2);
     }
 
-    if (baselinePath) {
-      const prev = loadBaseline(baselinePath);
-      if (prev) {
-        report.diff = diffReports(prev, report, { baselinePath });
-      } else if (baselineMissing === "fail") {
-        // Checked before the browser started; gone since.
-        console.error(`chaosbringer: --baseline ${baselinePath}: not found, and --baseline-missing fail refuses a run without it`);
-        process.exit(2);
-      } else {
-        // First CI run won't have a baseline yet. Warn, but keep going — the
-        // report we write here becomes the baseline for next time. A
-        // `report.warnings` entry, so --quiet shows it too (the stderr line it
-        // was left out there) and --fail-on-warnings can refuse it.
-        addRunWarning((report.warnings ??= []), baselineMissingWarning(baselinePath));
-      }
+    // A missing baseline: the first CI run won't have one yet. A warning, and
+    // keep going (the report we write here becomes the baseline for next
+    // time); a `report.warnings` entry, so --quiet shows it too (the stderr
+    // line it was left out there) and --fail-on-warnings can refuse it.
+    if (applyBaseline(report, baselinePath, baselineMissing) === "refuse") {
+      // Checked before the browser started; gone since.
+      console.error(`chaosbringer: --baseline ${baselinePath}: not found, and --baseline-missing fail refuses a run without it`);
+      process.exit(2);
     }
 
     // Print report first, then save + announce the file. This way the main

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { compositeDriver, samplingDriver } from "./drivers/composite.js";
 import { flowDriver } from "./drivers/flow-driver.js";
 import type { DriverStep } from "./drivers/types.js";
@@ -6,7 +6,18 @@ import { isWebSocketOnlyPattern } from "./fault-router.js";
 import { faultRunWarnings, faultWarnings, unfiredFaults } from "./firings.js";
 import { buildGithubAnnotations } from "./github.js";
 import { exitReasons, formatCompactReport, formatQuietReport, formatReport, getExitCode } from "./reporter.js";
-import { addRunWarning, mergeRunWarnings, RUN_WARNING_CODES, type RunWarning } from "./run-warnings.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  addRunWarning,
+  applyBaseline,
+  END_STATE_WARNING_CODES,
+  mergeRunWarnings,
+  RUN_WARNING_CODES,
+  warningsRaisedSince,
+  type RunWarning,
+} from "./run-warnings.js";
 import { mergeReports } from "./shard.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
 
@@ -86,6 +97,63 @@ describe("addRunWarning / mergeRunWarnings", () => {
 
   it("lists every code once", () => {
     expect(new Set(RUN_WARNING_CODES).size).toBe(RUN_WARNING_CODES.length);
+    for (const code of END_STATE_WARNING_CODES) expect(RUN_WARNING_CODES).toContain(code);
+  });
+});
+
+describe("warningsRaisedSince", () => {
+  const threw: RunWarning = { code: "lifecycle-fault-failed", message: "t", count: 1 };
+  const unmatched: RunWarning = { code: "fault-unmatched", message: "u", count: 1, rule: "r" };
+
+  // The fixture's testPage(): a rule aimed at the test's next page has not
+  // fired yet, which is not this page's finding.
+  it("is what the run raised in between, not what its end state says so far", () => {
+    expect(warningsRaisedSince([], [unmatched, threw])).toEqual([threw]);
+    expect(warningsRaisedSince([threw], [unmatched, { ...threw, count: 3 }])).toEqual([{ ...threw, count: 2 }]);
+    expect(warningsRaisedSince([threw], [threw])).toEqual([]);
+  });
+});
+
+describe("applyBaseline", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "cb-apply-baseline-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("diffs against a baseline that is there, and does nothing without one", () => {
+    const present = join(dir, "prev.json");
+    writeFileSync(present, JSON.stringify(report()));
+    const r = report({ warnings: [] });
+    expect(applyBaseline(r, present, "fail")).toBeUndefined();
+    expect([r.diff?.baselinePath, r.warnings]).toEqual([present, []]);
+    const none = report({ warnings: [] });
+    expect(applyBaseline(none, undefined, "fail")).toBeUndefined();
+    expect([none.diff, none.warnings]).toEqual([undefined, []]);
+  });
+
+  it("warns on a missing one, or says refuse under fail", () => {
+    const missing = join(dir, "nope.json");
+    const r = report();
+    expect(applyBaseline(r, missing)).toBeUndefined();
+    expect(r.warnings?.map((w) => [w.code, w.source])).toEqual([["baseline-missing", missing]]);
+    expect(applyBaseline(report(), missing, "fail")).toBe("refuse");
+  });
+
+  // `--baseline "$PREV"` with PREV unset skipped the diff without a word, so
+  // --baseline-strict and --fail-on-warnings both passed a CI cache miss.
+  it("counts a given but empty path as missing", () => {
+    const r = report({ warnings: [] });
+    expect(applyBaseline(r, "")).toBeUndefined();
+    expect(r.warnings).toEqual([
+      {
+        code: "baseline-missing",
+        message: expect.stringMatching(/^baseline "" \(an empty path\) not found, so no diff was made/),
+        source: "",
+        count: 1,
+      },
+    ]);
+    expect(applyBaseline(report(), "  ", "fail")).toBe("refuse");
   });
 });
 
@@ -98,7 +166,11 @@ describe("faultRunWarnings", () => {
       ],
       runtimeFaults: [{ rule: "rt", matched: 0, fired: 0 }],
       lifecycleFaults: [{ name: "lc", matched: 2, fired: 0, errored: 2 }],
-      iframeFaults: [{ rule: "if", selector: "iframe", action: "never-load", matched: 0, fired: 0 } as never],
+      iframeFaults: [
+        { rule: "if", selector: "iframe", action: "never-load", matched: 0, fired: 0 } as never,
+        // No counters: a hand-built row, or one an older version wrote.
+        { rule: "bare", selector: "iframe", action: "never-load" } as never,
+      ],
     });
     const warnings = faultRunWarnings(r);
     expect(warnings.map((w) => w.message)).toEqual(unfiredFaults(r));
@@ -108,9 +180,10 @@ describe("faultRunWarnings", () => {
       ["fault-unmatched", "runtime", "rt"],
       ["fault-unfired", "lifecycle", "lc"],
       ["fault-unmatched", "iframe", "if"],
+      ["fault-uncounted", "iframe", "bare"],
     ]);
     // A lifecycle fault that threw was not declined by its policy.
-    expect(warnings[3]?.message).toBe('lifecycle fault "lc" matched 2x and never fired — it threw 2 time(s) (the lifecycle_fault_failed log events have why)');
+    expect(warnings[3]?.message).toBe('lifecycle fault "lc" matched 2x and never fired — it threw 2 time(s) (its lifecycle-fault-failed warnings say why)');
     expect(warnings[1]?.message).toContain("the firing policy said no; 1 decision(s) lost to a rule ahead of it");
   });
 
@@ -226,8 +299,12 @@ describe("mergeReports' warnings", () => {
       runtimeFaults: [{ rule: "rt", matched: 1, fired: 1 }],
       warnings: [{ ...sitemap }],
     });
+    a.iframeFaults = [{ rule: "if", selector: "iframe", action: "never-load", matched: 1, fired: 1, suppressed: 1 } as never];
+    b.iframeFaults = [{ rule: "if", selector: "iframe", action: "never-load", matched: 2, fired: 1, suppressed: 2 } as never];
     const merged = mergeReports([a, b]);
     expect(merged.runtimeFaults).toEqual([{ rule: "rt", matched: 2, fired: 1 }]);
+    // Every shard's `suppressed`, not the first one's.
+    expect(merged.iframeFaults?.map((f) => [f.matched, f.fired, f.suppressed])).toEqual([[3, 2, 3]]);
     expect(merged.warnings).toEqual([
       { ...sitemap, count: 2 },
       {

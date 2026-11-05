@@ -169,6 +169,7 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   const iframeFaults = sumByName(reports.map((r) => r.iframeFaults), (f) => f.rule, (a, b) => {
     a.matched += b.matched;
     a.fired += b.fired;
+    if (b.suppressed) a.suppressed = (a.suppressed ?? 0) + b.suppressed;
   });
   const warnings = mergeShardWarnings(reports, {
     faultInjections,

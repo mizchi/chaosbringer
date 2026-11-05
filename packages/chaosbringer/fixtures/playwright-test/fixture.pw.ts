@@ -128,11 +128,25 @@ chaosTest.describe("warnings", () => {
   chaosTest.describe("with failOnWarnings", () => {
     chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, failOnWarnings: true, faultInjection: [dead] } });
 
-    chaosTest("fails crawl() and testPage() on them", async ({ page, chaos }) => {
+    chaosTest("fails crawl() on them", async ({ chaos }) => {
       await expect(chaos.crawl("/")).rejects.toThrow(
         /fails under failOnWarnings[\s\S]*\[fault-unmatched\] network fault "dead" never matched anything/,
       );
-      await expect(chaos.testPage(page, "/about")).rejects.toThrow(/chaos\.testPage\(.*\/about\) fails under failOnWarnings/);
+    });
+
+    // testPage() failed on the first page for a rule aimed at the second,
+    // which had not fired yet: the counters so far are no finding about one page.
+    chaosTest.describe("on a rule aimed at a later testPage()", () => {
+      const stock = faults.status(503, { urlPattern: /\/api\/stock$/, name: "stock-503" });
+      chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, failOnWarnings: true, faultInjection: [stock] } });
+
+      chaosTest("fails neither testPage(), and chaos.warnings() has what is left", async ({ page, chaos }) => {
+        await chaos.testPage(page, "/about");
+        expect(chaos.warnings().map((w) => [w.code, w.rule])).toEqual([["fault-unmatched", "stock-503"]]);
+        await chaos.testPage(page, "/stock");
+        expect(chaos.crawler.getFaultStats()).toEqual([expect.objectContaining({ rule: "stock-503", matched: 1, injected: 1 })]);
+        expect(chaos.warnings()).toEqual([]);
+      });
     });
   });
 });

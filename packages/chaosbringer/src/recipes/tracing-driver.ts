@@ -174,6 +174,11 @@ export function tracingDriver(opts: TracingDriverOptions): TracingDriver {
     onPageEnd(url: string): void {
       opts.inner.onPageEnd?.(url);
     },
+    // The inner driver's journeys, so a recorded `flowDriver` that ended
+    // mid-flow is still a `flow-incomplete` warning.
+    stats() {
+      return opts.inner.stats?.() ?? [];
+    },
     getTrace(): ActionTrace {
       // Lazy-init so callers (e.g. `investigate()`) can finalise the
       // trace before the inner driver ever runs.

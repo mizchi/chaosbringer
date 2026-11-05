@@ -10,9 +10,8 @@ import { ChaosCrawler } from "./crawler.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
 import { getExitCode, HTTP_FAIL_LEVELS, type HttpFailLevel } from "./reporter.js";
 import {
-  addRunWarning,
+  applyBaseline,
   BASELINE_MISSING_MODES,
-  baselineMissingWarning,
   type BaselineMissingMode,
   type RunWarning,
 } from "./run-warnings.js";
@@ -146,7 +145,8 @@ export async function chaos(
   }
   const refuseMissingBaseline = (path: string | undefined) =>
     new Error(
-      `chaosbringer: baseline ${path ?? "(none given)"} not found, and baselineMissing: "fail" refuses a run without one ` +
+      `chaosbringer: baseline ${path === undefined ? "(none given)" : path.trim() === "" ? `${JSON.stringify(path)} (an empty path)` : path} ` +
+        `not found, and baselineMissing: "fail" refuses a run without one ` +
         `(use "warn" for the first run, whose report becomes the baseline)`,
     );
   if (baselineMissing === "fail" && (!baseline || !existsSync(baseline))) throw refuseMissingBaseline(baseline);
@@ -167,17 +167,8 @@ export async function chaos(
   const report = await crawler.start();
   const warnings = (report.warnings ??= []);
 
-  if (baseline) {
-    const prev = loadBaseline(baseline);
-    if (prev) {
-      report.diff = diffReports(prev, report, { baselinePath: baseline });
-    } else if (baselineMissing === "fail") {
-      // Checked before the run; removed while it ran.
-      throw refuseMissingBaseline(baseline);
-    } else {
-      addRunWarning(warnings, baselineMissingWarning(baseline));
-    }
-  }
+  // A missing one under "fail" was checked before the run; removed while it ran.
+  if (applyBaseline(report, baseline, baselineMissing) === "refuse") throw refuseMissingBaseline(baseline);
 
   const exitCode = getExitCode(report, {
     strict,

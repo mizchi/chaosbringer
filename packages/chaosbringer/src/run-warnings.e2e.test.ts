@@ -14,12 +14,14 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { faults } from "@mizchi/playwright-faults";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chaos } from "./chaos.js";
+import { CoverageCollector } from "./coverage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { flowDriver } from "./drivers/flow-driver.js";
 import type { Driver } from "./drivers/types.js";
 import { unfiredFaults } from "./firings.js";
+import { PlaywrightLifecycleExecutor } from "./lifecycle-faults.js";
 import { exitReasons } from "./reporter.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 import type { CrawlerOptions } from "./types.js";
@@ -54,6 +56,10 @@ describe("report.warnings", () => {
           const ws = new WebSocket("ws://" + location.host + "/ws");
           ws.onopen = () => { document.getElementById("s").textContent = "open"; window.__cb_ws_open = 1; };
         </script>`);
+        return;
+      }
+      if (path === "/button") {
+        res.end(`<!doctype html><title>button</title><button type="button" onclick="window.__cb_clicked = 1">go</button>`);
         return;
       }
       res.end(`<!doctype html><title>plain</title><p>nothing to do here</p>`);
@@ -163,6 +169,8 @@ describe("report.warnings", () => {
         faultInjection: [
           faults.abort({ urlPattern: /\/ws$/, name: "ws-path" }),
           faults.abort({ urlPattern: "^wss?://", name: "ws-scheme" }),
+          // Dead too, but not for that reason: the socket's URL is not its.
+          faults.abort({ urlPattern: /nope\.invalid/, name: "unrelated" }),
         ],
       }),
     ).start();
@@ -172,10 +180,12 @@ describe("report.warnings", () => {
     expect(report.faultInjections).toEqual([
       { rule: "ws-path", matched: 0, injected: 0, webSocket: { connections: 1, first: wsUrl, webSocketOnly: false } },
       { rule: "ws-scheme", matched: 0, injected: 0, webSocket: { connections: 1, first: wsUrl, webSocketOnly: true } },
+      { rule: "unrelated", matched: 0, injected: 0 },
     ]);
     expect(report.warnings?.map((w) => [w.code, w.rule])).toEqual([
       ["fault-websocket", "ws-path"],
       ["fault-websocket", "ws-scheme"],
+      ["fault-unmatched", "unrelated"],
     ]);
     expect(report.warnings?.[0]?.message).toBe(
       `network fault "ws-path" never matched anything, and the run's pages opened 1 WebSocket connection(s) its pattern ` +
@@ -221,6 +231,67 @@ describe("report.warnings", () => {
     const far: Driver = { name: "far", selectAction: async () => ({ kind: "select", index: 999 }) };
     const outOfRange = await new ChaosCrawler(opts({ maxActionsPerPage: 1, driver: far })).start();
     expect(outOfRange.warnings?.map((w) => [w.code, w.count])).toEqual([["driver-out-of-range", 3]]);
+
+    const hook: Driver = {
+      name: "hook",
+      selectAction: async () => ({ kind: "select", index: 0 }),
+      onActionComplete: () => {
+        throw new Error("bookkeeping broke");
+      },
+    };
+    const hookThrew = await new ChaosCrawler(opts({ baseUrl: `${server.url}/button`, maxActionsPerPage: 1, driver: hook })).start();
+    expect(hookThrew.warnings?.map((w) => [w.code, w.message])).toEqual([
+      ["driver-threw", 'driver "hook" threw in onActionComplete (bookkeeping broke)'],
+    ]);
+  }, 120_000);
+
+  it("says nothing on a flow that finished, and names the step a halted one threw at", async () => {
+    const done = await new ChaosCrawler(
+      opts({ maxActionsPerPage: 1, driver: flowDriver({ name: "ok", steps: [{ name: "only", run: async () => {} }] }) }),
+    ).start();
+    expect(done.warnings).toEqual([]);
+
+    const halted = await new ChaosCrawler(
+      opts({
+        maxActionsPerPage: 1,
+        driver: flowDriver({
+          name: "co",
+          steps: [
+            {
+              name: "pay",
+              run: async () => {
+                throw new Error("declined");
+              },
+            },
+          ],
+        }),
+      }),
+    ).start();
+    expect(halted.warnings).toEqual([
+      { code: "flow-incomplete", message: 'flow "co" stopped at step 0/1, "pay", which threw: declined', driver: "co", count: 1 },
+    ]);
+  }, 120_000);
+
+  it("names a lifecycle fault that threw, with why, and a coverage attach that failed", async () => {
+    const lifecycle = vi.spyOn(PlaywrightLifecycleExecutor.prototype, "clearStorage").mockRejectedValue(new Error("storage gone"));
+    const coverage = vi.spyOn(CoverageCollector.prototype, "start").mockRejectedValue(new Error("Profiler unavailable"));
+    try {
+      const report = await new ChaosCrawler(
+        opts({
+          coverageFeedback: { enabled: true },
+          lifecycleFaults: [{ name: "wipe", when: "afterLoad", action: { kind: "clear-storage", scopes: ["localStorage"] } }],
+        }),
+      ).start();
+      expect(report.lifecycleFaults).toEqual([{ name: "wipe", matched: 1, fired: 0, errored: 1 }]);
+      expect(report.warnings?.map((w) => [w.code, w.message])).toEqual([
+        ["coverage-attach-failed", "coverageFeedback could not attach to a page (Profiler unavailable), so that page's actions earned no coverage credit"],
+        ["lifecycle-fault-failed", 'lifecycle fault "wipe" threw while firing (storage gone), so the page ran without it'],
+        ["fault-unfired", 'lifecycle fault "wipe" matched 1x and never fired — it threw 1 time(s) (its lifecycle-fault-failed warnings say why)'],
+      ]);
+    } finally {
+      lifecycle.mockRestore();
+      coverage.mockRestore();
+    }
   }, 120_000);
 
   describe("chaos()", () => {
@@ -274,6 +345,12 @@ describe("report.warnings", () => {
         }),
       ).rejects.toThrow(`chaosbringer: baseline ${missing} not found, and baselineMissing: "fail" refuses a run without one`);
       expect(setupRan).toBe(false);
+      await expect(chaos({ baseUrl: `${server.url}/`, baselineMissing: "fail" })).rejects.toThrow(
+        'chaosbringer: baseline (none given) not found, and baselineMissing: "fail" refuses a run without one',
+      );
+      await expect(chaos({ baseUrl: `${server.url}/`, baseline: "", baselineMissing: "fail" })).rejects.toThrow(
+        'chaosbringer: baseline "" (an empty path) not found, and baselineMissing: "fail" refuses',
+      );
       await expect(chaos({ baseUrl: `${server.url}/`, baselineMissing: "nope" as never })).rejects.toThrow(
         /"baselineMissing" must be one of warn, fail/,
       );

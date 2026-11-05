@@ -261,3 +261,16 @@ describe("tracingDriver", () => {
     expect(driver.getTrace().steps.length).toBe(0);
   });
 });
+
+describe("tracingDriver stats()", () => {
+  const goal: Goal = { name: "g", persona: "p", objective: "o", successCheck: async () => false };
+
+  // repair() and investigate() wrap the user's driver in one: a flowDriver
+  // that ended mid-journey lost its `flow-incomplete` warning there.
+  it("forwards the inner driver's journeys", () => {
+    const journey = { driver: "checkout", completed: 0, total: 1, laps: 0, next: "pay" };
+    const inner: Driver = { ...scriptedDriver([]), stats: () => [journey] };
+    expect(tracingDriver({ inner, goal }).stats?.()).toEqual([journey]);
+    expect(tracingDriver({ inner: scriptedDriver([]), goal }).stats?.()).toEqual([]);
+  });
+});

@@ -223,7 +223,7 @@ function diagnoseFaults(report: FaultStatsReport): FaultDiagnosis[] {
       // knob.
       const because =
         f.errored > 0
-          ? ` — it threw ${f.errored} time(s) (the lifecycle_fault_failed log events have why)`
+          ? ` — it threw ${f.errored} time(s) (its lifecycle-fault-failed warnings say why)`
           : ` — the firing policy said no${f.suppressed > 0 ? `; ${f.suppressed} decision(s) lost to a rule ahead of it` : ""}`;
       out.push({
         firing: f,

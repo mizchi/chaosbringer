@@ -535,7 +535,7 @@ export class ChaosCrawler {
     } else {
       this.logger = createNullLogger();
     }
-    this.perf = new CrawlPerf(perfOptions, this.logger, this.options.perfBudgets);
+    this.perf = new CrawlPerf(perfOptions, (event, data, warning) => this.warn(event, data, warning), this.options.perfBudgets);
   }
 
   /** Seed used for this run (useful for reproducing failures). */
@@ -1560,11 +1560,15 @@ export class ChaosCrawler {
         this.perf.noteFault(c.name, { persistent: true });
       } catch (err) {
         c.errored++;
-        this.logger.warn("lifecycle_fault_failed", {
-          name: c.name,
-          stage,
+        // A warning, so the reason is in the report: the stats row counts
+        // the throw and nothing more, and the logger writes nowhere by default.
+        const reason = errorMessage(err);
+        this.warn("lifecycle_fault_failed", { name: c.name, stage, url, reason }, {
+          code: "lifecycle-fault-failed",
+          message: `lifecycle fault "${c.name}" threw while firing (${reason}), so the page ran without it`,
+          rule: c.name,
+          layer: "lifecycle",
           url,
-          reason: errorMessage(err),
         });
       }
     }
@@ -1933,9 +1937,11 @@ export class ChaosCrawler {
         this.coverageCollector = new CoverageCollector(cdp);
         await this.coverageCollector.start();
       } catch (err) {
-        this.logger.warn("coverage_attach_failed", {
+        const reason = errorMessage(err);
+        this.warn("coverage_attach_failed", { url, reason }, {
+          code: "coverage-attach-failed",
+          message: `coverageFeedback could not attach to a page (${reason}), so that page's actions earned no coverage credit`,
           url,
-          reason: errorMessage(err),
         });
         this.coverageCollector = null;
       }

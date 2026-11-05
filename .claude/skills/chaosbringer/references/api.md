@@ -384,6 +384,8 @@ or hand them to `unfiredFaults` with the result:
 `unfiredFaults({ faultInjections: crawler.getFaultStats(), pages: [result] })`.
 `chaos.warnings()` (`crawler.getWarnings()`) has the run's warnings so far;
 `chaosOptions.failOnWarnings` fails the test on them, `strict` alone does not.
+On `testPage()` it fails only on what that call raised: a fault rule aimed at
+a later `testPage()` has not fired yet, so check `chaos.warnings()` at the end.
 The crawler leaves your context alone, so on a page a service worker controls
 the network rules see none of the requests the worker takes:
 `result.serviceWorker` is `"unrouted"` and `unfiredFaults` names the worker

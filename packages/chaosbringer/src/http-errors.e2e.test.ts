@@ -316,6 +316,8 @@ describe("the echo of a fault the run injected", () => {
     expect(resourceLines(report).map((e) => [e.status, e.causedByFault])).toEqual([[503, "server:5xx"]]);
     expect(report.serverFaults?.map((e) => e.attrs.kind)).toEqual(["5xx"]);
     expect(passed).toBe(true);
+    // The server sent its x-chaos-fault-* headers: no `server-faults-unseen`.
+    expect(report.warnings).toEqual([]);
   }, 60_000);
 
   it("strictCountsFaultEchoes counts the echo as before: untagged, clustered, failing strict", async () => {

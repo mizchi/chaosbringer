@@ -183,7 +183,7 @@ await chaos({
 });
 ```
 
-A journey that ends before its last step (a step whose `urlPattern` / `when` never matched a page the crawl reached, or a non-`optional` step that threw) is a `flow-incomplete` entry of `report.warnings`: `flow "flow(3)" ended at step 1/3: "verify" never ran, …`. `flowDriver(...).stats()` returns how far it got (`{ driver, completed, total, laps, next?, halted? }`), and the combinators forward their children's (`Driver.stats()`), which is what the crawler reads. A driver whose `selectAction` throws, or that picks an index outside the candidates, is a `driver-threw` / `driver-out-of-range` warning, once however many steps it happened on. Pass `failOnWarnings: true` to fail the run on them.
+A journey that ends before its last step (a step whose `urlPattern` / `when` never matched a page the crawl reached, or a non-`optional` step that threw) is a `flow-incomplete` entry of `report.warnings`: `flow "flow(3)" ended at step 1/3: "verify" never ran, …`. `flowDriver(...).stats()` returns how far it got (`{ driver, completed, total, laps, next?, halted? }`), and the combinators forward their children's (`Driver.stats()`), which is what the crawler reads. A driver whose `selectAction` throws, or that picks an index outside the candidates, is a `driver-threw` / `driver-out-of-range` warning. Identical ones fold into one entry with a `count`: an out-of-range pick is one entry however many steps it happened on, and a driver that throws is one per distinct error message (an error that names a request id or an elapsed time is one entry each time). `tracingDriver` (and so `repair()` / `investigate()`) forwards its inner driver's `stats()` too. Pass `failOnWarnings: true` to fail the run on them.
 
 ### Parallel drivers — different bug classes in one wall-clock window
 
@@ -208,7 +208,7 @@ console.log(out.merged.totalErrors, "errors across all shards");
 process.exit(out.exitCode);
 ```
 
-Each shard runs in its own browser with its own RNG and driver instance — there is intentionally **no shared state** between shards. Budgets (`DriverBudget`, `maxUsd`) apply per-shard; if you want a strict global cap, divide it by `shards.length` up front.
+Each shard runs in its own browser with its own RNG and driver instance — there is intentionally **no shared state** between shards. Under `failOnWarnings` the run's [warnings](../../packages/chaosbringer/README.md#run-warnings-reportwarnings) are judged on `out.merged`, not per shard: a fault rule aimed at the pages one shard crawled matched nothing on the others, which is no finding once the merge has summed the fault stats. Budgets (`DriverBudget`, `maxUsd`) apply per-shard; if you want a strict global cap, divide it by `shards.length` up front.
 
 ## Authoring a custom driver
 
