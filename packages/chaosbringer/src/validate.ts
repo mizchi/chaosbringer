@@ -103,6 +103,37 @@ const CHAOS_RUN_OPTION_NAMES = [
   "failOnWarnings",
 ];
 
+/**
+ * The name in `candidates` that `key` most likely misspells, or undefined
+ * when none is close: a prefix of a real name either way round
+ * (`maxActions` for `maxActionsPerPage`, a plural/singular slip), else one
+ * at most two edits away. Case is ignored. The options check below and the
+ * CLI's unknown-flag message (`--exlude`: did you mean `--exclude`?) both
+ * use it.
+ */
+export function nearestName(key: string, candidates: readonly string[]): string | undefined {
+  const lower = key.toLowerCase();
+  // Rank rather than take the first hit: in list order, `shard` matched
+  // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
+  // makes no sense is worse than none. Prefix relationships win, then the
+  // smaller edit distance.
+  let suggestion: string | undefined;
+  let best = Number.POSITIVE_INFINITY;
+  for (const name of candidates) {
+    const n = name.toLowerCase();
+    if (n === lower) return name;
+    const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
+    const distance = editDistance(lower, n, 2);
+    // Between two prefixes, the closer: `baselineStric` is `baselineStrict`, not `baseline`.
+    const score = prefix ? distance / 10 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+    if (score < best) {
+      best = score;
+      suggestion = name;
+    }
+  }
+  return suggestion;
+}
+
 function rejectNearMissOptions(
   options: object,
   names: readonly string[] = KNOWN_OPTION_NAMES,
@@ -114,26 +145,7 @@ function rejectNearMissOptions(
   const known: ReadonlySet<string> = new Set<string>(candidates);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
-    const lower = key.toLowerCase();
-    // Rank rather than take the first hit: in list order, `shard` matched
-    // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
-    // makes no sense is worse than none. Prefix relationships win, then the
-    // smaller edit distance.
-    let suggestion: string | undefined;
-    let best = Number.POSITIVE_INFINITY;
-    for (const name of candidates) {
-      const n = name.toLowerCase();
-      // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
-      // plural/singular slip (`faultInjections` for `faultInjection`).
-      const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
-      const distance = editDistance(lower, n, 2);
-      // Between two prefixes, the closer: `baselineStric` is `baselineStrict`, not `baseline`.
-      const score = prefix ? distance / 10 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
-      if (score < best) {
-        best = score;
-        suggestion = name;
-      }
-    }
+    const suggestion = nearestName(key, candidates);
     if (suggestion !== undefined) {
       throw new Error(
         `chaosbringer: unknown ${what} "${key}" — did you mean "${suggestion}"? ` +

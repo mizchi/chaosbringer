@@ -41,9 +41,11 @@ import { type BindSpec, type BoundBrowser, bindBrowser, resolveBind } from "../b
 import { newIsolatedPage } from "../browser-session.js";
 import { errorMessage } from "../errors.js";
 import { toRegExp } from "../fault-router.js";
+import { networkConditionsFor } from "../network.js";
 import { extractCandidate } from "../recipes/capture.js";
 import { type RecipeVars, recipeVariables, UndefinedVariableError } from "../recipes/templating.js";
 import type { ActionRecipe, ActionTrace, RecipeStep } from "../recipes/types.js";
+import type { NetworkProfile } from "../types.js";
 import { DEFAULT_SETTLE_QUIET_MS, pageSettleEnv, settleAdaptive, trackPageRequests } from "../settle.js";
 import { type DriveProblem, safeUrl, siteProblems, watchProblems } from "./problems.js";
 import { DriveSecrets, secretFieldKind } from "./secrets.js";
@@ -160,8 +162,22 @@ export interface DriveOptions {
   contextOptions?: BrowserContextOptions;
   /** Per-action timeout. Default 5000 ms. */
   actionTimeoutMs?: number;
+  /** Timeout of a navigation: the start page's load, and one a step starts (the crawl's `--timeout`). Default 30 s. */
+  navigationTimeoutMs?: number;
   /** Settle cap after each action. Default 3000 ms. */
   settleCapMs?: number;
+  /**
+   * Quiet window of the adaptive settle after each step: no request in
+   * flight and no long task for this long (the crawl's `--settle <ms>`).
+   * Default 100 ms.
+   */
+  settleQuietMs?: number;
+  /** Problems not to record (regex sources, case-insensitive), as the crawl's `ignoreErrorPatterns`. */
+  ignoreErrorPatterns?: readonly string[];
+  /** Serve requests from this HAR file, as the crawl's `--har-replay`; what it has no entry for goes to the network. */
+  harReplay?: string;
+  /** Throttle the page with this CDP preset, as the crawl's `--network`. */
+  network?: NetworkProfile;
   /** Name for the recipe of a successful run. Default `drive/<host>/<goal slug>`. */
   recipeName?: string;
   /**
@@ -243,6 +259,7 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   const maxFailed = wholeAtLeast(opts.maxFailedDecisions, 1, 3);
   const actionTimeout = opts.actionTimeoutMs ?? 5000;
   const settleCap = opts.settleCapMs ?? 3000;
+  const settleQuiet = opts.settleQuietMs ?? DEFAULT_SETTLE_QUIET_MS;
   const excluded = (opts.excludePatterns ?? []).map((p) => toRegExp(p)).filter((r): r is RegExp => r !== null);
   const isExcluded = (url: string) => excluded.some((r) => r.test(url));
 
@@ -251,15 +268,22 @@ export async function drive(opts: DriveOptions): Promise<DriveResult> {
   const bindOptions = resolveBind(opts.bind);
   const bound = bindOptions ? await bindBrowser(browser, bindOptions) : undefined;
   if (bound) opts.onBind?.(bound);
-  const { page, close } = await newIsolatedPage(browser, opts.contextOptions);
+  const { context, page, close } = await newIsolatedPage(browser, opts.contextOptions);
+  if (opts.harReplay) await context.routeFromHAR(opts.harReplay, { notFound: "fallback" });
+  if (opts.navigationTimeoutMs !== undefined) page.setDefaultNavigationTimeout(opts.navigationTimeoutMs);
+  if (opts.network) {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.emulateNetworkConditions", networkConditionsFor(opts.network));
+  }
 
-  const watch = await watchProblems(page);
+  const watch = await watchProblems(page, { ignoreErrorPatterns: opts.ignoreErrorPatterns });
   const problems = watch.problems;
   const drainRejections = () => watch.drain();
   const { tracker, detach } = trackPageRequests(page);
   const settle = async () => {
     await page.waitForLoadState("domcontentloaded", { timeout: settleCap }).catch(() => {});
-    await settleAdaptive(tracker, pageSettleEnv(page, tracker), { quietMs: DEFAULT_SETTLE_QUIET_MS, capMs: settleCap }).catch(() => {});
+    await settleAdaptive(tracker, pageSettleEnv(page, tracker), { quietMs: settleQuiet, capMs: settleCap }).catch(() => {});
   };
 
   if (opts.video) {

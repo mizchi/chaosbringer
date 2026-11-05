@@ -8,15 +8,30 @@
  * exercise the analysis without a browser.
  */
 
-import { parseArgs } from "node:util";
 import { writeFileSync } from "node:fs";
-import { parseNumberFlag } from "./cli-crawl-options.js";
+import { extname, join } from "node:path";
+import {
+  asUsageError,
+  baselineMissingFromCli,
+  CRAWL_CLI_OPTIONS,
+  type CrawlCliValues,
+  crawlCliExtras,
+  crawlCliPeerNeeds,
+  type CrawlFlag,
+  crawlerOptionsFromCli,
+  crawlUrlFromArgs,
+  exitOptionsFromCli,
+  formatFlagList,
+  parseArgsSuggesting,
+  readCrawlPerfBudgets,
+} from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
-import { errorMessage } from "./errors.js";
+import { type ExitCodeOptions, exitReasons } from "./reporter.js";
 import { isFaultEcho } from "./resource-outcomes.js";
-import { mergeRunWarnings, type RunWarning, warningTimes } from "./run-warnings.js";
-import type { CrawlReport, PageError } from "./types.js";
+import { applyBaseline, mergeRunWarnings, type RunWarning, warningTimes } from "./run-warnings.js";
+import type { CrawlerOptions, CrawlReport, PageError } from "./types.js";
 import { UnreachableTargetError, unreachableTarget } from "./unreachable-target.js";
+import { validateOptions } from "./validate.js";
 
 export interface ClusterOccurrence {
   key: string;
@@ -36,6 +51,15 @@ export interface PageOccurrence {
   visitedInRuns: number;
 }
 
+/** One run's verdict under the crawl's exit rules (`getExitCode`). */
+export interface RunVerdict {
+  /** The seed the run crawled with. */
+  seed: number;
+  passed: boolean;
+  /** Why it failed (`exitReasons`), empty when it passed. */
+  reasons: string[];
+}
+
 export interface FlakeAnalysis {
   runs: number;
   /**
@@ -53,6 +77,17 @@ export interface FlakeAnalysis {
    * quieter half of the report and not on the headline.)
    */
   decidable: boolean;
+  /**
+   * Each run's verdict, in run order, by the exit rules the crawl applies
+   * with the same flags (`flakeReport`'s `exitRules`: `--strict`, the
+   * `--fail-on-*` gates, `--baseline-strict`).
+   */
+  verdicts: RunVerdict[];
+  /**
+   * Some runs passed and some failed under those rules: the run's own
+   * outcome is not reproducible. Never set without `decidable`.
+   */
+  verdictFlaky: boolean;
   /** Clusters that fired in every run. Stability is only a claim when `decidable`. */
   stableClusters: ClusterOccurrence[];
   /** Clusters that fired in some runs but not others. */
@@ -71,9 +106,12 @@ export interface FlakeAnalysis {
 /**
  * Given N CrawlReports from runs of the same configuration, separate the
  * error clusters into stable (always fire) vs flaky (inconsistent), and the
- * pages into flaky (different failed/clean outcomes) vs stable.
+ * pages into flaky (different failed/clean outcomes) vs stable. Each run is
+ * also judged by `exitRules`, the rules the crawl exits by (`getExitCode`'s
+ * second argument; the CLI passes what its flags ask for), and the verdict
+ * is flaky when the runs disagree.
  */
-export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
+export function flakeReport(reports: readonly CrawlReport[], exitRules: boolean | ExitCodeOptions = {}): FlakeAnalysis {
   const runs = reports.length;
   // One run is enough to *list* what happened and never enough to call any of
   // it stable or flaky, so the verdict is marked undecidable rather than
@@ -83,6 +121,8 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
     return {
       runs: 0,
       decidable,
+      verdicts: [],
+      verdictFlaky: false,
       stableClusters: [],
       flakyClusters: [],
       flakyPages: [],
@@ -150,9 +190,17 @@ export function flakeReport(reports: readonly CrawlReport[]): FlakeAnalysis {
   }
   flakyPages.sort((a, b) => b.failedInRuns - a.failedInRuns);
 
+  const verdicts = reports.map((report): RunVerdict => {
+    const reasons = exitReasons(report, exitRules);
+    return { seed: report.seed, passed: reasons.length === 0, reasons };
+  });
+  const passed = verdicts.filter((v) => v.passed).length;
+
   return {
     runs,
     decidable,
+    verdicts,
+    verdictFlaky: decidable && passed > 0 && passed < runs,
     stableClusters,
     flakyClusters,
     flakyPages,
@@ -182,6 +230,22 @@ export function formatFlakeReport(analysis: FlakeAnalysis): string {
       `  With one run nothing can differ between runs, so "0 flaky clusters" below is a ` +
         `property of the sample size and not of the app. Re-run with --runs 2 or more.`,
     );
+    lines.push("");
+  }
+  // Older analyses (a `--output` file read back) have no verdicts.
+  const verdicts = analysis.verdicts ?? [];
+  if (verdicts.length > 0) {
+    const failed = verdicts.filter((v) => !v.passed).length;
+    const summary =
+      failed === 0
+        ? "every run passed"
+        : failed === verdicts.length
+          ? "every run failed"
+          : `${verdicts.length - failed} passed, ${failed} failed`;
+    lines.push(`Verdicts (the crawl's exit rules): ${summary}${analysis.verdictFlaky ? " — FLAKY" : ""}`);
+    verdicts.forEach((v, i) => {
+      if (!v.passed) lines.push(`  run ${i + 1} (seed=${v.seed}) FAIL: ${v.reasons.join("; ")}`);
+    });
     lines.push("");
   }
   lines.push(
@@ -219,111 +283,218 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 3) + "...";
 }
 
-interface FlakeCliArgs {
-  baseUrl: string;
+/** `flake`'s own flags. Every other flag is the main crawl's (`CRAWL_CLI_OPTIONS`). */
+const FLAKE_OPTIONS = {
+  runs: { type: "string" },
+  output: { type: "string" },
+  quiet: { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
+} as const;
+const FLAKE_OWN_FLAGS: readonly string[] = Object.keys(FLAKE_OPTIONS);
+
+/**
+ * Crawl flags flake accepts and does not apply: each writes or formats one
+ * crawl's report, after the crawl, and flake writes none (its analysis goes
+ * to stdout and `--output`). Accepted so that a CI command pasted after `--`
+ * runs; a stderr line names the ones given.
+ */
+export const FLAKE_NOT_APPLIED: readonly CrawlFlag[] = [
+  "compact",
+  "heatmap",
+  "heatmap-top",
+  "heatmap-out",
+  "junit",
+  "github-annotations",
+  "cluster-artifacts",
+  "cluster-min-count",
+  "version",
+];
+
+/**
+ * Crawl flags naming a file (or, for the last three, a directory) a run
+ * writes: each run gets its own, `<name>.run<N><ext>` (or `<dir>/run-<N>`),
+ * so the trace of the run that failed is still there for `minimize`, not
+ * overwritten by the next run.
+ */
+export const FLAKE_PER_RUN_OUTPUTS: readonly CrawlFlag[] = [
+  "trace-out",
+  "har-record",
+  "log-file",
+  "failure-artifacts",
+  "screenshot-dir",
+  "perf-out",
+];
+
+/** `path` for run `run` (1-based): `t.jsonl` is `t.run2.jsonl`, a directory `dir/run-2`. */
+export function perRunPath(path: string, run: number, kind: "file" | "dir"): string {
+  if (kind === "dir") return join(path, `run-${run}`);
+  const ext = extname(path);
+  return `${ext ? path.slice(0, -ext.length) : path}.run${run}${ext}`;
+}
+
+/** `options` for run `run`, with every file the run writes its own (`FLAKE_PER_RUN_OUTPUTS`). */
+export function perRunOptions(options: CrawlerOptions, run: number): CrawlerOptions {
+  const out: CrawlerOptions = { ...options };
+  if (options.traceOut) out.traceOut = perRunPath(options.traceOut, run, "file");
+  if (options.har?.mode === "record") out.har = { ...options.har, path: perRunPath(options.har.path, run, "file") };
+  if (options.logFile) out.logFile = perRunPath(options.logFile, run, "file");
+  if (options.failureArtifacts) {
+    out.failureArtifacts = { ...options.failureArtifacts, dir: perRunPath(options.failureArtifacts.dir, run, "dir") };
+  }
+  if (options.screenshotDir) out.screenshotDir = perRunPath(options.screenshotDir, run, "dir");
+  if (options.perf && typeof options.perf === "object" && options.perf.outDir !== undefined) {
+    out.perf = { ...options.perf, outDir: perRunPath(options.perf.outDir, run, "dir") };
+  }
+  return out;
+}
+
+export interface FlakeCliArgs {
   runs: number;
-  seed?: number;
-  maxPages?: number;
-  maxActions?: number;
-  timeout?: number;
-  ignoreAnalytics: boolean;
-  harReplay?: string;
-  traceReplay?: string;
-  storageState?: string;
   output?: string;
   quiet: boolean;
+  baseUrl: string;
+  /**
+   * Every run's crawler options, built from the crawl flags by the main
+   * crawl's own builder (`crawlerOptionsFromCli`). Without `--seed` each run
+   * draws its own; with one, every run uses it.
+   */
+  options: CrawlerOptions;
+  /** The rules each run is judged by: the ones the crawl would exit by with these flags. */
+  exitOptions: ExitCodeOptions;
+  /** The crawl flags, as the main crawl parses them. */
+  crawl: Partial<CrawlCliValues>;
+  /** Given crawl flags that flake does not apply (`FLAKE_NOT_APPLIED`). */
+  notApplied: string[];
 }
 
 /**
- * Exported for tests. The parser is where the workflow bug lived — a real flag
- * of the root command that this subcommand refused — and it is not reachable
- * from `runFlakeCli` without launching browsers. Every refusal throws: an
- * unknown flag from `parseArgs`, an invalid value a `UsageError` (`fail()`),
- * which cli.ts reports with exit 2.
+ * The words after `flake … --`: a crawl command as the shell split it, a
+ * `Repro:` line pasted as it was printed, its leading `chaosbringer` (or
+ * `npx chaosbringer`, `pnpm exec chaosbringer`, a path to the binary)
+ * dropped. The quoting `reproCommand` writes is the shell's to undo.
+ */
+export function pastedCrawlArgs(words: readonly string[]): string[] {
+  if (words.length === 1 && /\s/.test(words[0]!)) {
+    throw new UsageError(
+      "after --: one argument with spaces in it; paste the command unquoted, so the shell splits it into its words",
+    );
+  }
+  let i = 0;
+  if (words[0] === "npx" || words[0] === "pnpx" || words[0] === "bunx") {
+    i = 1;
+    while (words[i] === "-y" || words[i] === "--yes") i++;
+  } else if (words[0] === "pnpm" && (words[1] === "exec" || words[1] === "dlx")) {
+    i = 2;
+  } else if (words[0] === "yarn") {
+    i = words[1] === "exec" ? 2 : 1;
+  }
+  const bin = words[i];
+  if (bin !== undefined && /(^|\/)chaosbringer(@[^/\s]*)?$/.test(bin)) return words.slice(i + 1);
+  if (i > 0) throw new UsageError(`after --: expected a chaosbringer command, got ${JSON.stringify(words.slice(0, i + 1).join(" "))}`);
+  return [...words];
+}
+
+/** One flag spelled two ways (`--max-actions-per-page`, `--no-headless`), for the conflict check. */
+const FLAG_GROUP: Readonly<Record<string, string>> = {
+  "max-actions-per-page": "max-actions",
+  "no-headless": "headless",
+  "data-safety": "invariants",
+};
+
+/**
+ * Exported for tests: it is where every refusal is made, and `runFlakeCli`
+ * cannot be reached without launching browsers. Every refusal throws: an
+ * unknown flag from `parseArgs` (with the flag it misspells, when one is
+ * close), an invalid value or a conflict a `UsageError`, which cli.ts
+ * reports with exit 2.
+ *
+ * The crawl flags go before a `--` or after it, as a pasted crawl command.
+ * flake's own flags (`--runs`, `--output`, `--quiet`, `--help`) only go
+ * before it, and a crawl flag (or the URL) given on both sides is refused:
+ * which one would win is a guess either way.
  */
 export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
-  const { values } = parseArgs({
-    args: argv,
-    options: {
-      url: { type: "string" },
-      runs: { type: "string" },
-      seed: { type: "string" },
-      "max-pages": { type: "string" },
-      "max-actions": { type: "string" },
-      // The root CLI accepts both spellings for the same crawl option
-      // (`values["max-actions"] ?? values["max-actions-per-page"]`), so a
-      // caller who learned the long one there passed it here and `parseArgs`,
-      // being strict, killed the command on its first line. That is what
-      // happened to `.github/workflows/chaos-flake.yml`: a weekly job whose
-      // flake step had never once run. Accepting both here removes the trap
-      // rather than fixing the one call site that hit it.
-      "max-actions-per-page": { type: "string" },
-      timeout: { type: "string" },
-      "ignore-analytics": { type: "boolean", default: false },
-      "har-replay": { type: "string" },
-      "trace-replay": { type: "string" },
-      "storage-state": { type: "string" },
-      output: { type: "string" },
-      quiet: { type: "boolean", default: false },
-      help: { type: "boolean", default: false },
-    },
+  const split = argv.indexOf("--");
+  const ownArgs = split < 0 ? argv : argv.slice(0, split);
+  const own = parseArgsSuggesting({
+    args: ownArgs,
+    options: { ...CRAWL_CLI_OPTIONS, ...FLAKE_OPTIONS },
     allowPositionals: true,
+    tokens: true,
   });
-
-  if (values.help) {
+  if (own.values.help) {
     printFlakeHelp();
     process.exit(0);
   }
-  if (!values.url) fail("--url is required");
+  const given = (tokens: typeof own.tokens) =>
+    new Set<string>((tokens ?? []).flatMap((t) => (t.kind === "option" ? [t.name] : [])));
+  const ownGiven = given(own.tokens);
 
-  const runs = values.runs ? Number(values.runs) : 3;
+  let values: Partial<CrawlCliValues> = own.values;
+  let positionals = own.positionals;
+  if (split >= 0) {
+    const pasted = parseArgsSuggesting({
+      args: pastedCrawlArgs(argv.slice(split + 1)),
+      // `--runs` parses so that it can be refused as flake's own.
+      options: { ...CRAWL_CLI_OPTIONS, runs: FLAKE_OPTIONS.runs },
+      allowPositionals: true,
+      tokens: true,
+    });
+    const pastedGiven = given(pasted.tokens);
+    for (const name of pastedGiven) {
+      if (FLAKE_OWN_FLAGS.includes(name)) {
+        throw new UsageError(
+          `--${name} after --: flake's own flags (${FLAKE_OWN_FLAGS.map((f) => `--${f}`).join(", ")}) go before the --`,
+        );
+      }
+    }
+    const group = (name: string) => FLAG_GROUP[name] ?? name;
+    const ownGroups = new Set([...ownGiven].filter((n) => !FLAKE_OWN_FLAGS.includes(n)).map(group));
+    if (own.positionals.length > 0) ownGroups.add("url");
+    const pastedGroups = [...pastedGiven].map(group);
+    if (pasted.positionals.length > 0) pastedGroups.push("url");
+    const both = pastedGroups.find((g) => ownGroups.has(g));
+    if (both !== undefined) {
+      throw new UsageError(`${both === "url" ? "the URL" : `--${both}`} is given both before and after --: give it on one side`);
+    }
+    // The pasted command's values, then what was given before the `--`.
+    const ownCrawl = Object.fromEntries(
+      Object.entries(own.values).filter(([k]) => ownGiven.has(k) && !FLAKE_OWN_FLAGS.includes(k)),
+    );
+    values = { ...pasted.values, ...ownCrawl };
+    positionals = [...own.positionals, ...pasted.positionals];
+  }
+
+  const runsRaw = own.values.runs;
+  const runs = runsRaw ? Number(runsRaw) : 3;
   if (!Number.isFinite(runs) || !Number.isInteger(runs) || runs < 2) {
-    fail(`--runs must be an integer >= 2 (got ${JSON.stringify(values.runs)})`);
+    throw new UsageError(`--runs must be an integer >= 2 (got ${JSON.stringify(runsRaw)})`);
   }
 
-  // The main crawl's parser, not `Number`: `--max-pages abc` was NaN, which
-  // the first run refused as `"maxPages" must be an integer >= 1 (got null)`
-  // after `Run 1/3...`, with exit 1 — and chaos-flake.yml reads exit 1 as
-  // "flakes were found". An empty value is unset, as in the main crawl
-  // (`--max-pages "$MAX"` with MAX unset runs with the default).
-  const crawlNumber = (flag: string, raw: string | undefined, min: number): number | undefined => {
-    try {
-      return raw ? parseNumberFlag(flag, raw, { min, integer: true }) : undefined;
-    } catch (err) {
-      fail(errorMessage(err));
-    }
-  };
-  const maxPages = crawlNumber("--max-pages", values["max-pages"], 1);
-  const maxActions = crawlNumber(
-    values["max-actions"] !== undefined ? "--max-actions" : "--max-actions-per-page",
-    values["max-actions"] ?? values["max-actions-per-page"],
-    0,
-  );
-  const timeout = crawlNumber("--timeout", values.timeout, 1);
-
-  let seed: number | undefined;
-  if (values.seed !== undefined) {
-    const parsed = Number(values.seed);
-    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
-      fail(`--seed must be a non-negative integer (got ${JSON.stringify(values.seed)})`);
-    }
-    seed = parsed;
-  }
-
-  return {
-    baseUrl: values.url!,
-    runs,
-    seed,
-    maxPages,
-    maxActions,
-    timeout,
-    ignoreAnalytics: values["ignore-analytics"] ?? false,
-    harReplay: values["har-replay"],
-    traceReplay: values["trace-replay"],
-    storageState: values["storage-state"],
-    output: values.output,
-    quiet: values.quiet ?? false,
-  };
+  // The main crawl's checks, in its order, so a value the crawl would
+  // refuse is refused here before Run 1 (where it failed with exit 1, which
+  // chaos-flake.yml reads as "flakes were found").
+  return asUsageError(() => {
+    const baseUrl = crawlUrlFromArgs(values as CrawlCliValues, positionals);
+    const options = crawlerOptionsFromCli(values, baseUrl);
+    crawlCliExtras(values as CrawlCliValues);
+    const exitOptions = exitOptionsFromCli(values);
+    validateOptions(options);
+    const notApplied = FLAKE_NOT_APPLIED.filter((f) => {
+      const v = values[f];
+      return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== false;
+    }).map((f) => `--${f}`);
+    return {
+      runs,
+      output: own.values.output,
+      quiet: own.values.quiet ?? false,
+      baseUrl,
+      options,
+      exitOptions,
+      crawl: values,
+      notApplied,
+    };
+  });
 }
 
 function printFlakeHelp(): void {
@@ -331,74 +502,92 @@ function printFlakeHelp(): void {
 chaosbringer flake — run the same crawl N times and surface flaky errors.
 
 USAGE:
-  chaosbringer flake --url <url> [--runs N] [options]
+  chaosbringer flake --url <url> [--runs N] [crawl flags]
+  chaosbringer flake [--runs N] -- <a crawl command, e.g. a run's Repro: line>
 
-OPTIONS:
-  --url <url>           Base URL (required)
+OPTIONS (flake's own; before any --):
   --runs <n>            Number of runs (default: 3, minimum: 2)
-  --seed <n>            Fixed seed — makes RNG-driven variance impossible,
-                        so any flake points at non-determinism outside
-                        chaosbringer (server, network, timers).
-  --max-pages <n>       Forward to each crawl
-  --max-actions <n>     Forward to each crawl (--max-actions-per-page also accepted)
-  --timeout <ms>        Forward to each crawl
-  --ignore-analytics    Forward to each crawl
-  --har-replay <path>   Forward to each crawl
-  --trace-replay <path> Forward to each crawl
-  --storage-state <p>   Forward to each crawl
   --output <path>       Write the flake analysis as JSON alongside stdout
   --quiet               Print only the final summary
   --help                Show this help
 
+CRAWL FLAGS:
+  Every flag of the main crawl (chaosbringer --help) is taken, before the -- or
+  after it, and every run crawls with it: --seed, --exclude, --settle,
+  --storage-state, --strict, --invariants, … After a --, a pasted crawl command
+  may start with chaosbringer, npx chaosbringer or pnpm exec chaosbringer. A
+  crawl flag (or the URL) given on both sides is refused, exit 2.
+
+  --seed <n>            Every run uses it, so RNG-driven variance is impossible
+                        and any flake points at non-determinism outside
+                        chaosbringer (server, network, timers). Without it, each
+                        run draws its own seed (the verdicts name each run's).
+  Each run writes its own copy of what these name (<name>.run<N><ext>, or
+  <dir>/run-<N>):
+${formatFlagList(FLAKE_PER_RUN_OUTPUTS, "    ")}
+  Accepted and not applied (each writes or formats one crawl's report):
+${formatFlagList(FLAKE_NOT_APPLIED, "    ")}
+
+VERDICTS:
+  Each run passes or fails by the crawl's own exit rules with the same flags
+  (--strict, --fail-on-http, --fail-on-network, --fail-on-dead-links,
+  --fail-on-warnings, --baseline-strict, and a page that failed, a timeout, a
+  crash or an invariant violation without any of them). The verdict is flaky
+  when some runs pass and some fail.
+
 EXIT CODES:
-  0  nothing flaked
-  1  a cluster or a page flaked
-  2  refused: a bad flag or value, a --storage-state / --har-replay / --trace-replay
-     file that is missing or does not parse (before Run 1), or nothing answered at --url
+  0  nothing flaked (every run passed, or every run failed alike)
+  1  the verdict flaked, or a cluster or a page flaked
+  2  refused: a bad flag or value, a conflict across --, an input file that is
+     missing or does not parse (before Run 1), or nothing answered at the URL
      ("could not reach <url>: is the server running?", after the first run)
 `);
-}
-
-/** A usage error: `chaosbringer flake: <msg>` and exit 2, from cli.ts. */
-function fail(msg: string): never {
-  throw new UsageError(msg);
 }
 
 /** Entry point wired from src/cli.ts when the `flake` subcommand is used. */
 export async function runFlakeCli(argv: string[]): Promise<void> {
   const args = parseFlakeArgs(argv);
   // Before Run 1/N: a missing file failed inside the first crawl with exit 1,
-  // which chaos-flake.yml reads as "flakes were found".
+  // which chaos-flake.yml reads as "flakes were found". So do the main
+  // crawl's other checks that read files or the install.
   const { checkInputFiles } = await import("./input-files.js");
-  checkInputFiles({
-    storageState: args.storageState,
-    har: args.harReplay ? { path: args.harReplay, mode: "replay" } : undefined,
-    traceReplay: args.traceReplay,
-  });
+  const { assertPeers } = await import("./peers.js");
+  checkInputFiles(args.options);
+  const baselineMissing = baselineMissingFromCli(args.crawl);
+  assertPeers(crawlCliPeerNeeds(args.crawl));
+  const budgets = await readCrawlPerfBudgets(args.crawl as CrawlCliValues, args.options.settle);
+  if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
+  if (budgets?.warning) console.error(budgets.warning);
+  if (budgets) args.options.perfBudgets = budgets.rules;
+  if (args.notApplied.length > 0) {
+    console.error(
+      `chaosbringer flake: not applied to the runs: ${args.notApplied.join(", ")} ` +
+        "(each writes or formats one crawl's report; flake writes its analysis, with --output)",
+    );
+  }
+
   const { ChaosCrawler } = await import("./crawler.js");
-  const { COMMON_IGNORE_PATTERNS } = await import("./ignore-presets.js");
+  const baselinePath = args.crawl.baseline;
   const reports: CrawlReport[] = [];
   for (let i = 0; i < args.runs; i++) {
-    if (!args.quiet) console.log(`Run ${i + 1}/${args.runs}...`);
-    const crawler = new ChaosCrawler({
-      baseUrl: args.baseUrl,
-      seed: args.seed,
-      maxPages: args.maxPages,
-      maxActionsPerPage: args.maxActions,
-      timeout: args.timeout,
-      ignoreErrorPatterns: args.ignoreAnalytics ? COMMON_IGNORE_PATTERNS : undefined,
-      har: args.harReplay ? { path: args.harReplay, mode: "replay" } : undefined,
-      traceReplay: args.traceReplay,
-      storageState: args.storageState,
-    });
+    const options = perRunOptions(args.options, i + 1);
+    const crawler = new ChaosCrawler(options);
+    if (!args.quiet) {
+      const trace = options.traceOut ? `, trace ${options.traceOut}` : "";
+      console.log(`Run ${i + 1}/${args.runs} (seed=${crawler.getSeed()}${trace})...`);
+    }
     const report = await crawler.start();
     // A site nothing answered for fails the same way every run, which read
     // as a stable cluster and exit 0. Stop at the first.
-    const unreachable = unreachableTarget(report);
+    const unreachable = unreachableTarget(report, { network: args.options.network });
     if (unreachable) throw new UnreachableTargetError(unreachable);
+    // Diffed as the crawl diffs itself, so --baseline-strict judges each run.
+    if (applyBaseline(report, baselinePath, baselineMissing) === "refuse") {
+      throw new UsageError(`--baseline ${baselinePath}: not found, and --baseline-missing fail refuses a run without it`);
+    }
     reports.push(report);
   }
-  const analysis = flakeReport(reports);
+  const analysis = flakeReport(reports, args.exitOptions);
   console.log(formatFlakeReport(analysis));
   if (args.output) {
     writeFileSync(args.output, JSON.stringify(analysis, null, 2));
@@ -414,7 +603,7 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
     );
     process.exit(1);
   }
-  if (analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0) {
+  if (analysis.verdictFlaky || analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0) {
     process.exit(1);
   }
 }

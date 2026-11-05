@@ -7,10 +7,10 @@
  * here without either fails `repro-command.test.ts`.
  */
 import { existsSync } from "node:fs";
-import { parseArgs } from "node:util";
+import { parseArgs, type ParseArgsConfig } from "node:util";
 import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
-import { PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
+import { isUsageError, PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
 import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag } from "./cli-invariants.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
@@ -23,6 +23,7 @@ import { parseSettleArg, resolveSettle } from "./settle.js";
 import { parseShardArg } from "./shard.js";
 import { AXE_PEERS, type PeerNeed, VISUAL_REGRESSION_PEERS } from "./peers.js";
 import { PERF_BUDGET_KEYS, type CrawlerOptions, type Invariant, type PerfBudgetRule, type ReproFlag } from "./types.js";
+import { nearestName } from "./validate.js";
 import { visualRegression } from "./visual.js";
 
 export const CRAWL_CLI_OPTIONS = {
@@ -105,12 +106,166 @@ export const CRAWL_CLI_OPTIONS = {
   version: { type: "boolean", short: "V", default: false },
 } as const;
 
+/** A flag of the main crawl's table, by its name without the `--`. */
+export type CrawlFlag = keyof typeof CRAWL_CLI_OPTIONS;
+
+/**
+ * `parseArgs`, refusing an unknown flag as `unknown option --exlude: did
+ * you mean --exclude?` when one of the table's flags is close
+ * (`nearestName`, the options check's own ranking). Otherwise it throws
+ * what `parseArgs` throws, which the CLI prints as `unknown option --x`.
+ * The main crawl, `flake` (both sides of its `--`), `minimize` and `drive`
+ * parse with it.
+ */
+export function parseArgsSuggesting<T extends ParseArgsConfig>(config: T): ReturnType<typeof parseArgs<T>> {
+  try {
+    return parseArgs(config);
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    const unknown = code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? /^Unknown option '--([^'=]+)'/.exec(String((err as Error).message)) : null;
+    const near = unknown ? nearestName(unknown[1]!, Object.keys(config.options ?? {})) : undefined;
+    if (unknown && near !== undefined) throw new UsageError(`unknown option --${unknown[1]}: did you mean --${near}?`);
+    throw err;
+  }
+}
+
 /** Parse the main CLI's arguments (`process.argv` when `args` is omitted). */
 export function parseCrawlArgs(args?: string[]) {
-  return parseArgs({ args, options: CRAWL_CLI_OPTIONS, allowPositionals: true });
+  return parseArgsSuggesting({ args, options: CRAWL_CLI_OPTIONS, allowPositionals: true });
 }
 
 export type CrawlCliValues = ReturnType<typeof parseCrawlArgs>["values"];
+
+/**
+ * `CRAWL_CLI_OPTIONS` cut down to `flags`, to spread into a subcommand's own
+ * table: the flag then parses, defaults and builds options
+ * (`crawlerOptionsFromCli`) exactly as it does on the main crawl.
+ */
+export function crawlCliOptionsFor<const F extends readonly CrawlFlag[]>(flags: F): Pick<typeof CRAWL_CLI_OPTIONS, F[number]> {
+  return Object.fromEntries(flags.map((f) => [f, CRAWL_CLI_OPTIONS[f]])) as Pick<typeof CRAWL_CLI_OPTIONS, F[number]>;
+}
+
+/**
+ * The crawl flags `minimize` applies to every replay of the trace: what
+ * shapes how a page loads, settles and what counts as an error on it. A
+ * trace (format v2) records the options they build (`TraceSetup`), and a
+ * replay applies the recording's unless the flag is given. The single list
+ * behind `minimize --help`, its parser, and the docs' list.
+ */
+export const REPLAY_CRAWL_FLAGS = [
+  "timeout",
+  "settle",
+  "headless",
+  "no-headless",
+  "exclude",
+  "ignore-error",
+  "ignore-http",
+  "ignore-analytics",
+  "ignore-preset",
+  "spa",
+  "storage-state",
+  "har-replay",
+  "device",
+  "network",
+  "no-http-cache",
+  "invariants",
+  "data-safety",
+  "axe",
+  "axe-tags",
+] as const satisfies readonly CrawlFlag[];
+
+/**
+ * The flags a crawl's `Repro:` line can carry that `minimize` refuses, each
+ * with why: the trace decides the visits and the actions, and `--match`, not
+ * the exit rules, decides whether a replay reproduced. Accepting them would
+ * read as if they had been applied.
+ */
+export const REPLAY_REFUSED_FLAGS: Readonly<Partial<Record<CrawlFlag, string>>> = {
+  seed: "the trace decides the actions, so there is no random choice for a seed to make",
+  "max-actions": "the trace decides the actions; minimize removes them itself",
+  "max-actions-per-page": "the trace decides the actions; minimize removes them itself",
+  "aria-targets": "the trace names each action's selector, so no targets are found",
+  "seed-from-sitemap": "the trace decides the pages visited",
+  shard: "the trace decides the pages visited",
+  "trace-replay": "minimize replays --trace",
+  strict: "--match decides whether a replay reproduced, not the exit rules",
+  "fail-on-http": "--match decides whether a replay reproduced, not the exit rules",
+  "fail-on-network": "--match decides whether a replay reproduced, not the exit rules",
+  "fail-on-dead-links": "--match decides whether a replay reproduced, not the exit rules",
+  "fail-on-warnings": "--match decides whether a replay reproduced, not the exit rules",
+  cdp: "every replay starts a browser of its own",
+  "cdp-target": "every replay starts a browser of its own",
+  "terminal-browser": "every replay starts a browser of its own",
+  budget: "minimize does not measure its replays",
+  perf: "minimize does not measure its replays",
+  "perf-trace": "minimize does not measure its replays",
+  "perf-mem": "minimize does not measure its replays",
+  "perf-cov": "minimize does not measure its replays",
+  "perf-out": "minimize does not measure its replays",
+  "perf-budgets": "minimize does not measure its replays",
+  "allow-settle-mismatch": "minimize does not measure its replays",
+  "visual-baseline": "minimize does not compare its replays' screenshots",
+  "visual-threshold": "minimize does not compare its replays' screenshots",
+  "visual-max-diff-pixels": "minimize does not compare its replays' screenshots",
+  "visual-max-diff-ratio": "minimize does not compare its replays' screenshots",
+};
+
+/**
+ * The crawl flags `drive` takes, where they fit how it runs: one browser
+ * driven a step at a time, settling adaptively after each (`--settle` takes
+ * `adaptive` or a quiet window in ms there, not `networkidle`).
+ */
+export const DRIVE_CRAWL_FLAGS = [
+  "timeout",
+  "settle",
+  "headless",
+  "no-headless",
+  "exclude",
+  "ignore-error",
+  "ignore-analytics",
+  "ignore-preset",
+  "storage-state",
+  "har-replay",
+  "device",
+  "network",
+  "bind",
+  "bind-title",
+] as const satisfies readonly CrawlFlag[];
+
+/**
+ * `flags` as `--a, --b, …` lines for a subcommand's `--help`, wrapped at
+ * `width` and indented by `indent`: the list is the table above, not a copy.
+ */
+export function formatFlagList(flags: readonly string[], indent = "  ", width = 88): string {
+  const lines: string[] = [];
+  let line = "";
+  for (const [i, flag] of flags.entries()) {
+    const word = `--${flag}${i < flags.length - 1 ? "," : ""}`;
+    if (line !== "" && indent.length + line.length + 1 + word.length > width) {
+      lines.push(indent + line);
+      line = word;
+    } else {
+      line = line === "" ? word : `${line} ${word}`;
+    }
+  }
+  if (line !== "") lines.push(indent + line);
+  return lines.join("\n");
+}
+
+/**
+ * Run a builder of the main crawl's options for a subcommand: what it
+ * throws as a plain `Error` (an unknown `--ignore-preset`, a bad `--seed`,
+ * `validateOptions`) is a refusal of the invocation there too, a
+ * `UsageError` (exit 2), not `<sub> failed:` and exit 1.
+ */
+export function asUsageError<T>(build: () => T): T {
+  try {
+    return build();
+  } catch (err) {
+    if (isUsageError(err)) throw err;
+    throw new UsageError(errorMessage(err));
+  }
+}
 
 /**
  * The URL a crawl's arguments name, by `--url` or as its one positional.
@@ -280,7 +435,7 @@ export async function readCrawlPerfBudgets(
  * message it prints after `chaosbringer: `. `--perf-budgets` is only named here
  * (`perfBudgetsFile`): `readCrawlPerfBudgets` reads the rules.
  */
-export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): CrawlerOptions {
+export function crawlerOptionsFromCli(values: Partial<CrawlCliValues>, baseUrl: string): CrawlerOptions {
   // Build ignore patterns
   const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
   if (values["ignore-analytics"]) {
@@ -436,7 +591,7 @@ export function crawlerOptionsFromCli(values: CrawlCliValues, baseUrl: string): 
  * `UsageError` on a `--fail-on-http` that is not `4xx` or `5xx`, before a
  * browser starts; `shard` checks its workers' arguments with it too.
  */
-export function exitOptionsFromCli(values: CrawlCliValues): ExitCodeOptions {
+export function exitOptionsFromCli(values: Partial<CrawlCliValues>): ExitCodeOptions {
   const http = values["fail-on-http"];
   if (http !== undefined && !(HTTP_FAIL_LEVELS as readonly string[]).includes(http)) {
     throw new UsageError(
@@ -490,7 +645,7 @@ export function baselineMissingFromCli(values: Pick<CrawlCliValues, "baseline" |
  * before the browser starts: the crawl's own check of the invariants they
  * become names the invariant, not the flag.
  */
-export function crawlCliPeerNeeds(values: Pick<CrawlCliValues, "axe" | "invariants" | "visual-baseline">): PeerNeed[] {
+export function crawlCliPeerNeeds(values: Partial<Pick<CrawlCliValues, "axe" | "invariants" | "visual-baseline">>): PeerNeed[] {
   const needs: PeerNeed[] = [];
   if (values.axe) needs.push({ by: "--axe", peers: AXE_PEERS });
   else if (parseInvariantsFlag(values.invariants).axe) needs.push({ by: "--invariants axe", peers: AXE_PEERS });
@@ -504,7 +659,7 @@ export function crawlCliPeerNeeds(values: Pick<CrawlCliValues, "axe" | "invarian
  * `--visual-baseline`. Throws a `UsageError` on a name `--invariants` does
  * not know.
  */
-function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
+function buildInvariants(values: Partial<CrawlCliValues>): Invariant[] | undefined {
   const list: Invariant[] = [];
   const flag = parseInvariantsFlag(values.invariants, values["data-safety"]);
   if (values.axe || flag.axe) {
@@ -558,7 +713,7 @@ function buildInvariants(values: CrawlCliValues): Invariant[] | undefined {
  * `--visual-update` would rewrite the baselines and hide the diff it is
  * meant to reproduce.
  */
-function cliOnlyReproFlags(values: CrawlCliValues): ReproFlag[] {
+function cliOnlyReproFlags(values: Partial<CrawlCliValues>): ReproFlag[] {
   const out: ReproFlag[] = [];
   const invariants = parseInvariantsFlag(values.invariants, values["data-safety"]);
   if (values.axe || invariants.axe) {

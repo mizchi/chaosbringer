@@ -493,6 +493,7 @@ export {
   type VisualRegressionOptions,
 } from "./visual.js";
 export {
+  READABLE_TRACE_VERSIONS,
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
   groupTrace,
@@ -500,11 +501,13 @@ export {
   parseTrace,
   readTrace,
   serializeTrace,
+  traceSetupOf,
   writeTrace,
   type TraceAction,
   type TraceEntry,
   type TraceGroup,
   type TraceMeta,
+  type TraceSetup,
   type TraceVisit,
 } from "./trace.js";
 export {

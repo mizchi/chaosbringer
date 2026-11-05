@@ -9,6 +9,7 @@
  */
 
 import type { Page } from "playwright";
+import { matchesAnyPattern } from "../filters.js";
 import { watchUnhandledRejections } from "../rejections.js";
 import { environmentCause } from "../scan/analyze.js";
 
@@ -41,10 +42,18 @@ export interface ProblemWatch {
   drain(): Promise<void>;
 }
 
-export async function watchProblems(page: Page): Promise<ProblemWatch> {
+/**
+ * `ignoreErrorPatterns`: a problem whose message matches one (a regex
+ * source, case-insensitive, as the crawler's `ignoreErrorPatterns`) is not
+ * recorded, so `drive --ignore-error` / `--ignore-preset` drop the same
+ * noise the crawl's do.
+ */
+export async function watchProblems(page: Page, opts: { ignoreErrorPatterns?: readonly string[] } = {}): Promise<ProblemWatch> {
   const problems: DriveProblem[] = [];
   let step = -1;
+  const ignore = opts.ignoreErrorPatterns ?? [];
   const add = (kind: DriveProblem["kind"], message: string, url = safeUrl(page)) => {
+    if (ignore.length > 0 && matchesAnyPattern(message, ignore, "i")) return;
     const cause = environmentCause(message);
     problems.push({ kind, message, url, step, ...(cause ? { environment: cause.reason } : {}) });
   };

@@ -5,8 +5,16 @@
 
 import { accessSync, closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { parseArgs } from "node:util";
-import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
+import { type BrowserContextOptions, devices } from "playwright";
+import {
+  asUsageError,
+  type CrawlCliValues,
+  crawlCliOptionsFor,
+  crawlerOptionsFromCli,
+  DRIVE_CRAWL_FLAGS,
+  formatFlagList,
+  parseArgsSuggesting,
+} from "../cli-crawl-options.js";
 import { UsageError } from "../cli-usage.js";
 import { errorMessage } from "../errors.js";
 import { checkInputFiles, readInputJson } from "../input-files.js";
@@ -16,7 +24,8 @@ import { type RecipeVars, templateNames, VARIABLE_NAME_RE } from "../recipes/tem
 import type { ActionRecipe } from "../recipes/types.js";
 import { shellQuote } from "../repro-command.js";
 import { anthropicDecider, openRouterDecider, planDecider, type DrivePlanStep } from "./deciders.js";
-import { drive, type DriveDecider, type DriveResult, type DriveUntil } from "./drive.js";
+import { drive, type DriveDecider, type DriveOptions, type DriveResult, type DriveUntil } from "./drive.js";
+import type { CrawlerOptions } from "../types.js";
 import { siteProblems } from "./problems.js";
 import { DriveSecrets } from "./secrets.js";
 import { attachHint, type BoundBrowser, waitForInterrupt } from "../browser-bind.js";
@@ -86,6 +95,16 @@ OPTIONS:
   --quiet                   Only print the summary
   --help                    Show this help
 
+CRAWL FLAGS (as chaosbringer --help describes them; refused as the crawl refuses them):
+${formatFlagList(DRIVE_CRAWL_FLAGS, "  ")}
+  In a drive, --timeout is a navigation's (the start page's, and one a step
+  starts), --settle sets the quiet window of the adaptive settle after each
+  step (adaptive or <ms>; networkidle is refused), and --ignore-error,
+  --ignore-analytics and --ignore-preset drop the problems they match. With
+  --chaos, its replays take the --storage-state, --device, --timeout and
+  ignore flags too, not --har-replay or --network (they would answer or slow
+  the requests the faults are aimed at).
+
 SECRETS:
   What drive types into a password field (type=password, autocomplete *-password) or a
   one-time-code field, and every --secret, is recorded as a placeholder: {{password}}
@@ -105,9 +124,12 @@ Only drive sites you own or are allowed to test.
 `;
 
 export async function runDriveCli(argv: string[]): Promise<void> {
-  const { values } = parseArgs({
+  const { values } = parseArgsSuggesting({
     args: argv,
     options: {
+      // The crawl's flags that fit a drive, parsed and built as the crawl
+      // does (`DRIVE_CRAWL_FLAGS`): --exclude, --storage-state, --settle, …
+      ...crawlCliOptionsFor(DRIVE_CRAWL_FLAGS),
       url: { type: "string" },
       goal: { type: "string" },
       "until-url": { type: "string" },
@@ -118,23 +140,18 @@ export async function runDriveCli(argv: string[]): Promise<void> {
       vision: { type: "boolean", default: false },
       plan: { type: "string" },
       "max-steps": { type: "string" },
-      exclude: { type: "string", multiple: true },
       video: { type: "string" },
       out: { type: "string" },
       "save-recipe": { type: "string" },
       dir: { type: "string" },
-      "storage-state": { type: "string" },
       secret: { type: "string", multiple: true },
       "save-secrets": { type: "string" },
       chaos: { type: "boolean", default: false },
-      bind: { type: "boolean", default: false },
-      "bind-title": { type: "string" },
       "keep-open": { type: "boolean", default: false },
       faults: { type: "string" },
       "hang-ms": { type: "string" },
       quiet: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
-      ...HEADLESS_OPTIONS,
     },
     allowPositionals: false,
   });
@@ -143,6 +160,7 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     return;
   }
   if (!values.url || !values.goal) throw new UsageError("--url and --goal are required");
+  const crawl = driveCrawlOptions(values, values.url);
   // Parsed before the drive, not when --chaos replays after it: a typo in
   // --faults or --hang-ms was found only once the whole drive had run.
   const maxSteps = values["max-steps"] ? positiveInt(values["max-steps"], "--max-steps") : undefined;
@@ -150,7 +168,7 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   const hangReleaseMs = values["hang-ms"] ? positiveInt(values["hang-ms"], "--hang-ms") : undefined;
   // Read before the browser starts: a missing one failed inside Playwright
   // as `drive failed: …` and exit 1, which is "the goal was not reached".
-  checkInputFiles({ storageState: values["storage-state"] });
+  checkInputFiles(crawl);
   const secrets = parseSecretFlags(values.secret ?? [], process.env);
   const decider = values.plan
     ? planFrom(values.plan, new Set(Object.keys(secrets)))
@@ -173,11 +191,11 @@ export async function runDriveCli(argv: string[]): Promise<void> {
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(values.exclude ? { excludePatterns: values.exclude } : {}),
     ...(values.video ? { video: values.video } : {}),
-    ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
+    ...driveRunOptions(crawl),
     ...(values["save-recipe"] ? { recipeName: values["save-recipe"] } : {}),
     ...(Object.keys(secrets).length > 0 ? { secrets } : {}),
-    headless: resolveHeadless(values),
-    ...(values.bind || values["bind-title"] ? { bind: values["bind-title"] ?? true, onBind: (b: BoundBrowser) => console.log(attachHint(b)) } : {}),
+    headless: crawl.headless,
+    ...(crawl.bind ? { bind: crawl.bind, onBind: (b: BoundBrowser) => console.log(attachHint(b)) } : {}),
     ...(values["keep-open"]
       ? {
           keepOpen: async (r: DriveResult) => {
@@ -249,8 +267,13 @@ export async function runDriveCli(argv: string[]): Promise<void> {
         scrub: (text) => chaosSecrets.scrub(text),
         ...(values.exclude ? { exclude: values.exclude } : {}),
         ...(hangReleaseMs !== undefined ? { hangReleaseMs } : {}),
-        ...(values["storage-state"] ? { contextOptions: { storageState: values["storage-state"] } } : {}),
-        headless: resolveHeadless(values),
+        // The page as the drive saw it: the same login, device, timeout and
+        // ignored noise. Not the HAR or the throttle, which would answer or
+        // slow the very requests the faults are aimed at.
+        ...contextOptionsOf(crawl),
+        ...(crawl.timeout !== undefined ? { navigationTimeoutMs: crawl.timeout } : {}),
+        ...(crawl.ignoreErrorPatterns ? { ignoreErrorPatterns: crawl.ignoreErrorPatterns } : {}),
+        headless: crawl.headless,
         onRun: quiet
           ? undefined
           : (r) => console.log(`[chaos] ${r.label}: steps ${r.replay.ok ? "ran" : `stopped at ${r.replay.failedAt?.index}`}, goal ${r.goalHeld === null ? "?" : r.goalHeld ? "held" : "not held"}, fault fired ${r.fired}×, ${r.newProblems.length} new problem(s)`),
@@ -261,6 +284,47 @@ export async function runDriveCli(argv: string[]): Promise<void> {
   }
   if (result.status !== "reached" && result.status !== "done") process.exitCode = 1;
   else if (chaos?.findings.some((f) => f.severity === "high")) process.exitCode = 1;
+}
+
+/**
+ * The crawl options `drive`'s crawl flags build, by the crawl's own builder
+ * (`crawlerOptionsFromCli`), so a value is refused as the crawl refuses it.
+ * `--settle networkidle` is refused: drive settles adaptively after every
+ * step, and the flag sets that settle's quiet window.
+ */
+export function driveCrawlOptions(values: Partial<CrawlCliValues>, url: string): CrawlerOptions {
+  const picked: readonly string[] = DRIVE_CRAWL_FLAGS;
+  const crawlValues = Object.fromEntries(Object.entries(values).filter(([k]) => picked.includes(k))) as Partial<CrawlCliValues>;
+  const options = asUsageError(() => crawlerOptionsFromCli(crawlValues, url));
+  if (options.settle === "networkidle") {
+    throw new UsageError(
+      "--settle networkidle does not apply to drive: it settles adaptively after every step; " +
+        "--settle takes adaptive or a quiet window in ms here",
+    );
+  }
+  return options;
+}
+
+/** The `drive()` options of `driveCrawlOptions`' result. */
+export function driveRunOptions(crawl: CrawlerOptions): Partial<DriveOptions> {
+  return {
+    ...contextOptionsOf(crawl),
+    ...(crawl.timeout !== undefined ? { navigationTimeoutMs: crawl.timeout } : {}),
+    ...(typeof crawl.settle === "number" ? { settleQuietMs: crawl.settle } : {}),
+    ...(crawl.ignoreErrorPatterns ? { ignoreErrorPatterns: crawl.ignoreErrorPatterns } : {}),
+    ...(crawl.har?.mode === "replay" ? { harReplay: crawl.har.path } : {}),
+    ...(crawl.network ? { network: crawl.network } : {}),
+  };
+}
+
+/** `--device` (a Playwright descriptor) and `--storage-state`, as a browser context's options. */
+function contextOptionsOf(crawl: CrawlerOptions): { contextOptions?: BrowserContextOptions } {
+  const device = crawl.device ? devices[crawl.device] : undefined;
+  const contextOptions: BrowserContextOptions = {
+    ...device,
+    ...(crawl.storageState ? { storageState: crawl.storageState } : {}),
+  };
+  return Object.keys(contextOptions).length > 0 ? { contextOptions } : {};
 }
 
 /**

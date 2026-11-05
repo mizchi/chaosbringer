@@ -91,7 +91,9 @@ describe("progressText", () => {
 
 describe("usage errors", () => {
   it.each([
-    [["--max-page", "3"], "unknown option --max-page"],
+    // With the flag it misspells, when one is close.
+    [["--max-page", "3"], "unknown option --max-page: did you mean --max-pages?"],
+    [[...URL_ARG, "--bogus"], "unknown option --bogus"],
     [["-x"], "unknown option -x"],
     [[...URL_ARG, "--max-pages", "abc"], '--max-pages must be a finite number (got "abc")'],
     [[...URL_ARG, "--max-pages", "0"], "--max-pages must be >= 1 (got 0)"],
@@ -226,7 +228,13 @@ describe("usage errors", () => {
     [["flake", ...URL_ARG, "--trace-replay", "missing.jsonl"], "flake", "--trace-replay missing.jsonl: no such file"],
     [["flake", ...URL_ARG, "--har-replay", "missing.har"], "flake", "--har-replay missing.har: no such file"],
     [["shard", "--count", "2", ...URL_ARG, "--har-replay", "missing.har"], "shard", "--har-replay missing.har: no such file"],
-    [["minimize"], "minimize", "--url is required"],
+    // A crawl flag or the URL given on both sides of flake's `--`, and an
+    // unknown flag after it.
+    [["flake", "--seed", "1", "--", "chaosbringer", ...URL_ARG, "--seed", "2"], "flake", "--seed is given both before and after --: give it on one side"],
+    [["flake", "--", "chaosbringer", ...URL_ARG, "--exlude", "/x"], "flake", "unknown option --exlude: did you mean --exclude?"],
+    // --url defaults to the trace's.
+    [["minimize"], "minimize", "--trace is required"],
+    [["minimize", "--trace", "t.jsonl", "--match", "x", "--seed", "1"], "minimize", "--seed does not apply to minimize: the trace decides the actions, so there is no random choice for a seed to make"],
     // The numbers of the subcommands that read them with parseInt / parseFloat:
     // `--timeout 5s` was 5 ms, and a run that timed out on it exited 1.
     // One row per command here; every flag and value is in cli-numeric-flags.test.ts.

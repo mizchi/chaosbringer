@@ -5,7 +5,7 @@
  * on the page load alone (it used to keep an action ddmin could not drop).
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,5 +86,88 @@ describe("chaosbringer minimize", () => {
     expect(k).toContain("meta");
     expect(k).toContain("visit");
     expect(k).not.toContain("action");
+  }, 120_000);
+});
+
+/**
+ * A failure only a logged-in visit has: the page throws when its session
+ * cookie is set. `minimize --storage-state` exited 2 as an unknown option,
+ * and the trace did not record the login, so a replay ran logged out and
+ * the failure "did not reproduce".
+ */
+describe("chaosbringer minimize with the crawl's setup", () => {
+  let server: TestServer;
+  let dir: string;
+  let trace: string;
+  let state: string;
+  const COOKIE_VALUE = "cb-cookie-value-not-for-traces";
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), "chaos-minimize-setup-e2e-"));
+    server = await startTestServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<!doctype html><title>t</title><a href="/">Home</a> <a href="/#a">A</a>
+        <div style="height:3000px"></div>
+        <script>if (document.cookie.includes("cb_session=")) throw new Error("cb-logged-in-boom")</script>`);
+    });
+    state = join(dir, "state.json");
+    const host = new URL(server.url).hostname;
+    writeFileSync(state, JSON.stringify({
+      cookies: [{ name: "cb_session", value: COOKIE_VALUE, domain: host, path: "/", expires: -1, httpOnly: false, secure: false, sameSite: "Lax" }],
+      origins: [],
+    }));
+    writeFileSync(join(dir, "empty-state.json"), JSON.stringify({ cookies: [], origins: [] }));
+    trace = join(dir, "run.trace.jsonl");
+    const rec = await cli([
+      "--url", server.url, "--max-pages", "1", "--max-actions-per-page", "2", "--seed", "1", "--settle", "adaptive",
+      "--storage-state", state, "--trace-out", trace, "--output", join(dir, "r.json"), "--quiet",
+    ]);
+    const report = JSON.parse(readFileSync(join(dir, "r.json"), "utf8")) as { errorClusters: { fingerprint: string }[] };
+    expect(report.errorClusters.map((c) => c.fingerprint).join("\n"), rec.stderr).toContain("cb-logged-in-boom");
+  }, 120_000);
+
+  afterAll(async () => {
+    await server?.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("records the crawl's setup in a v2 trace: the file's path, not its cookies", () => {
+    const raw = readFileSync(trace, "utf8");
+    expect(JSON.parse(raw.split("\n")[0]!)).toMatchObject({ kind: "meta", v: 2, setup: { settle: "adaptive", storageState: state } });
+    expect(raw).not.toContain(COOKIE_VALUE);
+  });
+
+  it("replays with the recorded setup, says so, and writes a v2 trace with it", async () => {
+    const out = join(dir, "min.jsonl");
+    const r = await cli(["minimize", "--trace", trace, "--match", "cb-logged-in-boom", "--trace-out", out]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`replaying with the trace's setup: --settle adaptive --storage-state ${state}`);
+    expect(JSON.parse(readFileSync(out, "utf8").split("\n")[0]!)).toMatchObject({ v: 2, setup: { storageState: state } });
+  }, 120_000);
+
+  it("lets a flag override what was recorded", async () => {
+    const r = await cli([
+      "minimize", "--trace", trace, "--match", "cb-logged-in-boom", "--storage-state", join(dir, "empty-state.json"),
+      "--trace-out", join(dir, "never.jsonl"),
+    ]);
+    expect(r.stdout).toContain("replaced by the flags given: --storage-state");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("the failure did not reproduce");
+  }, 120_000);
+
+  it("still minimizes a v1 trace, with the setup given as flags", async () => {
+    const v1 = join(dir, "v1.trace.jsonl");
+    const [meta, ...rest] = readFileSync(trace, "utf8").split("\n");
+    const { setup: _setup, ...plain } = JSON.parse(meta!) as Record<string, unknown>;
+    writeFileSync(v1, [JSON.stringify({ ...plain, v: 1 }), ...rest].join("\n"));
+    // Without the login, as every v1 replay ran: nothing to minimize.
+    const loggedOut = await cli(["minimize", "--trace", v1, "--match", "cb-logged-in-boom", "--trace-out", join(dir, "v1-out.jsonl")]);
+    expect(loggedOut.status).toBe(1);
+    expect(loggedOut.stdout).toContain("the trace (format v1) records no crawl setup");
+    const r = await cli([
+      "minimize", "--trace", v1, "--match", "cb-logged-in-boom", "--storage-state", state, "--trace-out", join(dir, "v1-min.jsonl"),
+    ]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/Reduced \d+ → 0 actions over 2 replays/);
   }, 120_000);
 });

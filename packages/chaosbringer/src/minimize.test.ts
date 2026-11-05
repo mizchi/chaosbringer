@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
-import { ddmin, minimizeActions, reportMatches, traceWithActions } from "./minimize.js";
+import { REPLAY_CRAWL_FLAGS, REPLAY_REFUSED_FLAGS } from "./cli-crawl-options.js";
+import { UsageError } from "./cli-usage.js";
+import { ddmin, minimizeActions, parseMinimizeArgs, replaySetup, reportMatches, traceWithActions } from "./minimize.js";
+import { formatReproFlags } from "./repro-command.js";
+import { cliOptions, ROUND_TRIPS, URL } from "./repro-flags.test-helpers.js";
 import {
   TRACE_FORMAT_VERSION,
+  traceSetupOf,
   type TraceAction,
   type TraceEntry,
   type TraceMeta,
 } from "./trace.js";
-import type { CrawlReport, PageError } from "./types.js";
+import type { CrawlerOptions, CrawlReport, PageError } from "./types.js";
 
 const META: TraceMeta = {
   kind: "meta",
@@ -213,5 +218,111 @@ describe("reportMatches", () => {
 
   it("is false on an empty clusters array", () => {
     expect(reportMatches(report([]), /./)).toBe(false);
+  });
+});
+
+describe("minimize CLI arguments", () => {
+  const base = ["--trace", "t.jsonl", "--match", "boom"];
+
+  // `minimize --storage-state` exited 2 as an unknown option, so a failure
+  // behind a login could not be minimized at all.
+  it("takes the crawl flags that shape a replay", () => {
+    const args = parseMinimizeArgs([
+      ...base, "--storage-state", "s.json", "--settle", "adaptive", "--exclude", "/logout", "--ignore-preset", "analytics",
+      "--device", "Pixel 7", "--network", "fast-3g", "--no-headless", "--timeout", "5000", "--har-replay", "h.har",
+      "--spa", "/app", "--no-http-cache", "--invariants", "data-safety", "--ignore-error", "x", "--ignore-analytics",
+    ]);
+    expect([...args.replayGiven].sort()).toEqual([
+      "device", "exclude", "har-replay", "ignore-analytics", "ignore-error", "ignore-preset", "invariants", "network",
+      "no-headless", "no-http-cache", "settle", "spa", "storage-state", "timeout",
+    ]);
+  });
+
+  it("defaults --url to the trace's and keeps its own flags", () => {
+    expect(parseMinimizeArgs(base)).toMatchObject({ url: undefined, traceOut: "min.trace.jsonl", quiet: false, maxPagesGiven: false });
+    expect(parseMinimizeArgs([...base, "--url", "http://y/", "--max-pages", "3"])).toMatchObject({ url: "http://y/", maxPagesGiven: true });
+  });
+
+  it("refuses a flag the trace decides, saying why", () => {
+    expect(() => parseMinimizeArgs([...base, "--seed", "3"])).toThrow(
+      "--seed does not apply to minimize: the trace decides the actions, so there is no random choice for a seed to make",
+    );
+    expect(() => parseMinimizeArgs([...base, "--strict"])).toThrow(
+      "--strict does not apply to minimize: --match decides whether a replay reproduced, not the exit rules",
+    );
+  });
+
+  it("refuses a pasted crawl command, and a misspelled flag by the one it misses", () => {
+    expect(() => parseMinimizeArgs([...base, "--", "chaosbringer", "--url", "http://x/"])).toThrow(
+      /minimize takes no crawl command after --/,
+    );
+    expect(() => parseMinimizeArgs([...base, "--storage-stat", "s.json"])).toThrow(
+      "unknown option --storage-stat: did you mean --storage-state?",
+    );
+  });
+
+  it("refuses a value the crawl refuses, before the trace is read", () => {
+    expect(() => parseMinimizeArgs([...base, "--settle", "slow"])).toThrow(UsageError);
+    expect(() => parseMinimizeArgs([...base, "--exclude", "("])).toThrow(/--exclude "\(" is not a valid regex/);
+  });
+
+  // Every flag a Repro: line can carry: taken, or refused with why.
+  it.each(Object.entries(ROUND_TRIPS))("--%s from a Repro: line is applied, or refused with a reason", (flag, argv) => {
+    const replayFlags: readonly string[] = REPLAY_CRAWL_FLAGS;
+    const own = ["url", "max-pages", "trace-out"];
+    const refused = argv.flatMap((a) => {
+      const name = a.replace(/^--/, "").split("=")[0]!;
+      return name in REPLAY_REFUSED_FLAGS ? [name] : [];
+    });
+    if (refused.length === 0) {
+      expect(replayFlags.includes(flag) || own.includes(flag)).toBe(true);
+      expect(() => parseMinimizeArgs([...base, ...argv])).not.toThrow();
+    } else {
+      expect(replayFlags.includes(flag)).toBe(false);
+      expect(() => parseMinimizeArgs([...base, ...argv])).toThrow(
+        new RegExp(`^--(${refused.join("|")}) does not apply to minimize: `),
+      );
+    }
+  });
+});
+
+describe("replaySetup", () => {
+  const recorded = traceSetupOf(
+    cliOptions(["--url", URL, "--storage-state", "s.json", "--settle", "adaptive", "--ignore-preset", "analytics", "--data-safety"]),
+  );
+  const run = (argv: string[]) => replaySetup(recorded, parseMinimizeArgs(["--trace", "t", "--match", "x", ...argv]), URL);
+  /** What is set: a subset table leaves a boolean `undefined` where the main crawl's defaults it to `false`. */
+  const set = (o: CrawlerOptions) =>
+    Object.fromEntries(
+      Object.entries(o)
+        .filter(([, v]) => v !== undefined && v !== false)
+        .map(([k, v]) => [k, k === "invariants" ? (v as CrawlerOptions["invariants"])!.map((i) => i.name) : v]),
+    );
+
+  it("replays with what the trace recorded", () => {
+    const setup = run([]);
+    expect(set(setup.options)).toEqual(
+      set(cliOptions(["--url", URL, "--settle", "adaptive", "--ignore-preset", "analytics", "--storage-state", "s.json", "--invariants", "data-safety"])),
+    );
+    expect(formatReproFlags(setup.applied)).toEqual([
+      "--settle", "adaptive", "--ignore-preset", "analytics", "--storage-state", "s.json", "--invariants", "data-safety",
+    ]);
+    expect(setup.overridden).toEqual([]);
+  });
+
+  it("lets a flag replace what was recorded for its setting, and only that", () => {
+    const setup = run(["--storage-state", "other.json", "--ignore-error", "noise", "--invariants", "not-blank"]);
+    expect(setup.options.storageState).toBe("other.json");
+    // The recorded preset is replaced, not added to.
+    expect(setup.options.ignoreErrorPatterns).toEqual(["noise"]);
+    expect(setup.options.invariants?.map((i) => i.name)).toEqual(["data.not-blank"]);
+    expect(setup.options.settle).toBe("adaptive");
+    expect(setup.overridden).toEqual(["--ignore-error", "--storage-state", "--invariants"]);
+  });
+
+  it("replays a v1 trace, which records nothing, with the defaults and the flags", () => {
+    const setup = replaySetup(undefined, parseMinimizeArgs(["--trace", "t", "--match", "x", "--storage-state", "s.json"]), URL);
+    expect(set(setup.options)).toEqual(set(cliOptions(["--url", URL, "--storage-state", "s.json"])));
+    expect(setup.applied).toEqual([]);
   });
 });
