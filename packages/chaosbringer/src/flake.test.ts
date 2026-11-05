@@ -1,9 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
-import { UsageError } from "./cli-usage.js";
-import { flakeReport, formatFlakeReport, parseFlakeArgs, pastedCrawlArgs, perRunOptions, perRunPath } from "./flake.js";
+import { packageVersion, UsageError } from "./cli-usage.js";
+import {
+  flakeExitCode,
+  flakeReport,
+  formatFlakeReport,
+  parseFlakeArgs,
+  pastedCrawlArgs,
+  perRunOptions,
+  perRunPath,
+} from "./flake.js";
 import { buildReproCommand } from "./repro-command.js";
 import { cliOptions, comparable, resolved, ROUND_TRIPS, shellWords, URL } from "./repro-flags.test-helpers.js";
+import type { RunWarning } from "./run-warnings.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
 function summary(over: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -233,6 +242,19 @@ describe("flake CLI arguments", () => {
     expect(args.exitOptions).toMatchObject({ http: "5xx", deadLinks: true, warnings: true });
   });
 
+  describe("--version", () => {
+    afterEach(() => vi.restoreAllMocks());
+    // It was accepted as "not applied", and flake ran every crawl.
+    it("prints the version and runs nothing, as the main command does", () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(process, "exit").mockImplementation(((code: number) => {
+        throw new Error(`exit ${code}`);
+      }) as never);
+      expect(() => parseFlakeArgs([...base, "--version"])).toThrow("exit 0");
+      expect(log).toHaveBeenCalledWith(packageVersion());
+    });
+  });
+
   it("names the crawl flags it accepts and does not apply", () => {
     expect(parseFlakeArgs([...base, "--junit", "j.xml", "--compact", "--exclude", "/x"]).notApplied).toEqual([
       "--compact",
@@ -292,11 +314,19 @@ describe("flake -- <a pasted crawl command>", () => {
   });
 
   it("refuses flake's own flags after the --", () => {
-    for (const flag of [["--runs", "3"], ["--output", "o.json"], ["--quiet"]]) {
-      expect(() => parseFlakeArgs(["--", "--url", url, ...flag])).toThrow(
-        `${flag[0]} after --: flake's own flags (--runs, --output, --quiet, --help) go before the --`,
-      );
-    }
+    expect(() => parseFlakeArgs(["--", "--url", url, "--runs", "3"])).toThrow(
+      "--runs after --: it is flake's own flag, and goes before the --",
+    );
+    // The crawl's --output and --quiet mean something else before the --, so
+    // the refusal does not say to move them there.
+    expect(() => parseFlakeArgs(["--", "--url", url, "--output", "o.json"])).toThrow(
+      "--output after -- is the crawl's report path, which flake does not write (its runs' reports are not kept); " +
+        "flake's own --output, its analysis JSON, goes before the --",
+    );
+    expect(() => parseFlakeArgs(["--", "--url", url, "--quiet"])).toThrow(
+      "--quiet after -- is the crawl's; flake's own --quiet (print only the summary) goes before the --",
+    );
+    expect(() => parseFlakeArgs(["--", "--url", url, "--version"])).toThrow(/^--version after --: .*no run to repeat$/);
   });
 
   it("refuses an unknown flag after the --, naming the one it misspells", () => {
@@ -308,6 +338,26 @@ describe("flake -- <a pasted crawl command>", () => {
   it("refuses a command pasted as one quoted argument, and another program", () => {
     expect(() => pastedCrawlArgs([`chaosbringer --url ${url}`])).toThrow(/paste the command unquoted/);
     expect(() => pastedCrawlArgs(["npx", "playwright", "test"])).toThrow(/expected a chaosbringer command/);
+    expect(() => pastedCrawlArgs(["node", "server.js"])).toThrow(/expected a chaosbringer command, got "node server.js"/);
+  });
+
+  it("takes the command as chaos-flake.yml runs it, node and the built cli.js", () => {
+    expect(pastedCrawlArgs(["node", "dist/cli.js", "--url", url])).toEqual(["--url", url]);
+    expect(parseFlakeArgs(["--", "node", "dist/cli.js", "--url", url]).baseUrl).toBe(url);
+  });
+
+  // The main crawl's refusal listed its subcommands, `scan` among them, right
+  // after refusing `scan`.
+  it("refuses a subcommand or a stray word in flake's terms, not with the subcommand list", () => {
+    expect(() => parseFlakeArgs(["--runs", "2", "--", "chaosbringer", "scan", url])).toThrow(
+      'unexpected argument "scan" after --: it is a subcommand, and flake reruns a plain crawl command (chaosbringer --url <url> …)',
+    );
+    for (const argv of [["--runs", "2", "bogus", "--url", url], ["--", "--url", url, "bogus"]]) {
+      expect(() => parseFlakeArgs(argv)).toThrow(UsageError);
+      expect(() => parseFlakeArgs(argv)).toThrow(
+        /^unexpected argument "bogus": flake takes the URL \(--url <url>, or as the one argument\) and flags$/,
+      );
+    }
   });
 
   it("refuses a Repro line's `# + …` note that a shell passed on", () => {
@@ -335,8 +385,27 @@ describe("per-run outputs", () => {
     expect(perRunPath("t.jsonl", 2, "file")).toBe("t.run2.jsonl");
     expect(perRunPath("out/trace", 1, "file")).toBe("out/trace.run1");
     expect(perRunPath("bundles", 3, "dir")).toBe("bundles/run-3");
-    const o = perRunOptions(cliOptions(["--url", URL, "--trace-out", "t.jsonl", "--failure-artifacts", "b", "--har-record", "h.har"]), 2);
-    expect(o).toMatchObject({ traceOut: "t.run2.jsonl", failureArtifacts: { dir: "b/run-2" }, har: { path: "h.run2.har", mode: "record" } });
+    const o = perRunOptions(
+      cliOptions([
+        "--url", URL, "--trace-out", "t.jsonl", "--failure-artifacts", "b", "--har-record", "h.har",
+        "--log-file", "l.log", "--screenshots", "--screenshot-dir", "s", "--perf-out", "p",
+      ]),
+      2,
+    );
+    expect(o).toMatchObject({
+      traceOut: "t.run2.jsonl",
+      failureArtifacts: { dir: "b/run-2" },
+      har: { path: "h.run2.har", mode: "record" },
+      logFile: "l.run2.log",
+      screenshotDir: "s/run-2",
+      perf: { outDir: "p/run-2" },
+    });
+    // --screenshots alone wrote every run to the crawler's ./screenshots, each
+    // over the last.
+    const shots = cliOptions(["--url", URL, "--screenshots"]);
+    expect(perRunOptions(shots, 1).screenshotDir).toBe("screenshots/run-1");
+    expect(perRunOptions(shots, 2).screenshotDir).toBe("screenshots/run-2");
+    expect(perRunOptions(cliOptions(["--url", URL]), 2).screenshotDir).toBeUndefined();
     // A file a run reads is the same for every run.
     expect(perRunOptions(cliOptions(["--url", URL, "--har-replay", "h.har"]), 2).har).toEqual({ path: "h.har", mode: "replay" });
   });
@@ -374,6 +443,20 @@ describe("run verdicts", () => {
 
   it("is never flaky from one run", () => {
     expect(flakeReport([noisy], { strict: true }).verdictFlaky).toBe(false);
+  });
+
+  // flake's exit code read the flaky clusters and pages and, until this,
+  // nothing pinned that a verdict flaking alone also exits 1.
+  it("exits 1 when only the verdict flaked, with no flaky cluster or page", () => {
+    const warning: RunWarning = { code: "sitemap-unreadable", message: "sitemap x could not be read", count: 1 };
+    const a = flakeReport([makeReport({ seed: 1, warnings: [warning] }), makeReport({ seed: 2 })], { warnings: true });
+    expect(a.verdictFlaky).toBe(true);
+    expect(a.flakyClusters).toEqual([]);
+    expect(a.flakyPages).toEqual([]);
+    expect(flakeExitCode(a)).toBe(1);
+    expect(flakeExitCode(flakeReport([clean, clean], { strict: true }))).toBe(0);
+    expect(flakeExitCode(flakeReport([noisy, clean]))).toBe(1);
+    expect(flakeExitCode(flakeReport([clean]))).toBe(1);
   });
 });
 

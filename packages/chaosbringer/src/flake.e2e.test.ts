@@ -5,7 +5,7 @@
  * one, and each run is judged by the crawl's own exit rules.
  */
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,8 +95,11 @@ describe("chaosbringer flake with the main crawl's flags", () => {
       "flake", "--runs", "2", "--output", out, "--",
       "chaosbringer", "--url", `${site.url}/`, "--seed", "9", "--exclude", "/about", "--exclude", "/broken-link",
       "--exclude", "/console-error", "--max-pages", "2", "--max-actions", "0", "--trace-out", trace,
+      "--bind", "--bind-title", "cb-flake-e2e",
     ]);
     expect(r.status, r.stderr + r.stdout).toBe(0);
+    // Each run's bound browser says how to attach to it, as the crawl's does.
+    expect(r.stdout.match(/npx playwright cli attach cb-flake-e2e/g)).toHaveLength(2);
     expect(analysis(out).verdicts.map((v) => v.seed)).toEqual([9, 9]);
     for (const run of [1, 2]) {
       const visited = visits(join(dir, `pasted.run${run}.jsonl`));
@@ -126,18 +129,25 @@ describe("chaosbringer flake --invariants", () => {
 
   it("checks the invariants in every run, and fails each run on a violation", async () => {
     const out = join(dir, "inv.json");
+    // A baseline with no clusters: each run is diffed against it, as the
+    // crawl diffs itself, so --baseline-strict judges every run too.
+    const baseline = join(dir, "baseline.json");
+    writeFileSync(baseline, JSON.stringify({ baseUrl: `${server.url}/`, errorClusters: [], pages: [] }));
     const r = await cli([
       "flake", "--url", `${server.url}/`, "--runs", "2", "--max-pages", "1", "--max-actions", "0",
-      "--invariants", "xss-marker", "--output", out,
+      "--invariants", "xss-marker", "--baseline", baseline, "--baseline-strict", "--output", out,
     ]);
     expect(r.status, r.stderr + r.stdout).toBe(0);
     const a = analysis(out);
     expect(a.verdicts.every((v) => !v.passed && v.reasons.some((x) => /invariant violation/.test(x)))).toBe(true);
+    for (const v of a.verdicts) expect(v.reasons).toContainEqual(expect.stringMatching(/^--baseline-strict: 1 new cluster/));
     expect(a.stableClusters.map((c) => c.type)).toContain("invariant-violation");
     // Without it, both pass.
     const clean = join(dir, "clean.json");
     const c = await cli(["flake", "--url", `${server.url}/`, "--runs", "2", "--max-pages", "1", "--max-actions", "0", "--output", clean]);
     expect(c.status, c.stderr).toBe(0);
     expect(analysis(clean).verdicts.every((v) => v.passed)).toBe(true);
+    // Without --seed, each run draws its own.
+    expect(new Set(analysis(clean).verdicts.map((v) => v.seed)).size).toBe(2);
   }, 180_000);
 });

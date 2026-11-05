@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
 import { REPLAY_CRAWL_FLAGS, REPLAY_REFUSED_FLAGS } from "./cli-crawl-options.js";
 import { UsageError } from "./cli-usage.js";
-import { ddmin, minimizeActions, parseMinimizeArgs, replaySetup, reportMatches, traceWithActions } from "./minimize.js";
+import { checkReplayFiles, ddmin, minimizeActions, parseMinimizeArgs, replaySetup, reportMatches, traceWithActions } from "./minimize.js";
 import { formatReproFlags } from "./repro-command.js";
 import { cliOptions, ROUND_TRIPS, URL } from "./repro-flags.test-helpers.js";
 import {
@@ -320,9 +323,61 @@ describe("replaySetup", () => {
     expect(setup.overridden).toEqual(["--ignore-error", "--storage-state", "--invariants"]);
   });
 
+  // As one of the invariants flags, `--axe-tags` replaced the recorded
+  // `--axe` and `--invariants` with itself, which builds nothing.
+  it("lets --axe-tags alone retag the recorded axe check, keeping the recorded invariants", () => {
+    const withAxe = traceSetupOf(cliOptions(["--url", URL, "--axe", "--invariants", "data-safety"]));
+    const setup = replaySetup(withAxe, parseMinimizeArgs(["--trace", "t", "--match", "x", "--axe-tags", "wcag2a"]), URL);
+    const names = setup.options.invariants?.map((i) => i.name) ?? [];
+    expect(names).toEqual(cliOptions(["--url", URL, "--axe", "--invariants", "data-safety"]).invariants?.map((i) => i.name));
+    expect(names.length).toBeGreaterThan(1);
+    expect(setup.values["axe-tags"]).toBe("wcag2a");
+    expect(formatReproFlags(setup.applied)).toEqual(["--invariants", "data-safety", "--axe"]);
+    expect(setup.overridden).toEqual([]);
+    // A recorded --axe-tags is the one replaced.
+    const tagged = traceSetupOf(cliOptions(["--url", URL, "--axe", "--axe-tags", "wcag21a"]));
+    const retagged = replaySetup(tagged, parseMinimizeArgs(["--trace", "t", "--match", "x", "--axe-tags", "wcag2a"]), URL);
+    expect(retagged.values["axe-tags"]).toBe("wcag2a");
+    expect(retagged.overridden).toEqual(["--axe-tags"]);
+  });
+
+  it("refuses --axe-tags alone when the trace recorded no axe check", () => {
+    expect(() => run(["--axe-tags", "wcag2a"])).toThrow(
+      "--axe-tags without --axe: the trace recorded no axe check for it to tag; give --axe --axe-tags <list>",
+    );
+    // With --axe it replaces the recorded invariants, as documented.
+    expect(run(["--axe", "--axe-tags", "wcag2a"]).overridden).toEqual(["--invariants"]);
+  });
+
   it("replays a v1 trace, which records nothing, with the defaults and the flags", () => {
     const setup = replaySetup(undefined, parseMinimizeArgs(["--trace", "t", "--match", "x", "--storage-state", "s.json"]), URL);
     expect(set(setup.options)).toEqual(set(cliOptions(["--url", URL, "--storage-state", "s.json"])));
     expect(setup.applied).toEqual([]);
+  });
+});
+
+describe("checkReplayFiles", () => {
+  const dir = mkdtempSync(join(tmpdir(), "chaos-min-files-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const missing = join(dir, "missing.json");
+
+  // The refusal named a flag the user never gave, and nothing said the path
+  // came from the trace or that a flag replaces it.
+  it("says a missing file came from the trace's setup, and which flag replaces it", () => {
+    expect(() => checkReplayFiles({ storageState: missing }, new Set())).toThrow(
+      `--storage-state ${missing}: no such file (recorded in the trace's setup, read from the current directory; give --storage-state <path> to replace it)`,
+    );
+    expect(() => checkReplayFiles({ har: { path: missing, mode: "replay" } }, new Set())).toThrow(
+      /^--har-replay .*: no such file \(recorded in the trace's setup, .*give --har-replay <path> to replace it\)$/,
+    );
+  });
+
+  it("refuses a file given as a flag as the crawl does", () => {
+    expect(() => checkReplayFiles({ storageState: missing }, new Set(["storage-state"]))).toThrow(
+      new RegExp(`^--storage-state ${missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: no such file$`),
+    );
+    const ok = join(dir, "s.json");
+    writeFileSync(ok, JSON.stringify({ cookies: [], origins: [] }));
+    expect(() => checkReplayFiles({ storageState: ok }, new Set())).not.toThrow();
   });
 });

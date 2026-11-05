@@ -227,6 +227,12 @@ describe("usage errors", () => {
     [["flake", ...URL_ARG, "--storage-state", "missing-state.json"], "flake", "--storage-state missing-state.json: no such file"],
     [["flake", ...URL_ARG, "--trace-replay", "missing.jsonl"], "flake", "--trace-replay missing.jsonl: no such file"],
     [["flake", ...URL_ARG, "--har-replay", "missing.har"], "flake", "--har-replay missing.har: no such file"],
+    [
+      ["flake", ...URL_ARG, "--baseline", "missing-baseline.json", "--baseline-missing", "fail"],
+      "flake",
+      "--baseline missing-baseline.json: not found, and --baseline-missing fail refuses a run without it " +
+        "(drop the flag, or pass --baseline-missing warn, for the first run, whose report becomes the baseline)",
+    ],
     [["shard", "--count", "2", ...URL_ARG, "--har-replay", "missing.har"], "shard", "--har-replay missing.har: no such file"],
     // A crawl flag or the URL given on both sides of flake's `--`, and an
     // unknown flag after it.

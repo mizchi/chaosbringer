@@ -254,6 +254,23 @@ describe("drive", () => {
     expect(inputs[0]!.outline).toContain('[#0] button "Reject optional"');
   }, 60_000);
 
+  // drive --ignore-error / --ignore-preset: nothing checked that the
+  // patterns reach the problem watch.
+  it("does not record a problem an ignoreErrorPatterns entry matches, and still records the rest", async () => {
+    const decider: DriveDecider = {
+      name: "watcher",
+      async decide(input) {
+        if (input.stepIndex === 0) return { action: "click", index: input.candidates.findIndex((c) => c.description.startsWith('button "Wishlist"')) };
+        return { action: "give_up", reasoning: "seen enough" };
+      },
+    };
+    const result = await drive({ url: `${server.url}/`, goal: "add to wishlist", decider, browser, ignoreErrorPatterns: ["api/wishlist"] });
+    const step0 = result.problems.filter((p) => p.step === 0);
+    expect(step0.some((p) => /api\/wishlist/i.test(p.message))).toBe(false);
+    expect(step0.map((p) => p.kind)).not.toContain("http");
+    expect(step0.map((p) => p.kind)).toContain("unhandled-rejection");
+  }, 60_000);
+
   it("does not take the decider's word for done while the goal does not hold", async () => {
     const inputs: DriveInput[] = [];
     let first = true;

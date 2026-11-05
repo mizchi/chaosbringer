@@ -25,6 +25,7 @@ import {
   REPLAY_CRAWL_FLAGS,
   REPLAY_REFUSED_FLAGS,
 } from "./cli-crawl-options.js";
+import { parseInvariantsFlag } from "./cli-invariants.js";
 import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
@@ -308,11 +309,17 @@ export function replaySetup(
   args: Pick<MinimizeCliArgs, "replay" | "replayGiven">,
   baseUrl: string,
 ): ReplaySetup {
-  const givenGroups = new Set([...args.replayGiven].map(replayGroup));
+  // An `--axe-tags` given alone retags the recorded axe check. As one of the
+  // invariants flags it would replace the recorded `--axe` and `--invariants`
+  // with itself, which builds nothing without `--axe`, and the replays would
+  // run with no checks at all.
+  const tagsOnly = args.replayGiven.has("axe-tags") && !["axe", "invariants", "data-safety"].some((f) => args.replayGiven.has(f));
+  const groupOf = (flag: string) => (tagsOnly && flag === "axe-tags" ? flag : replayGroup(flag));
+  const givenGroups = new Set([...args.replayGiven].map(groupOf));
   const recorded = traceSetupFlags(setup);
-  const keep = (f: ReproFlag) => !givenGroups.has(replayGroup(f.flag.slice(2)));
+  const keep = (f: ReproFlag) => !givenGroups.has(groupOf(f.flag.slice(2)));
   const applied = recorded.filter(keep);
-  const overridden = [...new Set(recorded.filter((f) => !keep(f)).map((f) => `--${replayGroup(f.flag.slice(2))}`))];
+  const overridden = [...new Set(recorded.filter((f) => !keep(f)).map((f) => `--${groupOf(f.flag.slice(2))}`))];
   // Unquoted words, as a shell would hand them over: a value that starts
   // with `-` joined to its flag, which parseArgs otherwise refuses.
   const words = applied.flatMap(({ flag, value }) =>
@@ -321,6 +328,11 @@ export function replaySetup(
   const fromTrace = parseArgsSuggesting({ args: words, options: crawlCliOptionsFor(REPLAY_CRAWL_FLAGS) }).values;
   const fromFlags = Object.fromEntries(Object.entries(args.replay).filter(([k]) => args.replayGiven.has(k)));
   const values: Partial<CrawlCliValues> = { ...fromTrace, ...fromFlags };
+  if (tagsOnly && !values.axe && !asUsageError(() => parseInvariantsFlag(values.invariants).axe)) {
+    throw new UsageError(
+      "--axe-tags without --axe: the trace recorded no axe check for it to tag; give --axe --axe-tags <list>",
+    );
+  }
   const options = asUsageError(() => {
     const built = crawlerOptionsFromCli(values, baseUrl);
     validateOptions(built);
@@ -349,8 +361,10 @@ OPTIONS:
 CRAWL FLAGS (as chaosbringer --help describes them), applied to every replay:
 ${formatFlagList(REPLAY_CRAWL_FLAGS, "  ")}
   A trace written with --trace-out (format v2) records the ones its crawl was
-  given, and every replay uses them: the cookies of its --storage-state, its
-  --settle, its --exclude, … A flag given here replaces what was recorded for it.
+  given (all but --headless / --no-headless), and every replay uses them: the
+  cookies of its --storage-state, its --settle, its --exclude, … A flag given
+  here replaces what was recorded for it (--axe-tags alone retags the recorded
+  axe check). A recorded relative path is read from the current directory.
   A v1 trace records none, and replays with the defaults.
 
 REFUSED (exit 2: the trace decides the pages and the actions, and --match,
@@ -365,6 +379,31 @@ function fail(msg: string): never {
   throw new UsageError(msg);
 }
 
+/** The setup's input files, and the flag each one is replaced by. */
+const REPLAY_INPUT_FILES = [
+  { key: "storageState", flag: "storage-state" },
+  { key: "har", flag: "har-replay" },
+] as const;
+
+/**
+ * `checkInputFiles` over the files the replays read. A path the trace
+ * recorded (and no flag replaced) is refused as one: the user never gave
+ * the flag the refusal names, and a relative path recorded where the crawl
+ * ran is read from where minimize runs.
+ */
+export function checkReplayFiles(options: CrawlerOptions, given: ReadonlySet<string>): void {
+  for (const { key, flag } of REPLAY_INPUT_FILES) {
+    try {
+      checkInputFiles(key === "storageState" ? { storageState: options.storageState } : { har: options.har });
+    } catch (err) {
+      if (!(err instanceof UsageError) || given.has(flag)) throw err;
+      throw new UsageError(
+        `${err.message} (recorded in the trace's setup, read from the current directory; give --${flag} <path> to replace it)`,
+      );
+    }
+  }
+}
+
 /** Entry point wired from src/cli.ts when the `minimize` subcommand is used. */
 export async function runMinimizeCli(argv: string[]): Promise<void> {
   const args = parseMinimizeArgs(argv);
@@ -376,7 +415,7 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
   const setup = replaySetup(meta.setup, args, baseUrl);
   // The files the replays read, recorded or given, and the packages an
   // --invariants axe needs: before the first replay, as the crawl does.
-  checkInputFiles(setup.options);
+  checkReplayFiles(setup.options, args.replayGiven);
   assertPeers(crawlCliPeerNeeds(setup.values));
 
   if (args.maxPagesGiven) {
@@ -425,8 +464,9 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
   }
 
   // In the current format, recording the setup its replays reproduced under
-  // (the trace's, with the flags given here), so a minimize of it, or a
-  // --trace-replay, loads its pages the same way.
+  // (the trace's, with the flags given here), so a minimize of it loads its
+  // pages the same way. A `chaosbringer --trace-replay` of it does not read
+  // the setup: the crawler takes only the flags it is given.
   const [, ...entries] = result.minimizedTrace;
   const outSetup = traceSetupOf(setup.options);
   const outMeta: TraceMeta = { ...meta, v: TRACE_FORMAT_VERSION };

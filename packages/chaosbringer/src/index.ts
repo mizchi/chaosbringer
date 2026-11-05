@@ -525,6 +525,7 @@ export {
   type FlakeAnalysis,
   type ClusterOccurrence,
   type PageOccurrence,
+  type RunVerdict,
 } from "./flake.js";
 export {
   buildGithubAnnotations,

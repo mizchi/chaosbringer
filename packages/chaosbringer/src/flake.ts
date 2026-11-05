@@ -25,9 +25,11 @@ import {
   parseArgsSuggesting,
   readCrawlPerfBudgets,
 } from "./cli-crawl-options.js";
-import { UsageError } from "./cli-usage.js";
+import { packageVersion, PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
+import { DEFAULT_OPTIONS } from "./defaults.js";
 import { type ExitCodeOptions, exitReasons } from "./reporter.js";
 import { isFaultEcho } from "./resource-outcomes.js";
+import { attachHint } from "./browser-bind.js";
 import { applyBaseline, mergeRunWarnings, type RunWarning, warningTimes } from "./run-warnings.js";
 import type { CrawlerOptions, CrawlReport, PageError } from "./types.js";
 import { UnreachableTargetError, unreachableTarget } from "./unreachable-target.js";
@@ -296,7 +298,9 @@ const FLAKE_OWN_FLAGS: readonly string[] = Object.keys(FLAKE_OPTIONS);
  * Crawl flags flake accepts and does not apply: each writes or formats one
  * crawl's report, after the crawl, and flake writes none (its analysis goes
  * to stdout and `--output`). Accepted so that a CI command pasted after `--`
- * runs; a stderr line names the ones given.
+ * with one of these runs; a stderr line names the ones given. The crawl's
+ * `--output` and `--quiet` are refused after the `--` instead: before it,
+ * they are flake's own (`FLAKE_OWN_AFTER_SPLIT`).
  */
 export const FLAKE_NOT_APPLIED: readonly CrawlFlag[] = [
   "compact",
@@ -307,8 +311,23 @@ export const FLAKE_NOT_APPLIED: readonly CrawlFlag[] = [
   "github-annotations",
   "cluster-artifacts",
   "cluster-min-count",
-  "version",
 ];
+
+/**
+ * Why each of flake's own flags (and `--version`) is refused after the `--`. `--output` and
+ * `--quiet` are also crawl flags, with another meaning there, so the
+ * refusal does not tell the user to move them: a crawl report path moved
+ * before the `--` would get flake's analysis written to it.
+ */
+const FLAKE_OWN_AFTER_SPLIT: Readonly<Record<string, string>> = {
+  runs: "--runs after --: it is flake's own flag, and goes before the --",
+  output:
+    "--output after -- is the crawl's report path, which flake does not write (its runs' reports are not kept); " +
+    "flake's own --output, its analysis JSON, goes before the --",
+  quiet: "--quiet after -- is the crawl's; flake's own --quiet (print only the summary) goes before the --",
+  help: "--help after --: it is flake's own flag, and goes before the --",
+  version: "--version after --: that command prints the version and crawls nothing, so there is no run to repeat",
+};
 
 /**
  * Crawl flags naming a file (or, for the last three, a directory) a run
@@ -341,7 +360,11 @@ export function perRunOptions(options: CrawlerOptions, run: number): CrawlerOpti
   if (options.failureArtifacts) {
     out.failureArtifacts = { ...options.failureArtifacts, dir: perRunPath(options.failureArtifacts.dir, run, "dir") };
   }
-  if (options.screenshotDir) out.screenshotDir = perRunPath(options.screenshotDir, run, "dir");
+  // The crawler's default too, or every run wrote `./screenshots/<page>.png`
+  // over the last one's.
+  if (options.screenshotDir || options.screenshots) {
+    out.screenshotDir = perRunPath(options.screenshotDir ?? DEFAULT_OPTIONS.screenshotDir, run, "dir");
+  }
   if (options.perf && typeof options.perf === "object" && options.perf.outDir !== undefined) {
     out.perf = { ...options.perf, outDir: perRunPath(options.perf.outDir, run, "dir") };
   }
@@ -370,8 +393,9 @@ export interface FlakeCliArgs {
 /**
  * The words after `flake … --`: a crawl command as the shell split it, a
  * `Repro:` line pasted as it was printed, its leading `chaosbringer` (or
- * `npx chaosbringer`, `pnpm exec chaosbringer`, a path to the binary)
- * dropped. The quoting `reproCommand` writes is the shell's to undo.
+ * `npx chaosbringer`, `pnpm exec chaosbringer`, a path to the binary,
+ * `node <path>/cli.js` as chaos-flake.yml runs it) dropped. The quoting
+ * `reproCommand` writes is the shell's to undo.
  */
 export function pastedCrawlArgs(words: readonly string[]): string[] {
   if (words.length === 1 && /\s/.test(words[0]!)) {
@@ -387,6 +411,9 @@ export function pastedCrawlArgs(words: readonly string[]): string[] {
     i = 2;
   } else if (words[0] === "yarn") {
     i = words[1] === "exec" ? 2 : 1;
+  } else if (words[0] === "node") {
+    i = 1;
+    if (words[1] !== undefined && /(^|\/)(cli|chaosbringer)\.[cm]?js$/.test(words[1])) return words.slice(2);
   }
   const bin = words[i];
   if (bin !== undefined && /(^|\/)chaosbringer(@[^/\s]*)?$/.test(bin)) return words.slice(i + 1);
@@ -426,6 +453,11 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     printFlakeHelp();
     process.exit(0);
   }
+  // As the main command does: print it and run nothing.
+  if (own.values.version) {
+    console.log(packageVersion());
+    process.exit(0);
+  }
   const given = (tokens: typeof own.tokens) =>
     new Set<string>((tokens ?? []).flatMap((t) => (t.kind === "option" ? [t.name] : [])));
   const ownGiven = given(own.tokens);
@@ -442,11 +474,8 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     });
     const pastedGiven = given(pasted.tokens);
     for (const name of pastedGiven) {
-      if (FLAKE_OWN_FLAGS.includes(name)) {
-        throw new UsageError(
-          `--${name} after --: flake's own flags (${FLAKE_OWN_FLAGS.map((f) => `--${f}`).join(", ")}) go before the --`,
-        );
-      }
+      const own = FLAKE_OWN_AFTER_SPLIT[name];
+      if (own !== undefined) throw new UsageError(own);
     }
     const group = (name: string) => FLAG_GROUP[name] ?? name;
     const ownGroups = new Set([...ownGiven].filter((n) => !FLAKE_OWN_FLAGS.includes(n)).map(group));
@@ -471,6 +500,7 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
     throw new UsageError(`--runs must be an integer >= 2 (got ${JSON.stringify(runsRaw)})`);
   }
 
+  checkFlakePositionals(positionals, split >= 0);
   // The main crawl's checks, in its order, so a value the crawl would
   // refuse is refused here before Run 1 (where it failed with exit 1, which
   // chaos-flake.yml reads as "flakes were found").
@@ -497,6 +527,30 @@ export function parseFlakeArgs(argv: string[]): FlakeCliArgs {
   });
 }
 
+/**
+ * A word that is not a URL, refused in flake's terms: the main crawl's
+ * refusal lists its subcommands, which after a `--` read as if `scan` were
+ * one flake could rerun.
+ */
+function checkFlakePositionals(positionals: readonly string[], pasted: boolean): void {
+  const word = positionals.find((p) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(p));
+  if (word === undefined) return;
+  if (word === "#") throw new UsageError(PASTED_COMMENT);
+  if (Object.hasOwn(SUBCOMMANDS, word)) {
+    throw new UsageError(
+      `unexpected argument "${word}"${pasted ? " after --" : ""}: it is a subcommand, and flake reruns a plain crawl ` +
+        "command (chaosbringer --url <url> …)",
+    );
+  }
+  throw new UsageError(`unexpected argument "${word}": flake takes the URL (--url <url>, or as the one argument) and flags`);
+}
+
+/** flake's exit code for an analysis: 1 when the verdict, a cluster or a page flaked, or nothing could be decided. */
+export function flakeExitCode(analysis: FlakeAnalysis): 0 | 1 {
+  if (!analysis.decidable) return 1;
+  return analysis.verdictFlaky || analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0 ? 1 : 0;
+}
+
 function printFlakeHelp(): void {
   console.log(`
 chaosbringer flake — run the same crawl N times and surface flaky errors.
@@ -515,15 +569,17 @@ CRAWL FLAGS:
   Every flag of the main crawl (chaosbringer --help) is taken, before the -- or
   after it, and every run crawls with it: --seed, --exclude, --settle,
   --storage-state, --strict, --invariants, … After a --, a pasted crawl command
-  may start with chaosbringer, npx chaosbringer or pnpm exec chaosbringer. A
-  crawl flag (or the URL) given on both sides is refused, exit 2.
+  may start with chaosbringer, npx chaosbringer, pnpm exec chaosbringer or
+  node dist/cli.js. A crawl flag (or the URL) given on both sides is refused,
+  exit 2, and so are --output and --quiet after the -- (there they are the
+  crawl's: its report path, which flake does not write).
 
   --seed <n>            Every run uses it, so RNG-driven variance is impossible
                         and any flake points at non-determinism outside
                         chaosbringer (server, network, timers). Without it, each
                         run draws its own seed (the verdicts name each run's).
   Each run writes its own copy of what these name (<name>.run<N><ext>, or
-  <dir>/run-<N>):
+  <dir>/run-<N>; --screenshots alone, screenshots/run-<N>):
 ${formatFlagList(FLAKE_PER_RUN_OUTPUTS, "    ")}
   Accepted and not applied (each writes or formats one crawl's report):
 ${formatFlagList(FLAKE_NOT_APPLIED, "    ")}
@@ -571,7 +627,8 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
   const reports: CrawlReport[] = [];
   for (let i = 0; i < args.runs; i++) {
     const options = perRunOptions(args.options, i + 1);
-    const crawler = new ChaosCrawler(options);
+    // As the main crawl does, so a run's bound browser can be attached to.
+    const crawler = new ChaosCrawler(options, options.bind ? { onBind: (b) => console.log(attachHint(b)) } : {});
     if (!args.quiet) {
       const trace = options.traceOut ? `, trace ${options.traceOut}` : "";
       console.log(`Run ${i + 1}/${args.runs} (seed=${crawler.getSeed()}${trace})...`);
@@ -601,9 +658,6 @@ export async function runFlakeCli(argv: string[]): Promise<void> {
     console.error(
       `flake: ${analysis.runs} run(s) cannot decide flakiness — nothing above is a verdict.`,
     );
-    process.exit(1);
   }
-  if (analysis.verdictFlaky || analysis.flakyClusters.length > 0 || analysis.flakyPages.length > 0) {
-    process.exit(1);
-  }
+  if (flakeExitCode(analysis) !== 0) process.exit(1);
 }

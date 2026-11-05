@@ -267,8 +267,9 @@ state); to see it again first, rerun the `chaosbringer scan … --faults
 <fault>` command in its chaos crawl's report (`reproCommand`). A plain
 crawl's `Repro:` line has no flag for a fault set in code: it names the
 rules in a trailing `# + …` comment and reruns without them. To tell a real
-failure from a race, paste that line after `chaosbringer flake --runs 5 --`:
-every run gets the same flags and is judged by the crawl's own exit rules.
+failure from a race, paste that line (a plain crawl's; flake refuses a
+`scan` command) after `chaosbringer flake --runs 5 --`: every run gets the
+same flags and is judged by the crawl's own exit rules.
 To shrink one, record it with `--trace-out` and run `chaosbringer minimize
 --trace <file> --match <regex>`: the trace records the crawl's
 `--storage-state`, `--settle`, `--exclude` and the rest, and every replay
