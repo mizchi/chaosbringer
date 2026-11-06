@@ -8,7 +8,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The job's own 10 minutes plus the Playwright install step's 25-minute
+    # bound (see that step): every job here that installs Playwright adds it.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -51,12 +53,26 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # Both installs run apt-get through sudo, and the runner's Ubuntu mirror
+      # is sometimes slow rather than down. On Nov 5-6 2026 it served the
+      # ~20-22 MB of fonts `install-deps` fetches (the libraries are already
+      # on the image) at 26-46 kB/s, 8 to 13.5 minutes per install step.
+      # A 10-minute job was cancelled partway through its tests, and an
+      # 8-minute step bound killed the download. The step bound is the
+      # install's own budget: a slow mirror still finishes inside it, and a
+      # stalled one fails the install step by name instead of timing out the
+      # job (chaos-pr-gate.yml has the 24-minute hang that bound is for).
+      # 25 minutes, because the three logged fetches spread by a factor of
+      # ~1.8: the same spread again below the slowest is 23-25 minutes.
+      # Each job's timeout is what it needed before plus these 25 minutes.
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
         run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps only (cache hit path)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 25
         run: npx playwright install-deps chromium
 
       - name: Test
@@ -79,7 +95,8 @@ jobs:
     # `lightbringer-perf.yml` is the separate, path-filtered budget gate; this
     # job is correctness, on every PR.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: packages/lightbringer
@@ -122,10 +139,12 @@ jobs:
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
         run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps only (cache hit path)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 25
         run: npx playwright install-deps chromium
 
       # The local specs only: they measure the vite fixture app the config's
@@ -143,7 +162,8 @@ jobs:
     # Both need the Playwright Chromium browser (chaosbringer drives Chromium
     # internally) and a `pnpm install` of the workspace.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -188,10 +208,12 @@ jobs:
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
         run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps only (cache hit path)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 25
         run: npx playwright install-deps chromium
 
       - name: Test example
@@ -209,10 +231,11 @@ jobs:
     # nobody invokes, are indistinguishable from the outside.
     #
     # Its own job rather than a step in example-tests: ~5 minutes of browser
-    # work would push that job's 2m34s close to its 10-minute limit, and a
-    # separate leg names itself in the checks list when it breaks.
+    # work would more than double that job's 2m34s, and a separate leg names
+    # itself in the checks list when it breaks.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -235,10 +258,12 @@ jobs:
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
         run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps only (cache hit path)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 25
         run: npx playwright install-deps chromium
 
       - name: Red-team suites
