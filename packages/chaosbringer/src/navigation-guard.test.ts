@@ -10,7 +10,7 @@ function fakeSession() {
   const session = Object.assign(emitter, {
     async send(method: string, params?: unknown) {
       sends.push({ method, params });
-      return {};
+      return method === "Page.getFrameTree" ? { frameTree: { frame: { id: "MAIN" } } } : {};
     },
     async detach() {},
   });
@@ -35,10 +35,12 @@ describe("installNavigationGuard", () => {
       isExternal: (url) => !url.startsWith("http://app.test"),
       onBlocked: (url) => blocked.push(url),
     });
-    expect(sends[0]).toEqual({
+    expect(sends.map((s) => s.method)).toEqual(["Page.enable", "Page.getFrameTree", "Fetch.enable"]);
+    expect(sends[2]).toEqual({
       method: "Fetch.enable",
       params: { patterns: [{ resourceType: "Document", requestStage: "Request" }] },
     });
+    sends.splice(0, 2);
 
     emit("Fetch.requestPaused", { requestId: "1", request: { url: "http://app.test/a" } });
     emit("Fetch.requestPaused", { requestId: "2", request: { url: "https://elsewhere.test/" } });
@@ -62,5 +64,26 @@ describe("installNavigationGuard", () => {
     emit("Fetch.requestPaused", { requestId: "4", request: { url: "https://elsewhere.test/" } });
     await tick();
     expect(blocked).toHaveLength(1);
+  });
+
+  it("reports whether a blocked navigation was the main frame's, and the browser's reason for it", async () => {
+    const { session, emit } = fakeSession();
+    const blocked: Array<[string, unknown]> = [];
+    await installNavigationGuard(fakePage(session), {
+      isExternal: (url) => !url.startsWith("http://app.test"),
+      onBlocked: (url, info) => blocked.push([url, info]),
+    });
+    // The page asks for the navigation, then its request is paused.
+    emit("Page.frameRequestedNavigation", { url: "https://elsewhere.test/a#x", reason: "metaTagRefresh", frameId: "MAIN" });
+    emit("Fetch.requestPaused", { requestId: "1", frameId: "MAIN", request: { url: "https://elsewhere.test/a" } });
+    emit("Fetch.requestPaused", { requestId: "2", frameId: "SUB", request: { url: "https://elsewhere.test/embed" } });
+    // The reason is used once.
+    emit("Fetch.requestPaused", { requestId: "3", frameId: "MAIN", request: { url: "https://elsewhere.test/a" } });
+    await tick();
+    expect(blocked).toEqual([
+      ["https://elsewhere.test/a", { mainFrame: true, reason: "metaTagRefresh" }],
+      ["https://elsewhere.test/embed", { mainFrame: false }],
+      ["https://elsewhere.test/a", { mainFrame: true }],
+    ]);
   });
 });

@@ -221,6 +221,14 @@ export {
   type XssMarkerOptions,
 } from "./data-invariants.js";
 export {
+  describeOffsiteNavigation,
+  isOffsiteRedirect,
+  noOffsiteRedirect,
+  offsiteRedirects,
+  reflectedIn,
+  type NoOffsiteRedirectOptions,
+} from "./offsite-navigation.js";
+export {
   stateMachineCurrent,
   stateMachineInvariant,
   stateMachineKey,
@@ -600,6 +608,8 @@ export type {
   CrawlerEvents,
   ChaosTestOptions,
   PageResult,
+  OffsiteNavigation,
+  OffsiteNavigationTrigger,
   PageError,
   ActionResult,
   ActionTarget,

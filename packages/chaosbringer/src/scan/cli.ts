@@ -44,11 +44,13 @@ OPTIONS:
   --axe                   Run axe-core accessibility checks (needs axe-core; exit 2 without it)
   --invariants <list>     Run these checks on every page of every crawl (comma-separated,
                           repeatable): data-safety (xss-marker, injected-markup,
-                          prototype-pollution and rendered-garbage; not not-blank), or any of
-                          those and not-blank by name; axe is --axe. Each with its defaults
-                          (set options through runScan's crawler.invariants). A violation
-                          is an invariant-violation finding: high for xss-marker,
-                          injected-markup and prototype-pollution, medium otherwise
+                          prototype-pollution, rendered-garbage and no-offsite-redirect; not
+                          not-blank), or any of those and not-blank by name; axe is --axe.
+                          Each with its defaults (set options through runScan's
+                          crawler.invariants). A violation is an invariant-violation finding:
+                          high for xss-marker, injected-markup and prototype-pollution,
+                          medium otherwise. An off-site redirect is an open-redirect finding
+                          (security; high when the target is in the page's URL) either way
   --data-safety           Shorthand for --invariants data-safety
   --bind                  Serve each crawl's browser to other Playwright clients
                           (npx playwright cli attach <title>; the endpoint is printed)

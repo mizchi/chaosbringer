@@ -174,11 +174,15 @@ OPTIONS:
                         installed: without it the run is refused, exit 2)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
   --invariants <list>   Run these checks on every page (comma-separated, repeatable): data-safety
-                        (xss-marker, injected-markup, prototype-pollution and rendered-garbage;
-                        not not-blank), any of those or not-blank by name, axe (= --axe). Each
-                        runs with its defaults: set options through the library
-                        (invariants.dataSafety({ ... })). A violation fails the run
+                        (xss-marker, injected-markup, prototype-pollution, rendered-garbage and
+                        no-offsite-redirect; not not-blank), any of those or not-blank by name,
+                        axe (= --axe). Each runs with its defaults: set options through the
+                        library (invariants.dataSafety({ ... })). A violation fails the run.
+                        no-offsite-redirect fails a page that sends the browser to another origin
+                        by a script, a meta refresh or a 3xx (a click does not count)
   --data-safety         Shorthand for --invariants data-safety
+  --offsite-redirect-allow <origins>  Origins no-offsite-redirect lets a page redirect to (an SSO
+                        provider): comma-separated, repeatable, scheme and host only
   --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires
                         pixelmatch + pngjs: without them the run is refused, exit 2)
   --visual-threshold <n>   pixelmatch color threshold 0..1 (default 0.1)

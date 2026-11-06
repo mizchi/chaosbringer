@@ -42,7 +42,7 @@ describe("the --invariants name table", () => {
     expect(buildInvariantPresets(INVARIANT_PRESETS).map((i) => i.name)).toEqual([...DATA_SAFETY_NAMES, notBlank().name]);
   });
 
-  it("is dataSafety()'s four presets for data-safety, without notBlank", () => {
+  it("is dataSafety()'s five presets for data-safety, without notBlank", () => {
     expect(buildInvariantPresets(DATA_SAFETY_PRESETS).map((i) => i.name)).toEqual(DATA_SAFETY_NAMES);
     expect(DATA_SAFETY_PRESETS).not.toContain("not-blank");
   });
@@ -54,6 +54,7 @@ describe("the --invariants name table", () => {
       "injected-markup",
       "prototype-pollution",
       "rendered-garbage",
+      "no-offsite-redirect",
       "not-blank",
       "axe",
     ]);
@@ -86,13 +87,13 @@ describe("parseInvariantsFlag", () => {
   });
 
   it.each([
-    [["nope"], '--invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
+    [["nope"], '--invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)'],
     // A preset's own `data.*` name is what the report shows, not what the flag takes.
-    [["data.xss-marker"], '--invariants: unknown invariant "data.xss-marker" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
-    [["xss-marker,Not-Blank"], '--invariants: unknown invariant "Not-Blank" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)'],
+    [["data.xss-marker"], '--invariants: unknown invariant "data.xss-marker" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)'],
+    [["xss-marker,Not-Blank"], '--invariants: unknown invariant "Not-Blank" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)'],
     // `--invariants "$CHECKS"` with CHECKS unset ran with nothing.
-    [[""], "--invariants needs at least one name (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)"],
-    [[" , "], "--invariants needs at least one name (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank, axe)"],
+    [[""], "--invariants needs at least one name (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)"],
+    [[" , "], "--invariants needs at least one name (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)"],
   ])("refuses %j as a usage error", (raw, message) => {
     expect(() => parseInvariantsFlag(raw)).toThrow(UsageError);
     expect(() => parseInvariantsFlag(raw)).toThrow(message);
@@ -124,11 +125,11 @@ describe("expandInvariantNames (ScanOptions.invariants)", () => {
 
   it("refuses a name it does not know, from plain JS, as the option it was passed to", () => {
     expect(() => expandInvariantNames(["nope" as never])).toThrow(
-      'ScanOptions.invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank)',
+      'ScanOptions.invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank)',
     );
     // axe is the flag's alias for --axe, not a preset: point at the option that is.
     expect(() => expandInvariantNames(["axe" as never])).toThrow(
-      'ScanOptions.invariants: unknown invariant "axe" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, not-blank); axe-core is ScanOptions.axe: true',
+      'ScanOptions.invariants: unknown invariant "axe" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank); axe-core is ScanOptions.axe: true',
     );
   });
 
@@ -166,6 +167,52 @@ describe("the main crawl's --invariants / --data-safety", () => {
 
   it("refuses an unknown name before the browser starts", () => {
     expect(() => crawl(["--invariants", "xss"])).toThrow(UsageError);
+  });
+});
+
+describe("--offsite-redirect-allow", () => {
+  const check = async (argv: string[], to: string) => {
+    const inv = (crawl(argv).invariants ?? []).find((i) => i.name === "navigation.no-offsite-redirect");
+    if (!inv) throw new Error("no no-offsite-redirect check built");
+    return inv.check({
+      page: undefined as never,
+      url: URL,
+      errors: [],
+      state: new Map(),
+      offsiteNavigations: [{ from: `${URL}login`, to, trigger: "server-redirect" }],
+    });
+  };
+
+  it("lets the no-offsite-redirect check pass a redirect to the origins it names", async () => {
+    const argv = ["--data-safety", "--offsite-redirect-allow", "https://login.example.com,https://pay.example.net/"];
+    expect(await check(argv, "https://login.example.com/authorize?client=x")).toBe(true);
+    expect(await check(argv, "https://pay.example.net/checkout")).toBe(true);
+    expect(await check(argv, "https://evil.example/")).toMatch(/^off-site redirect: /);
+    expect(await check(["--invariants", "no-offsite-redirect"], "https://login.example.com/")).toMatch(/^off-site redirect: /);
+  });
+
+  it("is carried on the Repro line as one de-duplicated list", () => {
+    const flags = crawl([
+      "--invariants", "no-offsite-redirect",
+      "--offsite-redirect-allow", "https://login.example.com",
+      "--offsite-redirect-allow", "https://login.example.com/,https://pay.example.net",
+    ]).cliReproFlags;
+    expect(flags).toEqual([
+      { flag: "--invariants", value: "no-offsite-redirect" },
+      { flag: "--offsite-redirect-allow", value: "https://login.example.com,https://pay.example.net" },
+    ]);
+  });
+
+  it.each([
+    [["--data-safety", "--offsite-redirect-allow", "https://login.example.com/authorize"], '--offsite-redirect-allow "https://login.example.com/authorize" is not an origin'],
+    [["--data-safety", "--offsite-redirect-allow", "login.example.com"], '--offsite-redirect-allow "login.example.com" is not an origin'],
+    [["--data-safety", "--offsite-redirect-allow", " , "], "--offsite-redirect-allow needs at least one origin"],
+    // Nothing to configure: the run would allow nothing, and say nothing.
+    [["--offsite-redirect-allow", "https://login.example.com"], "--offsite-redirect-allow configures the no-offsite-redirect check, which is not on"],
+    [["--invariants", "xss-marker", "--offsite-redirect-allow", "https://login.example.com"], "which is not on: add --invariants no-offsite-redirect or --data-safety"],
+  ])("refuses %j as a usage error", (argv, message) => {
+    expect(() => crawl(argv)).toThrow(UsageError);
+    expect(() => crawl(argv)).toThrow(message);
   });
 });
 

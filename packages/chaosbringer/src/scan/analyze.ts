@@ -22,7 +22,8 @@
 
 import { isLoadKey } from "../perf-key.js";
 import { reportSpans } from "../perf-summary.js";
-import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
+import type { CrawlReport, OffsiteNavigation, PageResult, PerfSpanReport } from "../types.js";
+import { describeOffsiteNavigation, offsiteRedirects } from "../offsite-navigation.js";
 import type { ErrorCluster } from "../clusters.js";
 import { unreachableTarget, unreachableTargetMessage } from "../unreachable-target.js";
 import { CRAWLER_NAVIGATION_ERROR, stripAnsi } from "../error-text.js";
@@ -33,7 +34,7 @@ import { SERVED_NOTE } from "./blocked-responses.js";
 import { mergeRunWarnings, type RunWarning } from "../run-warnings.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
-export type ScanCategory = "bug" | "resilience" | "perf" | "a11y";
+export type ScanCategory = "bug" | "security" | "resilience" | "perf" | "a11y";
 
 export interface ScanFinding {
   /** The rule that raised it, e.g. `js-exception`, `span-blocking`. Stable across runs. */
@@ -381,7 +382,7 @@ export const RULE_PATTERNS: Record<string, readonly string[]> = {
 type Located = { where: string; value: number; line: string };
 
 const SEVERITY_ORDER: Record<ScanSeverity, number> = { high: 0, medium: 1, low: 2 };
-const CATEGORY_ORDER: Record<ScanCategory, number> = { bug: 0, resilience: 1, a11y: 2, perf: 3 };
+const CATEGORY_ORDER: Record<ScanCategory, number> = { bug: 0, security: 1, resilience: 2, a11y: 3, perf: 4 };
 
 export function analyzeScan(
   baseline: CrawlReport,
@@ -397,6 +398,7 @@ export function analyzeScan(
   chaos = chaos.map((r) => ({ ...r, report: splitEnvironment(r.report).report }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
+    ...openRedirectFindings([baseline, ...chaos.map((c) => c.report)]),
     ...errorFindings(baseline, envPages),
     ...perfFindings(baseline),
     ...resilienceFindings(baseline, chaos, options),
@@ -596,6 +598,56 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
   return out;
 }
 
+/**
+ * `open-redirect`, from the off-site navigations the crawls recorded
+ * (`PageResult.offsiteNavigations`): a page that sent the browser to another
+ * origin on its own (a script, a meta refresh, a 3xx), passively, on what the
+ * crawls happened to visit. A target taken from the page's own URL is an
+ * open redirect, `high`; one written into the page (a /chat that sends users
+ * to a chat service, a login that goes to an SSO) is `low`, worth a look and
+ * often what the site means. A click and an iframe are not redirects. The
+ * clean crawl and the chaos crawls visit the same pages: each redirect is
+ * counted once.
+ */
+function openRedirectFindings(reports: readonly CrawlReport[]): ScanFinding[] {
+  const seen = new Map<string, OffsiteNavigation>();
+  for (const nav of reports.flatMap((r) => offsiteRedirects(r.pages))) {
+    const key = `${nav.from} -> ${nav.to}`;
+    if (!seen.has(key)) seen.set(key, nav);
+  }
+  const all = [...seen.values()];
+  const out: ScanFinding[] = [];
+  const push = (navs: OffsiteNavigation[], f: Pick<ScanFinding, "severity" | "title" | "hint">) => {
+    if (navs.length === 0) return;
+    out.push({
+      rule: "open-redirect",
+      category: "security",
+      ...f,
+      ...placesOf(navs.map((n) => n.from)),
+      occurrences: navs.length,
+      evidence: navs.slice(0, SCAN_WHERE_CAP).map(describeOffsiteNavigation),
+      ...unlistedOf(navs.length),
+    });
+  };
+  push(
+    all.filter((n) => n.reflected),
+    {
+      severity: "high",
+      title: "Open redirect: a page sends the browser to the URL in its own address",
+      hint: "Whoever writes a link to the page picks the site it sends the user to, from the site's own trusted URL: a phishing page, a fake sign-in. Resolve the target against the site's origin and follow it only when the origin is unchanged or on an allowlist; otherwise go to a default page.",
+    },
+  );
+  push(
+    all.filter((n) => !n.reflected),
+    {
+      severity: "low",
+      title: "Off-site redirect: a page sends the browser to another origin on its own",
+      hint: "The target is not in the page's URL, so this is not an open redirect as crawled; often it is meant (an SSO provider, a chat invite). Check that nothing a user controls (a cookie, a stored setting, a header) chooses it.",
+    },
+  );
+  return out;
+}
+
 function linkedFrom(p: PageResult): string {
   return p.sourceUrl ? ` (linked from ${p.sourceUrl})` : "";
 }
@@ -710,6 +762,11 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
   const failedDocs = new Set(report.pages.filter((p) => (p.statusCode ?? 0) >= 400).map((p) => p.url));
   for (const c of report.errorClusters ?? []) {
     if (!isSiteError(c)) continue;
+    // `open-redirect` reports these from the navigations themselves,
+    // checked or not: the violation would be the same finding twice.
+    if (c.type === "invariant-violation" && (c.invariantNames ?? []).length > 0 && (c.invariantNames ?? []).every((n) => n === "navigation.no-offsite-redirect")) {
+      continue;
+    }
     const r = ERROR_RULES[c.type];
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;

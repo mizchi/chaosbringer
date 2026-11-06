@@ -30,6 +30,11 @@
  *   redirects): the guard decides on the URL the navigation was started for;
  * - popups (`window.open`, `target=_blank`) are other pages and are covered by
  *   neither.
+ *
+ * Each blocked navigation is reported with whether it was the main frame's
+ * and the browser's reason for it (`Page.frameRequestedNavigation`: a
+ * script, a meta refresh, a link click), which the crawler turns into the
+ * navigation's trigger (`OffsiteNavigation.trigger`).
  */
 
 import type { CDPSession, Frame, Page } from "playwright";
@@ -39,14 +44,85 @@ import { pageCdp } from "./page-cdp.js";
 interface RequestPaused {
   requestId: string;
   request: { url: string };
+  frameId?: string;
   redirectedRequestId?: string;
+}
+
+/** What is known of a blocked navigation besides its URL. */
+export interface BlockedNavigationInfo {
+  /** The page's own navigation, not an iframe's. */
+  mainFrame: boolean;
+  /**
+   * The browser's reason for it (CDP `ClientNavigationReason`:
+   * `scriptInitiated`, `metaTagRefresh`, `anchorClick`, …), when it gave one.
+   */
+  reason?: string;
 }
 
 export interface NavigationGuardOptions {
   /** Whether a document request for `url` leaves the crawl. */
   isExternal(url: string): boolean;
   /** Called once per blocked navigation, before the request is failed. */
-  onBlocked(url: string): void;
+  onBlocked(url: string, info: BlockedNavigationInfo): void;
+}
+
+/** The subset of `Page.frameRequestedNavigation` read here. */
+interface FrameRequestedNavigation {
+  url: string;
+  reason: string;
+}
+
+/** Most reasons remembered at once: a navigation is paused right after it is requested. */
+const MAX_REASONS = 32;
+
+/** The navigations a page asked for, by URL, and its main frame. */
+export interface RequestedNavigations {
+  /** The frame id of the page's main frame (`Fetch.requestPaused`'s `frameId` for its navigations). */
+  readonly mainFrameId: string | undefined;
+  /** The browser's reason for the latest navigation requested to `url` (fragment ignored), once. */
+  takeReason(url: string): string | undefined;
+  dispose(): void;
+}
+
+/** `url` without its fragment, as a request carries it. */
+function withoutFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash === -1 ? url : url.slice(0, hash);
+}
+
+/**
+ * Listen for the navigations the page's documents ask for on `client` (the
+ * page's own session). The request a navigation makes is paused after the
+ * request for it is announced, so the reason is known when the guard
+ * decides. Throws when `client` has no Page domain.
+ */
+export async function watchRequestedNavigations(client: CDPSession): Promise<RequestedNavigations> {
+  const reasons = new Map<string, string>();
+  const onRequested = (event: FrameRequestedNavigation) => {
+    const key = withoutFragment(event.url);
+    reasons.delete(key);
+    reasons.set(key, event.reason);
+    if (reasons.size > MAX_REASONS) reasons.delete(reasons.keys().next().value as string);
+  };
+  client.on("Page.frameRequestedNavigation", onRequested);
+  let mainFrameId: string | undefined;
+  try {
+    await client.send("Page.enable");
+    mainFrameId = (await client.send("Page.getFrameTree"))?.frameTree?.frame?.id;
+  } catch (err) {
+    client.off("Page.frameRequestedNavigation", onRequested);
+    throw err;
+  }
+  return {
+    mainFrameId,
+    takeReason(url) {
+      const key = withoutFragment(url);
+      const reason = reasons.get(key);
+      reasons.delete(key);
+      return reason;
+    },
+    dispose: () => client.off("Page.frameRequestedNavigation", onRequested),
+  };
 }
 
 export interface NavigationGuard {
@@ -60,13 +136,23 @@ export interface NavigationGuard {
 
 const DOCUMENT_PATTERNS = { patterns: [{ resourceType: "Document" as const, requestStage: "Request" as const }] };
 
-/** Pause document requests on `client` and answer each through `options`. */
-async function guardSession(client: CDPSession, options: NavigationGuardOptions): Promise<() => void> {
+/**
+ * Pause document requests on `client` and answer each through `options`.
+ * `requested` is the page's own session's watch, absent on an out-of-process
+ * iframe's session, where every navigation is a subframe's.
+ */
+async function guardSession(
+  client: CDPSession,
+  options: NavigationGuardOptions,
+  requested?: RequestedNavigations,
+): Promise<() => void> {
   const onPaused = (event: RequestPaused) => {
     const url = event.request.url;
     // A redirect hop is decided by the request it continues, as with the route.
     if (!event.redirectedRequestId && options.isExternal(url)) {
-      options.onBlocked(url);
+      const mainFrame = requested !== undefined && requested.mainFrameId !== undefined && event.frameId === requested.mainFrameId;
+      const reason = requested?.takeReason(url);
+      options.onBlocked(url, { mainFrame, ...(reason !== undefined ? { reason } : {}) });
       client.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }).catch(() => {});
       return;
     }
@@ -88,7 +174,14 @@ async function guardSession(client: CDPSession, options: NavigationGuardOptions)
  */
 export async function installNavigationGuard(page: Page, options: NavigationGuardOptions): Promise<NavigationGuard> {
   const main = await pageCdp(page).session();
-  const offMain = await guardSession(main, options);
+  const requested = await watchRequestedNavigations(main);
+  let offMain: () => void;
+  try {
+    offMain = await guardSession(main, options, requested);
+  } catch (err) {
+    requested.dispose();
+    throw err;
+  }
 
   // One session per out-of-process frame, replaced on every commit: a frame
   // that left its process and came back has a dead session, and there is no
@@ -136,6 +229,7 @@ export async function installNavigationGuard(page: Page, options: NavigationGuar
       page.off("framedetached", release);
       for (const frame of frames.keys()) release(frame);
       offMain();
+      requested.dispose();
       await main.send("Fetch.disable").catch(() => {});
     },
   };

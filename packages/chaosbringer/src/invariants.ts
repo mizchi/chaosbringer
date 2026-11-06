@@ -13,6 +13,7 @@ import type { Invariant } from "./types.js";
 import { visualRegression } from "./visual.js";
 import { stateMachineInvariant } from "./state-machine-invariants.js";
 import { dataSafety, injectedMarkup, notBlank, prototypePollution, renderedGarbage, xssMarker } from "./data-invariants.js";
+import { noOffsiteRedirect } from "./offsite-navigation.js";
 
 export interface AxeInvariantOptions {
   /** Display name for reporting. Default: `a11y-axe`. */
@@ -322,5 +323,6 @@ export const invariants = {
   prototypePollution,
   renderedGarbage,
   notBlank,
+  noOffsiteRedirect,
   dataSafety,
 };

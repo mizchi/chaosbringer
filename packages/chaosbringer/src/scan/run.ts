@@ -58,9 +58,9 @@ export interface ScanOptions {
   axe?: boolean;
   /**
    * Invariant presets to run on every page of every crawl, by the names
-   * `--invariants` takes: `data-safety` (`invariants.dataSafety()`'s four,
+   * `--invariants` takes: `data-safety` (`invariants.dataSafety()`'s five,
    * not `not-blank`), `xss-marker`, `injected-markup`, `prototype-pollution`,
-   * `rendered-garbage`, `not-blank`. Each with its defaults; a preset with
+   * `rendered-garbage`, `no-offsite-redirect`, `not-blank`. Each with its defaults; a preset with
    * options of your own goes in `crawler.invariants`, which the Repro line
    * can only note. Unlike those, these are carried as a flag.
    */

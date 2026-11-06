@@ -11,6 +11,7 @@ import { createServer } from "node:net";
 import { expect } from "@playwright/test";
 import { faults } from "../../src/faults.js";
 import { chaosExpect, chaosTest, runChaosTest } from "../../src/fixture.js";
+import { invariants } from "../../src/invariants.js";
 import type { ChaosTestOptions } from "../../src/types.js";
 
 /** The same site under a second origin, for the explicit-`baseUrl` case. */
@@ -174,6 +175,30 @@ chaosTest("chaosExpect.toLoadWithin fails a page that did not load, however fast
   expect(() => chaosExpect.toLoadWithin(result, 3000)).toThrow(
     /did not load \(error\): \[navigation\] page\.goto: net::ERR_CONNECTION_REFUSED/,
   );
+});
+
+// The same site under its second origin is "another site" to the crawl: a
+// /go?next= that sends the browser there is an open redirect.
+chaosTest.describe("an open redirect", () => {
+  chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, invariants: [invariants.noOffsiteRedirect()] } });
+  const go = () => `/go?next=${encodeURIComponent(`${ALT_URL}/about`)}`;
+
+  chaosTest("is recorded by testPage(), and failed by invariants.noOffsiteRedirect()", async ({ page, chaos, baseURL }) => {
+    const result = await chaos.testPage(page, go());
+    expect(result.redirectedTo).toBe(`${ALT_URL}/about`);
+    expect(result.offsiteNavigations?.map((n) => [n.trigger, n.reflected])).toEqual([["script", { in: "query", param: "next" }]]);
+    expect(result.errors.map((e) => e.message)).toEqual([
+      `[navigation.no-offsite-redirect] open redirect: ${baseURL}${go()} -> ${ALT_URL}/about (script redirect, to the URL in its "next" query parameter)`,
+    ]);
+  });
+
+  chaosTest.describe("under strict", () => {
+    chaosTest.use({ chaosOptions: { ...LOAD_ONLY, maxPages: 1, strict: true, invariants: [invariants.noOffsiteRedirect()] } });
+
+    chaosTest("fails the test", async ({ page, chaos }) => {
+      await expect(chaos.testPage(page, go())).rejects.toThrow(/fails under strict[\s\S]*open redirect/);
+    });
+  });
 });
 
 chaosTest.describe("chaosOptions reach the crawler", () => {

@@ -522,7 +522,7 @@ describe("config errors that used to pass silently", () => {
         invariants: [{ name: "no-xss-fired", when: "afterAction" as never, check: () => false }],
       }),
     ).toThrow(
-      'chaosbringer: invariant "no-xss-fired" when must be "afterLoad" or "afterActions" (got "afterAction")',
+      'chaosbringer: invariant "no-xss-fired" when must be "afterLoad", "afterActions" or "afterVisit" (got "afterAction")',
     );
     expect(() =>
       validateOptions({

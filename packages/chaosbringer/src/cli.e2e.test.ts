@@ -494,7 +494,9 @@ describe("a target nothing listens on", () => {
 
   // The goto error names the URL navigated to, not the host that failed:
   // a running site whose start URL redirects to a host that is down (an SSO
-  // that is not up yet) was refused as unreachable, with no report.
+  // that is not up yet) was refused as unreachable, with no report. The host
+  // is another origin (another port), so it is an off-site redirect, not a
+  // failed load of the start URL; `noOffsiteRedirect` is what fails it.
   it("crawl reports a start URL that redirects to a host that is down, not refuses it", async () => {
     const site = await startTestServer((_req, res) => {
       res.writeHead(302, { location: url });
@@ -504,9 +506,17 @@ describe("a target nothing listens on", () => {
       const output = join(dir, "sso.json");
       const r = await cli(["--url", `${site.url}/sso`, "--max-pages", "1", "--max-actions", "0", "--quiet", "--output", output]);
       expect(r.stderr).not.toContain("could not reach");
-      expect(r.status).toBe(1);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`  Off-site redirects: 1 (first: ${site.url}/sso -> ${url})`);
       const report = JSON.parse(readFileSync(output, "utf8")) as CrawlReport;
-      expect(report.pages[0]!.errors.map((e) => [e.type, e.redirected])).toEqual([["navigation", true]]);
+      expect(report.pages[0]).toMatchObject({ status: "success", errors: [], redirectedTo: url });
+      expect(report.pages[0]!.offsiteNavigations?.[0]).toMatchObject({ trigger: "server-redirect", failed: "net::ERR_CONNECTION_REFUSED" });
+      const checked = await cli([
+        "--url", `${site.url}/sso`, "--max-pages", "1", "--max-actions", "0", "--quiet", "--invariants", "no-offsite-redirect",
+        "--output", join(dir, "sso-checked.json"),
+      ]);
+      expect(checked.status).toBe(1);
+      expect(checked.stdout).toContain("  Failed: 1 invariant violation");
     } finally {
       await site.close();
     }

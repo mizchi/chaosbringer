@@ -47,7 +47,17 @@ describe("public package exports (this branch's additions)", () => {
       "data.injected-markup",
       "data.prototype-pollution",
       "data.rendered-garbage",
+      "navigation.no-offsite-redirect",
     ]);
+  });
+
+  it("re-exports noOffsiteRedirect and the off-site navigation helpers", () => {
+    expect(api.invariants.noOffsiteRedirect).toBe(api.noOffsiteRedirect);
+    expect(api.noOffsiteRedirect().when).toBe("afterVisit");
+    expect(api.reflectedIn("http://a.test/go?next=http://b.test/", "http://b.test/")).toEqual({ in: "query", param: "next" });
+    expect(api.isOffsiteRedirect({ trigger: "click" })).toBe(false);
+    expect(typeof api.offsiteRedirects).toBe("function");
+    expect(typeof api.describeOffsiteNavigation).toBe("function");
   });
 
   it("re-exports recipe templating and drive's secrets", () => {

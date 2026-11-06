@@ -1,6 +1,6 @@
 /**
  * GitHub Actions annotation emitter. Renders a run's error clusters, dead
- * links and warnings (`report.warnings`) as `::error ...::` /
+ * links, off-site redirects and warnings (`report.warnings`) as `::error ...::` /
  * `::warning ...::` workflow commands so GitHub surfaces them on the PR
  * Checks tab without requiring a separate bot.
  *
@@ -11,6 +11,7 @@
  * up on the run summary instead of the diff.
  */
 
+import { describeOffsiteNavigation, isOffsiteRedirect } from "./offsite-navigation.js";
 import { clusterFailsRun, type ExitCodeOptions } from "./reporter.js";
 import type { CrawlReport } from "./types.js";
 
@@ -83,6 +84,23 @@ export function buildGithubAnnotations(
       title: `Dead link: ${truncate(link.url, 80)}`,
       message: `HTTP ${link.statusCode} — found on ${link.sourceUrl || "(initial)"}${link.sourceElement ? ` via ${truncate(link.sourceElement, 40)}` : ""}`,
     });
+  }
+
+  // A page that redirected off-site on its own. The run fails on it only
+  // through an invariant (`noOffsiteRedirect`), whose violation is already
+  // an `error` above: one the page's violations name is left to it.
+  // Otherwise a warning when the target came from the page's own URL (an
+  // open redirect), a notice when it did not (a /chat that sends users to
+  // a chat service, an SSO the check allowed).
+  for (const page of report.pages) {
+    for (const nav of (page.offsiteNavigations ?? []).filter(isOffsiteRedirect)) {
+      if (page.errors.some((e) => e.type === "invariant-violation" && e.message.includes(`-> ${nav.to} (`))) continue;
+      out.push({
+        level: nav.reflected ? "warning" : "notice",
+        title: `Off-site redirect: ${truncate(nav.from, 80)}`,
+        message: describeOffsiteNavigation(nav),
+      });
+    }
   }
 
   // The setup problems (`report.warnings`): `error` only when

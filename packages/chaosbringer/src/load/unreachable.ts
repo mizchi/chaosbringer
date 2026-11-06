@@ -41,6 +41,12 @@ export interface DocumentRequest {
   url: string;
   /** The request followed a redirect: the site answered, and where it pointed failed. */
   redirected: boolean;
+  /**
+   * Where the chain ended: the last request's URL, `url` itself without a
+   * redirect. The crawler reads it to tell a redirect to another origin
+   * that failed from a failed load of its own page.
+   */
+  to?: string;
 }
 
 /**
@@ -61,7 +67,7 @@ export function watchDocumentRequests(
     if (!request.isNavigationRequest() || !inMainFrame(request)) return;
     let first = request;
     for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
-    last = { url: first.url(), redirected: first !== request };
+    last = { url: first.url(), redirected: first !== request, to: request.url() };
   };
   (target as Page).on("request", onRequest);
   return Object.assign(() => last, { stop: () => void (target as Page).off("request", onRequest) });

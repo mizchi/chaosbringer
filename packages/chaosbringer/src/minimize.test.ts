@@ -358,6 +358,25 @@ describe("replaySetup", () => {
     expect(run(["--axe", "--axe-tags", "wcag2a"]).overridden).toEqual(["--invariants"]);
   });
 
+  it("replays the recorded --offsite-redirect-allow, and lets it alone replace only the allow list", () => {
+    const allowed = traceSetupOf(cliOptions(["--url", URL, "--data-safety", "--offsite-redirect-allow", "https://login.example.com"]));
+    expect(allowed?.offsiteRedirectAllow).toBe("https://login.example.com");
+    const replay = (argv: string[]) => replaySetup(allowed, parseMinimizeArgs(["--trace", "t", "--match", "x", ...argv]), URL);
+    expect(formatReproFlags(replay([]).applied)).toEqual(["--invariants", "data-safety", "--offsite-redirect-allow", "https://login.example.com"]);
+    const swapped = replay(["--offsite-redirect-allow", "https://sso.example.net"]);
+    expect(formatReproFlags(swapped.applied)).toEqual(["--invariants", "data-safety"]);
+    expect(swapped.values["offsite-redirect-allow"]).toEqual(["https://sso.example.net"]);
+    expect(swapped.overridden).toEqual(["--offsite-redirect-allow"]);
+    // Another set of checks replaces the allow list with the checks it configured.
+    const other = replay(["--invariants", "xss-marker"]);
+    expect(other.values["offsite-redirect-allow"]).toBeUndefined();
+    expect(other.overridden).toEqual(["--invariants"]);
+    // Alone, on a trace whose checks have no no-offsite-redirect, it has nothing to configure.
+    expect(() => run(["--invariants", "xss-marker", "--offsite-redirect-allow", "https://sso.example.net"])).toThrow(
+      "--offsite-redirect-allow configures the no-offsite-redirect check, which is not on",
+    );
+  });
+
   it("replays a v1 trace, which records nothing, with the defaults and the flags", () => {
     const setup = replaySetup(undefined, parseMinimizeArgs(["--trace", "t", "--match", "x", "--storage-state", "s.json"]), URL);
     expect(set(setup.options)).toEqual(set(cliOptions(["--url", URL, "--storage-state", "s.json"])));

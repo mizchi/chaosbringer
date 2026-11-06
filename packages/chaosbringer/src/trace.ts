@@ -71,6 +71,8 @@ export interface TraceSetup {
    * trace can hold: it is not recorded.
    */
   invariants?: string;
+  /** `--offsite-redirect-allow`'s origins, as one comma list: what the no-offsite-redirect check lets through. */
+  offsiteRedirectAllow?: string;
   /** `--axe` (or `--invariants axe`), with its `--axe-tags`. */
   axe?: { tags?: string };
 }
@@ -99,6 +101,7 @@ export function traceSetupOf(options: CrawlerOptions): TraceSetup | undefined {
   if (options.httpCache === false) setup.httpCache = false;
   for (const { flag, value } of options.cliReproFlags ?? []) {
     if (flag === "--invariants" && value) setup.invariants = value;
+    if (flag === "--offsite-redirect-allow" && value) setup.offsiteRedirectAllow = value;
     if (flag === "--axe") setup.axe = { ...setup.axe };
     if (flag === "--axe-tags" && value !== undefined) setup.axe = { ...setup.axe, tags: value };
   }
@@ -127,6 +130,7 @@ export function traceSetupFlags(setup: TraceSetup | undefined): ReproFlag[] {
   if (setup.network !== undefined) push("--network", setup.network);
   if (setup.httpCache === false) push("--no-http-cache");
   if (setup.invariants !== undefined) push("--invariants", setup.invariants);
+  if (setup.offsiteRedirectAllow !== undefined) push("--offsite-redirect-allow", setup.offsiteRedirectAllow);
   if (setup.axe) {
     push("--axe");
     if (setup.axe.tags !== undefined) push("--axe-tags", setup.axe.tags);
