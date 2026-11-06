@@ -53,27 +53,26 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      # Both installs run apt-get through sudo, and the runner's Ubuntu mirror
+      # The install runs apt-get through sudo, and the runner's Ubuntu mirror
       # is sometimes slow rather than down. On Nov 5-6 2026 it served the
-      # ~20-22 MB of fonts `install-deps` fetches (the libraries are already
-      # on the image) at 26-46 kB/s, 8 to 13.5 minutes per install step.
+      # ~16-22 MB of fonts that install fetches (the libraries are already on
+      # the image) at 22-46 kB/s, 8 to 13.5 minutes per install step.
       # A 10-minute job was cancelled partway through its tests, and an
-      # 8-minute step bound killed the download. The step bound is the
-      # install's own budget: a slow mirror still finishes inside it, and a
+      # 8-minute step bound killed the download.
+      #
+      # The action keeps apt's downloaded archives in the Actions cache, so a
+      # run that restores them asks the mirror only for its package lists (see
+      # .github/actions/install-playwright). The step bound is for the runs
+      # that miss that cache: a slow mirror still finishes inside it, and a
       # stalled one fails the install step by name instead of timing out the
       # job (chaos-pr-gate.yml has the 24-minute hang that bound is for).
-      # 25 minutes, because the three logged fetches spread by a factor of
-      # ~1.8: the same spread again below the slowest is 23-25 minutes.
-      # Each job's timeout is what it needed before plus these 25 minutes.
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      # 25 minutes covered every fetch seen. Each job's timeout is what it
+      # needed before plus these 25 minutes.
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: npx playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Test
         run: pnpm -F chaosbringer test
@@ -137,15 +136,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: npx playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       # The local specs only: they measure the vite fixture app the config's
       # webServer starts. example.spec.ts (example.com), react-dev.spec.ts
@@ -206,15 +201,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: npx playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Test example
         run: pnpm -F "@mizchi/chaosbringer-example-${{ matrix.example }}" test
@@ -256,15 +247,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: npx playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Red-team suites
         run: pnpm -F "@mizchi/chaosbringer-example-model-faults" test:adversarial

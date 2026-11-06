@@ -45,7 +45,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      # The two installs below run apt-get through sudo. The runner image
+      # The install below runs apt-get through sudo. The runner image
       # already bounds apt's own waits (/etc/apt/apt.conf.d/zz-retries: a 15 s
       # timeout and one retry, then the next mirror), and the Oct 7 nightly
       # still sat 24 minutes on one noble-security InRelease after apt printed
@@ -56,16 +56,14 @@ jobs:
       # stalling. On Nov 5 2026 it served install-deps' ~22 MB of fonts at
       # ~39 kB/s: the same download took a CI job about 9.5 minutes, and the
       # PR gate's 8-minute bound killed it. A day later one took 13.5 minutes
-      # (26 kB/s); ci.yml's build-and-test has the arithmetic behind 25.
-      - name: Install Playwright Chromium
-        if: steps.pw-cache.outputs.cache-hit != 'true'
+      # (26 kB/s). The bound catches a stalled apt on any run; its size is set
+      # for the runs that miss the action's archive cache (see ci.yml's
+      # build-and-test).
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Install Playwright system deps (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: pnpm exec playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.pw-cache.outputs.cache-hit }}
 
       - name: Start fixture server
         run: |
