@@ -250,6 +250,9 @@ same-site fetch / XHR failing. Findings are ranked in
 `chaosbringer-scan/scan-report.md`:
 
 - bugs: failed and 4xx/5xx pages, exceptions, rejections;
+- security: pages that send the browser to another origin on their own
+  (`open-redirect`: high when the target came from the page's own URL, low
+  otherwise; `--offsite-redirect-allow` for an SSO provider);
 - resilience: errors or broken pages that appear only when an API call
   fails, and steps with no request timeout;
 - perf: vitals, blocking, layout, DOM size, request fan-out, leaks, unused JS.

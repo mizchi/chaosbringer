@@ -128,7 +128,6 @@ read the same way.
 > redirect, an `open-redirect` finding, `low` unless the target was in the
 > page's URL, so `--fail-on high` (or `medium`) no longer fails on it.
 
-
 ## Reading the report
 
 `scan-report.md` opens with a table. Each finding also gets its own

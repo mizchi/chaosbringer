@@ -127,8 +127,8 @@ entry's signal: an error by a `js-exception` or `unhandled-rejection`
 finding whose title matches the message, an invariant by an
 `invariant-violation` finding that names it, and an off-site redirect by
 scan's own `open-redirect` finding (scan reports the redirect itself and
-leaves the `no-offsite-redirect` check's violation out). Expect the entries that throw to be flagged out of the box, and
-the ones caught only by an invariant (a marker, a polluted prototype,
+leaves the `no-offsite-redirect` check's violation out). Expect the entries
+that throw to be flagged out of the box, and the ones caught only by an invariant (a marker, a polluted prototype,
 garbage on screen, a blank page) only with the suite, and from the CLI
 wherever it can deliver the data: the query entries
 (`prototype-pollution-query`, `reflected-xss-query`) included. The third

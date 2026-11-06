@@ -26,8 +26,9 @@ export interface UnreachableTarget {
  * connection to the site's origin was made. `null` for any other crawl,
  * one where a page loaded, one where the host answered (a reset or empty
  * response is the site's finding, and so is a start URL whose same-site
- * redirect target failed: `PageError.redirected`; one that redirected to
- * another origin that is down loaded, as an off-site redirect), and one where the run cut
+ * redirect target failed: `PageError.redirected`; a start URL that
+ * redirected to another origin that is down is a page that loaded, with
+ * an off-site redirect), and one where the run cut
  * the connection itself: a fault rule fired (an `abort` the run injected
  * fails the same way), or `run.network` is `offline`
  * (`ERR_INTERNET_DISCONNECTED` is what that profile is for).
