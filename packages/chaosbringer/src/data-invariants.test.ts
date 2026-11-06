@@ -53,19 +53,36 @@ describe("data-safety preset factories", () => {
 });
 
 describe("dataSafety", () => {
-  it("returns the four security and rendering presets in order, without notBlank", () => {
+  it("returns the five security and rendering presets in order, without notBlank", () => {
     expect(dataSafety().map((i) => i.name)).toEqual([
       "data.xss-marker",
       "data.injected-markup",
       "data.prototype-pollution",
       "data.rendered-garbage",
+      "navigation.no-offsite-redirect",
     ]);
   });
 
-  it("applies the shared when / urlPattern to every preset", () => {
-    for (const inv of dataSafety({ when: "afterLoad", urlPattern: "/app" })) {
+  it("applies the shared when / urlPattern to every preset, but noOffsiteRedirect's when", () => {
+    const all = dataSafety({ when: "afterLoad", urlPattern: "/app" });
+    for (const inv of all.slice(0, 4)) {
       expect([inv.name, inv.when, inv.urlPattern]).toEqual([inv.name, "afterLoad", "/app"]);
     }
+    // A page that redirected is one the crawler stops at: only afterVisit sees it.
+    expect([all[4]!.when, all[4]!.urlPattern]).toEqual(["afterVisit", "/app"]);
+  });
+
+  it("passes noOffsiteRedirect its allow list", async () => {
+    const inv = dataSafety({ noOffsiteRedirect: { allow: ["https://login.example.com"] } }).at(-1)!;
+    const ctx = (to: string) => ({
+      page: undefined as never,
+      url: "http://x/",
+      errors: [],
+      state: new Map(),
+      offsiteNavigations: [{ from: "http://x/login", to, trigger: "server-redirect" as const }],
+    });
+    expect(await inv.check(ctx("https://login.example.com/authorize"))).toBe(true);
+    expect(await inv.check(ctx("https://elsewhere.example/"))).toMatch(/^off-site redirect: /);
   });
 
   it("lets a preset's own options win over the shared ones", () => {

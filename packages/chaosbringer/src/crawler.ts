@@ -33,6 +33,8 @@ import type {
   LifecycleStage,
   NetworkProfile,
   RuntimeFaultStats,
+  Invariant,
+  OffsiteNavigation,
 } from "./types.js";
 import {
   compileLifecycleFaults,
@@ -140,7 +142,14 @@ import { findFaultRuleShadows } from "./fault-shadow.js";
 import { buildReproCommand, reproFlags, unreplayedNote } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
-import { installNavigationGuard, type NavigationGuard } from "./navigation-guard.js";
+import {
+  type BlockedNavigationInfo,
+  installNavigationGuard,
+  type NavigationGuard,
+  type RequestedNavigations,
+  watchRequestedNavigations,
+} from "./navigation-guard.js";
+import { blockedTrigger, offsiteNavigation, offsiteRedirectAllowOf, reflectedIn } from "./offsite-navigation.js";
 import { CrawlPerf } from "./crawl-perf.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { tagServerFaults } from "./perf-faults.js";
@@ -275,6 +284,24 @@ export class ChaosCrawler {
   private backedOutActions: ActionResult[] = [];
   /** External navigations blocked while the current page was crawled. */
   private pageBlockedNavigations: string[] = [];
+  /** `pageBlockedNavigations` with where each left from and what started it. */
+  private pageOffsiteNavigations: OffsiteNavigation[] = [];
+  /** The URL the current page was visited at: where a navigation left from when the page shows no URL of the site's. */
+  private visitUrl = "";
+  /**
+   * A crawler step (an action and its settle) is running: an off-site
+   * navigation that starts now is the step's (`trigger: "click"`), not
+   * the page leaving on its own.
+   */
+  private stepRunning = false;
+  /**
+   * The current page's last main-frame document request
+   * (`watchDocumentRequests`), with its redirect chain: what tells a step
+   * that landed off-site through a 3xx from one sent there directly.
+   */
+  private pageDocument: () => DocumentRequest | null = () => null;
+  /** The navigation watch the route path reads reasons from, on the CDP-attach page; disposed at teardown. */
+  private readonly routeNavigationWatches = new Map<Page, RequestedNavigations>();
   private startTime = 0;
   private baseOrigin: string;
   /** Actions performed on the page currently being crawled. Reset on
@@ -583,7 +610,7 @@ export class ChaosCrawler {
    * a PageError with type "invariant-violation".
    */
   private async runInvariants(
-    phase: "afterLoad" | "afterActions",
+    phase: NonNullable<Invariant["when"]>,
     page: Page,
     url: string,
     errors: PageError[]
@@ -600,7 +627,13 @@ export class ChaosCrawler {
 
       let failureReason: string | null = null;
       try {
-        const result = await inv.check({ page, url, errors, state: this.invariantState });
+        const result = await inv.check({
+          page,
+          url,
+          errors,
+          state: this.invariantState,
+          offsiteNavigations: [...this.pageOffsiteNavigations],
+        });
         if (result === false) {
           failureReason = `invariant "${inv.name}" returned false`;
         } else if (typeof result === "string") {
@@ -617,12 +650,15 @@ export class ChaosCrawler {
           type: "invariant-violation",
           message: `[${inv.name}] ${failureReason}`,
           invariantName: inv.name,
+          ...(offsiteRedirectAllowOf(inv) ? { offsiteRedirect: true as const } : {}),
           url,
           timestamp: Date.now(),
         };
         this.emitPageError(errors, error);
         this.advisorRuntime?.stall.recordInvariantViolation();
-        if (this.driver !== null) {
+        // An `afterVisit` violation comes after the page's last step: no
+        // step of the driver's on the next page caused it.
+        if (this.driver !== null && phase !== "afterVisit") {
           this.driverPendingViolations.push({ name: inv.name, message: failureReason });
         }
       }
@@ -1638,7 +1674,7 @@ export class ChaosCrawler {
         try {
           const guard = await installNavigationGuard(page, {
             isExternal: (url) => this.isExternalUrl(url),
-            onBlocked: (url) => this.noteBlockedNavigation(url),
+            onBlocked: (url, info) => this.noteBlockedNavigation(this.blockedNavigation(page, url, info)),
           });
           this.interceptedPages.add(page);
           if (page === this.cdpPage) this.navigationGuards.set(page, guard);
@@ -1664,11 +1700,67 @@ export class ChaosCrawler {
   }
 
   /** Bookkeeping for one blocked external navigation, whichever layer blocked it. */
-  private noteBlockedNavigation(url: string): void {
+  private noteBlockedNavigation(nav: OffsiteNavigation): void {
     this.blockedExternalCount++;
-    this.pageBlockedNavigations.push(url);
-    this.events.onBlockedNavigation?.(url);
-    this.logger.logBlockedNavigation(url);
+    this.pageBlockedNavigations.push(nav.to);
+    this.pageOffsiteNavigations.push(nav);
+    this.events.onBlockedNavigation?.(nav.to);
+    this.logger.logBlockedNavigation(nav.to);
+  }
+
+  /** A navigation to `url` the guard or the route blocked on `page`, with what started it. */
+  private blockedNavigation(page: Page, url: string, info: BlockedNavigationInfo): OffsiteNavigation {
+    const from = this.navigationSource(page);
+    const trigger = blockedTrigger({
+      mainFrame: info.mainFrame,
+      stepRunning: this.stepRunning,
+      reason: info.reason,
+      reflected: reflectedIn(from, url) !== undefined,
+    });
+    return offsiteNavigation(from, url, trigger);
+  }
+
+  /**
+   * The site's URL that redirected the page's last navigation off-site to
+   * `landed`: the last of its redirect chain on the crawl's origin, when
+   * the page's last document request followed a redirect and ended at
+   * `landed`. Undefined for a page that got there without one.
+   */
+  private redirectSource(landed: string): string | undefined {
+    const sent = this.pageDocument();
+    if (!sent?.redirected || sent.to === undefined) return undefined;
+    const bare = (u: string) => u.split("#")[0];
+    if (bare(sent.to) !== bare(landed)) return undefined;
+    return [...(sent.hops ?? [sent.url])].reverse().find((u) => !this.isExternalUrl(u));
+  }
+
+  /**
+   * Where a navigation on `page` leaves from: the URL it shows, while that
+   * is one of the site's (a script redirects before its navigation
+   * commits, so the page still shows its own document), else the URL the
+   * page was visited at.
+   */
+  private navigationSource(page: Page): string {
+    let shown = "";
+    try {
+      shown = page.url();
+    } catch {
+      // A closed page has no URL; the visit's is the one to name.
+    }
+    return /^https?:/i.test(shown) && !this.isExternalUrl(shown) ? shown : this.visitUrl || shown;
+  }
+
+  /**
+   * The latest navigation of the page's own frame the guard blocked since
+   * `since` (an index into `pageOffsiteNavigations`): what a page showing
+   * the browser's error page (`chrome-error://chromewebdata/`) was sent to.
+   */
+  private lastBlockedPageNavigation(since: number): OffsiteNavigation | undefined {
+    for (let i = this.pageOffsiteNavigations.length - 1; i >= since; i--) {
+      const nav = this.pageOffsiteNavigations[i]!;
+      if (nav.trigger !== "frame" && nav.trigger !== "server-redirect") return nav;
+    }
+    return undefined;
   }
 
   /**
@@ -1678,6 +1770,8 @@ export class ChaosCrawler {
   private async releaseCdpPageInterception(page: Page): Promise<void> {
     const handler = this.routeHandlers.get(page);
     const guard = this.navigationGuards.get(page);
+    this.routeNavigationWatches.get(page)?.dispose();
+    this.routeNavigationWatches.delete(page);
     this.routeHandlers.delete(page);
     this.navigationGuards.delete(page);
     this.interceptedPages.delete(page);
@@ -1705,6 +1799,16 @@ export class ChaosCrawler {
     const traceparentEnabled = this.options.traceparent !== undefined && this.options.traceparent !== false;
     const traceparentHook =
       typeof this.options.traceparent === "object" ? this.options.traceparent.onInject : undefined;
+    // The browser's reason for each navigation a document asks for, so a
+    // blocked one is named a script redirect or a meta refresh, as the CDP
+    // guard names it. None for a page without CDP: a script, then.
+    const requested = blockExternal
+      ? await pageCdp(page)
+          .session()
+          .then(watchRequestedNavigations)
+          .catch(() => undefined)
+      : undefined;
+    if (requested && page === this.cdpPage) this.routeNavigationWatches.set(page, requested);
 
     // Install a single route handler that first considers fault injection,
     // then falls back to external-navigation blocking, then continues.
@@ -1777,7 +1881,14 @@ export class ChaosCrawler {
       // 2. Block external navigation if requested.
       if (blockExternal && this.isExternalUrl(url)) {
         if (request.isNavigationRequest()) {
-          this.noteBlockedNavigation(url);
+          let mainFrame = false;
+          try {
+            mainFrame = request.frame() === page.mainFrame();
+          } catch {
+            // A service worker's request has no frame: not the page's.
+          }
+          const reason = requested?.takeReason(url);
+          this.noteBlockedNavigation(this.blockedNavigation(page, url, { mainFrame, ...(reason !== undefined ? { reason } : {}) }));
           await route.abort("blockedbyclient");
           return;
         }
@@ -2302,11 +2413,16 @@ export class ChaosCrawler {
     const collectors = await this.attachPageCollectors(page, errors, warnings, () =>
       this.installPageInitScripts(page),
     );
+    this.pageDocument = collectors.lastDocument;
 
     this.backedOutActions = [];
     this.pageBlockedNavigations = [];
+    this.pageOffsiteNavigations = [];
+    this.visitUrl = url;
 
     let result: PageResult;
+    // The page loaded and the crawl stopped there (`NotCrawled`).
+    let stoppedAt = false;
     // Whether `page.goto` returned. Only a navigation that never did leaves a
     // load in flight for `finishPagePerf` to stop; a page that loaded and
     // then failed later (an action, an invariant, a screenshot) still has a
@@ -2346,7 +2462,7 @@ export class ChaosCrawler {
       // The page loaded, but is not the crawl's to act on: stop here.
       const notCrawled = this.notCrawledReason(page.url(), url, response);
       if (notCrawled) {
-        if (notCrawled.fields.redirectedTo) this.noteBlockedNavigation(notCrawled.fields.redirectedTo);
+        if (notCrawled.landed) this.noteBlockedNavigation(notCrawled.landed);
         // Close the load span as a normal load would, so the page's perf
         // session finishes cleanly; its report is dropped below.
         await this.perf.endLoad({ settleCapped: loadCapped });
@@ -2430,6 +2546,7 @@ export class ChaosCrawler {
     } catch (err) {
       const loadTime = Date.now() - startTime;
       if (err instanceof NotCrawled) {
+        stoppedAt = true;
         result = {
           url,
           status: "success",
@@ -2472,27 +2589,48 @@ export class ChaosCrawler {
         // The site answered the navigation with a redirect, and where it
         // pointed is what failed: not a site that is down.
         const redirected = type === "navigation" && collectors.lastDocument()?.redirected === true;
-        const combinedErrors: PageError[] = [
-          ...errors,
-          {
-            type,
-            message: withoutCallLog(raw),
-            ...(stack ? { stack } : {}),
-            ...(redirected ? { redirected: true as const } : {}),
+        const offsiteTo = redirected ? collectors.lastDocument()?.to : undefined;
+        if (offsiteTo !== undefined && this.isExternalUrl(offsiteTo)) {
+          // A redirect to another origin, whose host then failed (a 302 to
+          // an SSO that is down): the page answered, and what failed is not
+          // the crawled site. Reported as the redirect it is, the way one
+          // whose host answered is, not as this URL failing to load.
+          const failed = /net::ERR_[A-Z0-9_]+/.exec(raw)?.[0] ?? withoutCallLog(raw).replace(/^page\.goto: /, "");
+          this.noteBlockedNavigation(offsiteNavigation(url, offsiteTo, "server-redirect", { failed }));
+          result = {
             url,
-            timestamp: Date.now(),
-          },
-        ];
-        result = {
-          url,
-          status: isTimeout ? "timeout" : "error",
-          loadTime,
-          errors: combinedErrors,
-          hasErrors: hasCountedErrors(combinedErrors),
-          warnings,
-          links: [],
-          ...this.blockedNavigationsField(),
-        };
+            status: "success",
+            loadTime,
+            errors: [],
+            hasErrors: false,
+            warnings: [...warnings, `redirected off-site to ${offsiteTo}, which failed to load (${failed}); not crawled`],
+            links: [],
+            redirectedTo: offsiteTo,
+            ...this.blockedNavigationsField(),
+          };
+        } else {
+          const combinedErrors: PageError[] = [
+            ...errors,
+            {
+              type,
+              message: withoutCallLog(raw),
+              ...(stack ? { stack } : {}),
+              ...(redirected ? { redirected: true as const } : {}),
+              url,
+              timestamp: Date.now(),
+            },
+          ];
+          result = {
+            url,
+            status: isTimeout ? "timeout" : "error",
+            loadTime,
+            errors: combinedErrors,
+            hasErrors: hasCountedErrors(combinedErrors),
+            warnings,
+            links: [],
+            ...this.blockedNavigationsField(),
+          };
+        }
       }
     }
 
@@ -2503,6 +2641,7 @@ export class ChaosCrawler {
     // the measurement itself causes must not reach the error stream, which
     // is what a crawl with perf off would report.
     collectors.stop();
+    this.pageDocument = () => null;
     // A crash nothing after it threw on (the crawl's later calls on the page
     // are best-effort reads): the page still did not survive its visit.
     if (collectors.crashed() && result.status !== "error") {
@@ -2518,8 +2657,12 @@ export class ChaosCrawler {
     // the attempt cost.
     await this.finishPagePerf(result, url, { navigationFailed: !navigated });
     // A page the crawl stopped at: what was measured was another site's page,
-    // an excluded one, or the browser's viewer for a file.
-    if (result.redirectedTo || result.excludedTo || result.contentType) {
+    // an excluded one, the browser's viewer for a file or its error page, and
+    // the errors are the other site's (a failed redirect's error is in its
+    // `offsiteNavigations` entry, not here). Still right with the off-site
+    // redirect check: it runs `afterVisit`, below, so its violation is added
+    // after this and stays.
+    if (stoppedAt || result.redirectedTo || result.excludedTo || result.contentType) {
       delete result.perf;
       delete result.perfPage;
       result.errors = [];
@@ -2534,6 +2677,12 @@ export class ChaosCrawler {
       result.errors = result.errors.filter((e) => e.url === undefined || !this.isForbiddenUrl(e.url));
       result.hasErrors = hasCountedErrors(result.errors);
     }
+    // Last, after the other site's errors are dropped above: an `afterVisit`
+    // violation (an off-site redirect, `noOffsiteRedirect`) is this page's
+    // own, and is what a page the crawl stopped at can still be failed for.
+    const visitErrors = result.errors.length;
+    await this.runInvariants("afterVisit", page, url, result.errors);
+    if (result.errors.length !== visitErrors) result.hasErrors = hasCountedErrors(result.errors);
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
@@ -2621,13 +2770,20 @@ export class ChaosCrawler {
     };
     this.currentAction = placeholder;
     const urlBefore = page.url();
+    const navigationsBefore = this.pageOffsiteNavigations.length;
     const span = await this.beginActionSpan();
-    const result = await perform();
-    await this.endActionSpan(page, span, result, urlBefore);
+    let result: ActionResult | null;
+    this.stepRunning = true;
+    try {
+      result = await perform();
+      await this.endActionSpan(page, span, result, urlBefore);
+    } finally {
+      this.stepRunning = false;
+    }
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
-    await this.returnFromForbidden(page, urlBefore, result);
+    await this.returnFromForbidden(page, urlBefore, result, navigationsBefore);
     return result;
   }
 
@@ -2645,9 +2801,35 @@ export class ChaosCrawler {
     landed: string,
     url: string,
     response: Response | null,
-  ): { message: string; fields: NotCrawled["fields"] } | undefined {
+  ): { message: string; fields: NotCrawled["fields"]; landed?: OffsiteNavigation } | undefined {
+    if (landed.startsWith("chrome-error:")) {
+      // The browser's error page: the guard blocked a navigation of the
+      // page's (a script or a meta refresh sent it off-site), and that
+      // blocked URL is where it went. Already counted when it was blocked.
+      const blocked = this.lastBlockedPageNavigation(0);
+      if (blocked) return { message: `redirected off-site to ${blocked.to}; not crawled`, fields: { redirectedTo: blocked.to } };
+      return { message: `landed on the browser's error page (${landed}); not crawled`, fields: {} };
+    }
+    if (this.isExternalUrl(landed) && !/^https?:/i.test(landed)) {
+      // `about:blank`, a `data:` or `blob:` URL: no other site, and nothing
+      // left the browser. Not an off-site navigation, and not counted as one.
+      return { message: `navigated to ${landed}; not crawled`, fields: { redirectedTo: landed } };
+    }
     if (this.isExternalUrl(landed)) {
-      return { message: `redirected off-site to ${landed}; not crawled`, fields: { redirectedTo: landed } };
+      // The guard lets a redirect hop through, so a page that shows another
+      // site's got there by a 3xx: the goto's own (its response is the
+      // other site's), or one a later navigation of the page met (named by
+      // the site's URL that answered it). With `blockExternalNavigation` off
+      // nothing was blocked, and a page that shows another site without a
+      // redirect sent itself there.
+      const via = this.redirectSource(landed);
+      const viaRedirect = via !== undefined || (response !== null && this.isExternalUrl(response.url()));
+      const trigger = viaRedirect || this.options.blockExternalNavigation ? "server-redirect" : "script";
+      return {
+        message: `redirected off-site to ${landed}; not crawled`,
+        fields: { redirectedTo: landed },
+        landed: offsiteNavigation(via ?? url, landed, trigger),
+      };
     }
     if (this.shouldExclude(landed) && !this.shouldExclude(url)) {
       return { message: `redirected to excluded ${landed}; not crawled`, fields: { excludedTo: landed } };
@@ -2659,9 +2841,11 @@ export class ChaosCrawler {
     return undefined;
   }
 
-  /** `blockedNavigations` for the current page's result: absent when none was blocked. */
-  private blockedNavigationsField(): Pick<PageResult, "blockedNavigations"> {
-    return this.pageBlockedNavigations.length > 0 ? { blockedNavigations: [...this.pageBlockedNavigations] } : {};
+  /** `blockedNavigations` and `offsiteNavigations` for the current page's result: absent when none was blocked. */
+  private blockedNavigationsField(): Pick<PageResult, "blockedNavigations" | "offsiteNavigations"> {
+    return this.pageBlockedNavigations.length > 0
+      ? { blockedNavigations: [...this.pageBlockedNavigations], offsiteNavigations: [...this.pageOffsiteNavigations] }
+      : {};
   }
 
   /** A URL a step must not stay on: another site, or one `excludePatterns` keeps the crawl off. */
@@ -2682,15 +2866,39 @@ export class ChaosCrawler {
    * that page), and the crawler goes back so the remaining steps act on
    * this page again.
    */
-  private async returnFromForbidden(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
+  private async returnFromForbidden(
+    page: Page,
+    urlBefore: string,
+    result: ActionResult,
+    navigationsBefore: number,
+  ): Promise<void> {
     const landed = page.url();
     if (!this.isForbiddenUrl(landed)) {
       // A link to a feed or a JSON file opens the browser's viewer for it;
       // the steps after it would measure and click the viewer.
       if (landed === urlBefore || (await isHtmlDocument(page))) return;
       result.openedFile = landed;
+    } else if (landed.startsWith("chrome-error:")) {
+      // The browser's error page: the guard blocked where the step sent
+      // the page (a button whose handler sets `location`), and counted it.
+      // Without one, a same-site navigation failed; go back all the same.
+      const blocked = this.lastBlockedPageNavigation(navigationsBefore);
+      if (blocked) result.leftSiteTo = blocked.to;
     } else if (this.isExternalUrl(landed)) {
-      this.noteBlockedNavigation(landed);
+      // Through a 3xx (a form posted to an endpoint that redirects): that
+      // endpoint's redirect, read against its own URL. Without one (no
+      // guard to block it), the step's, unless it went to the URL in the
+      // page's own address.
+      const via = /^https?:/i.test(landed) ? this.redirectSource(landed) : undefined;
+      this.noteBlockedNavigation(
+        via !== undefined
+          ? offsiteNavigation(via, landed, "server-redirect")
+          : offsiteNavigation(
+              urlBefore,
+              landed,
+              blockedTrigger({ mainFrame: true, stepRunning: true, reflected: reflectedIn(urlBefore, landed) !== undefined }),
+            ),
+      );
       // Not `blockedExternal`: replay reads that as "never clicked", and this
       // click did happen.
       result.leftSiteTo = landed;
@@ -3230,6 +3438,7 @@ export class ChaosCrawler {
       let result: ActionResult;
       const urlBefore = page.url();
       const span = await this.beginActionSpan();
+      this.stepRunning = true;
       try {
         if (action.blockedExternal) {
           // The original run detected an external link and did not click it.
@@ -3298,7 +3507,11 @@ export class ChaosCrawler {
           timestamp,
         };
       }
-      await this.endActionSpan(page, span, result, urlBefore);
+      try {
+        await this.endActionSpan(page, span, result, urlBefore);
+      } finally {
+        this.stepRunning = false;
+      }
       this.recordAction(result, url, undefined);
       this.recordReplayOutcome(action, result);
       await this.pauseBetweenActions(page);

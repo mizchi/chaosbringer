@@ -11,10 +11,14 @@
  *
  * Each preset is built with its defaults: the flag takes names, not options.
  * Markers, tokens, `ignore`, `selector`, `urlPattern`, `when` and the rest
- * are set through the library (`invariants.dataSafety({ … })`).
+ * are set through the library (`invariants.dataSafety({ … })`). The one
+ * option with a flag of its own is `no-offsite-redirect`'s `allow`
+ * (`--offsite-redirect-allow <origins>`): without it a site that sends its
+ * users to an SSO provider could not run `--data-safety` at all.
  */
 import { UsageError } from "./cli-usage.js";
 import { injectedMarkup, notBlank, prototypePollution, renderedGarbage, xssMarker } from "./data-invariants.js";
+import { compileOffsiteAllow, noOffsiteRedirect } from "./offsite-navigation.js";
 import type { Invariant } from "./types.js";
 
 /** Each preset by its flag name, in the order they run (`dataSafety()`'s, then `notBlank`). */
@@ -23,6 +27,7 @@ const PRESETS = {
   "injected-markup": injectedMarkup,
   "prototype-pollution": prototypePollution,
   "rendered-garbage": renderedGarbage,
+  "no-offsite-redirect": noOffsiteRedirect,
   "not-blank": notBlank,
 } as const satisfies Record<string, () => Invariant>;
 
@@ -31,11 +36,17 @@ export type InvariantPreset = keyof typeof PRESETS;
 export const INVARIANT_PRESETS = Object.keys(PRESETS) as readonly InvariantPreset[];
 
 /**
- * What `data-safety` names: `invariants.dataSafety()`'s four presets. Not
+ * What `data-safety` names: `invariants.dataSafety()`'s five presets. Not
  * `not-blank`, which `dataSafety()` leaves out too: a canvas or image-only
  * page is blank by design.
  */
-export const DATA_SAFETY_PRESETS: readonly InvariantPreset[] = ["xss-marker", "injected-markup", "prototype-pollution", "rendered-garbage"];
+export const DATA_SAFETY_PRESETS: readonly InvariantPreset[] = [
+  "xss-marker",
+  "injected-markup",
+  "prototype-pollution",
+  "rendered-garbage",
+  "no-offsite-redirect",
+];
 
 /** What `ScanOptions.invariants` takes: a preset, or the `data-safety` bundle. */
 export type InvariantPresetName = InvariantPreset | "data-safety";
@@ -108,13 +119,66 @@ export function parseInvariantsFlag(values: readonly string[] | undefined, dataS
   return { presets: expand(names, (name) => `--invariants: unknown invariant ${JSON.stringify(name)} (${known()})`), axe };
 }
 
-/** The presets' invariants, each with its defaults. */
-export function buildInvariantPresets(presets: readonly InvariantPreset[]): Invariant[] {
-  return presets.map((p) => PRESETS[p]());
+/** What of the presets' options the flags set: `--offsite-redirect-allow`'s origins. */
+export interface InvariantPresetOptions {
+  offsiteRedirectAllow?: readonly string[];
+}
+
+/** The presets' invariants, each with its defaults but for what `options` sets. */
+export function buildInvariantPresets(presets: readonly InvariantPreset[], options: InvariantPresetOptions = {}): Invariant[] {
+  return presets.map((p) =>
+    p === "no-offsite-redirect" ? noOffsiteRedirect({ allow: options.offsiteRedirectAllow }) : PRESETS[p](),
+  );
 }
 
 /**
- * `presets` as the one `--invariants` value a Repro line carries: the four
+ * Every `--offsite-redirect-allow` value (comma lists, the flag repeatable)
+ * as the origins it names, once each, in the order given. Refused: a value
+ * with no origin in it, one that is not a bare origin (a path reads as
+ * "that page only" to one reader and "that site" to another; a RegExp is
+ * the library's `allow`), and the flag without the check it configures,
+ * which would allow nothing.
+ */
+export function parseOffsiteRedirectAllowFlag(values: readonly string[] | undefined, presets: readonly InvariantPreset[]): string[] {
+  const origins = parseOffsiteRedirectOrigins(values);
+  if (origins.length > 0 && !presets.includes("no-offsite-redirect")) {
+    throw new UsageError(
+      "--offsite-redirect-allow configures the no-offsite-redirect check, which is not on: add --invariants no-offsite-redirect or --data-safety",
+    );
+  }
+  return origins;
+}
+
+/**
+ * `parseOffsiteRedirectAllowFlag` without the check it configures: scan's
+ * `--offsite-redirect-allow`, which its `open-redirect` finding reads with
+ * or without the check.
+ */
+export function parseOffsiteRedirectOrigins(values: readonly string[] | undefined): string[] {
+  const origins: string[] = [];
+  for (const raw of values ?? []) {
+    const parts = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parts.length === 0) throw new UsageError("--offsite-redirect-allow needs at least one origin (like https://login.example.com)");
+    for (const part of parts) {
+      try {
+        compileOffsiteAllow([part]);
+      } catch {
+        throw new UsageError(
+          `--offsite-redirect-allow ${JSON.stringify(part)} is not an origin: give the scheme and host, no path (like https://login.example.com)`,
+        );
+      }
+      const origin = new URL(part).origin;
+      if (!origins.includes(origin)) origins.push(origin);
+    }
+  }
+  return origins;
+}
+
+/**
+ * `presets` as the one `--invariants` value a Repro line carries: the five
  * of `data-safety` by that name, the rest by theirs, in the table's order,
  * so a command reads back as the run it came from however it was typed.
  */

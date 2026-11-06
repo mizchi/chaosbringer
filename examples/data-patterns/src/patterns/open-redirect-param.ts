@@ -45,9 +45,11 @@ export default definePattern({
     benign: "?next=/home",
   },
   crawl: { entry: "/go" },
-  // Only pages[].blockedNavigations records this: the crawler blocks the
-  // off-site navigation, which fails no exit code and raises no scan finding.
+  // `noOffsiteRedirect` (in `dataSafety()`) fails the page: a script sent
+  // it off-site, to the URL its own ?next= named. The navigation the crawler
+  // blocked is in `pages[].blockedNavigations` too.
   expect: {
-    signal: { kind: "blocked-navigation", includes: MARKER_PATH },
+    signal: { kind: "invariant", name: "navigation.no-offsite-redirect", message: /^open redirect: .*cb-offsite-marker \(script redirect, to the URL in its "next" query parameter\)$/ },
+    alsoSignals: [{ kind: "blocked-navigation", includes: MARKER_PATH }],
   },
 });

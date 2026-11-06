@@ -23,6 +23,8 @@ const PAGES: Record<string, string> = {
   "/": `<!doctype html><title>Home</title><h1>Home</h1><a href="/about">About</a>`,
   "/about": `<!doctype html><title>About</title><h1>About</h1>`,
   "/boom": `<!doctype html><title>Boom</title><script>console.error("boom")</script>`,
+  // Sends the browser wherever ?next= says: an open redirect.
+  "/go": `<!doctype html><title>Go</title><script>location.replace(new URLSearchParams(location.search).get("next"))</script>`,
   // Renders what `/api/stock` answered, or a fallback when it failed.
   "/stock": `<!doctype html><title>Stock</title><p role="status">loading</p><script>
     fetch("/api/stock")
@@ -74,7 +76,7 @@ describe("chaosbringer/fixture under Playwright Test", () => {
         res.end(`{"count":3}`);
         return;
       }
-      const body = PAGES[req.url ?? ""];
+      const body = PAGES[(req.url ?? "").startsWith("/go?") ? "/go" : (req.url ?? "")];
       if (body === undefined) {
         res.writeHead(req.url === "/favicon.ico" ? 204 : 404);
         res.end();
@@ -152,6 +154,10 @@ describe("chaosbringer/fixture under Playwright Test", () => {
 
   it("fails toLoadWithin for a page that did not load", () => {
     expectPassed("chaosExpect.toLoadWithin fails a page that did not load");
+  });
+
+  it("records an open redirect on testPage(), and fails it with invariants.noOffsiteRedirect()", () => {
+    expectPassed("an open redirect");
   });
 
   it("passes seed, faults and invariants through to the crawler", () => {

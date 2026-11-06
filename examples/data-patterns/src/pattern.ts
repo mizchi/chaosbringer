@@ -137,8 +137,9 @@ export type Signal =
   | { kind: "invariant"; name: string; message?: RegExp }
   /**
    * The crawler kept the page from navigating off-site to a URL containing
-   * `includes`. Only `pages[].blockedNavigations` records it: it changes no
-   * exit code and no scan finding.
+   * `includes` (`pages[].blockedNavigations`). On its own it changes no exit
+   * code: an open redirect is flagged by the `navigation.no-offsite-redirect`
+   * invariant, with this as a further signal of the same run.
    */
   | { kind: "blocked-navigation"; includes: string };
 

@@ -68,7 +68,7 @@ and without `strict`, and whether the control and the fix are clean. A bold
 cell is a verdict that failed, with its first problem.
 
 <!-- results:start -->
-Measured by `pnpm report` on 2026-10-27: one crawl per case, `strict` on, the catalog suite. "exit" is the buggy + bad run's exit code with `strict` / without it.
+Measured by `pnpm report` on 2026-11-06: one crawl per case, `strict` on, the catalog suite. "exit" is the buggy + bad run's exit code with `strict` / without it.
 
 | entry | category | data via | buggy + bad data: reported | exit | buggy + benign data | fixed + bad data | fix |
 |---|---|---|---|---|---|---|---|
@@ -86,7 +86,7 @@ Measured by `pnpm report` on 2026-10-27: one crawl per case, `strict` on, the ca
 | [negative-count](src/patterns/negative-count.ts) | bug-data | response `/api/page` | `unhandled-rejection "Invalid array length"` | 1 / 0 | clean | clean | Check a count is a non-negative integer before sizing anything with it, and render the empty state otherwise. |
 | [null-in-list-item](src/patterns/null-in-list-item.ts) | bug-data | response `/api/items` | `unhandled-rejection "Cannot read properties of null (reading 'trim')"` | 1 / 0 | clean | clean | Treat the field as nullable on every item where it is read (a null check or ?? with a fallback label) and render the item anyway. |
 | [null-relation](src/patterns/null-relation.ts) | bug-data | response `/api/user` | `unhandled-rejection "Cannot read properties of null (reading 'name')"` | 1 / 0 | clean | clean | Model the relation as nullable where it is read (a null check, optional chaining with a fallback, or a type that says User \| null) and render the empty state. |
-| [open-redirect-param](src/patterns/open-redirect-param.ts) | malicious-data | query on `/go` | `blocked navigation to <third-party>/cb-offsite-marker` | 0 / 0 | clean | clean | Resolve next against the site's own origin and follow it only when the origin is unchanged (or the target is on an allowlist); otherwise go to a default page. |
+| [open-redirect-param](src/patterns/open-redirect-param.ts) | malicious-data | query on `/go` | `invariant navigation.no-offsite-redirect "open redirect: <app>/go?next=<third-party>%2Fcb…`<br>`blocked navigation to <third-party>/cb-offsite-marker` | 1 / 1 | clean | clean | Resolve next against the site's own origin and follow it only when the origin is unchanged (or the target is on an allowlist); otherwise go to a default page. |
 | [oracle-code-sample](src/patterns/oracle-code-sample.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: renderedGarbage skips code, pre, kbd, samp and textarea, text the user can't see, and a token inside a longer word. |
 | [oracle-escaped-payload](src/patterns/oracle-escaped-payload.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: the presets look for a marker that ran, an element carrying the canary attribute, or a javascript: URL in a URL attribute, not for the marker's text. |
 | [oracle-own-keys](src/patterns/oracle-own-keys.ts) | oracle | – | – | – | – | clean (exit 0 / 0) | Nothing to fix: prototypePollution reads Object.prototype's enumerable keys, not the keys of objects the page holds. |
@@ -122,25 +122,28 @@ query: everything but storage and form data) is scanned a third time by the
 built CLI, `chaosbringer scan --invariants data-safety,not-blank`, the same
 suite named by flag.
 
-A variant is flagged when a `bug` finding matches the entry's signal: an
-error by a `js-exception` or `unhandled-rejection` finding whose title
-matches the message, an invariant by an `invariant-violation` finding that
-names it. Expect the entries that throw to be flagged out of the box, and
-the ones caught only by an invariant (a marker, a polluted prototype,
+A variant is flagged when a `bug` or `security` finding matches the
+entry's signal: an error by a `js-exception` or `unhandled-rejection`
+finding whose title matches the message, an invariant by an
+`invariant-violation` finding that names it, and an off-site redirect by
+scan's own `open-redirect` finding (scan reports the redirect itself and
+leaves the `no-offsite-redirect` check's violation out). Expect the entries
+that throw to be flagged out of the box, and the ones caught only by an invariant (a marker, a polluted prototype,
 garbage on screen, a blank page) only with the suite, and from the CLI
 wherever it can deliver the data: the query entries
 (`prototype-pollution-query`, `reflected-xss-query`) included. The third
-query entry, `open-redirect-param`, is a blocked navigation, which no scan
-rule reads, with or without the checks. The script
+query entry, `open-redirect-param`, is flagged in every column by the
+`high` `open-redirect` finding, with or without the checks: scan reads the
+redirect from the crawl's `pages[].offsiteNavigations`. The script
 exits 1 when a fixed variant is still flagged, an oracle entry has any bug
-finding, or the CLI misses a variant the suite in code flags.
+or security finding, or the CLI misses a variant the suite in code flags.
 
 <!-- scan-check:start -->
-Measured by `pnpm scan-check` on 2026-11-03: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data; the CLI column is the built `chaosbringer scan --no-chaos --invariants data-safety,not-blank` with the same page, seed and actions.
+Measured by `pnpm scan-check` on 2026-11-06: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data; the CLI column is the built `chaosbringer scan --no-chaos --invariants data-safety,not-blank` with the same page, seed and actions.
 
-**12 of 28** buggy variants are flagged out of the box, **27 of 28** with the catalog suite as `crawler.invariants`, and **25 of 26** from the command line, of the 26 whose data the command line can deliver; **0** fixed variants are still flagged.
+**13 of 28** buggy variants are flagged out of the box, **28 of 28** with the catalog suite as `crawler.invariants`, and **26 of 26** from the command line, of the 26 whose data the command line can deliver; **0** fixed variants are still flagged.
 
-| entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | buggy: CLI `scan --invariants data-safety,not-blank` | fixed: still flagged | every bug rule on buggy |
+| entry | data via | buggy: out of the box | buggy: with `invariants.dataSafety()` + `notBlank()` | buggy: CLI `scan --invariants data-safety,not-blank` | fixed: still flagged | every bug / security rule on buggy |
 |---|---|---|---|---|---|---|
 | [array-became-object](src/patterns/array-became-object.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
 | [attribute-breakout-xss](src/patterns/attribute-breakout-xss.ts) | response `/api/profile` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
@@ -156,7 +159,7 @@ Measured by `pnpm scan-check` on 2026-11-03: `runScan` with `chaos: false`, one 
 | [negative-count](src/patterns/negative-count.ts) | response `/api/page` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
 | [null-in-list-item](src/patterns/null-in-list-item.ts) | response `/api/items` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
 | [null-relation](src/patterns/null-relation.ts) | response `/api/user` | `unhandled-rejection` | `unhandled-rejection` | `unhandled-rejection` | – | `unhandled-rejection` |
-| [open-redirect-param](src/patterns/open-redirect-param.ts) | query on `/go` | – (report field only) | – (report field only) | – (report field only) | – | – |
+| [open-redirect-param](src/patterns/open-redirect-param.ts) | query on `/go` | `open-redirect` | `open-redirect` | `open-redirect` | – | `open-redirect` |
 | [prototype-pollution-merge](src/patterns/prototype-pollution-merge.ts) | response `/api/preferences` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
 | [prototype-pollution-query](src/patterns/prototype-pollution-query.ts) | query on `/settings` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
 | [reflected-xss-query](src/patterns/reflected-xss-query.ts) | query on `/search` | – | `invariant-violation` | `invariant-violation` | – | `invariant-violation` |
@@ -182,11 +185,10 @@ Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/o
   `injectedMarkup` flags the URL in the sink, not its execution.
 - **Payloads in the URL fragment**: the crawler drops the hash before it
   navigates, so DOM XSS through `location.hash` is out of reach.
-- **Open redirects in exit codes or scan**: a blocked off-site navigation is
-  recorded only in `pages[].blockedNavigations` (and `redirectedTo`). It
-  fails no exit code and raises no scan finding, and the redirected page's
-  errors are dropped. Entries with this signal are judged on the report
-  field alone.
+- **Open redirects the crawl never visits**: `noOffsiteRedirect` and scan's
+  `open-redirect` judge the URLs the crawl went to. A `?next=` the site
+  never links to with an off-site value is not probed (the entry's own
+  start URL carries one), and no redirect parameter is tried by name.
 - **Markup that doesn't run and carries no canary**: an inserted `<script>`
   (which `innerHTML` never runs), attacker HTML without `data-cb-injected`.
 - **Well-formed but wrong values**: an off-by-one total, the wrong currency.

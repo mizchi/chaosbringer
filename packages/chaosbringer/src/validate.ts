@@ -525,9 +525,9 @@ export function validateOptions(options: CrawlerOptions): void {
     // The crawler runs an invariant only in the phase its `when` names, so any
     // other value (`"afterAction"`, say) never runs it: the check cannot fail
     // and the crawl exits 0.
-    if (inv.when !== undefined && inv.when !== "afterLoad" && inv.when !== "afterActions") {
+    if (inv.when !== undefined && inv.when !== "afterLoad" && inv.when !== "afterActions" && inv.when !== "afterVisit") {
       throw new Error(
-        `chaosbringer: invariant "${inv.name}" when must be "afterLoad" or "afterActions" (got ${JSON.stringify(inv.when)})`
+        `chaosbringer: invariant "${inv.name}" when must be "afterLoad", "afterActions" or "afterVisit" (got ${JSON.stringify(inv.when)})`
       );
     }
     assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);

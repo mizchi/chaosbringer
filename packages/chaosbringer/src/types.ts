@@ -977,12 +977,22 @@ export interface PageError {
   causedByFault?: string;
   /**
    * Only on a `navigation` error, when the navigation followed a redirect
-   * and where it pointed is what failed. The message names the URL
-   * navigated to, not the host that failed, so this is what tells a start
-   * URL that redirects to a host that is down (an SSO that is not up) from
-   * a site that is not there.
+   * inside the crawl (same origin) and where it pointed is what failed. The
+   * message names the URL navigated to, not the target that failed, so this
+   * is what tells a start URL whose redirect target is down from a site
+   * that is not there. A redirect to another origin whose host failed (an
+   * SSO that is not up) is no error at all: it is an off-site redirect,
+   * recorded in `PageResult.offsiteNavigations[].failed`, and the page a
+   * success.
    */
   redirected?: true;
+  /**
+   * Only on an `invariant-violation` that `invariants.noOffsiteRedirect()`
+   * raised, whatever it is named: the violation is about the page's
+   * off-site redirects, which `--github-annotations` and scan's
+   * `open-redirect` otherwise report from the navigations themselves.
+   */
+  offsiteRedirect?: true;
 }
 
 /**
@@ -997,8 +1007,16 @@ export interface Invariant {
   name: string;
   /** Check the invariant. Return false / throw / return a string to fail. */
   check: (ctx: InvariantContext) => boolean | string | void | Promise<boolean | string | void>;
-  /** When to evaluate. Default: "afterActions". */
-  when?: "afterLoad" | "afterActions";
+  /**
+   * When to evaluate. Default: "afterActions".
+   *
+   * `afterVisit` runs once at the end of every visit, also on a page the
+   * crawler stopped at (it redirected off-site, its load failed) where the
+   * other two never run. `ctx.page` may show another site or an error page
+   * there: check what the crawl recorded (`ctx.offsiteNavigations`,
+   * `ctx.errors`), not the DOM.
+   */
+  when?: "afterLoad" | "afterActions" | "afterVisit";
   /** Restrict to URLs matching this matcher (regex literal or regex string). Omit to run on every page. */
   urlPattern?: UrlMatcher;
   /**
@@ -1021,6 +1039,11 @@ export interface InvariantContext {
   url: string;
   /** Errors collected on this page so far. */
   errors: readonly PageError[];
+  /**
+   * This page's off-site navigations so far (`PageResult.offsiteNavigations`).
+   * Set by the crawler; absent where no crawl recorded any (`scenarioLoad`).
+   */
+  offsiteNavigations?: readonly OffsiteNavigation[];
   /**
    * Mutable, run-scoped key/value bag shared between invariants. The same
    * `Map` instance is passed to every invariant on every page during a run,
@@ -1110,16 +1133,29 @@ export interface PageResult {
    * The external URLs the crawler kept this page from navigating to: links
    * and redirects to another origin, including a step it backed out of
    * (`ActionResult.leftSiteTo`) and the page's own `redirectedTo`. Absent
-   * when none was blocked.
+   * when none was blocked. `offsiteNavigations` holds the same entries, in
+   * the same order, with what started each.
    */
   blockedNavigations?: string[];
+  /**
+   * Each of `blockedNavigations`, with where it left from, what started it
+   * and whether the target came from the page's own URL: what
+   * `invariants.noOffsiteRedirect()`, the report's off-site navigation list
+   * and scan's `open-redirect` finding read. Absent when none was blocked.
+   */
+  offsiteNavigations?: OffsiteNavigation[];
   /** Recovery info if page was recovered from error */
   recovery?: RecoveryInfo;
   /**
-   * Where the page's URL redirected to when that was another origin. The
-   * crawler stops there: the page showing is another site's, so the result
-   * carries no errors, links, actions or perf, and the redirect counts as a
-   * blocked external navigation.
+   * Where the page went when it left for another origin on its own: its URL
+   * redirected there (a server 3xx, followed even when the other host then
+   * failed to load), or a script or `<meta http-equiv="refresh">` sent it
+   * there (the crawler blocked that navigation, so it names the URL that was
+   * blocked, never the browser's error page). The crawler stops there: the
+   * result carries no links, actions or perf, none of the other site's
+   * errors, and the redirect counts as a blocked external navigation. An
+   * `afterVisit` invariant still runs, and can fail the page
+   * (`invariants.noOffsiteRedirect()`).
    */
   redirectedTo?: string;
   /**
@@ -1189,6 +1225,58 @@ export interface PageResult {
    * `fetch` in the page, ahead of the worker, and fire either way.
    */
   serviceWorker?: "routed" | "unrouted";
+}
+
+/**
+ * What started an off-site navigation (`OffsiteNavigation.trigger`):
+ * - `click`: a crawler step went to a URL the page wrote: a link or a form
+ *   to another origin, a button whose handler sets `location` to a fixed
+ *   URL (a share button). The user asked to go there. A link straight to
+ *   another origin is never clicked at all (`ActionResult.blockedExternal`);
+ * - `script`: a script navigated the page (`location.href = …`,
+ *   `location.replace()`, a form it submitted) when no step was running,
+ *   or while one ran, to a target taken from the page's own URL (a
+ *   "Continue" button that follows `?next=`: `reflected` is set);
+ * - `meta-refresh`: a `<meta http-equiv="refresh">` or a `Refresh` header;
+ * - `server-redirect`: a URL of the site answered with a redirect (3xx) to
+ *   another origin: the page's own, or one a step went to (a form posted to
+ *   an endpoint that redirects);
+ * - `frame`: an iframe navigating off-site, not the page itself.
+ *
+ * `click`, `script` and `meta-refresh` are told apart by the browser's own
+ * reason for the navigation (CDP `Page.frameRequestedNavigation`); a page
+ * without CDP (a non-Chromium page handed to `testPage()`) reports both
+ * of the last as `script`, and a step's navigation by its target alone.
+ * A navigation that starts while a step runs is the step's, even when a
+ * timer the page set earlier started it.
+ */
+export type OffsiteNavigationTrigger = "click" | "script" | "meta-refresh" | "server-redirect" | "frame";
+
+/** One off-site navigation of a page (`PageResult.offsiteNavigations`). */
+export interface OffsiteNavigation {
+  /**
+   * The URL the navigation left: the page's, or the one it showed when a
+   * step ran. For a `server-redirect`, the site's URL that answered with
+   * the redirect (a step's form posted to `/login?next=…`), which is what
+   * `reflected` is read from.
+   */
+  from: string;
+  /** The off-site URL it went to. */
+  to: string;
+  trigger: OffsiteNavigationTrigger;
+  /**
+   * Where `to` appears in `from`, when it does: a query parameter (`param`
+   * names it) or the fragment, as written or URL-decoded. A redirect to a
+   * URL its own address carries is an open redirect: whoever writes the
+   * link picks where it sends the user.
+   */
+  reflected?: { in: "query"; param: string } | { in: "fragment" };
+  /**
+   * The error the off-site target failed with (`net::ERR_CONNECTION_REFUSED`),
+   * when a redirect to it did not load. The page is not failed for it: the
+   * host that failed is not the crawled site.
+   */
+  failed?: string;
 }
 
 export interface RecoveryInfo {

@@ -12,7 +12,7 @@ import { devices } from "playwright";
 import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
 import { isUsageError, PASTED_COMMENT, SUBCOMMANDS, UsageError } from "./cli-usage.js";
 import { errorMessage } from "./errors.js";
-import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag } from "./cli-invariants.js";
+import { buildInvariantPresets, formatInvariantsFlag, parseInvariantsFlag, parseOffsiteRedirectAllowFlag } from "./cli-invariants.js";
 import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
 import { readInputJson } from "./input-files.js";
 import { HTTP_FAIL_LEVELS, type ExitCodeOptions, type HttpFailLevel } from "./reporter.js";
@@ -59,6 +59,7 @@ export const CRAWL_CLI_OPTIONS = {
   axe: { type: "boolean", default: false },
   invariants: { type: "string", multiple: true },
   "data-safety": { type: "boolean", default: false },
+  "offsite-redirect-allow": { type: "string", multiple: true },
   "aria-targets": { type: "boolean", default: false },
   bind: { type: "boolean", default: false },
   "bind-title": { type: "string" },
@@ -170,6 +171,7 @@ export const REPLAY_CRAWL_FLAGS = [
   "no-http-cache",
   "invariants",
   "data-safety",
+  "offsite-redirect-allow",
   "axe",
   "axe-tags",
 ] as const satisfies readonly CrawlFlag[];
@@ -655,9 +657,11 @@ export function crawlCliPeerNeeds(values: Partial<Pick<CrawlCliValues, "axe" | "
 
 /**
  * The invariants the flags build: `--axe` (or `--invariants axe`), then the
- * `--invariants` / `--data-safety` presets (`cli-invariants.ts`), then
- * `--visual-baseline`. Throws a `UsageError` on a name `--invariants` does
- * not know.
+ * `--invariants` / `--data-safety` presets (`cli-invariants.ts`), with
+ * `--offsite-redirect-allow`'s origins, then `--visual-baseline`. Throws a
+ * `UsageError` on a name `--invariants` does not know, and on an
+ * `--offsite-redirect-allow` that is not an origin or has no check to
+ * configure.
  */
 function buildInvariants(values: Partial<CrawlCliValues>): Invariant[] | undefined {
   const list: Invariant[] = [];
@@ -674,7 +678,8 @@ function buildInvariants(values: Partial<CrawlCliValues>): Invariant[] | undefin
       })
     );
   }
-  list.push(...buildInvariantPresets(flag.presets));
+  const offsiteRedirectAllow = parseOffsiteRedirectAllowFlag(values["offsite-redirect-allow"], flag.presets);
+  list.push(...buildInvariantPresets(flag.presets, { offsiteRedirectAllow }));
   if (values["visual-baseline"]) {
     list.push(
       visualRegression({
@@ -705,7 +710,7 @@ function buildInvariants(values: Partial<CrawlCliValues>): Invariant[] | undefin
  * The flags that change the run or its exit code in a form
  * `buildReproCommand` cannot read back from the options: the CLI applies
  * `--strict` and the `--fail-on-*` rules itself, `--axe` / `--invariants` / `--data-safety` /
- * `--visual-*` become invariant closures, and `--allow-settle-mismatch` lifts
+ * `--offsite-redirect-allow` / `--visual-*` become invariant closures, and `--allow-settle-mismatch` lifts
  * a refusal the CLI makes. `--invariants axe` is carried as `--axe`, and
  * `--data-safety` and every `--invariants` as one canonical `--invariants`
  * value (`formatInvariantsFlag`). Left out:
@@ -721,6 +726,8 @@ function cliOnlyReproFlags(values: Partial<CrawlCliValues>): ReproFlag[] {
     if (values["axe-tags"] !== undefined) out.push({ flag: "--axe-tags", value: values["axe-tags"] });
   }
   if (invariants.presets.length > 0) out.push({ flag: "--invariants", value: formatInvariantsFlag(invariants.presets) });
+  const allow = parseOffsiteRedirectAllowFlag(values["offsite-redirect-allow"], invariants.presets);
+  if (allow.length > 0) out.push({ flag: "--offsite-redirect-allow", value: allow.join(",") });
   if (values["visual-baseline"]) {
     out.push({ flag: "--visual-baseline", value: values["visual-baseline"], path: true });
     for (const name of ["visual-threshold", "visual-max-diff-pixels", "visual-max-diff-ratio"] as const) {

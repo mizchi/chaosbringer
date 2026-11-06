@@ -21,6 +21,7 @@
 import type { Frame, Page } from "playwright";
 import { raceTimeout, TIMED_OUT } from "./async-util.js";
 import { XSS_AUTH_MARKER } from "./drivers/auth-attack/payloads.js";
+import { noOffsiteRedirect, type NoOffsiteRedirectOptions } from "./offsite-navigation.js";
 import type { Invariant } from "./types.js";
 
 /** Options every data-safety preset takes. */
@@ -86,7 +87,11 @@ export interface NotBlankOptions extends DataInvariantOptions {
 }
 
 export interface DataSafetyOptions {
-  /** Phase for every preset. Default: `afterActions`. */
+  /**
+   * Phase for every preset. Default: `afterActions`. Not `noOffsiteRedirect`,
+   * which always runs `afterVisit`: a page that redirected is one the
+   * crawler stops at.
+   */
   when?: Invariant["when"];
   /** Restrict every preset to URLs matching this matcher. */
   urlPattern?: Invariant["urlPattern"];
@@ -97,6 +102,8 @@ export interface DataSafetyOptions {
   injectedMarkup?: InjectedMarkupOptions;
   prototypePollution?: PrototypePollutionOptions;
   renderedGarbage?: RenderedGarbageOptions;
+  /** `allow` the origins a page may redirect to (an SSO provider), and the rest of its options. */
+  noOffsiteRedirect?: NoOffsiteRedirectOptions;
 }
 
 /** `__xss_fired` is what the `xss` payload set (drivers/payloads.ts) writes. */
@@ -499,8 +506,11 @@ export function notBlank(options: NotBlankOptions = {}): Invariant {
 
 /**
  * The security and rendering presets, in this order: `xssMarker`,
- * `injectedMarkup`, `prototypePollution`, `renderedGarbage`. `notBlank` is
- * left out (see there); add it when every page you crawl shows text.
+ * `injectedMarkup`, `prototypePollution`, `renderedGarbage`,
+ * `noOffsiteRedirect` (from `offsite-navigation.ts`: data in a URL that
+ * sends the user to another site is the same class of bug as data that
+ * runs as script). `notBlank` is left out (see there); add it when every
+ * page you crawl shows text.
  */
 export function dataSafety(options: DataSafetyOptions = {}): Invariant[] {
   const shared = { when: options.when, urlPattern: options.urlPattern };
@@ -510,5 +520,6 @@ export function dataSafety(options: DataSafetyOptions = {}): Invariant[] {
     injectedMarkup({ ...shared, markers, ...options.injectedMarkup }),
     prototypePollution({ ...shared, ...options.prototypePollution }),
     renderedGarbage({ ...shared, ...options.renderedGarbage }),
+    noOffsiteRedirect({ urlPattern: options.urlPattern, ...options.noOffsiteRedirect }),
   ];
 }

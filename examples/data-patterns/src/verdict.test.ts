@@ -79,12 +79,6 @@ describe("signalsOf", () => {
     ]);
   });
 
-  it("leaves out the browser's error page for a blocked navigation", () => {
-    const r = report({}, { blockedNavigations: ["http://localhost:4001/cb-offsite-marker", "chrome-error://chromewebdata/"] });
-    expect(signalsOf(r)).toEqual([{ kind: "blocked-navigation", url: "http://localhost:4001/cb-offsite-marker" }]);
-    expect(signalsOf(report({}, { blockedNavigations: ["chrome-error://chromewebdata/"] }))).toEqual([]);
-  });
-
   it("lists an invariant once however many clusters it failed in, with each message", () => {
     const r = report({
       errorClusters: [
@@ -122,7 +116,7 @@ describe("judgeBuggy", () => {
   });
 
   it("does not hold a blocked navigation to an exit code", () => {
-    const r = report({}, { blockedNavigations: ["http://localhost:4001/cb-offsite-marker", "chrome-error://chromewebdata/"] });
+    const r = report({}, { blockedNavigations: ["http://localhost:4001/cb-offsite-marker"] });
     const p = pattern({ signal: { kind: "blocked-navigation", includes: "/cb-offsite-marker" } });
     expect(judgeBuggy(p, run(r, { exitCode: 0 }))).toEqual([]);
     expect(judgeBuggy(p, run(report(), { exitCode: 0 }))).toEqual(["expected blocked navigation to */cb-offsite-marker*, saw nothing"]);
@@ -188,10 +182,6 @@ describe("judgeClean", () => {
     expect(judgeClean(p, run(report({}, { blockedNavigations: ["http://localhost:4001/x"] })))).toEqual([
       "reported blocked navigation to http://localhost:4001/x",
     ]);
-  });
-
-  it("is not failed by the browser's error page alone", () => {
-    expect(judgeClean(p, run(report({}, { blockedNavigations: ["chrome-error://chromewebdata/"] })))).toEqual([]);
   });
 
   it("fails a strict exit of 1, a page that did not load, or no page at all", () => {

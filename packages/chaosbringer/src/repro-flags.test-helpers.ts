@@ -66,6 +66,12 @@ export const ROUND_TRIPS: Record<string, string[]> = {
   // Merged and de-duplicated, then written back in one canonical form.
   invariants: ["--invariants", "not-blank,xss-marker", "--invariants", "data-safety"],
   "data-safety": ["--data-safety"],
+  // De-duplicated by origin, written back as one comma list.
+  "offsite-redirect-allow": [
+    "--data-safety",
+    "--offsite-redirect-allow", "https://login.example.com,https://pay.example.net/",
+    "--offsite-redirect-allow", "https://login.example.com",
+  ],
   "visual-baseline": ["--visual-baseline", "baselines"],
   "visual-threshold": ["--visual-baseline", "b", "--visual-threshold", "0.2"],
   "visual-max-diff-pixels": ["--visual-baseline", "b", "--visual-max-diff-pixels", "10"],

@@ -30,7 +30,9 @@ setup that tested less than it said: a fault rule that never fired, a
 `--seed-from-sitemap` that could not be read, a `--network` profile that
 failed, a missing `--baseline`). `--github-annotations` prints `::error` for
 what one of those rules (or `--baseline-strict`) fails the run on, and for
-every JS exception even on a run that exits 0; `::warning` for the rest.
+every JS exception even on a run that exits 0; `::warning` for the rest, and
+for an off-site redirect no check failed `::warning` (target from the page's
+URL) or `::notice`.
 `--baseline-missing fail` refuses (exit 2) a `--baseline` that is not there,
 which is otherwise a warning. `--log-console` alone logs to stderr.
 
@@ -191,13 +193,34 @@ invariant violation per page, which reads as an accessibility bug in the app.
 An invariant declares such packages in `peers`; the presets already do.
 
 The data-safety presets (`invariants.dataSafety()`: `xssMarker`,
-`injectedMarkup`, `prototypePollution`, `renderedGarbage`; and `notBlank`,
-which `dataSafety()` leaves out) catch bad data that did damage without
-throwing: a payload that ran, `NaN` on screen, a polluted prototype. From the
-shell, `--invariants data-safety,not-blank` (or `--data-safety`) turns them
-on for the crawl, `shard` and `scan`, each with its defaults; their options
-(`markers`, `tokens`, `ignore`, `urlPattern`) are code-only. The `Repro:`
-line carries the flag. Details: `docs/recipes/data-safety.md`.
+`injectedMarkup`, `prototypePollution`, `renderedGarbage`,
+`noOffsiteRedirect`; and `notBlank`, which `dataSafety()` leaves out) catch
+bad data that did damage without throwing: a payload that ran, `NaN` on
+screen, a polluted prototype, a `?next=` that sends the user to another
+site. From the shell, `--invariants data-safety,not-blank` (or
+`--data-safety`) turns them on for the crawl, `shard` and `scan`, each with
+its defaults; their options (`markers`, `tokens`, `ignore`, `urlPattern`)
+are code-only, but for `noOffsiteRedirect`'s `allow` (an SSO provider the
+site redirects to), which is `--offsite-redirect-allow <origins>`: for the
+crawl and `shard` only with the check on; `scan` takes it either way, and
+raises no `open-redirect` finding for those origins. The `Repro:` line
+carries the flags. Details: `docs/recipes/data-safety.md`.
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+// An open redirect: a page that leaves for another origin by a script, a
+// meta refresh or a 3xx fails, and so does a click that follows the page's
+// own ?next= (a click to a URL the page wrote does not); `allow` lets the
+// SSO through.
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F",
+  invariants: [invariants.noOffsiteRedirect({ allow: ["https://login.example.com"] })],
+});
+// Every page's off-site navigations, with what started them:
+// report.pages[0].offsiteNavigations
+//   → [{ from, to, trigger: "script", reflected: { in: "query", param: "next" } }]
+```
 
 ## Driving a known path instead of a random one
 

@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 import { fingerprintError, type ErrorCluster } from "./clusters.js";
 import { perfKeyRoute } from "./perf-key.js";
 import { slowestActions } from "./perf-summary.js";
+import { describeOffsiteNavigation, offsiteRedirects } from "./offsite-navigation.js";
 import { isFaultEcho } from "./resource-outcomes.js";
 import { type RunWarning, warningTimes } from "./run-warnings.js";
 import type { CrawlReport, PageError, PageResult, PerfDegradationEntry } from "./types.js";
@@ -15,6 +16,8 @@ import type { CrawlReport, PageError, PageResult, PerfDegradationEntry } from ".
 const CLUSTER_RESOURCES_SHOWN = 5;
 /** Error clusters the compact report lists under a failing verdict. */
 const COMPACT_CLUSTERS_SHOWN = 3;
+/** Off-site navigations the text report lists; the JSON has them all. */
+const OFFSITE_NAVIGATIONS_SHOWN = 20;
 
 export function formatReport(report: CrawlReport): string {
   const lines: string[] = [];
@@ -124,6 +127,8 @@ export function formatReport(report: CrawlReport): string {
       lines.push(`  ${page.url}`);
     }
   }
+
+  lines.push(...formatOffsiteNavigations(report));
 
   // Dead links with source information
   if (report.summary.discovery?.deadLinks && report.summary.discovery.deadLinks.length > 0) {
@@ -336,6 +341,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
     deadLinksLine(report),
+    offsiteRedirectsLine(report),
     warningsLine(report),
   ].filter(Boolean);
   if (reasons.length > 0) {
@@ -367,6 +373,7 @@ export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCod
   return [
     formatVerdictLine(report, strict),
     deadLinksLine(report),
+    offsiteRedirectsLine(report),
     warningsLine(report),
     ...(reasons.length > 0 ? [failedLine(reasons)] : []),
   ]
@@ -382,6 +389,39 @@ export function formatQuietReport(report: CrawlReport, strict: boolean | ExitCod
 function deadLinksLine(report: Pick<CrawlReport, "summary">): string {
   const dead = report.summary.discovery?.deadLinks ?? [];
   return dead.length > 0 ? `  Dead links: ${dead.length}${firstDeadLink(dead)}` : "";
+}
+
+/**
+ * `  Off-site redirects: N (first: <page> -> <target>)`, or "" with none: the
+ * pages that sent the browser to another origin on their own (a script, a
+ * meta refresh, a 3xx; `isOffsiteRedirect`), whether or not
+ * `invariants.noOffsiteRedirect()` fails the run on them, as for dead links.
+ * A click and an iframe are not counted.
+ */
+function offsiteRedirectsLine(report: Pick<CrawlReport, "pages">): string {
+  const redirects = offsiteRedirects(report.pages ?? []);
+  const first = redirects[0];
+  return first ? `  Off-site redirects: ${redirects.length} (first: ${first.from} -> ${first.to})` : "";
+}
+
+/**
+ * The text report's list of off-site navigations: each page's, as
+ * `<page> -> <target> (<trigger>; …)`, where `Blocked External
+ * Navigations` above only counts them. A report an older version wrote
+ * has no `offsiteNavigations`; its `blockedNavigations` are listed without
+ * a trigger.
+ */
+function formatOffsiteNavigations(report: CrawlReport): string[] {
+  const rows = report.pages.flatMap((p) =>
+    p.offsiteNavigations
+      ? p.offsiteNavigations.map(describeOffsiteNavigation)
+      : (p.blockedNavigations ?? []).map((to) => `${p.url} -> ${to}`),
+  );
+  if (rows.length === 0) return [];
+  const out = ["", "-".repeat(40), "OFF-SITE NAVIGATIONS", "-".repeat(40)];
+  for (const row of rows.slice(0, OFFSITE_NAVIGATIONS_SHOWN)) out.push(`  ${row}`);
+  if (rows.length > OFFSITE_NAVIGATIONS_SHOWN) out.push(`  … and ${rows.length - OFFSITE_NAVIGATIONS_SHOWN} more`);
+  return out;
 }
 
 /**

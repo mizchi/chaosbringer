@@ -42,9 +42,7 @@ export interface CaseRun {
 /**
  * Every signal in `report`: one per error cluster that isn't an invariant
  * violation, one per failed invariant (with the messages of all its
- * clusters), one per off-site navigation the crawler blocked. The browser's
- * own error page for a blocked navigation (`chrome-error://chromewebdata/`)
- * is left out: it is where the page ended up, not where it tried to go.
+ * clusters), one per off-site navigation the crawler blocked.
  */
 export function signalsOf(report: Pick<CrawlReport, "errorClusters" | "pages">): ObservedSignal[] {
   const out: ObservedSignal[] = [];
@@ -69,9 +67,7 @@ export function signalsOf(report: Pick<CrawlReport, "errorClusters" | "pages">):
     }
   }
   for (const p of report.pages) {
-    for (const url of p.blockedNavigations ?? []) {
-      if (!url.startsWith("chrome-error://")) add({ kind: "blocked-navigation", url });
-    }
+    for (const url of p.blockedNavigations ?? []) add({ kind: "blocked-navigation", url });
   }
   return out;
 }

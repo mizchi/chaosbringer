@@ -18,6 +18,7 @@ import { withSidecarRequests } from "./sidecars.js";
 import { deriveScanEndpoints, endpointsPattern } from "./endpoints.js";
 import { formatScanMarkdown, formatScanSummary } from "./format.js";
 import { parseFaults } from "./cli.js";
+import { offsiteNavigation } from "../offsite-navigation.js";
 
 const U = "http://localhost:3000";
 
@@ -152,6 +153,79 @@ describe("analyzeScan: bugs", () => {
       ["invariant-violation", "medium", "bug", "[cart-total] total is wrong"],
     ]);
     expect(r.findings[0]!.hint).toMatch(/as text/);
+  });
+});
+
+describe("analyzeScan: open redirects", () => {
+  const EVIL = "http://127.0.0.1:4401/phish";
+  const go = `${U}/go?next=${encodeURIComponent(EVIL)}`;
+  const reflected = offsiteNavigation(go, EVIL, "script");
+  const fixed = offsiteNavigation(`${U}/chat`, "http://127.0.0.1:4401/invite", "server-redirect");
+  const pages = [
+    fakePage(go, undefined, { redirectedTo: EVIL, blockedNavigations: [EVIL], offsiteNavigations: [reflected] }),
+    fakePage(`${U}/chat`, undefined, { blockedNavigations: [fixed.to], offsiteNavigations: [fixed] }),
+    // Not redirects: a click and an iframe.
+    fakePage(`${U}/links`, undefined, {
+      offsiteNavigations: [offsiteNavigation(`${U}/links?u=${EVIL}`, EVIL, "click"), offsiteNavigation(`${U}/links`, EVIL, "frame")],
+    }),
+  ];
+
+  it("raises open-redirect in the security category, high when the page's URL named the target", () => {
+    const r = analyzeScan(fakeReport(pages, []));
+    const found = r.findings.filter((f) => f.rule === "open-redirect");
+    expect(found.map((f) => [f.severity, f.category, f.where])).toEqual([
+      ["high", "security", [go]],
+      ["low", "security", [`${U}/chat`]],
+    ]);
+    expect(found[0]!.evidence).toEqual([`${go} -> ${EVIL} (script redirect; target from the "next" query parameter)`]);
+    expect(found[0]!.title).toMatch(/^Open redirect/);
+    expect(r.counts.high).toBe(1);
+  });
+
+  it("counts a redirect the chaos crawls saw again once, and adds one only they saw", () => {
+    const other = offsiteNavigation(`${U}/out?url=${EVIL}`, EVIL, "server-redirect");
+    const chaosReport = fakeReport([...pages, fakePage(other.from, undefined, { offsiteNavigations: [other] })], []);
+    const r = analyzeScan(fakeReport(pages, []), [{ fault: "status", report: chaosReport }]);
+    const high = r.findings.find((f) => f.rule === "open-redirect" && f.severity === "high")!;
+    expect(high.occurrences).toBe(2);
+    expect(high.where).toEqual([go, other.from]);
+  });
+
+  it("is the one finding for it when the scan ran the no-offsite-redirect check too, whatever its name", () => {
+    // The crawler marks the check's violations (`PageError.offsiteRedirect`).
+    const marked = (name: string) => {
+      const c = cluster("invariant-violation", `[${name}] open redirect: ${go} -> ${EVIL}`, [go]);
+      c.invariantNames = [name];
+      c.sample = { ...c.sample, invariantName: name, offsiteRedirect: true };
+      return c;
+    };
+    const r = analyzeScan(fakeReport(pages, [], { errorClusters: [marked("navigation.no-offsite-redirect"), marked("my.redirect-check")] }));
+    expect(rules(r).filter((rule) => rule === "invariant-violation")).toEqual([]);
+    expect(rules(r).filter((rule) => rule === "open-redirect")).toHaveLength(2);
+    // A check of the user's own that happens to say so is still reported.
+    const own = cluster("invariant-violation", "[cart] open redirect: wrong", [go]);
+    own.invariantNames = ["cart"];
+    expect(rules(analyzeScan(fakeReport(pages, [], { errorClusters: [own] }))).filter((rule) => rule === "invariant-violation")).toHaveLength(1);
+  });
+
+  it("leaves out a redirect to an allowed origin (an SSO provider)", () => {
+    const r = analyzeScan(fakeReport(pages, []), [], { offsiteRedirectAllowed: (url) => url.startsWith("http://127.0.0.1:4401/invite") });
+    expect(r.findings.filter((f) => f.rule === "open-redirect").map((f) => f.severity)).toEqual(["high"]);
+  });
+
+  it("is in the terminal summary and the Markdown", () => {
+    const r = analyzeScan(fakeReport(pages, []));
+    expect(formatScanSummary(r)).toContain("[security] Open redirect: a page sends the browser to the URL in its own address");
+    const md = formatScanMarkdown(r, {
+      url: U,
+      startedAt: "2026-09-30T00:00:00.000Z",
+      durationMs: 1_000,
+      pagesVisited: 3,
+      actions: 0,
+      files: { baseline: "out/clean-report.json", chaos: {}, perfDir: "out/perf" },
+    });
+    expect(md).toContain("| 🔴 | security | [Open redirect: a page sends the browser to the URL in its own address](#f1) |");
+    expect(md).toContain("`open-redirect` · security · high");
   });
 });
 

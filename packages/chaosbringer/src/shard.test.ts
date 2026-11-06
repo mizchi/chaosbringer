@@ -11,6 +11,7 @@ import {
   shardOwns,
   shardReproCommand,
 } from "./shard.js";
+import { formatCompactReport, formatReport } from "./reporter.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
 function summary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -172,6 +173,22 @@ describe("mergeReports", () => {
       "http://localhost:3000/b",
     ]);
     expect(merged.pagesVisited).toBe(3);
+  });
+
+  it("keeps each shard's off-site navigations, so the merged report lists and counts them all", () => {
+    const nav = (from: string, to: string) => ({ from, to, trigger: "server-redirect" as const });
+    const a = report({
+      blockedExternalNavigations: 1,
+      pages: [page("http://localhost:3000/chat", [], { blockedNavigations: ["http://x.test/i"], offsiteNavigations: [nav("http://localhost:3000/chat", "http://x.test/i")] })],
+    });
+    const b = report({
+      blockedExternalNavigations: 1,
+      pages: [page("http://localhost:3000/go", [], { blockedNavigations: ["http://y.test/p"], offsiteNavigations: [nav("http://localhost:3000/go", "http://y.test/p")] })],
+    });
+    const merged = mergeReports([a, b]);
+    expect(merged.pages.flatMap((p) => p.offsiteNavigations ?? []).map((n) => n.to)).toEqual(["http://x.test/i", "http://y.test/p"]);
+    expect(formatCompactReport(merged).split("\n")).toContain("  Off-site redirects: 2 (first: http://localhost:3000/chat -> http://x.test/i)");
+    expect(formatReport(merged)).toContain("  http://localhost:3000/go -> http://y.test/p (server redirect)");
   });
 
   it("sums blockedExternalNavigations and recoveryCount", () => {

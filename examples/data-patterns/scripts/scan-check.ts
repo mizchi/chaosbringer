@@ -13,18 +13,20 @@
  * is scanned a third time by the built CLI, `chaosbringer scan --invariants
  * data-safety,not-blank`: the same suite, named by flag.
  *
- * A variant is **flagged** when a `bug` finding matches the entry's signal:
- * an error by a `js-exception` / `unhandled-rejection` finding whose title
- * matches the message, an invariant by an `invariant-violation` finding whose
- * title names it (`Invariant violated: [data.xss-marker] …`) and matches the
- * signal's message when it has one. A blocked
- * navigation is in the crawl report only; no scan rule reads it.
+ * A variant is **flagged** when a `bug` or `security` finding matches the
+ * entry's signal: an error by a `js-exception` / `unhandled-rejection`
+ * finding whose title matches the message, an invariant by an
+ * `invariant-violation` finding whose title names it (`Invariant violated:
+ * [data.xss-marker] …`) and matches the signal's message when it has one.
+ * `navigation.no-offsite-redirect` is the exception: scan reports a redirect
+ * as its own `open-redirect` finding, with or without the check, and leaves
+ * the check's violation out. A blocked navigation alone is no finding.
  *
  *   pnpm scan-check                     # every entry; rewrites the README section
  *   PATTERN=null-relation pnpm scan-check
  *
  * Exits 1 when a fixed variant is still flagged, an oracle entry has any
- * bug finding, or the CLI scan misses a variant the suite in code flags: the
+ * bug or security finding, or the CLI scan misses a variant the suite in code flags: the
  * flag and `crawler.invariants` must run the same checks.
  */
 
@@ -62,7 +64,10 @@ function cliUnreachable(pattern: DataPattern): string | undefined {
   return undefined;
 }
 
-/** The bug findings of `chaosbringer scan --invariants …` on a variant's bad data, from its scan-report.json. */
+/** What the catalog judges by: a bug, or a security finding (`open-redirect`). Not perf, resilience or a11y. */
+const isBugOrSecurity = (f: ScanFinding) => f.category === "bug" || f.category === "security";
+
+/** The bug and security findings of `chaosbringer scan --invariants …` on a variant's bad data, from its scan-report.json. */
 async function scanVariantCli(pattern: DataPattern, variant: Variant): Promise<ScanFinding[]> {
   const server = await servePattern(pattern, variant, (v, ctx) => toServedRoutes(pattern, v, ctx));
   const outDir = mkdtempSync(join(tmpdir(), `scan-check-cli-${pattern.id}-`));
@@ -81,14 +86,14 @@ async function scanVariantCli(pattern: DataPattern, variant: Variant): Promise<S
       ),
     );
     const report = JSON.parse(readFileSync(join(outDir, "scan-report.json"), "utf-8")) as ScanReportFile;
-    return report.findings.filter((f) => f.category === "bug");
+    return report.findings.filter(isBugOrSecurity);
   } finally {
     await server.close();
     rmSync(outDir, { recursive: true, force: true });
   }
 }
 
-/** The bug findings of one scan of one variant on its bad data. */
+/** The bug and security findings of one scan of one variant on its bad data. */
 async function scanVariant(pattern: DataPattern, variant: Variant, withSuite: boolean): Promise<ScanFinding[]> {
   const oracle = pattern.inject.channel === "none";
   const server = await servePattern(pattern, variant, (v, ctx) => toServedRoutes(pattern, v, ctx));
@@ -125,7 +130,7 @@ async function scanVariant(pattern: DataPattern, variant: Variant, withSuite: bo
         ...options,
       },
     });
-    return result.analysis.findings.filter((f) => f.category === "bug");
+    return result.analysis.findings.filter(isBugOrSecurity);
   } finally {
     await server.close();
     rmSync(outDir, { recursive: true, force: true });
@@ -139,6 +144,11 @@ function flaggedBy(findings: ScanFinding[], signal: Signal): ScanFinding | undef
       return findings.find((f) => (f.rule === "js-exception" || f.rule === "unhandled-rejection") && f.title.search(signal.message) !== -1);
     case "invariant": {
       const message = signal.message;
+      // Reported from the navigations themselves; the evidence lines are
+      // `<page> -> <target> (…)`, not the check's message.
+      if (signal.name === "navigation.no-offsite-redirect") {
+        return findings.find((f) => f.rule === "open-redirect" && f.severity === "high");
+      }
       return findings.find(
         (f) =>
           f.rule === "invariant-violation" &&
@@ -158,7 +168,7 @@ interface Row {
   withSuite?: string;
   /** The CLI scan's flagging rule, or why the CLI cannot deliver the data (`cliUnreachable`). */
   cli: { rule?: string } | { unreachable: string };
-  /** Every bug rule the fixed variant raised, not only the entry's own signal. */
+  /** Every bug or security rule the fixed variant raised, not only the entry's own signal. */
   fixed: string[];
   rules: string[];
 }
@@ -215,7 +225,7 @@ const lines = [
   "",
   `**${outOfTheBox} of ${rows.length}** buggy variants are flagged out of the box, **${withSuite} of ${rows.length}** with the catalog suite as \`crawler.invariants\`, and **${fromCli} of ${cliReachable.length}** from the command line, of the ${cliReachable.length} whose data the command line can deliver; **${fixedFlagged}** fixed variants are still flagged.`,
   "",
-  `| entry | data via | buggy: out of the box | buggy: with \`invariants.dataSafety()\` + \`notBlank()\` | buggy: CLI \`scan --invariants ${CLI_INVARIANTS}\` | fixed: still flagged | every bug rule on buggy |`,
+  `| entry | data via | buggy: out of the box | buggy: with \`invariants.dataSafety()\` + \`notBlank()\` | buggy: CLI \`scan --invariants ${CLI_INVARIANTS}\` | fixed: still flagged | every bug / security rule on buggy |`,
   "|---|---|---|---|---|---|---|",
   ...rows.map(
     (r) =>

@@ -165,6 +165,27 @@ describe("buildGithubAnnotations", () => {
     expect(out[0]!.message).toContain("3 URLs");
     expect(out[0]!.title).toContain("×3");
   });
+
+  it("annotates each off-site redirect once, and none on a page the no-offsite-redirect check failed, whatever it is named", () => {
+    const nav = (i: number) => ({ from: "http://x/go", to: `http://evil.test/${i}`, trigger: "script" as const });
+    const page = (url: string, navs: ReturnType<typeof nav>[], errors: PageError[] = []) => ({
+      url,
+      status: "success" as const,
+      loadTime: 1,
+      errors,
+      hasErrors: errors.length > 0,
+      warnings: [],
+      links: [],
+      offsiteNavigations: navs,
+    });
+    // Four redirects: more than the violation lists by name.
+    const failed = page("http://x/go", [1, 2, 3, 4].map(nav), [
+      { type: "invariant-violation", message: "[sso-check] off-site redirect: … (+1 more)", invariantName: "sso-check", offsiteRedirect: true, timestamp: 0 },
+    ]);
+    const repeated = page("http://x/again", [nav(5), nav(5), nav(5)].map((n) => ({ ...n, from: "http://x/again" })));
+    const out = buildGithubAnnotations(makeReport({ pages: [failed, repeated] })).filter((a) => a.title.startsWith("Off-site redirect"));
+    expect(out.map((a) => [a.level, a.message])).toEqual([["notice", "http://x/again -> http://evil.test/5 (script redirect)"]]);
+  });
 });
 
 describe("formatGithubAnnotation", () => {

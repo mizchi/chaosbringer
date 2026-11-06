@@ -14,7 +14,7 @@ import { DEFAULT_HANG_RELEASE_MS, DEFAULT_SCAN_DIR, runScan, type ScanOptions } 
 import { HEADLESS_OPTIONS, resolveHeadless } from "../cli-headless.js";
 import { UnreachableTargetError, unreachableTarget } from "../unreachable-target.js";
 import { checkDeviceFlag, checkRegexFlag } from "../cli-crawl-options.js";
-import { parseInvariantsFlag } from "../cli-invariants.js";
+import { parseInvariantsFlag, parseOffsiteRedirectOrigins } from "../cli-invariants.js";
 import { checkInputFiles } from "../input-files.js";
 import { AXE_PEERS, assertPeers } from "../peers.js";
 import { validateOptions } from "../validate.js";
@@ -44,12 +44,18 @@ OPTIONS:
   --axe                   Run axe-core accessibility checks (needs axe-core; exit 2 without it)
   --invariants <list>     Run these checks on every page of every crawl (comma-separated,
                           repeatable): data-safety (xss-marker, injected-markup,
-                          prototype-pollution and rendered-garbage; not not-blank), or any of
-                          those and not-blank by name; axe is --axe. Each with its defaults
-                          (set options through runScan's crawler.invariants). A violation
-                          is an invariant-violation finding: high for xss-marker,
-                          injected-markup and prototype-pollution, medium otherwise
+                          prototype-pollution, rendered-garbage and no-offsite-redirect; not
+                          not-blank), or any of those and not-blank by name; axe is --axe.
+                          Each with its defaults (set options through runScan's
+                          crawler.invariants). A violation is an invariant-violation finding:
+                          high for xss-marker, injected-markup and prototype-pollution,
+                          medium otherwise. An off-site redirect is an open-redirect finding
+                          (security; high when the target is in the page's URL) either way
   --data-safety           Shorthand for --invariants data-safety
+  --offsite-redirect-allow <origins>  Origins a page may redirect to (an SSO provider):
+                          no open-redirect finding for them, and no-offsite-redirect lets
+                          them through. Comma-separated, repeatable, scheme and host only;
+                          works with or without the check
   --bind                  Serve each crawl's browser to other Playwright clients
                           (npx playwright cli attach <title>; the endpoint is printed)
   --bind-title <title>    Name to attach by (default chaosbringer)
@@ -99,6 +105,7 @@ export const SCAN_CLI_OPTIONS = {
   axe: { type: "boolean", default: false },
   invariants: { type: "string", multiple: true },
   "data-safety": { type: "boolean", default: false },
+  "offsite-redirect-allow": { type: "string", multiple: true },
   "aria-targets": { type: "boolean", default: false },
   bind: { type: "boolean", default: false },
   "bind-title": { type: "string" },
@@ -185,6 +192,7 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
   }
   const faults = values.faults === undefined ? undefined : parseFaults(values.faults);
   const invariants = parseInvariantsFlag(values.invariants, values["data-safety"]);
+  const offsiteRedirectAllow = parseOffsiteRedirectOrigins(values["offsite-redirect-allow"]);
 
   const ignoreErrorPatterns = [...(values["ignore-error"] ?? [])];
   if (values["ignore-analytics"]) ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
@@ -214,6 +222,7 @@ export function scanOptionsFromCli(values: ScanCliValues): ScanOptions {
     seed,
     axe: values.axe || invariants.axe,
     ...(invariants.presets.length > 0 ? { invariants: invariants.presets } : {}),
+    ...(offsiteRedirectAllow.length > 0 ? { offsiteRedirectAllow } : {}),
     coverage: !values["no-coverage"],
     hangReleaseMs,
     crawler: {

@@ -441,6 +441,42 @@ describe("formatReport", () => {
   });
 });
 
+describe("off-site navigations in the reports", () => {
+  const U = "http://localhost:3000";
+  const nav = (from: string, to: string, trigger: "script" | "click" | "server-redirect") => ({ from, to, trigger });
+
+  it("places the compact line after the dead links and before the warnings, and counts redirects only", () => {
+    const report = makeReport({
+      pages: [
+        { ...fakePage(`${U}/a`), offsiteNavigations: [nav(`${U}/a`, "http://x.test/1", "click")] },
+        { ...fakePage(`${U}/b`), offsiteNavigations: [nav(`${U}/b`, "http://x.test/2", "server-redirect")] },
+      ],
+      summary: makeSummary({ discovery: { extractedLinks: 1, clickedLinks: 0, uniquePages: 1, deadLinks: [{ url: `${U}/gone`, statusCode: 404, sourceUrl: `${U}/`, method: "extracted" }], spaIssues: [] } }),
+      warnings: [{ code: "sitemap-unreadable", message: "sitemap gone", count: 1 }],
+    } as Partial<CrawlReport>);
+    const lines = formatCompactReport(report).split("\n");
+    expect(lines.slice(1, 4)).toEqual([
+      `  Dead links: 1 (first: ${U}/gone <- ${U}/)`,
+      `  Off-site redirects: 1 (first: ${U}/b -> http://x.test/2)`,
+      "  Warnings: 1 (first: sitemap gone)",
+    ]);
+    // No redirect, no line.
+    expect(formatCompactReport(makeReport({ pages: [report.pages[0]!] }))).not.toContain("Off-site redirects");
+  });
+
+  it("lists a report an older version wrote by its blockedNavigations, and caps the list", () => {
+    const old = makeReport({ pages: [{ ...fakePage(`${U}/chat`), blockedNavigations: ["http://x.test/invite"] }] });
+    expect(formatReport(old)).toContain(`OFF-SITE NAVIGATIONS\n${"-".repeat(40)}\n  ${U}/chat -> http://x.test/invite`);
+    const many = makeReport({
+      pages: [{ ...fakePage(`${U}/`), offsiteNavigations: Array.from({ length: 25 }, (_, i) => nav(`${U}/`, `http://x.test/${i}`, "script")) }],
+    });
+    const text = formatReport(many);
+    expect(text).toContain(`  ${U}/ -> http://x.test/19 (script redirect)`);
+    expect(text).not.toContain("http://x.test/20 ");
+    expect(text).toContain("  … and 5 more");
+  });
+});
+
 describe("saveReport", () => {
   it("writes a readable JSON file", () => {
     const path = join(tmpdir(), `chaos-test-${Date.now()}.json`);

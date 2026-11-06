@@ -25,7 +25,7 @@ import {
   REPLAY_CRAWL_FLAGS,
   REPLAY_REFUSED_FLAGS,
 } from "./cli-crawl-options.js";
-import { parseInvariantsFlag } from "./cli-invariants.js";
+import { parseInvariantsFlag, parseOffsiteRedirectAllowFlag } from "./cli-invariants.js";
 import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
@@ -270,7 +270,12 @@ export function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
   const replayGiven = new Set([...given].filter((f) => replayFlags.includes(f)));
   const replay = Object.fromEntries(Object.entries(values).filter(([k]) => replayFlags.includes(k))) as Partial<CrawlCliValues>;
   // The crawl's own checks of these flags' values, before the trace is read.
-  asUsageError(() => crawlerOptionsFromCli(replay, "http://minimize.invalid/"));
+  // An `--offsite-redirect-allow` alone configures the check the trace
+  // recorded, which only `replaySetup` knows of: its origins are checked
+  // here, whether a check is on for it there.
+  const { "offsite-redirect-allow": allow, ...rest } = replay;
+  asUsageError(() => crawlerOptionsFromCli(rest, "http://minimize.invalid/"));
+  parseOffsiteRedirectAllowFlag(allow, ["no-offsite-redirect"]);
 
   return {
     url: values.url,
@@ -291,6 +296,7 @@ const REPLAY_GROUP: Readonly<Record<string, string>> = {
   "data-safety": "invariants",
   axe: "invariants",
   "axe-tags": "invariants",
+  "offsite-redirect-allow": "invariants",
   "no-headless": "headless",
 };
 const replayGroup = (flag: string) => REPLAY_GROUP[flag] ?? flag;
@@ -323,8 +329,13 @@ export function replaySetup(
   // invariants flags it would replace the recorded `--axe` and `--invariants`
   // with itself, which builds nothing without `--axe`, and the replays would
   // run with no checks at all.
-  const tagsOnly = args.replayGiven.has("axe-tags") && !["axe", "invariants", "data-safety"].some((f) => args.replayGiven.has(f));
-  const groupOf = (flag: string) => (tagsOnly && flag === "axe-tags" ? flag : replayGroup(flag));
+  // The same for an `--offsite-redirect-allow` given alone: it replaces the
+  // recorded allow list, and keeps the recorded checks it configures.
+  const checksGiven = ["axe", "invariants", "data-safety"].some((f) => args.replayGiven.has(f));
+  const tagsOnly = args.replayGiven.has("axe-tags") && !checksGiven;
+  const allowOnly = args.replayGiven.has("offsite-redirect-allow") && !checksGiven;
+  const groupOf = (flag: string) =>
+    (tagsOnly && flag === "axe-tags") || (allowOnly && flag === "offsite-redirect-allow") ? flag : replayGroup(flag);
   const givenGroups = new Set([...args.replayGiven].map(groupOf));
   const recorded = traceSetupFlags(setup);
   const keep = (f: ReproFlag) => !givenGroups.has(groupOf(f.flag.slice(2)));
@@ -374,7 +385,8 @@ ${formatFlagList(REPLAY_CRAWL_FLAGS, "  ")}
   given (all but --headless / --no-headless), and every replay uses them: the
   cookies of its --storage-state, its --settle, its --exclude, … A flag given
   here replaces what was recorded for it (--axe-tags alone retags the recorded
-  axe check). A recorded relative path is read from the current directory.
+  axe check, --offsite-redirect-allow alone replaces only the recorded allow
+  list). A recorded relative path is read from the current directory.
   A v1 trace records none, and replays with the defaults.
 
 REFUSED (exit 2: the trace decides the pages and the actions, and --match,

@@ -1,7 +1,7 @@
 /**
- * The invariants every case runs: the four `dataSafety()` presets plus
- * `notBlank()`, the same suite for every entry and every run, so no entry
- * is judged by a check picked for it.
+ * The invariants every case runs: the five `dataSafety()` presets (an open
+ * redirect is `noOffsiteRedirect`'s) plus `notBlank()`, the same suite for
+ * every entry and every run, so no entry is judged by a check picked for it.
  */
 
 import { type Invariant, invariants } from "chaosbringer";
