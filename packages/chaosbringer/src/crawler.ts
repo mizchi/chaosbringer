@@ -108,6 +108,7 @@ import { copyRequestFields, isFaultEcho, ResourceLinePairing, resourceLineKind }
 import { shouldSaveArtifacts, writeFailureBundle } from "./failure-artifacts.js";
 import {
   TRACE_FORMAT_VERSION,
+  traceSetupOf,
   actionToTraceEntry,
   groupTrace,
   readTrace,
@@ -706,12 +707,17 @@ export class ChaosCrawler {
       : null;
 
     if (this.isRecordingTrace()) {
+      const setup = traceSetupOf(this.options);
       this.trace.push({
         kind: "meta",
         v: TRACE_FORMAT_VERSION,
         seed: this.rng.seed,
         baseUrl: this.options.baseUrl,
         startTime: this.startTime,
+        // What a replay of this trace needs to load and judge its pages the
+        // way this run did: `minimize` replayed with the defaults, logged out
+        // of a crawl that ran with --storage-state.
+        ...(setup ? { setup } : {}),
       });
     }
 

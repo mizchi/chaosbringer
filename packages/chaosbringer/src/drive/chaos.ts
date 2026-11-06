@@ -60,6 +60,8 @@ export interface RecipeChaosOptions {
   endpointPattern?: string;
   /** Never fail these (`toRegExp` patterns), e.g. a logout endpoint. */
   exclude?: string[];
+  /** Problems to drop, as `drive`'s (`watchProblems`): a regex source each, case-insensitive. */
+  ignoreErrorPatterns?: readonly string[];
   /** How long `hang` holds a request before releasing it. Default 8000 ms. */
   hangReleaseMs?: number;
   /** How long to wait for `until` to hold after the replay. Default 5000 ms. */
@@ -161,7 +163,7 @@ async function replayOnce(
   const hangReleaseMs = opts.hangReleaseMs ?? DEFAULT_HANG_RELEASE_MS;
   const { page, close } = await newIsolatedPage(browser, opts.contextOptions);
   try {
-    const watch = await watchProblems(page);
+    const watch = await watchProblems(page, { ignoreErrorPatterns: opts.ignoreErrorPatterns });
     const requests: RequestLike[] = [];
     const pages: string[] = [];
     page.on("request", (r) => {

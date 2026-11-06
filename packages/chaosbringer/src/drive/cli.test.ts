@@ -2,10 +2,21 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parseCrawlArgs } from "../cli-crawl-options.js";
 import { UsageError } from "../cli-usage.js";
+import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS } from "../ignore-presets.js";
 import type { ActionRecipe } from "../recipes/types.js";
 import { emptyStats } from "../recipes/types.js";
-import { checkSecretsPath, parseSecretFlags, planFrom, runDriveCli, verifyCommand, writeSecretsFile } from "./cli.js";
+import {
+  checkSecretsPath,
+  driveCrawlOptions,
+  driveRunOptions,
+  parseSecretFlags,
+  planFrom,
+  runDriveCli,
+  verifyCommand,
+  writeSecretsFile,
+} from "./cli.js";
 
 function recipe(name: string, url: string): ActionRecipe {
   return {
@@ -238,5 +249,49 @@ describe("--save-secrets", () => {
     writeSecretsFile(wide, { password: "pw2" });
     expect(statSync(wide).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(wide, "utf8"))).toEqual({ password: "pw2" });
+  });
+});
+
+// `drive --settle adaptive` and `drive --timeout 5000` exited 2 as unknown
+// options: the crawl's flags that fit a drive now parse as the crawl's do.
+describe("drive's crawl flags", () => {
+  const base = ["--url", "http://127.0.0.1:9/", "--goal", "x"];
+  const flags = [
+    "--timeout", "5000", "--settle", "250", "--ignore-error", "noise", "--ignore-analytics", "--ignore-preset", "maps",
+    "--device", "Pixel 7", "--network", "fast-3g", "--exclude", "/logout",
+  ];
+
+  it("parses them all, and refuses nothing before the plan is read", async () => {
+    await expect(runDriveCli([...base, ...flags, "--plan", "missing-plan.json"])).rejects.toThrow(
+      "--plan missing-plan.json: no such file",
+    );
+    // An input file among them is read first, as the crawl reads it.
+    await expect(runDriveCli([...base, "--har-replay", "missing.har", "--plan", "p.json"])).rejects.toThrow(
+      "--har-replay missing.har: no such file",
+    );
+  });
+
+  it("builds drive's options from them by the crawl's builder", () => {
+    const values = parseCrawlArgs([...flags, "--har-replay", "net.har", "--storage-state", "s.json"]).values;
+    const run = driveRunOptions(driveCrawlOptions(values, "http://x/"));
+    expect(run).toMatchObject({
+      navigationTimeoutMs: 5000,
+      settleQuietMs: 250,
+      harReplay: "net.har",
+      network: "fast-3g",
+      contextOptions: { storageState: "s.json", userAgent: expect.stringContaining("Pixel 7") },
+    });
+    expect(run.ignoreErrorPatterns).toEqual(expect.arrayContaining(["noise", ...COMMON_IGNORE_PATTERNS, ...IGNORE_PRESETS.maps!]));
+    expect(driveRunOptions(driveCrawlOptions(parseCrawlArgs(["--settle", "adaptive"]).values, "http://x/"))).toEqual({});
+  });
+
+  it("refuses what the crawl refuses, and --settle networkidle, which a drive never does", async () => {
+    await expect(runDriveCli([...base, "--timeout", "5s"])).rejects.toThrow('--timeout must be a finite number (got "5s")');
+    await expect(runDriveCli([...base, "--device", "Nope 9"])).rejects.toThrow('--device "Nope 9" is not a known Playwright device descriptor');
+    await expect(runDriveCli([...base, "--exclude", "("])).rejects.toThrow(/--exclude "\(" is not a valid regex/);
+    await expect(runDriveCli([...base, "--settle", "networkidle"])).rejects.toThrow(
+      "--settle networkidle does not apply to drive: it settles adaptively after every step",
+    );
+    await expect(runDriveCli([...base, "--setle", "5"])).rejects.toThrow("unknown option --setle: did you mean --settle?");
   });
 });

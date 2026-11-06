@@ -12,20 +12,40 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs } from "node:util";
-import { parseNumberFlag } from "./cli-crawl-options.js";
+import {
+  asUsageError,
+  CRAWL_CLI_OPTIONS,
+  type CrawlCliValues,
+  crawlCliOptionsFor,
+  crawlCliPeerNeeds,
+  crawlerOptionsFromCli,
+  formatFlagList,
+  parseArgsSuggesting,
+  parseNumberFlag,
+  REPLAY_CRAWL_FLAGS,
+  REPLAY_REFUSED_FLAGS,
+} from "./cli-crawl-options.js";
+import { parseInvariantsFlag } from "./cli-invariants.js";
 import { UsageError } from "./cli-usage.js";
 import { ChaosCrawler } from "./crawler.js";
 import { ddmin } from "./ddmin.js";
 import { checkInputFiles } from "./input-files.js";
+import { assertPeers } from "./peers.js";
+import { formatReproFlags } from "./repro-command.js";
 import {
+  metaOf,
   readTrace,
+  TRACE_FORMAT_VERSION,
+  traceSetupFlags,
+  traceSetupOf,
   writeTrace,
   type TraceAction,
   type TraceEntry,
   type TraceMeta,
+  type TraceSetup,
 } from "./trace.js";
-import type { CrawlReport } from "./types.js";
+import type { CrawlerOptions, CrawlReport, ReproFlag } from "./types.js";
+import { validateOptions } from "./validate.js";
 
 // `ddmin` moved to its own module so browser-free callers can use it without
 // pulling Playwright in through `ChaosCrawler` above. Re-exported here because
@@ -161,40 +181,79 @@ export async function minimizeTrace(options: MinimizeOptions): Promise<MinimizeR
   }
 }
 
+/** minimize's own flags. */
+const MINIMIZE_OPTIONS = {
+  url: { type: "string" },
+  trace: { type: "string" },
+  match: { type: "string" },
+  "trace-out": { type: "string" },
+  "max-pages": { type: "string" },
+  quiet: { type: "boolean", default: false },
+  help: { type: "boolean", short: "h", default: false },
+} as const;
+
+const REFUSED_FLAGS = Object.keys(REPLAY_REFUSED_FLAGS) as Array<keyof typeof REPLAY_REFUSED_FLAGS>;
+
 /** Parsed CLI arguments for the minimize subcommand. */
-interface MinimizeCliArgs {
-  baseUrl: string;
+export interface MinimizeCliArgs {
+  /** `--url`; without it, the trace's own `baseUrl`. */
+  url?: string;
   tracePath: string;
   match: RegExp;
   traceOut: string;
-  maxPages?: number;
-  timeout?: number;
-  ignoreAnalytics: boolean;
   quiet: boolean;
+  /** `--max-pages`, given: a replay visits every page of the trace, so it changes nothing (a note says so). */
+  maxPagesGiven: boolean;
+  /** The crawl flags given (`REPLAY_CRAWL_FLAGS`), as the main crawl parses them. */
+  replay: Partial<CrawlCliValues>;
+  /** Which of them were given, by name: each overrides what the trace recorded. */
+  replayGiven: ReadonlySet<string>;
 }
 
-function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
-  const { values } = parseArgs({
+/**
+ * Exported for tests. Every refusal throws a `UsageError` (or what
+ * `parseArgs` throws for an unknown flag), which cli.ts reports with exit 2:
+ * a crawl flag of `REPLAY_REFUSED_FLAGS` says why it cannot apply, and a
+ * `--` is refused, since a pasted crawl command's `--seed` and
+ * `--max-actions` are exactly what a trace replaces (the trace records the
+ * rest of its setup).
+ */
+export function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
+  if (argv.includes("--")) {
+    throw new UsageError(
+      "minimize takes no crawl command after --: the trace records the crawl's setup (format v2), " +
+        "and a flag given here overrides it",
+    );
+  }
+  const { values, positionals, tokens } = parseArgsSuggesting({
     args: argv,
     options: {
-      url: { type: "string" },
-      trace: { type: "string" },
-      match: { type: "string" },
-      "trace-out": { type: "string" },
-      "max-pages": { type: "string" },
-      timeout: { type: "string" },
-      "ignore-analytics": { type: "boolean", default: false },
-      quiet: { type: "boolean", default: false },
-      help: { type: "boolean", default: false },
+      ...crawlCliOptionsFor(REPLAY_CRAWL_FLAGS),
+      // Parsed so that each is refused with why, not as an unknown flag.
+      ...Object.fromEntries(REFUSED_FLAGS.map((f) => [f, CRAWL_CLI_OPTIONS[f]])),
+      ...MINIMIZE_OPTIONS,
     },
     allowPositionals: true,
+    tokens: true,
   });
+  const given = new Set<string>(tokens.flatMap((t) => (t.kind === "option" ? [t.name] : [])));
 
   if (values.help) {
     printMinimizeHelp();
     process.exit(0);
   }
-  if (!values.url) fail("--url is required");
+  const refused = REFUSED_FLAGS.find((f) => given.has(f));
+  if (refused !== undefined) throw new UsageError(`--${refused} does not apply to minimize: ${REPLAY_REFUSED_FLAGS[refused]}`);
+  // A stray word used to be dropped silently, as flake's were: a URL given
+  // bare replayed against the trace's server instead of the one named.
+  const stray = positionals[0];
+  if (stray !== undefined) {
+    fail(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(stray)
+        ? `unexpected argument "${stray}": give the URL to replay against as --url ${stray}`
+        : `unexpected argument "${stray}": minimize takes flags only (--trace <file> --match <regex>, and --url <url>)`,
+    );
+  }
   if (!values.trace) fail("--trace is required");
   if (!values.match) fail("--match is required");
 
@@ -204,19 +263,92 @@ function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
   } catch (err) {
     fail(`--match is not a valid regex: ${(err as Error).message}`);
   }
+  // Checked as the main crawl checks it, though no replay reads it.
+  if (values["max-pages"]) parseNumberFlag("--max-pages", values["max-pages"], { min: 1, integer: true });
+
+  const replayFlags: readonly string[] = REPLAY_CRAWL_FLAGS;
+  const replayGiven = new Set([...given].filter((f) => replayFlags.includes(f)));
+  const replay = Object.fromEntries(Object.entries(values).filter(([k]) => replayFlags.includes(k))) as Partial<CrawlCliValues>;
+  // The crawl's own checks of these flags' values, before the trace is read.
+  asUsageError(() => crawlerOptionsFromCli(replay, "http://minimize.invalid/"));
 
   return {
-    baseUrl: values.url!,
+    url: values.url,
     tracePath: values.trace!,
     match: match!,
     traceOut: values["trace-out"] ?? "min.trace.jsonl",
-    // Checked as the main crawl checks them: `Number` made `--timeout abc`
-    // NaN, refused by the first replay's crawler after `Minimizing …`.
-    maxPages: values["max-pages"] ? parseNumberFlag("--max-pages", values["max-pages"], { min: 1, integer: true }) : undefined,
-    timeout: values.timeout ? parseNumberFlag("--timeout", values.timeout, { min: 1, integer: true }) : undefined,
-    ignoreAnalytics: values["ignore-analytics"] ?? false,
     quiet: values.quiet ?? false,
+    maxPagesGiven: Boolean(values["max-pages"]),
+    replay,
+    replayGiven,
   };
+}
+
+/** One setting spelled by several flags: given any of them, the flag replaces all of what was recorded for it. */
+const REPLAY_GROUP: Readonly<Record<string, string>> = {
+  "ignore-analytics": "ignore-error",
+  "ignore-preset": "ignore-error",
+  "data-safety": "invariants",
+  axe: "invariants",
+  "axe-tags": "invariants",
+  "no-headless": "headless",
+};
+const replayGroup = (flag: string) => REPLAY_GROUP[flag] ?? flag;
+
+export interface ReplaySetup {
+  /** Every replay's crawler options. */
+  options: CrawlerOptions;
+  /** What of the trace's setup was applied, as crawl flags. */
+  applied: ReproFlag[];
+  /** The recorded settings a flag given replaced, by the flag (`--settle`). */
+  overridden: string[];
+  /** The crawl flags' values the options were built from. */
+  values: Partial<CrawlCliValues>;
+}
+
+/**
+ * The options every replay runs with: the trace's recorded `setup`, then
+ * the flags given, each replacing what was recorded for its setting (an
+ * `--ignore-error` replaces the recorded ignore patterns, presets and
+ * `--ignore-analytics` with it, and an `--invariants` the recorded
+ * invariants and `--axe`). Throws a `UsageError` on what the main crawl
+ * refuses.
+ */
+export function replaySetup(
+  setup: TraceSetup | undefined,
+  args: Pick<MinimizeCliArgs, "replay" | "replayGiven">,
+  baseUrl: string,
+): ReplaySetup {
+  // An `--axe-tags` given alone retags the recorded axe check. As one of the
+  // invariants flags it would replace the recorded `--axe` and `--invariants`
+  // with itself, which builds nothing without `--axe`, and the replays would
+  // run with no checks at all.
+  const tagsOnly = args.replayGiven.has("axe-tags") && !["axe", "invariants", "data-safety"].some((f) => args.replayGiven.has(f));
+  const groupOf = (flag: string) => (tagsOnly && flag === "axe-tags" ? flag : replayGroup(flag));
+  const givenGroups = new Set([...args.replayGiven].map(groupOf));
+  const recorded = traceSetupFlags(setup);
+  const keep = (f: ReproFlag) => !givenGroups.has(groupOf(f.flag.slice(2)));
+  const applied = recorded.filter(keep);
+  const overridden = [...new Set(recorded.filter((f) => !keep(f)).map((f) => `--${groupOf(f.flag.slice(2))}`))];
+  // Unquoted words, as a shell would hand them over: a value that starts
+  // with `-` joined to its flag, which parseArgs otherwise refuses.
+  const words = applied.flatMap(({ flag, value }) =>
+    value === undefined ? [flag] : value.startsWith("-") ? [`${flag}=${value}`] : [flag, value],
+  );
+  const fromTrace = parseArgsSuggesting({ args: words, options: crawlCliOptionsFor(REPLAY_CRAWL_FLAGS) }).values;
+  const fromFlags = Object.fromEntries(Object.entries(args.replay).filter(([k]) => args.replayGiven.has(k)));
+  const values: Partial<CrawlCliValues> = { ...fromTrace, ...fromFlags };
+  if (tagsOnly && !values.axe && !asUsageError(() => parseInvariantsFlag(values.invariants).axe)) {
+    throw new UsageError(
+      "--axe-tags without --axe: the trace recorded no axe check for it to tag; give --axe --axe-tags <list>",
+    );
+  }
+  const options = asUsageError(() => {
+    const built = crawlerOptionsFromCli(values, baseUrl);
+    validateOptions(built);
+    return built;
+  });
+  return { options, applied, overridden, values };
 }
 
 function printMinimizeHelp(): void {
@@ -225,18 +357,30 @@ chaosbringer minimize — shrink a recorded trace to the minimum actions
 that still reproduce a failure.
 
 USAGE:
-  chaosbringer minimize --url <url> --trace <in.jsonl> --match <regex> [options]
+  chaosbringer minimize --trace <in.jsonl> --match <regex> [options]
 
 OPTIONS:
-  --url <url>           Base URL under test (required)
   --trace <path>        Source trace to shrink (required; exit 2 if missing or not a trace)
   --match <regex>       Reproduction predicate — matches error cluster fingerprints
+  --url <url>           Base URL under test (default: the trace's)
   --trace-out <path>    Where to write the minimized trace (default: min.trace.jsonl)
-  --max-pages <n>       Forward to the crawler
-  --timeout <ms>        Forward to the crawler
-  --ignore-analytics    Suppress common analytics noise during replays
+  --max-pages <n>       Accepted, and changes nothing: a replay visits every page of the trace
   --quiet               Print only the final summary
   --help                Show this help
+
+CRAWL FLAGS (as chaosbringer --help describes them), applied to every replay:
+${formatFlagList(REPLAY_CRAWL_FLAGS, "  ")}
+  A trace written with --trace-out (format v2) records the ones its crawl was
+  given (all but --headless / --no-headless), and every replay uses them: the
+  cookies of its --storage-state, its --settle, its --exclude, … A flag given
+  here replaces what was recorded for it (--axe-tags alone retags the recorded
+  axe check). A recorded relative path is read from the current directory.
+  A v1 trace records none, and replays with the defaults.
+
+REFUSED (exit 2: the trace decides the pages and the actions, and --match,
+not the exit rules, decides whether a replay reproduced):
+${formatFlagList(REFUSED_FLAGS, "  ")}
+  and a crawl command after --.
 `);
 }
 
@@ -245,34 +389,67 @@ function fail(msg: string): never {
   throw new UsageError(msg);
 }
 
+/** The setup's input files, and the flag each one is replaced by. */
+const REPLAY_INPUT_FILES = [
+  { key: "storageState", flag: "storage-state" },
+  { key: "har", flag: "har-replay" },
+] as const;
+
+/**
+ * `checkInputFiles` over the files the replays read. A path the trace
+ * recorded (and no flag replaced) is refused as one: the user never gave
+ * the flag the refusal names, and a relative path recorded where the crawl
+ * ran is read from where minimize runs.
+ */
+export function checkReplayFiles(options: CrawlerOptions, given: ReadonlySet<string>): void {
+  for (const { key, flag } of REPLAY_INPUT_FILES) {
+    try {
+      checkInputFiles(key === "storageState" ? { storageState: options.storageState } : { har: options.har });
+    } catch (err) {
+      if (!(err instanceof UsageError) || given.has(flag)) throw err;
+      throw new UsageError(
+        `${err.message} (recorded in the trace's setup, read from the current directory; give --${flag} <path> to replace it)`,
+      );
+    }
+  }
+}
+
 /** Entry point wired from src/cli.ts when the `minimize` subcommand is used. */
 export async function runMinimizeCli(argv: string[]): Promise<void> {
   const args = parseMinimizeArgs(argv);
   // A missing or malformed --trace is a usage error, like --trace-replay's.
   checkInputFiles({ traceReplay: args.tracePath }, { traceReplay: "--trace" });
   const trace = readTrace(args.tracePath);
-  const meta = trace[0] as TraceMeta;
+  const meta = metaOf(trace);
+  const baseUrl = args.url ?? meta.baseUrl;
+  const setup = replaySetup(meta.setup, args, baseUrl);
+  // The files the replays read, recorded or given, and the packages an
+  // --invariants axe needs: before the first replay, as the crawl does.
+  checkReplayFiles(setup.options, args.replayGiven);
+  assertPeers(crawlCliPeerNeeds(setup.values));
 
+  if (args.maxPagesGiven) {
+    console.error("chaosbringer minimize: --max-pages changes nothing: a replay visits every page of the trace");
+  }
   if (!args.quiet) {
     const actionCount = trace.filter((e) => e.kind === "action").length;
     console.log(
-      `Minimizing ${actionCount} actions from ${args.tracePath} (baseUrl=${meta.baseUrl}, match=${args.match})`
+      `Minimizing ${actionCount} actions from ${args.tracePath} (baseUrl=${baseUrl}, match=${args.match})`
     );
-  }
-
-  const overrides: Record<string, unknown> = {};
-  if (args.maxPages !== undefined) overrides.maxPages = args.maxPages;
-  if (args.timeout !== undefined) overrides.timeout = args.timeout;
-  if (args.ignoreAnalytics) {
-    const { COMMON_IGNORE_PATTERNS } = await import("./ignore-presets.js");
-    overrides.ignoreErrorPatterns = COMMON_IGNORE_PATTERNS;
+    if (meta.v < 2) {
+      console.log("  the trace (format v1) records no crawl setup: replaying with the defaults and the flags given");
+    } else if (setup.applied.length > 0) {
+      console.log(`  replaying with the trace's setup: ${formatReproFlags(setup.applied).join(" ")}`);
+    }
+    if (setup.overridden.length > 0) console.log(`  replaced by the flags given: ${setup.overridden.join(", ")}`);
   }
 
   const result = await minimizeTrace({
-    baseUrl: args.baseUrl,
+    baseUrl,
     trace,
     predicate: (report) => reportMatches(report, args.match),
-    crawlerOverrides: overrides,
+    // `baseUrl` and `traceReplay` are minimizeTrace's own.
+    crawlerOverrides: { ...setup.options },
     onStep: args.quiet
       ? undefined
       : (info) =>
@@ -296,7 +473,16 @@ export async function runMinimizeCli(argv: string[]): Promise<void> {
     return;
   }
 
-  writeTrace(args.traceOut, result.minimizedTrace);
+  // In the current format, recording the setup its replays reproduced under
+  // (the trace's, with the flags given here), so a minimize of it loads its
+  // pages the same way. A `chaosbringer --trace-replay` of it does not read
+  // the setup: the crawler takes only the flags it is given.
+  const [, ...entries] = result.minimizedTrace;
+  const outSetup = traceSetupOf(setup.options);
+  const outMeta: TraceMeta = { ...meta, v: TRACE_FORMAT_VERSION };
+  if (outSetup) outMeta.setup = outSetup;
+  else delete outMeta.setup;
+  writeTrace(args.traceOut, [outMeta, ...entries]);
   if (!args.quiet) {
     console.log("");
     console.log(

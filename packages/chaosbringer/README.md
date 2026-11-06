@@ -787,7 +787,7 @@ await chaos({
 });
 ```
 
-The file is read by Playwright and not modified by the crawl. The CLI (and `scan`, `flake`, `shard`) checks it before the browser starts: a file that is not there, or is not storageState JSON, exits 2 with `chaosbringer: --storage-state auth.json: no such file`. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
+The file is read by Playwright and not modified by the crawl. The CLI (and `scan`, `flake`, `shard`, `minimize`, `drive`) checks it before the browser starts: a file that is not there, or is not storageState JSON, exits 2 with `chaosbringer: --storage-state auth.json: no such file`. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
 
 ## HAR record / replay
 
@@ -896,8 +896,9 @@ Each preset runs with its defaults: its options (your own `markers` or
 A violation is an `invariant-violation` page error, which fails the run in
 every mode; `scan` reports it as an `invariant-violation` finding, `high`
 for `xss-marker`, `injected-markup` and `prototype-pollution`, `medium`
-otherwise. `shard` forwards both flags to its workers; `flake` and `drive`
-take neither.
+otherwise. `shard` forwards both flags to its workers and `flake` to every
+run; `minimize` checks them on every replay (a v2 trace records them); `drive`
+takes neither.
 
 ## Action heatmap
 
@@ -1108,11 +1109,20 @@ chaosbringer minimize --url http://localhost:3000 \
   --trace-out min.trace.jsonl
 ```
 
-A trace is line-delimited JSON: a leading `meta` entry with the seed + baseUrl, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+A trace is line-delimited JSON: a leading `meta` entry, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked (`meta.v`, `TRACE_FORMAT_VERSION`) — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+
+The `meta` entry holds the seed, the baseUrl, the start time and, from format **v2**, the crawl's `setup`: the options that change how a replay loads, settles and judges its pages, each only when it is not the default (`TraceSetup`, from `traceSetupOf(options)`):
+
+```json
+{"kind":"meta","v":2,"seed":42,"baseUrl":"http://localhost:3000","startTime":1762300000000,
+ "setup":{"settle":"adaptive","excludePatterns":["/logout"],"storageState":"auth.json","invariants":"data-safety"}}
+```
+
+The keys are `timeout`, `settle`, `excludePatterns`, `ignoreErrorPatterns`, `ignoreHttpPatterns`, `spaPatterns`, `storageState`, `harReplay`, `device`, `network`, `httpCache` (`false` for `--no-http-cache`), `invariants` (the `--invariants` / `--data-safety` presets as one `--invariants` value) and `axe` (`{ tags? }`). A file is recorded by its path, as the crawl was given it (a relative one resolves against the directory you replay from), never by its contents: the cookies of a `--storage-state` stay in that file. The crawl takes no secret of its own, so a trace holds none; an invariant set in code is a closure and is not recorded. A v1 trace (no `setup`) still reads, and replays with the defaults.
 
 Replay skips link discovery and the RNG entirely: only URLs listed as `visit` entries are loaded, and only the recorded actions are performed. Missing selectors are logged as failed actions and the run continues.
 
-`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Output goes to `--trace-out` (defaults to `min.trace.jsonl`).
+`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Every replay runs with the trace's recorded `setup` (logged in with its `--storage-state`, settled with its `--settle`, …), and a crawl flag given to `minimize` replaces what was recorded for it. Output goes to `--trace-out` (defaults to `min.trace.jsonl`), in format v2, recording the setup its replays reproduced under.
 
 ## Baseline diff (regression detection)
 
@@ -1309,7 +1319,7 @@ They do not fail the run, and they are always shown: the full report ends with a
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
 
-Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s`, `cluster-artifacts --min-count abc` or `perf emit-budgets --floor scriptMs=-1`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`shard` takes every input file of the main command, `flake` its `--storage-state`, `--har-replay` and `--trace-replay`, `scan` its `--storage-state` and a `--sitemap` path, `drive` its `--storage-state` and `--plan`, `minimize` its `--trace`, `recipes verify`, `recipes repair` and `load` their `--vars-file`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). So is a recipe one of those three would replay with a `{{name}}` placeholder no `--var` or `--vars-file` defines (`chaosbringer recipes verify: auth/login: variable "password" is not defined …`), and a `drive --secret` whose environment variable is unset, a `--plan` value with a `{{name}}` no `--secret` names, or a `--save-secrets` path drive could not write. `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and an unknown `--invariants` name, and `scan --axe` / `--invariants axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky cluster, a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). An unknown flag of the main crawl, `shard`, `flake`, `minimize` or `drive` names the flag it misspells when one is close (`chaosbringer: unknown option --max-page: did you mean --max-pages? (see chaosbringer --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s`, `cluster-artifacts --min-count abc` or `perf emit-budgets --floor scriptMs=-1`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`shard` and `flake` take every input file of the main command, `scan` its `--storage-state` and a `--sitemap` path, `drive` its `--storage-state`, `--har-replay` and `--plan`, `minimize` its `--trace` and the `--storage-state` / `--har-replay` it replays with, recorded or given, `recipes verify`, `recipes repair` and `load` their `--vars-file`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). So is a recipe one of those three would replay with a `{{name}}` placeholder no `--var` or `--vars-file` defines (`chaosbringer recipes verify: auth/login: variable "password" is not defined …`), and a `drive --secret` whose environment variable is unset, a `--plan` value with a `{{name}}` no `--secret` names, or a `--save-secrets` path drive could not write. `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and an unknown `--invariants` name, and `scan --axe` / `--invariants axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky verdict, cluster or page (`flake`), a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
 
 > **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
 > Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
@@ -1446,7 +1456,7 @@ chaosbringer minimize \
   --trace-out min.trace.jsonl
 ```
 
-`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
+`--url` defaults to the trace's `baseUrl`. Every replay runs with the crawl flags that shape a replay: `--timeout`, `--settle`, `--headless` / `--no-headless`, `--exclude`, `--ignore-error`, `--ignore-http`, `--ignore-analytics`, `--ignore-preset`, `--spa`, `--storage-state`, `--har-replay`, `--device`, `--network`, `--no-http-cache`, `--invariants`, `--data-safety`, `--axe`, `--axe-tags` (`REPLAY_CRAWL_FLAGS`; `minimize --help` prints the same list). A v2 trace records the ones its crawl was given (all but `--headless` / `--no-headless`), and those apply by default: `minimize` prints them (`replaying with the trace's setup: --settle adaptive --storage-state auth.json`). A flag given replaces what was recorded for its setting (`replaced by the flags given: --storage-state`); `--ignore-error`, `--ignore-analytics` and `--ignore-preset` are one setting, and so are `--invariants`, `--data-safety`, `--axe` and `--axe-tags`, except that `--axe-tags` given alone retags the recorded axe check (and is refused, exit 2, when the trace recorded none). A recorded relative `--storage-state` or `--har-replay` path is read from the directory `minimize` runs in, and when it is not there the refusal says it came from the trace's setup and that the flag replaces it. A `chaosbringer --trace-replay` does not read the recorded setup: give it the flags yourself. A crawl flag that cannot apply is refused, exit 2, with why (`chaosbringer minimize: --seed does not apply to minimize: the trace decides the actions, …`): `--seed`, `--max-actions`, `--aria-targets`, `--seed-from-sitemap`, `--shard` and `--trace-replay` (the trace decides the pages and the actions), `--strict` and the `--fail-on-*` gates (`--match` decides whether a replay reproduced), `--cdp` (every replay starts its own browser), and the `--perf*`, `--budget` and `--visual-*` flags (replays are not measured). So is a crawl command after `--`: the trace carries the crawl's setup, and a `Repro:` line's `--seed` is exactly what it replaces. `--max-pages` is accepted and changes nothing, which a stderr line says: a replay visits every page of the trace. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
 
 ### `flake`
 
@@ -1456,7 +1466,17 @@ Run the same crawl N times and separate error clusters into stable (fire every r
 chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
 ```
 
-With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it, and 2 when nothing answered at `--url` (`chaosbringer flake: could not reach <url>: is the server running? (…)`, after the first run): a site that is down fails the same way every run, which used to read as a stable cluster and exit 0. `--output <path>` also writes the analysis as JSON. The runs' [warnings](#run-warnings-reportwarnings) are listed once each (`analysis.warnings`, identical ones folded across runs), and fail nothing.
+Every flag of the main crawl is taken and given to every run: `--exclude`, `--settle`, `--storage-state`, `--strict`, `--ignore-preset`, `--invariants`, `--device`, `--fail-on-http`, … The crawl's checks refuse a bad value or a missing input file before Run 1, exit 2. A run's `Repro:` line can be pasted whole after a `--`, with or without its leading `chaosbringer` (or `npx chaosbringer`, `pnpm exec chaosbringer`, `node dist/cli.js`), as the shell splits it:
+
+```bash
+chaosbringer flake --runs 5 -- chaosbringer --url http://localhost:3000 --seed 9 --exclude /logout --settle adaptive
+```
+
+flake's own flags (`--runs`, `--output`, `--quiet`) go before the `--`; one of them after it is refused, and so is a crawl flag (or the URL) given on both sides, exit 2 (`chaosbringer flake: --seed is given both before and after --: give it on one side`). After the `--`, `--output` and `--quiet` would be the crawl's (its report path, which flake does not write), so the refusal says so rather than telling you to move them: before the `--`, `--output` is flake's analysis JSON. A pasted command's `--version` is refused too, and `flake --version` prints the version and runs nothing, as the main command does. An unknown flag on either side is refused with the one it misspells (`unknown option --exlude: did you mean --exclude?`), and a subcommand after the `--` (`chaosbringer scan …`) with `it is a subcommand, and flake reruns a plain crawl command`. A file a run writes is its own, so the trace of the run that failed is still there for `minimize`: `--trace-out t.jsonl` writes `t.run1.jsonl`, `t.run2.jsonl`, …, and so do `--har-record` and `--log-file` (`--failure-artifacts`, `--screenshot-dir` and `--perf-out` get a `run-<N>/` directory each; `--screenshots` without `--screenshot-dir` writes `screenshots/run-<N>/`). The flags that write or format one crawl's report (`--compact`, `--heatmap`, `--heatmap-top`, `--heatmap-out`, `--junit`, `--github-annotations`, `--cluster-artifacts`, `--cluster-min-count`) are accepted and not applied, which a stderr line says. A run's `--bind` prints its attach hint, as the main crawl's does.
+
+Each run is judged by the crawl's own exit rules with the same flags (`getExitCode`: a failed, timed-out or crashed page, an invariant violation, and `--strict`, `--fail-on-*` and `--baseline-strict` when given), and the report opens with the verdicts (`Verdicts (the crawl's exit rules): 2 passed, 1 failed — FLAKY`, then each failing run's seed and reasons; `analysis.verdicts`, `analysis.verdictFlaky`). The verdict is flaky when some runs pass and some fail; every run failing alike is a stable failure, not a flake.
+
+With a fixed `--seed`, every run uses it and RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Without one, each run draws its own seed, as an unseeded crawl does, and the verdicts name each run's. Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when the verdict flaked or any cluster / page flaked, so CI can gate on it, and 2 when nothing answered at `--url` (`chaosbringer flake: could not reach <url>: is the server running? (…)`, after the first run): a site that is down fails the same way every run, which used to read as a stable cluster and exit 0. `--output <path>` also writes the analysis as JSON. The runs' [warnings](#run-warnings-reportwarnings) are listed once each (`analysis.warnings`, identical ones folded across runs), and fail nothing unless `--fail-on-warnings` is given, which judges each run's verdict by them.
 
 Programmatic equivalent — `chaos()` does **not** throw when `strict: true` triggers a failure; it returns `{ report, passed: false, exitCode: 1 }`. That means you can collect reports across runs even with `strict: true` and pass them to `flakeReport()`:
 
@@ -1468,7 +1488,8 @@ for (const seed of [1, 2, 3, 4, 5]) {
   const { report } = await chaos({ ...sharedOpts, seed, strict: true });
   reports.push(report);
 }
-const analysis = flakeReport(reports);
+// Judged by the rules chaos() ran with: `strict: true` here.
+const analysis = flakeReport(reports, { strict: true });
 ```
 
 ### `shard`

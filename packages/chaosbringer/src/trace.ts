@@ -10,10 +10,21 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import type { ActionResult } from "./types.js";
+import { DEFAULT_OPTIONS } from "./defaults.js";
+import { ignoreReproFlags } from "./repro-command.js";
+import type { ActionResult, CrawlerOptions, NetworkProfile, ReproFlag, SettleMode } from "./types.js";
 
-/** Incremented when the on-disk layout changes in a way replay cares about. */
-export const TRACE_FORMAT_VERSION = 1;
+/**
+ * Incremented when the on-disk layout changes in a way replay cares about.
+ * v2 added `TraceMeta.setup`, the crawl options that shape a replay.
+ */
+export const TRACE_FORMAT_VERSION = 2;
+
+/**
+ * The versions `parseTrace` reads. A v1 trace has no `setup`, and replays
+ * with the options' defaults, as it always did.
+ */
+export const READABLE_TRACE_VERSIONS: readonly number[] = [1, 2];
 
 export interface TraceMeta {
   kind: "meta";
@@ -22,6 +33,105 @@ export interface TraceMeta {
   baseUrl: string;
   /** Epoch ms of the run. Informational only — replay does not use it. */
   startTime: number;
+  /**
+   * The recording crawl's options that change how a replay of it loads,
+   * settles and judges its pages (format v2; absent in v1 and when every one
+   * was the default). `minimize` replays with them unless a flag overrides.
+   */
+  setup?: TraceSetup;
+}
+
+/**
+ * What of a crawl's options a replay needs to see what the crawl saw, each
+ * only when it was not the default. Every value is one the crawl was given:
+ * patterns, modes and file *paths*. A file's contents (the cookies of a
+ * storage state, the bodies of a HAR) are never copied in, and the crawl
+ * takes no secret of its own (no `drive --secret`), so a trace holds none.
+ * A relative path is as the crawl was given it, so it resolves against the
+ * working directory of whoever replays it, as the run's `Repro:` line does.
+ */
+export interface TraceSetup {
+  timeout?: number;
+  settle?: SettleMode;
+  excludePatterns?: string[];
+  ignoreErrorPatterns?: string[];
+  ignoreHttpPatterns?: string[];
+  spaPatterns?: string[];
+  /** `--storage-state`'s path. */
+  storageState?: string;
+  /** `--har-replay`'s path. A recording (`--har-record`) is no setup to replay with. */
+  harReplay?: string;
+  device?: string;
+  network?: NetworkProfile;
+  /** `false` for `--no-http-cache`. */
+  httpCache?: false;
+  /**
+   * The `--invariants` / `--data-safety` presets, as one canonical
+   * `--invariants` value. An invariant set in code is a closure, which no
+   * trace can hold: it is not recorded.
+   */
+  invariants?: string;
+  /** `--axe` (or `--invariants axe`), with its `--axe-tags`. */
+  axe?: { tags?: string };
+}
+
+/**
+ * The `TraceSetup` of a crawl's options; `undefined` when nothing in it
+ * differs from the defaults. The CLI's invariants are read off
+ * `cliReproFlags`, which is how `reproCommand` carries them too.
+ */
+export function traceSetupOf(options: CrawlerOptions): TraceSetup | undefined {
+  const setup: TraceSetup = {};
+  if (options.timeout !== undefined && options.timeout !== DEFAULT_OPTIONS.timeout) setup.timeout = options.timeout;
+  if (options.settle !== undefined && options.settle !== DEFAULT_OPTIONS.settle) setup.settle = options.settle;
+  const list = (v: readonly string[] | undefined) => (v && v.length > 0 ? [...v] : undefined);
+  const lists = {
+    excludePatterns: list(options.excludePatterns),
+    ignoreErrorPatterns: list(options.ignoreErrorPatterns),
+    ignoreHttpPatterns: list(options.ignoreHttpPatterns),
+    spaPatterns: list(options.spaPatterns),
+  };
+  for (const [key, value] of Object.entries(lists)) if (value) setup[key as keyof typeof lists] = value;
+  if (typeof options.storageState === "string" && options.storageState !== "") setup.storageState = options.storageState;
+  if (options.har?.mode === "replay") setup.harReplay = options.har.path;
+  if (options.device) setup.device = options.device;
+  if (options.network) setup.network = options.network;
+  if (options.httpCache === false) setup.httpCache = false;
+  for (const { flag, value } of options.cliReproFlags ?? []) {
+    if (flag === "--invariants" && value) setup.invariants = value;
+    if (flag === "--axe") setup.axe = { ...setup.axe };
+    if (flag === "--axe-tags" && value !== undefined) setup.axe = { ...setup.axe, tags: value };
+  }
+  return Object.keys(setup).length > 0 ? setup : undefined;
+}
+
+/**
+ * A `TraceSetup` as the crawl flags that build it, in the main crawl's
+ * spelling (`--ignore-preset analytics` for that preset's patterns, as the
+ * `Repro:` line writes them): `minimize` parses them with the same table as
+ * its own flags, and prints them as what it applied.
+ */
+export function traceSetupFlags(setup: TraceSetup | undefined): ReproFlag[] {
+  if (!setup) return [];
+  const out: ReproFlag[] = [];
+  const push = (flag: string, value?: string) => out.push(value === undefined ? { flag } : { flag, value });
+  if (setup.timeout !== undefined) push("--timeout", String(setup.timeout));
+  if (setup.settle !== undefined) push("--settle", String(setup.settle));
+  for (const p of setup.excludePatterns ?? []) push("--exclude", p);
+  out.push(...ignoreReproFlags(setup.ignoreErrorPatterns ?? []));
+  for (const p of setup.ignoreHttpPatterns ?? []) push("--ignore-http", p);
+  for (const p of setup.spaPatterns ?? []) push("--spa", p);
+  if (setup.storageState !== undefined) out.push({ flag: "--storage-state", value: setup.storageState, path: true });
+  if (setup.harReplay !== undefined) out.push({ flag: "--har-replay", value: setup.harReplay, path: true });
+  if (setup.device !== undefined) push("--device", setup.device);
+  if (setup.network !== undefined) push("--network", setup.network);
+  if (setup.httpCache === false) push("--no-http-cache");
+  if (setup.invariants !== undefined) push("--invariants", setup.invariants);
+  if (setup.axe) {
+    push("--axe");
+    if (setup.axe.tags !== undefined) push("--axe-tags", setup.axe.tags);
+  }
+  return out;
 }
 
 export interface TraceVisit {
@@ -124,9 +234,9 @@ export function parseTrace(raw: string): TraceEntry[] {
     throw new Error("parseTrace: trace is missing a leading meta entry");
   }
   const meta = out[0] as TraceMeta;
-  if (meta.v !== TRACE_FORMAT_VERSION) {
+  if (!READABLE_TRACE_VERSIONS.includes(meta.v)) {
     throw new Error(
-      `parseTrace: unsupported trace format v=${meta.v} (this build understands v=${TRACE_FORMAT_VERSION})`
+      `parseTrace: unsupported trace format v=${meta.v} (this build understands v=${READABLE_TRACE_VERSIONS.join(", v=")})`
     );
   }
   return out;
