@@ -225,7 +225,7 @@ export function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
         "and a flag given here overrides it",
     );
   }
-  const { values, tokens } = parseArgsSuggesting({
+  const { values, positionals, tokens } = parseArgsSuggesting({
     args: argv,
     options: {
       ...crawlCliOptionsFor(REPLAY_CRAWL_FLAGS),
@@ -244,6 +244,16 @@ export function parseMinimizeArgs(argv: string[]): MinimizeCliArgs {
   }
   const refused = REFUSED_FLAGS.find((f) => given.has(f));
   if (refused !== undefined) throw new UsageError(`--${refused} does not apply to minimize: ${REPLAY_REFUSED_FLAGS[refused]}`);
+  // A stray word used to be dropped silently, as flake's were: a URL given
+  // bare replayed against the trace's server instead of the one named.
+  const stray = positionals[0];
+  if (stray !== undefined) {
+    fail(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(stray)
+        ? `unexpected argument "${stray}": give the URL to replay against as --url ${stray}`
+        : `unexpected argument "${stray}": minimize takes flags only (--trace <file> --match <regex>, and --url <url>)`,
+    );
+  }
   if (!values.trace) fail("--trace is required");
   if (!values.match) fail("--match is required");
 

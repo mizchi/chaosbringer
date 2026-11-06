@@ -264,6 +264,15 @@ describe("minimize CLI arguments", () => {
     );
   });
 
+  it("refuses a stray argument instead of dropping it, a bare URL with the --url spelling", () => {
+    expect(() => parseMinimizeArgs([...base, "http://y/"])).toThrow(
+      new UsageError('unexpected argument "http://y/": give the URL to replay against as --url http://y/'),
+    );
+    expect(() => parseMinimizeArgs(["extra", ...base])).toThrow(
+      new UsageError('unexpected argument "extra": minimize takes flags only (--trace <file> --match <regex>, and --url <url>)'),
+    );
+  });
+
   it("refuses a value the crawl refuses, before the trace is read", () => {
     expect(() => parseMinimizeArgs([...base, "--settle", "slow"])).toThrow(UsageError);
     expect(() => parseMinimizeArgs([...base, "--exclude", "("])).toThrow(/--exclude "\(" is not a valid regex/);
