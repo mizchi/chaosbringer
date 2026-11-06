@@ -19,7 +19,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChaosCrawler } from "../crawler.js";
 import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "../defaults.js";
-import { buildInvariantPresets, expandInvariantNames, formatInvariantsFlag, type InvariantPresetName } from "../cli-invariants.js";
+import {
+  buildInvariantPresets,
+  expandInvariantNames,
+  formatInvariantsFlag,
+  type InvariantPresetName,
+  parseOffsiteRedirectOrigins,
+} from "../cli-invariants.js";
+import { compileOffsiteAllow, offsiteRedirectAllowOf } from "../offsite-navigation.js";
 import { faults } from "../faults.js";
 import { axe } from "../invariants.js";
 import { attachHint } from "../browser-bind.js";
@@ -65,6 +72,14 @@ export interface ScanOptions {
    * can only note. Unlike those, these are carried as a flag.
    */
   invariants?: readonly InvariantPresetName[];
+  /**
+   * Origins a page may redirect to (an SSO provider, a payment page), as
+   * `--offsite-redirect-allow` takes them: scheme and host, no path. Their
+   * redirects raise no `open-redirect`, and the `no-offsite-redirect`
+   * preset (in `invariants`) lets them through. A `noOffsiteRedirect({ allow })`
+   * in `crawler.invariants` is read the same way. Default: none.
+   */
+  offsiteRedirectAllow?: readonly string[];
   /** Collect JS / CSS coverage for the unused-code finding. Default true. */
   coverage?: boolean;
   /** Further `perf` options for every crawl (e.g. `memory: { forceGc: true }`); `outDir` is the scan's. */
@@ -156,6 +171,8 @@ export function scanReproCommand(options: ScanOptions, seed: number, kind: ScanF
   if (options.axe) push("--axe");
   const presets = expandInvariantNames(options.invariants ?? []);
   if (presets.length > 0) push("--invariants", formatInvariantsFlag(presets));
+  const allow = parseOffsiteRedirectOrigins(options.offsiteRedirectAllow);
+  if (allow.length > 0) push("--offsite-redirect-allow", allow.join(","));
   if (c.ariaTargets) push("--aria-targets");
   if (options.coverage === false) push("--no-coverage");
   for (const p of c.excludePatterns ?? []) push("--exclude", p);
@@ -304,15 +321,25 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   const kinds = options.chaos === false ? [] : [...new Set(options.faults ?? SCAN_FAULT_KINDS)];
   // Before mkdirSync: a refused name leaves nothing behind.
   const presets = expandInvariantNames(options.invariants ?? []);
+  const offsiteRedirectAllow = parseOffsiteRedirectOrigins(options.offsiteRedirectAllow);
   mkdirSync(outDir, { recursive: true });
 
   const invariants: Invariant[] = [...(options.crawler?.invariants ?? [])];
   if (options.axe) invariants.push(axe());
-  invariants.push(...buildInvariantPresets(presets));
-  // The clean crawl's repro is a plain crawl, which builds the same checks from the same flags.
+  invariants.push(...buildInvariantPresets(presets, { offsiteRedirectAllow }));
+  // What `open-redirect` leaves out: the scan's own allow list, and every
+  // no-offsite-redirect check's (the preset's is the same list).
+  const allowTests = invariants.flatMap((inv) => offsiteRedirectAllowOf(inv) ?? []);
+  const scanAllowed = compileOffsiteAllow(offsiteRedirectAllow);
+  const offsiteRedirectAllowed = (url: string) => scanAllowed(url) || allowTests.some((t) => t(url));
+  // The clean crawl's repro is a plain crawl, which builds the same checks
+  // from the same flags; its allow list only with the check it configures.
   const reproFlags: ReproFlag[] = [
     ...(options.axe ? [{ flag: "--axe" }] : []),
     ...(presets.length > 0 ? [{ flag: "--invariants", value: formatInvariantsFlag(presets) }] : []),
+    ...(presets.includes("no-offsite-redirect") && offsiteRedirectAllow.length > 0
+      ? [{ flag: "--offsite-redirect-allow", value: offsiteRedirectAllow.join(",") }]
+      : []),
   ];
 
   const base = (perfDir: string): CrawlerOptions => ({
@@ -369,7 +396,7 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
   const analysis = analyzeScan(
     markServed(cleanFull, served),
     chaos.map((c) => ({ ...c, report: markServed(c.report, served) })),
-    { hangReleaseMs, ...(pattern ? { endpointPattern: pattern } : {}) },
+    { hangReleaseMs, offsiteRedirectAllowed, ...(pattern ? { endpointPattern: pattern } : {}) },
   );
   const files: ScanFiles = {
     json: join(outDir, "scan-report.json"),

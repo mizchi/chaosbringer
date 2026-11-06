@@ -6,6 +6,7 @@ import {
   isOffsiteRedirect,
   noOffsiteRedirect,
   offsiteNavigation,
+  offsiteRedirectAllowOf,
   offsiteRedirects,
   reflectedIn,
 } from "./offsite-navigation.js";
@@ -44,14 +45,26 @@ describe("reflectedIn", () => {
 });
 
 describe("blockedTrigger", () => {
-  it("names an iframe, a step, a meta refresh and a script, in that order", () => {
+  it("names an iframe, a meta refresh, a step and a script, in that order", () => {
     expect(blockedTrigger({ mainFrame: false, stepRunning: true, reason: "scriptInitiated" })).toBe("frame");
-    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "metaTagRefresh" })).toBe("click");
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "metaTagRefresh" })).toBe("meta-refresh");
     expect(blockedTrigger({ mainFrame: true, stepRunning: false, reason: "metaTagRefresh" })).toBe("meta-refresh");
     expect(blockedTrigger({ mainFrame: true, stepRunning: false, reason: "httpHeaderRefresh" })).toBe("meta-refresh");
     expect(blockedTrigger({ mainFrame: true, stepRunning: false, reason: "scriptInitiated" })).toBe("script");
     // No CDP reason (a page without CDP): a script.
     expect(blockedTrigger({ mainFrame: true, stepRunning: false })).toBe("script");
+  });
+
+  it("keeps a step's link, form or fixed-URL handler a click, and not a handler that follows the page's own URL", () => {
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "anchorClick", reflected: true })).toBe("click");
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "formSubmissionGet", reflected: true })).toBe("click");
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "formSubmissionPost" })).toBe("click");
+    // A share button: location.href = "https://partner.example/".
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "scriptInitiated" })).toBe("click");
+    // A "Continue" button: location.href = new URLSearchParams(location.search).get("next").
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reason: "scriptInitiated", reflected: true })).toBe("script");
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true, reflected: true })).toBe("script");
+    expect(blockedTrigger({ mainFrame: true, stepRunning: true })).toBe("click");
   });
 });
 
@@ -73,12 +86,18 @@ describe("offsiteNavigation / describeOffsiteNavigation", () => {
   it("counts script, meta refresh and server redirects as redirects, not clicks or iframes", () => {
     const pages = [
       { offsiteNavigations: [offsiteNavigation(SITE, EVIL, "click"), offsiteNavigation(SITE, EVIL, "frame")] },
-      { offsiteNavigations: [offsiteNavigation(SITE, EVIL, "script"), offsiteNavigation(SITE, EVIL, "meta-refresh")] },
+      { offsiteNavigations: [offsiteNavigation(`${SITE}/a`, EVIL, "script"), offsiteNavigation(`${SITE}/b`, EVIL, "meta-refresh")] },
       {},
-      { offsiteNavigations: [offsiteNavigation(SITE, EVIL, "server-redirect")] },
+      { offsiteNavigations: [offsiteNavigation(`${SITE}/c`, EVIL, "server-redirect")] },
     ];
     expect(offsiteRedirects(pages).map((n) => n.trigger)).toEqual(["script", "meta-refresh", "server-redirect"]);
     expect(isOffsiteRedirect({ trigger: "click" })).toBe(false);
+  });
+
+  it("counts a redirect that fired again (a delayed one, each time the crawler went back) once", () => {
+    const again = offsiteNavigation(`${SITE}/delayed`, EVIL, "script");
+    const elsewhere = offsiteNavigation(`${SITE}/other`, EVIL, "script");
+    expect(offsiteRedirects([{ offsiteNavigations: [again, again, again] }, { offsiteNavigations: [elsewhere, again] }])).toEqual([again, elsewhere]);
   });
 });
 
@@ -136,6 +155,20 @@ describe("noOffsiteRedirect", () => {
     const sso = offsiteNavigation(`${SITE}/login`, "http://localhost:4401/authorize?client=x", "server-redirect");
     expect(await noOffsiteRedirect({ allow: ["http://localhost:4401"] }).check(ctx([sso]))).toBe(true);
     expect(await noOffsiteRedirect({ allow: ["http://localhost:4402"] }).check(ctx([sso]))).toMatch(/^off-site redirect: /);
+  });
+
+  it("lists a redirect that fired again once", async () => {
+    const nav = offsiteNavigation(`${SITE}/delayed`, EVIL, "script");
+    expect(await noOffsiteRedirect().check(ctx([nav, nav, nav]))).toBe(`off-site redirect: ${SITE}/delayed -> ${EVIL} (script redirect)`);
+  });
+
+  it("carries its allow list, kept by a spread and left out of JSON, and no other invariant has one", () => {
+    const inv = noOffsiteRedirect({ allow: ["http://localhost:4401"] });
+    expect(offsiteRedirectAllowOf(inv)?.(EVIL)).toBe(true);
+    expect(offsiteRedirectAllowOf(inv)?.("http://localhost:4402/")).toBe(false);
+    expect(offsiteRedirectAllowOf({ ...inv, name: "renamed" })?.(EVIL)).toBe(true);
+    expect(JSON.parse(JSON.stringify(inv))).toEqual({ name: "navigation.no-offsite-redirect", when: "afterVisit" });
+    expect(offsiteRedirectAllowOf({ name: "x", check: () => true })).toBeUndefined();
   });
 
   it("lists three and counts the rest", async () => {

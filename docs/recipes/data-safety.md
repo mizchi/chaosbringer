@@ -58,7 +58,7 @@ doesn't throw.
 | `injectedMarkup({ markers, attribute, anyJavascriptUrl })` | `data.injected-markup` | an element carries `attribute` (default `data-cb-injected`), or an `href` / `src` / `action` / `formaction` / `xlink:href` holds a `javascript:` URL that names a marker |
 | `prototypePollution()` | `data.prototype-pollution` | `Object.prototype` has an enumerable key |
 | `renderedGarbage({ tokens, ignore, selector })` | `data.rendered-garbage` | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` as a word |
-| `noOffsiteRedirect({ allow })` | `navigation.no-offsite-redirect` | the page sent the browser to another origin on its own (a script, a meta refresh, a 3xx; not a click, not an iframe) that `allow` does not list. `open redirect: …` when the target was in the page's own URL |
+| `noOffsiteRedirect({ allow })` | `navigation.no-offsite-redirect` | the page sent the browser to another origin on its own (a script, a meta refresh, a 3xx, a click that followed the page's own `?next=`; not a click to a URL the page wrote, not an iframe) that `allow` does not list. `open redirect: …` when the target was in the page's own URL |
 | `notBlank({ selector, minText, errorText })` | `data.not-blank` | the page shows fewer than `minText` (default 1) characters of visible text, or shows one of `errorText` (strings match as substrings, or RegExps) |
 
 `invariants.dataSafety(options)` returns the first five, in that order. It
@@ -112,13 +112,23 @@ browser, and follows a redirect hop (so the other host does receive a
 302's request), then stops there. Each is recorded in
 `pages[].offsiteNavigations` with its `trigger`: a `script`, a
 `meta-refresh` and a `server-redirect` are the page leaving on its own,
-which the check fails; a `click` (a crawler step was running: the user asked
-to go) and a `frame` (an iframe) are not. A link straight to another origin
-is never clicked. `reflected` says the target was in the page's own query
-(`{ in: "query", param: "next" }`) or fragment, as written or URL-decoded:
-the open redirect, which the message calls by name. A 302 to a host that is
-down is the same redirect, with `failed` set, not a failed load of the
-page.
+which the check fails; a `click` (a crawler step went to a URL the page
+wrote: a link, a form, a share button's fixed `location`; the user asked to
+go) and a `frame` (an iframe) are not. A link straight to another origin
+is never clicked. A step is not a pass on its own: a "Continue" button
+whose handler follows the page's own `?next=` is a `script`, and a form
+posted to an endpoint of the site's that answers a 3xx off-site is a
+`server-redirect` named by that endpoint's URL. `reflected` says the target
+was in the page's own query (`{ in: "query", param: "next" }`) or fragment,
+as written or URL-decoded: the open redirect, which the message calls by
+name. A 302 to a host that is down is the same redirect, with `failed` set,
+not a failed load of the page. A redirect that fires again (a delayed one,
+each time the crawler goes back) is listed once. A page that goes to
+`about:blank` left for no other site and is not counted.
+
+Only the crawler records off-site navigations. `scenarioLoad` runs every
+invariant after every step and records none, so there the check always
+passes.
 
 `allow` takes origins (`"https://login.example.com"`, no path) and RegExps
 tested on the target URL, for the redirects a site means: an SSO provider, a

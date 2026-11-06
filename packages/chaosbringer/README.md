@@ -889,7 +889,7 @@ chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
 | `injected-markup` | `invariants.injectedMarkup()` (`data.injected-markup`) | a `data-cb-injected` element, or a `javascript:` URL or `on*` attribute naming a marker, is in the DOM |
 | `prototype-pollution` | `invariants.prototypePollution()` (`data.prototype-pollution`) | `Object.prototype` has an enumerable key |
 | `rendered-garbage` | `invariants.renderedGarbage()` (`data.rendered-garbage`) | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` |
-| `no-offsite-redirect` | `invariants.noOffsiteRedirect()` (`navigation.no-offsite-redirect`) | the page sent the browser to another origin on its own: a script, a meta refresh or a 3xx, not a click. `open redirect: …` when the target was in the page's own URL. See [Off-site redirects](#off-site-redirects-and-open-redirects) |
+| `no-offsite-redirect` | `invariants.noOffsiteRedirect()` (`navigation.no-offsite-redirect`) | the page sent the browser to another origin on its own: a script, a meta refresh or a 3xx, not a click to a URL the page wrote. `open redirect: …` when the target was in the page's own URL. See [Off-site redirects](#off-site-redirects-and-open-redirects) |
 | `not-blank` | `invariants.notBlank()` (`data.not-blank`) | the page shows no visible text. Not in `data-safety`, as `dataSafety()` leaves it out: a canvas or image-only page is blank by design |
 | `axe` | `invariants.axe()`, as `--axe` | an axe-core violation (needs `axe-core`) |
 
@@ -902,7 +902,8 @@ The one exception is `no-offsite-redirect`'s `allow`: `--offsite-redirect-allow
 <origins>` (comma-separated, repeatable, scheme and host only) lists the
 origins a page may redirect to, such as an SSO provider. It is refused (exit
 2) for a value that is not a bare origin, and without the check it configures
-(`--invariants no-offsite-redirect` or `--data-safety`).
+(`--invariants no-offsite-redirect` or `--data-safety`); `scan` takes it
+either way, and raises no `open-redirect` finding for those origins.
 A violation is an `invariant-violation` page error, which fails the run in
 every mode; `scan` reports it as an `invariant-violation` finding, `high`
 for `xss-marker`, `injected-markup` and `prototype-pollution`, `medium`
@@ -932,10 +933,10 @@ of `blockedNavigations`:
 
 | `trigger` | What started it | A redirect? |
 |---|---|---|
-| `click` | a crawler step was running (a button whose handler sets `location`, a same-site link that redirected off-site). A link straight to another origin is never clicked at all (`actions[].blockedExternal`) | no: the user asked to go |
-| `script` | a script, with no step running: `location.href = …`, `location.replace()`, a form it submitted | yes |
+| `click` | a crawler step went to a URL the page wrote: a link or a form to another origin, a button whose handler sets `location` to a fixed URL (a share button). A link straight to another origin is never clicked at all (`actions[].blockedExternal`) | no: the user asked to go |
+| `script` | a script: `location.href = …`, `location.replace()`, a form it submitted, with no step running; or while a step ran, to a target taken from the page's own URL (a "Continue" button that follows `?next=`) | yes |
 | `meta-refresh` | `<meta http-equiv="refresh">` or a `Refresh` header | yes |
-| `server-redirect` | the page's URL answered a 3xx to another origin | yes |
+| `server-redirect` | a URL of the site answered a 3xx to another origin: the page's own, or one a step went to (a form posted to an endpoint that redirects; `from` is then that endpoint's URL, which `reflected` is read from) | yes |
 | `frame` | an iframe navigating off-site | no: not the page |
 
 A page that redirected is one the crawl stops at: its `redirectedTo` names
@@ -949,9 +950,12 @@ own URL. The full report lists every off-site navigation under `OFF-SITE
 NAVIGATIONS` (`<page> -> <target> (script redirect; target from the "next"
 query parameter)`), and the compact and `--quiet` output count the
 redirects under the verdict line, after the dead links: `  Off-site
-redirects: 1 (first: <page> -> <target>)`. With `--github-annotations` each
-redirect is a `::warning` when its target was in the page's URL and a
-`::notice` otherwise.
+redirects: 1 (first: <page> -> <target>)`, each `<page> -> <target>` pair
+once (a delayed redirect that fires again each time the crawler goes back
+is one). A page that went to `about:blank` or a `data:` URL left for no
+other site, and is not one. With `--github-annotations` each redirect is a
+`::warning` when its target was in the page's URL and a `::notice`
+otherwise; on a page the check below failed, its `::error` stands for them.
 
 None of that fails a run. `invariants.noOffsiteRedirect({ allow })` does
 (it is in `dataSafety()`, and `--invariants no-offsite-redirect`): it fails
@@ -968,8 +972,12 @@ the run in every mode:
 It runs `afterVisit`, a phase for checks that read what the crawl recorded
 (`ctx.offsiteNavigations`, `ctx.errors`) rather than the DOM: unlike
 `afterLoad` and `afterActions`, it also runs on a page the crawl stopped
-at. `scan` raises an `open-redirect` finding (category `security`) from the
-same records: `high` when the target was in the page's URL, `low` when not.
+at. Only the crawler records off-site navigations: under `scenarioLoad`, which
+runs every invariant after every step, the check always passes. `scan` raises
+an `open-redirect` finding (category `security`) from the same records: `high`
+when the target was in the page's URL, `low` when not, and none for an origin
+its `--offsite-redirect-allow` (`ScanOptions.offsiteRedirectAllow`) or a
+`noOffsiteRedirect({ allow })` among its crawler's invariants allows.
 
 > **Behaviour change:** `dataSafety()` and `--data-safety` now include
 > `noOffsiteRedirect`, so a run with them fails on a page that redirects
@@ -980,9 +988,14 @@ same records: `high` when the target was in the page's URL, `low` when not.
 > that is down was a failed load of the on-site URL (`[navigation]
 > page.goto: net::ERR_CONNECTION_REFUSED at <its URL>`, status `error`,
 > exit 1); it is now that off-site redirect, `success` with no errors, and
-> fails a run only through the check. The text report lists the off-site
-> navigations it used to only count, and the compact and `--quiet` output
-> have the `Off-site redirects:` line.
+> fails a run only through the check. `summary.blockedExternalNavigations`
+> follows: a script redirect counted twice (the target and the error page)
+> and now counts once, and a 302 to a host that is down counted 0 and now
+> counts 1. In `scan`, that 302 was a `high` `page-load-failed` finding and
+> is now an `open-redirect` (`low` unless the target was in the page's URL),
+> so `--fail-on high` no longer fails on it. The text report lists the
+> off-site navigations it used to only count, and the compact and `--quiet`
+> output have the `Off-site redirects:` line.
 
 ## Action heatmap
 
@@ -1246,13 +1259,13 @@ Each side's cluster keys are recomputed from the cluster's `sample.message` with
 
 ## GitHub Actions annotations
 
-Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster, dead link and [warning](#run-warnings-reportwarnings). GitHub surfaces these on the Checks tab alongside test output.
+Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster, dead link, [off-site redirect](#off-site-redirects-and-open-redirects) and [warning](#run-warnings-reportwarnings). GitHub surfaces these on the Checks tab alongside test output.
 
 ```bash
 chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
-The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not, with one exception: a JS exception is always `::error`, also on a run without `--strict` that exits 0. Invariant violations, failed navigations and crashes fail every run and are always `::error`. Under `--baseline-strict`, a cluster the baseline did not have is `::error`. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. Each run warning is `::warning title=chaosbringer warning: <code>::<message>`, and `::error` under `--fail-on-warnings`. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
+The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not, with one exception: a JS exception is always `::error`, also on a run without `--strict` that exits 0. Invariant violations, failed navigations and crashes fail every run and are always `::error`. Under `--baseline-strict`, a cluster the baseline did not have is `::error`. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. Each run warning is `::warning title=chaosbringer warning: <code>::<message>`, and `::error` under `--fail-on-warnings`. An off-site redirect (`title=Off-site redirect: <page>`) is `::warning` when its target was in the page's URL (an open redirect) and `::notice` otherwise; on a page `no-offsite-redirect` failed it is not annotated, as that violation's `::error` names it. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
 
 > **Behaviour change:** network errors and dead links used to annotate as `::error` on a run that exited 0. They are `::warning` unless `--fail-on-network` / `--fail-on-dead-links` fails the run on them. And a console cluster that failed a `--baseline-strict` run as new used to be `::warning`; it is `::error`.
 
@@ -1706,7 +1719,7 @@ chaosbringer --url http://localhost:3000 \
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
 | `--baseline-missing <warn\|fail>` | A missing `--baseline` file: `warn` runs without a diff (a `baseline-missing` warning), `fail` refuses the run, exit 2 | warn |
-| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link / [run warning](#run-warnings-reportwarnings), `::error` for what fails the run under its rules (and every JS exception) and `::warning` otherwise | false |
+| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link / [run warning](#run-warnings-reportwarnings), `::error` for what fails the run under its rules (and every JS exception) and `::warning` otherwise, and for each [off-site redirect](#off-site-redirects-and-open-redirects) no check failed: `::warning` when its target was in the page's URL, `::notice` otherwise | false |
 | `--compact` | Compact output | false |
 | `--strict` | Fail on console errors, JS exceptions and unhandled rejections (not on the [echo of a fault](#fault-echoes) the run injected) | false |
 | `--fail-on-http <5xx\|4xx>` | Fail on a subresource / API response of 500 and up (`5xx`) or 400 and up (`4xx`). See [HTTP errors](#http-errors) | — |

@@ -216,6 +216,13 @@ export interface AnalyzeScanOptions {
    * requests to them; without it they count every request.
    */
   endpointPattern?: string;
+  /**
+   * The off-site URLs a page may redirect to (an SSO provider): those
+   * redirects raise no `open-redirect`. `runScan` builds it from
+   * `offsiteRedirectAllow` and the `allow` of every `noOffsiteRedirect()`
+   * among the crawls' invariants. Default: none is allowed.
+   */
+  offsiteRedirectAllowed?: (url: string) => boolean;
 }
 
 /**
@@ -398,7 +405,7 @@ export function analyzeScan(
   chaos = chaos.map((r) => ({ ...r, report: splitEnvironment(r.report).report }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
-    ...openRedirectFindings([baseline, ...chaos.map((c) => c.report)]),
+    ...openRedirectFindings([baseline, ...chaos.map((c) => c.report)], options.offsiteRedirectAllowed),
     ...errorFindings(baseline, envPages),
     ...perfFindings(baseline),
     ...resilienceFindings(baseline, chaos, options),
@@ -605,13 +612,14 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
  * crawls happened to visit. A target taken from the page's own URL is an
  * open redirect, `high`; one written into the page (a /chat that sends users
  * to a chat service, a login that goes to an SSO) is `low`, worth a look and
- * often what the site means. A click and an iframe are not redirects. The
- * clean crawl and the chaos crawls visit the same pages: each redirect is
- * counted once.
+ * often what the site means. A click and an iframe are not redirects, and
+ * one to a URL `allowed` passes is not reported. The clean crawl and the
+ * chaos crawls visit the same pages: each redirect is counted once.
  */
-function openRedirectFindings(reports: readonly CrawlReport[]): ScanFinding[] {
+function openRedirectFindings(reports: readonly CrawlReport[], allowed: (url: string) => boolean = () => false): ScanFinding[] {
   const seen = new Map<string, OffsiteNavigation>();
   for (const nav of reports.flatMap((r) => offsiteRedirects(r.pages))) {
+    if (allowed(nav.to)) continue;
     const key = `${nav.from} -> ${nav.to}`;
     if (!seen.has(key)) seen.set(key, nav);
   }
@@ -764,9 +772,7 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
     if (!isSiteError(c)) continue;
     // `open-redirect` reports these from the navigations themselves,
     // checked or not: the violation would be the same finding twice.
-    if (c.type === "invariant-violation" && (c.invariantNames ?? []).length > 0 && (c.invariantNames ?? []).every((n) => n === "navigation.no-offsite-redirect")) {
-      continue;
-    }
+    if (c.type === "invariant-violation" && c.sample.offsiteRedirect) continue;
     const r = ERROR_RULES[c.type];
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;

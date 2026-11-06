@@ -122,18 +122,21 @@ query: everything but storage and form data) is scanned a third time by the
 built CLI, `chaosbringer scan --invariants data-safety,not-blank`, the same
 suite named by flag.
 
-A variant is flagged when a `bug` finding matches the entry's signal: an
-error by a `js-exception` or `unhandled-rejection` finding whose title
-matches the message, an invariant by an `invariant-violation` finding that
-names it. Expect the entries that throw to be flagged out of the box, and
+A variant is flagged when a `bug` or `security` finding matches the
+entry's signal: an error by a `js-exception` or `unhandled-rejection`
+finding whose title matches the message, an invariant by an
+`invariant-violation` finding that names it, and an off-site redirect by
+scan's own `open-redirect` finding (scan reports the redirect itself and
+leaves the `no-offsite-redirect` check's violation out). Expect the entries that throw to be flagged out of the box, and
 the ones caught only by an invariant (a marker, a polluted prototype,
 garbage on screen, a blank page) only with the suite, and from the CLI
 wherever it can deliver the data: the query entries
 (`prototype-pollution-query`, `reflected-xss-query`) included. The third
-query entry, `open-redirect-param`, is a blocked navigation, which no scan
-rule reads, with or without the checks. The script
+query entry, `open-redirect-param`, is flagged in every column by the
+`high` `open-redirect` finding, with or without the checks: scan reads the
+redirect from the crawl's `pages[].offsiteNavigations`. The script
 exits 1 when a fixed variant is still flagged, an oracle entry has any bug
-finding, or the CLI misses a variant the suite in code flags.
+or security finding, or the CLI misses a variant the suite in code flags.
 
 <!-- scan-check:start -->
 Measured by `pnpm scan-check` on 2026-11-06: `runScan` with `chaos: false`, one page, the entry's seed and actions, on the bad data; the CLI column is the built `chaosbringer scan --no-chaos --invariants data-safety,not-blank` with the same page, seed and actions.
@@ -182,11 +185,10 @@ Oracle entries, scanned once with the suite: [oracle-code-sample](src/patterns/o
   `injectedMarkup` flags the URL in the sink, not its execution.
 - **Payloads in the URL fragment**: the crawler drops the hash before it
   navigates, so DOM XSS through `location.hash` is out of reach.
-- **Open redirects in exit codes or scan**: a blocked off-site navigation is
-  recorded only in `pages[].blockedNavigations` (and `redirectedTo`). It
-  fails no exit code and raises no scan finding, and the redirected page's
-  errors are dropped. Entries with this signal are judged on the report
-  field alone.
+- **Open redirects the crawl never visits**: `noOffsiteRedirect` and scan's
+  `open-redirect` judge the URLs the crawl went to. A `?next=` the site
+  never links to with an off-site value is not probed (the entry's own
+  start URL carries one), and no redirect parameter is tried by name.
 - **Markup that doesn't run and carries no canary**: an inserted `<script>`
   (which `innerHTML` never runs), attacker HTML without `data-cb-injected`.
 - **Well-formed but wrong values**: an off-by-one total, the wrong currency.

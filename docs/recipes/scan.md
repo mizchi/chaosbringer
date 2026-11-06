@@ -84,12 +84,22 @@ from the shell, a query on `--url` is how hostile data reaches the page. The
 presets run with their defaults; set their options through
 `runScan({ crawler: { invariants } })`.
 
+> **Behaviour change:** this applies to data-safety presets passed through
+> `runScan({ crawler: { invariants } })` as well, which reached the scan
+> before the flag did. Their violations used to be `medium`
+> `invariant-violation` findings, below `--fail-on high`; the three hostile-data
+> ones are now `high`. One seen only in a chaos crawl used to be dropped and is
+> now a `medium` `fault-new-error` finding. Code that gates on the findings'
+> severity and passed can fail, and `analyzeScan` re-grades an old report the
+> same way.
+
 ## Open redirects
 
 Scan raises `open-redirect`, in the `security` category, for a page that
 sent the browser to another origin on its own (a script, a meta refresh, a
-3xx), from the off-site navigations its crawls recorded
-(`pages[].offsiteNavigations`; a click and an iframe are not redirects):
+3xx, or a click that followed the page's own `?next=`), from the off-site
+navigations its crawls recorded (`pages[].offsiteNavigations`; a click to a
+URL the page wrote and an iframe are not redirects):
 
 | severity | when |
 |---|---|
@@ -104,14 +114,20 @@ redirect parameter itself, so a `?next=` the site never links to with an
 off-site value is found only when `--url` carries one
 (`--url 'http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F'`).
 
-> **Behaviour change:** this applies to data-safety presets passed through
-> `runScan({ crawler: { invariants } })` as well, which reached the scan
-> before the flag did. Their violations used to be `medium`
-> `invariant-violation` findings, below `--fail-on high`; the three hostile-data
-> ones are now `high`. One seen only in a chaos crawl used to be dropped and is
-> now a `medium` `fault-new-error` finding. Code that gates on the findings'
-> severity and passed can fail, and `analyzeScan` re-grades an old report the
-> same way.
+`--offsite-redirect-allow <origins>` (`ScanOptions.offsiteRedirectAllow`;
+comma-separated, repeatable, scheme and host only) names the origins a page
+may redirect to, such as an SSO provider: their redirects raise no
+finding, and the `no-offsite-redirect` check lets them through. Unlike the
+crawl's, scan takes it with or without the check. A
+`noOffsiteRedirect({ allow })` in `runScan({ crawler: { invariants } })` is
+read the same way.
+
+> **Behaviour change:** a page that 302s to another origin whose host is
+> down used to be a `high` `page-load-failed` finding (the crawl failed
+> the on-site URL with `ERR_CONNECTION_REFUSED`). It is now that off-site
+> redirect, an `open-redirect` finding, `low` unless the target was in the
+> page's URL, so `--fail-on high` (or `medium`) no longer fails on it.
+
 
 ## Reading the report
 
@@ -308,7 +324,8 @@ reported, and the redirect is an [`open-redirect`](#open-redirects) finding
 (`low`, its target not being in the URL). A 302 to a host that is down is
 the same redirect, not a page that failed to load. The same goes for a click that ends up off-site (Wikipedia's
 "Create account" redirects to auth.wikimedia.org): the step records
-`leftSiteTo`, carries no measurement, and the crawler goes back to the page.
+`leftSiteTo`, carries no measurement, and the crawler goes back to the page;
+the site's redirect that took it there is an `open-redirect` finding too.
 Static files a page fetches with `fetch()` (CSS chunks, WebAssembly, 3D
 models) are not treated as API endpoints either, and neither are the pages
 the crawled ones link to: a router prefetching a linked route's data

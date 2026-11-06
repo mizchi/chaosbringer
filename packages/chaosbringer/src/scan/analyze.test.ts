@@ -191,12 +191,26 @@ describe("analyzeScan: open redirects", () => {
     expect(high.where).toEqual([go, other.from]);
   });
 
-  it("is the one finding for it when the scan ran the no-offsite-redirect check too", () => {
-    const violation = cluster("invariant-violation", `[navigation.no-offsite-redirect] open redirect: ${go} -> ${EVIL}`, [go]);
-    violation.invariantNames = ["navigation.no-offsite-redirect"];
-    const r = analyzeScan(fakeReport(pages, [], { errorClusters: [violation] }));
+  it("is the one finding for it when the scan ran the no-offsite-redirect check too, whatever its name", () => {
+    // The crawler marks the check's violations (`PageError.offsiteRedirect`).
+    const marked = (name: string) => {
+      const c = cluster("invariant-violation", `[${name}] open redirect: ${go} -> ${EVIL}`, [go]);
+      c.invariantNames = [name];
+      c.sample = { ...c.sample, invariantName: name, offsiteRedirect: true };
+      return c;
+    };
+    const r = analyzeScan(fakeReport(pages, [], { errorClusters: [marked("navigation.no-offsite-redirect"), marked("my.redirect-check")] }));
     expect(rules(r).filter((rule) => rule === "invariant-violation")).toEqual([]);
     expect(rules(r).filter((rule) => rule === "open-redirect")).toHaveLength(2);
+    // A check of the user's own that happens to say so is still reported.
+    const own = cluster("invariant-violation", "[cart] open redirect: wrong", [go]);
+    own.invariantNames = ["cart"];
+    expect(rules(analyzeScan(fakeReport(pages, [], { errorClusters: [own] }))).filter((rule) => rule === "invariant-violation")).toHaveLength(1);
+  });
+
+  it("leaves out a redirect to an allowed origin (an SSO provider)", () => {
+    const r = analyzeScan(fakeReport(pages, []), [], { offsiteRedirectAllowed: (url) => url.startsWith("http://127.0.0.1:4401/invite") });
+    expect(r.findings.filter((f) => f.rule === "open-redirect").map((f) => f.severity)).toEqual(["high"]);
   });
 
   it("is in the terminal summary and the Markdown", () => {

@@ -9,12 +9,17 @@
  * The other site is a second local origin (`localhost` beside `127.0.0.1`),
  * and the dead host a closed local port. Nothing leaves the machine.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chaos } from "./chaos.js";
 import { ChaosCrawler } from "./crawler.js";
 import { dataSafety } from "./data-invariants.js";
 import { buildGithubAnnotations } from "./github.js";
+import { faults } from "./faults.js";
 import { noOffsiteRedirect } from "./offsite-navigation.js";
+import { runScan } from "./scan/run.js";
 import { exitReasons, formatCompactReport, formatQuietReport, formatReport, getExitCode } from "./reporter.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 import type { CrawlerOptions, CrawlReport, PageResult } from "./types.js";
@@ -81,6 +86,22 @@ describe("pages that redirect off-site", () => {
           return html(`<button onclick="location.href='${off}/clicked'">Visit our partner</button>`);
         case "/partner":
           return html(`<a href="${off}/out">partner</a>`);
+        case "/continue":
+          // The open redirect a click sets off: the target is still the page's own ?next=.
+          return html(`<button onclick="location.href = new URLSearchParams(location.search).get('next')">Continue</button>`);
+        case "/form":
+          // A form posted to an endpoint of the site's own that redirects off-site.
+          return html(
+            `<form method="get" action="/r302"><input type="hidden" name="next" value="${off}/formhit"><button>Sign in</button></form>`,
+          );
+        case "/blank":
+          return html(`<script>location.href = "about:blank"</script>`);
+        case "/old":
+          // A same-site redirect whose target fails: still the site's own failed load.
+          res.writeHead(302, { location: "/reset" });
+          return res.end();
+        case "/reset":
+          return req.socket.destroy();
         default:
           res.writeHead(404);
           return res.end();
@@ -201,7 +222,7 @@ describe("pages that redirect off-site", () => {
       baseUrl: `${base}/clicky`,
       maxPages: 1,
       maxActionsPerPage: 4,
-      actionWeights: { scroll: 0, hover: 0, input: 0 },
+      actionWeights: { scroll: 0 },
       invariants: [noOffsiteRedirect()],
     });
     const p = page(report, "/clicky");
@@ -215,12 +236,112 @@ describe("pages that redirect off-site", () => {
     expect(left.every((a) => a.leftSiteTo === `${off}/clicked`)).toBe(true);
     expect(getExitCode(report, { strict: true })).toBe(0);
     // A link to another origin is not clicked at all, so nothing navigates.
-    const link = await crawl({ baseUrl: `${base}/partner`, maxPages: 1, maxActionsPerPage: 2, actionWeights: { scroll: 0, hover: 0, input: 0 }, invariants: [noOffsiteRedirect()] });
+    const link = await crawl({ baseUrl: `${base}/partner`, maxPages: 1, maxActionsPerPage: 2, actionWeights: { scroll: 0 }, invariants: [noOffsiteRedirect()] });
     expect(link.actions.length).toBeGreaterThan(0);
     expect(link.actions.every((a) => a.blockedExternal)).toBe(true);
     expect(page(link, "/partner").offsiteNavigations).toBeUndefined();
     expect(getExitCode(link, { strict: true })).toBe(0);
   }, 120_000);
+
+  it("flags a click that follows the page's own ?next=, and a form whose endpoint redirects off-site", async () => {
+    const steps = { maxPages: 1, maxActionsPerPage: 3, actionWeights: { scroll: 0 }, invariants: dataSafety(), seed: 3 };
+    const cont = await crawl({ ...steps, baseUrl: `${base}${q("/continue", `${off}/phish`)}` });
+    const c = page(cont, "/continue");
+    expect(c.offsiteNavigations?.length).toBeGreaterThan(0);
+    expect(c.offsiteNavigations?.every((n) => n.trigger === "script" && n.to === `${off}/phish` && n.reflected?.in === "query")).toBe(true);
+    expect(c.errors.filter((e) => e.type === "invariant-violation").map((e) => e.message)).toEqual([
+      `[navigation.no-offsite-redirect] open redirect: ${base}${q("/continue", `${off}/phish`)} -> ${off}/phish (script redirect, to the URL in its "next" query parameter)`,
+    ]);
+    expect(getExitCode(cont)).toBe(1);
+    // Listed once in the compact line, however many clicks set it off.
+    expect(formatCompactReport(cont, {}).split("\n")).toContain(
+      `  Off-site redirects: 1 (first: ${base}${q("/continue", `${off}/phish`)} -> ${off}/phish)`,
+    );
+
+    const form = await crawl({ ...steps, baseUrl: `${base}/form` });
+    const f = page(form, "/form");
+    expect(f.offsiteNavigations?.length).toBeGreaterThan(0);
+    for (const nav of f.offsiteNavigations ?? []) {
+      // Named by the endpoint that redirected, which is where the target came from.
+      expect(nav).toMatchObject({ to: `${off}/formhit`, trigger: "server-redirect", reflected: { in: "query", param: "next" } });
+      expect(new URL(nav.from).pathname).toBe("/r302");
+    }
+    expect(f.errors.filter((e) => e.type === "invariant-violation")).toHaveLength(1);
+    expect(f.errors[0]?.offsiteRedirect).toBe(true);
+    expect(getExitCode(form)).toBe(1);
+  }, 120_000);
+
+  it("records no off-site navigation for a page that went to about:blank", async () => {
+    const report = await crawl({ baseUrl: `${base}/blank`, maxPages: 1, invariants: dataSafety() });
+    const p = page(report, "/blank");
+    expect(p.offsiteNavigations).toBeUndefined();
+    expect(p.blockedNavigations).toBeUndefined();
+    expect(p.errors.filter((e) => e.type === "invariant-violation")).toEqual([]);
+    expect(getExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it("keeps a failed same-site redirect a failed load of the page, not an off-site redirect", async () => {
+    const report = await crawl({ baseUrl: `${base}/old`, maxPages: 1, invariants: dataSafety() });
+    const p = page(report, "/old");
+    expect(p.status).toBe("error");
+    expect(p.errors.map((e) => [e.type, e.redirected])).toEqual([["navigation", true]]);
+    expect(p.offsiteNavigations).toBeUndefined();
+    expect(p.redirectedTo).toBeUndefined();
+  }, 120_000);
+
+  it("classifies them the same through the fault route (any --faults run), and dataSafety() fails them there too", async () => {
+    // A rule that matches nothing still puts every request through the route.
+    const report = await crawl({
+      invariants: dataSafety(),
+      faultInjection: [faults.status(500, { urlPattern: /\/never-requested$/ })],
+    });
+    const triggers = (path: string) => page(report, path).offsiteNavigations?.map((n) => n.trigger);
+    expect(triggers("/script")).toEqual(["script"]);
+    expect(triggers("/replace")).toEqual(["script"]);
+    expect(triggers("/meta")).toEqual(["meta-refresh"]);
+    expect(triggers("/r302")).toEqual(["server-redirect"]);
+    expect(triggers("/framed")).toEqual(["frame"]);
+    const violations = (path: string) =>
+      page(report, path)
+        .errors.filter((e) => e.type === "invariant-violation")
+        .map((e) => e.message);
+    expect(violations("/script")[0]).toMatch(/^\[navigation\.no-offsite-redirect\] open redirect: /);
+    expect(violations("/meta")[0]).toMatch(/^\[navigation\.no-offsite-redirect\] open redirect: .*\(meta refresh, /);
+    expect(violations("/framed")).toEqual([]);
+  }, 120_000);
+
+  it("replays a click from a trace as a click, not as the page redirecting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chaos-offsite-replay-"));
+    try {
+      const traceOut = join(dir, "clicky.jsonl");
+      const options = { baseUrl: `${base}/clicky`, maxPages: 1, maxActionsPerPage: 2, actionWeights: { scroll: 0 }, invariants: [noOffsiteRedirect()] };
+      const recorded = await crawl({ ...options, traceOut });
+      expect(page(recorded, "/clicky").offsiteNavigations?.length).toBeGreaterThan(0);
+      const replayed = await crawl({ ...options, traceReplay: traceOut });
+      const p = page(replayed, "/clicky");
+      expect(p.offsiteNavigations?.length).toBeGreaterThan(0);
+      expect(p.offsiteNavigations?.every((n) => n.trigger === "click")).toBe(true);
+      expect(p.errors.filter((e) => e.type === "invariant-violation")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("scan leaves out of open-redirect what a noOffsiteRedirect({ allow }) of crawler.invariants allows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chaos-offsite-scan-"));
+    try {
+      const scan = (crawler: { invariants?: ReturnType<typeof noOffsiteRedirect>[] }, extra: { offsiteRedirectAllow?: string[] } = {}) =>
+        runScan({ url: `${base}/chat`, maxPages: 1, maxActionsPerPage: 0, chaos: false, coverage: false, seed: 1, outDir: dir, crawler: { headless: true, ...crawler }, ...extra });
+      const plain = await scan({});
+      expect(plain.analysis.findings.filter((f) => f.rule === "open-redirect").map((f) => f.severity)).toEqual(["low"]);
+      const allowed = await scan({ invariants: [noOffsiteRedirect({ name: "sso", allow: [off] })] });
+      expect(allowed.analysis.findings.filter((f) => f.rule === "open-redirect" || f.rule === "invariant-violation")).toEqual([]);
+      const byOption = await scan({}, { offsiteRedirectAllow: [off] });
+      expect(byOption.analysis.findings.filter((f) => f.rule === "open-redirect")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 180_000);
 
   it("chaos() fails the run on it through dataSafety()", async () => {
     const result = await chaos({ baseUrl: `${base}${q("/replace", `${off}/b`)}`, maxPages: 1, maxActionsPerPage: 0, headless: true, invariants: dataSafety() });

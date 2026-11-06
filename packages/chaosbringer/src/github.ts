@@ -11,7 +11,7 @@
  * up on the run summary instead of the diff.
  */
 
-import { describeOffsiteNavigation, isOffsiteRedirect } from "./offsite-navigation.js";
+import { describeOffsiteNavigation, distinctOffsiteNavigations, isOffsiteRedirect } from "./offsite-navigation.js";
 import { clusterFailsRun, type ExitCodeOptions } from "./reporter.js";
 import type { CrawlReport } from "./types.js";
 
@@ -86,15 +86,16 @@ export function buildGithubAnnotations(
     });
   }
 
-  // A page that redirected off-site on its own. The run fails on it only
-  // through an invariant (`noOffsiteRedirect`), whose violation is already
-  // an `error` above: one the page's violations name is left to it.
-  // Otherwise a warning when the target came from the page's own URL (an
-  // open redirect), a notice when it did not (a /chat that sends users to
-  // a chat service, an SSO the check allowed).
+  // A page that redirected off-site on its own, each `from -> to` once.
+  // The run fails on it only through an invariant (`noOffsiteRedirect`),
+  // whose violation is already an `error` above and names the page's
+  // redirects: a page with one is left to it. Otherwise a warning when the
+  // target came from the page's own URL (an open redirect), a notice when
+  // it did not (a /chat that sends users to a chat service, an SSO the
+  // check allowed).
   for (const page of report.pages) {
-    for (const nav of (page.offsiteNavigations ?? []).filter(isOffsiteRedirect)) {
-      if (page.errors.some((e) => e.type === "invariant-violation" && e.message.includes(`-> ${nav.to} (`))) continue;
+    if (page.errors.some((e) => e.type === "invariant-violation" && e.offsiteRedirect)) continue;
+    for (const nav of distinctOffsiteNavigations((page.offsiteNavigations ?? []).filter(isOffsiteRedirect))) {
       out.push({
         level: nav.reflected ? "warning" : "notice",
         title: `Off-site redirect: ${truncate(nav.from, 80)}`,

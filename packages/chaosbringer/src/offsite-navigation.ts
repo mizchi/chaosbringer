@@ -27,20 +27,50 @@ export function isOffsiteRedirect(nav: Pick<OffsiteNavigation, "trigger">): bool
   return REDIRECT_TRIGGERS.has(nav.trigger);
 }
 
-/** The redirects of `pages`, in page order (`isOffsiteRedirect`). */
+/**
+ * `navs` with each `from -> to` pair once, first seen first: a delayed
+ * redirect that fires again each time the crawler goes back to the page is
+ * one redirect, not one per time it fired.
+ */
+export function distinctOffsiteNavigations<T extends Pick<OffsiteNavigation, "from" | "to">>(navs: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return navs.filter((n) => {
+    const key = `${n.from} -> ${n.to}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** The redirects of `pages`, in page order, each `from -> to` pair once (`isOffsiteRedirect`, `distinctOffsiteNavigations`). */
 export function offsiteRedirects(pages: ReadonlyArray<Pick<PageResult, "offsiteNavigations">>): OffsiteNavigation[] {
-  return pages.flatMap((p) => (p.offsiteNavigations ?? []).filter(isOffsiteRedirect));
+  return distinctOffsiteNavigations(pages.flatMap((p) => (p.offsiteNavigations ?? []).filter(isOffsiteRedirect)));
 }
 
 /**
  * What started a navigation the crawler blocked. `reason` is the browser's
  * (CDP `Page.frameRequestedNavigation`'s `ClientNavigationReason`), absent
- * when it gave none.
+ * when it gave none; `reflected`, whether the target is in the URL the
+ * navigation left (`reflectedIn`).
+ *
+ * While a step runs, only a link or a form the step activated, or a handler
+ * that sent the page to a URL the page itself wrote (a share button), is
+ * the step's `click`: the user asked to go there. A handler that sent it to
+ * the URL in the page's own address (a "Continue" button that follows
+ * `?next=`) is the open redirect it would be without the click, a `script`.
  */
-export function blockedTrigger(info: { mainFrame: boolean; stepRunning: boolean; reason?: string }): OffsiteNavigationTrigger {
+export function blockedTrigger(info: {
+  mainFrame: boolean;
+  stepRunning: boolean;
+  reason?: string;
+  reflected?: boolean;
+}): OffsiteNavigationTrigger {
   if (!info.mainFrame) return "frame";
-  if (info.stepRunning) return "click";
   if (info.reason === "metaTagRefresh" || info.reason === "httpHeaderRefresh") return "meta-refresh";
+  if (info.stepRunning) {
+    if (info.reason === "anchorClick" || info.reason?.startsWith("formSubmission")) return "click";
+    return info.reflected ? "script" : "click";
+  }
   return "script";
 }
 
@@ -141,6 +171,20 @@ function violation(nav: OffsiteNavigation): string {
 /** Most redirects one violation lists; the rest are counted. */
 const MAX_LISTED = 3;
 
+/**
+ * Set on the check `noOffsiteRedirect` returns: its `allow`, as a test of a
+ * target URL. What tells that check from any other whatever it is named:
+ * the crawler marks its violations (`PageError.offsiteRedirect`), and scan
+ * leaves out of `open-redirect` the redirects it allows.
+ */
+const OFFSITE_REDIRECT_ALLOW: unique symbol = Symbol.for("chaosbringer.noOffsiteRedirect.allow");
+
+/** The `allow` test of an invariant `noOffsiteRedirect` built, or undefined for any other. */
+export function offsiteRedirectAllowOf(inv: Invariant): ((url: string) => boolean) | undefined {
+  const allowed = (inv as { [OFFSITE_REDIRECT_ALLOW]?: (url: string) => boolean })[OFFSITE_REDIRECT_ALLOW];
+  return typeof allowed === "function" ? allowed : undefined;
+}
+
 export interface NoOffsiteRedirectOptions {
   /** Display name for reporting. Default: `navigation.no-offsite-redirect`. */
   name?: string;
@@ -207,22 +251,29 @@ export function compileOffsiteAllow(allow: ReadonlyArray<string | RegExp> = []):
  * iframe. The message says `open redirect` when the target was in the
  * page's own URL, and names the parameter.
  *
+ * Each `from -> to` pair is listed once, however many times it fired.
+ *
  * Runs `afterVisit`: a page that redirected is one the crawler stops at,
  * where the other phases never run. It reads what the crawl recorded, not
- * the DOM, so it costs nothing per page.
+ * the DOM, so it costs nothing per page. Only the crawler records off-site
+ * navigations: under `scenarioLoad`, which runs every invariant after every
+ * step with none, it always passes.
  */
 export function noOffsiteRedirect(options: NoOffsiteRedirectOptions = {}): Invariant {
   const allowed = compileOffsiteAllow(options.allow);
-  return {
+  const check: Invariant = {
     name: options.name ?? "navigation.no-offsite-redirect",
     urlPattern: options.urlPattern,
     when: "afterVisit",
     check({ offsiteNavigations }) {
-      const hits = (offsiteNavigations ?? []).filter((n) => isOffsiteRedirect(n) && !allowed(n.to));
+      const hits = distinctOffsiteNavigations((offsiteNavigations ?? []).filter((n) => isOffsiteRedirect(n) && !allowed(n.to)));
       if (hits.length === 0) return true;
       const shown = hits.slice(0, MAX_LISTED).map(violation);
       const more = hits.length - shown.length;
       return `${shown.join("; ")}${more > 0 ? ` (+${more} more)` : ""}`;
     },
   };
+  // A symbol: kept by a spread (`{ ...check, name }`), left out of JSON.
+  Object.defineProperty(check, OFFSITE_REDIRECT_ALLOW, { value: allowed, enumerable: true });
+  return check;
 }

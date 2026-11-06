@@ -140,6 +140,21 @@ export function buildInvariantPresets(presets: readonly InvariantPreset[], optio
  * which would allow nothing.
  */
 export function parseOffsiteRedirectAllowFlag(values: readonly string[] | undefined, presets: readonly InvariantPreset[]): string[] {
+  const origins = parseOffsiteRedirectOrigins(values);
+  if (origins.length > 0 && !presets.includes("no-offsite-redirect")) {
+    throw new UsageError(
+      "--offsite-redirect-allow configures the no-offsite-redirect check, which is not on: add --invariants no-offsite-redirect or --data-safety",
+    );
+  }
+  return origins;
+}
+
+/**
+ * `parseOffsiteRedirectAllowFlag` without the check it configures: scan's
+ * `--offsite-redirect-allow`, which its `open-redirect` finding reads with
+ * or without the check.
+ */
+export function parseOffsiteRedirectOrigins(values: readonly string[] | undefined): string[] {
   const origins: string[] = [];
   for (const raw of values ?? []) {
     const parts = raw
@@ -158,11 +173,6 @@ export function parseOffsiteRedirectAllowFlag(values: readonly string[] | undefi
       const origin = new URL(part).origin;
       if (!origins.includes(origin)) origins.push(origin);
     }
-  }
-  if (origins.length > 0 && !presets.includes("no-offsite-redirect")) {
-    throw new UsageError(
-      "--offsite-redirect-allow configures the no-offsite-redirect check, which is not on: add --invariants no-offsite-redirect or --data-safety",
-    );
   }
   return origins;
 }

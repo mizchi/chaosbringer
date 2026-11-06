@@ -148,5 +148,14 @@ describe("open redirects on the command line", () => {
     expect(low.stdout).toContain("[security] Off-site redirect: a page sends the browser to another origin on its own");
     const file2 = JSON.parse(readFileSync(join(fixed, "scan-report.json"), "utf8")) as ScanReportFile;
     expect(file2.findings.filter((f) => f.rule === "open-redirect").map((f) => f.severity)).toEqual(["low"]);
-  }, 180_000);
+
+    // An SSO-style origin the scan is told about raises nothing, so --fail-on low passes.
+    const sso = join(dir, "scan-chat-allowed");
+    const allowed = await cli([
+      "scan", "--url", chat, ...one, "--no-chaos", "--no-coverage", "--offsite-redirect-allow", off, "--fail-on", "low", "--quiet", "--out", sso,
+    ]);
+    expect(allowed.status, allowed.stderr).toBe(0);
+    const file3 = JSON.parse(readFileSync(join(sso, "scan-report.json"), "utf8")) as ScanReportFile;
+    expect(file3.findings.filter((f) => f.rule === "open-redirect")).toEqual([]);
+  }, 240_000);
 });

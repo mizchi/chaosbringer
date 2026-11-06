@@ -37,6 +37,7 @@ const ROUND_TRIPS: Record<string, string[]> = {
   axe: ["--axe"],
   invariants: ["--invariants", "not-blank,xss-marker", "--invariants", "data-safety"],
   "data-safety": ["--data-safety"],
+  "offsite-redirect-allow": ["--offsite-redirect-allow", "https://sso.example.com,http://127.0.0.1:9000", "--offsite-redirect-allow", "https://pay.example.com"],
   "aria-targets": ["--aria-targets"],
   "no-coverage": ["--no-coverage"],
   "hang-ms": ["--hang-ms", "1500"],

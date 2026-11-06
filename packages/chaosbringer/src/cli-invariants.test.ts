@@ -229,4 +229,16 @@ describe("scan's --invariants / --data-safety", () => {
     expect(() => scan(["--invariants", "nope"])).toThrow(UsageError);
     expect(() => scan(["--invariants", ""])).toThrow("--invariants needs at least one name");
   });
+
+  it("takes --offsite-redirect-allow with or without the check: scan's open-redirect finding reads it either way", () => {
+    expect(scan(["--offsite-redirect-allow", "https://login.example.com/,https://pay.example.net"]).offsiteRedirectAllow).toEqual([
+      "https://login.example.com",
+      "https://pay.example.net",
+    ]);
+    expect(scan(["--data-safety", "--offsite-redirect-allow", "https://login.example.com"]).offsiteRedirectAllow).toEqual([
+      "https://login.example.com",
+    ]);
+    expect(scan([]).offsiteRedirectAllow).toBeUndefined();
+    expect(() => scan(["--offsite-redirect-allow", "https://login.example.com/authorize"])).toThrow(UsageError);
+  });
 });
