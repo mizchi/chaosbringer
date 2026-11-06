@@ -56,13 +56,13 @@ jobs:
       # Both installs run apt-get through sudo, and the runner's Ubuntu mirror
       # is sometimes slow rather than down: on Nov 5-6 2026 it served the
       # ~22 MB of fonts `install-deps` fetches (the libraries are already on
-      # the image) at ~39 kB/s, 9m22s, so a 10-minute job was cancelled
-      # before its tests and an 8-minute step bound killed the download. The
-      # step bound is the install's own budget: a slow mirror still finishes
-      # inside it, and a stalled one fails the install step by name instead
-      # of timing out the job (chaos-pr-gate.yml has the 24-minute hang that
-      # bound is for). Each job's timeout is what it needed before plus these
-      # 15 minutes.
+      # the image) at 39-46 kB/s, 8 to 9.5 minutes, so a 10-minute job was
+      # cancelled partway through its tests and an 8-minute step bound killed
+      # the download. The step bound is the install's own budget: a slow
+      # mirror still finishes inside it, and a stalled one fails the install
+      # step by name instead of timing out the job (chaos-pr-gate.yml has the
+      # 24-minute hang that bound is for). Each job's timeout is what it
+      # needed before plus these 15 minutes.
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         timeout-minutes: 15
