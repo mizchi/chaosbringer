@@ -24,7 +24,8 @@ env:
 jobs:
   loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 plus the install step's 15-minute bound.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -48,12 +49,16 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # Bounded for a stalled apt mirror, and long enough for a slow one; see
+      # chaos-pr-gate.yml.
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: npx playwright install --with-deps chromium
 
       - name: Install Playwright system deps only (cache hit path)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 15
         run: npx playwright install-deps chromium
 
       - name: Run dogfood loop with seeded-baseline assertion

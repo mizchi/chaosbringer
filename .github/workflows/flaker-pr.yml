@@ -14,7 +14,8 @@ permissions:
 jobs:
   flaker-merge:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 plus the install step's 15-minute bound.
+    timeout-minutes: 35
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +41,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      # Bounded for a stalled apt mirror, and long enough for a slow one; see
+      # chaos-pr-gate.yml.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Restore flaker data
