@@ -12,7 +12,8 @@ on: [pull_request]
 jobs:
   load-and-chaos:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 for the run itself, plus the Playwright install's 25 (see that step).
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
+      # `--with-deps` also runs apt-get for Chromium's system packages, and
+      # the runner's Ubuntu mirror can be slow rather than down: GitHub's
+      # runners have taken 8 to 13.5 minutes for the ~22 MB of fonts apt
+      # fetches there. The step bound fails a stalled mirror by name instead
+      # of timing out the job, and leaves room for a slow one.
       - if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
         run: pnpm exec playwright install --with-deps chromium
 
       # Boot the app. Adapt to your stack — Docker compose, `pnpm dev`, etc.
@@ -140,8 +147,21 @@ assertSlo(report, slo);   // throws → exit 1 → CI red
 - **`pnpm dev &` is fragile.** Real CI usually wants a `docker compose up`
   or a built bundle running on a known port. The pattern above is the
   smallest reproducer, not what you should ship.
-- **Browser binaries dominate cold-cache install time.** The cache step
-  above is worth ~90 seconds per PR.
+- **A cold cache costs the browser download and apt.** The cache step above
+  saves the ~150 MB browser download, worth ~90 seconds per PR. The apt part
+  of `--with-deps` depends on the runner's Ubuntu mirror. It usually takes
+  seconds, but it has taken over 10 minutes. That is what the 25-minute step
+  bound and the job's matching headroom are for.
+- **Making apt's part cached too.** This repo's
+  [`.github/actions/install-playwright`](https://github.com/mizchi/chaosbringer/blob/main/.github/actions/install-playwright/action.yml)
+  keeps apt's downloaded archives in the Actions cache. It checks each one
+  against the signed package lists before apt sees it, because apt itself
+  trusts a cached archive on name and size alone. To use it, copy it into
+  your repo's `.github/actions/`. It runs `pnpm exec playwright` from the repo
+  root, so adapt that line for another package manager. Replace the install
+  step above with a step that `uses:` it, passing the browser cache's
+  `cache-hit` as `browser-cached`, and keep `timeout-minutes` on that step.
+  Its header comment explains the design.
 
 ## Related
 
