@@ -5,31 +5,39 @@ description: >-
   Actions cache so the next run installs them without the Ubuntu mirror.
 
 # Why: `playwright install-deps` runs apt-get, and every library it asks for
-# is already on the runner image. What apt downloads is ~20-22 MB of fonts,
+# is already on the runner image. What apt downloads is ~16-22 MB of fonts,
 # and the runner's mirror has served those at 22-46 kB/s, 8 to 13.5 minutes
 # per install (Nov 5-6 2026; see the install bound in ci.yml). This action
-# keeps those archives. With them, apt only installs from local files, and the
-# mirror is asked for nothing but the package lists.
+# keeps those archives. With them, apt installs from local files and asks the
+# mirror for little more than the package lists.
 #
 # How:
-#   1. Restore ~/.cache/playwright-apt. The key is the image and the Playwright
-#      version, which together decide the package set; any older entry of the
-#      same OS is the fallback.
-#   2. Copy the archives into /var/cache/apt/archives, where apt-get looks
-#      before downloading.
+#   1. Restore ~/.cache/playwright-apt: the newest entry for this image and
+#      Playwright version (which together decide the package set), else the
+#      newest for the OS.
+#   2. Run `apt-get update`, and copy each restored archive whose SHA256 the
+#      package lists name into /var/cache/apt/archives, where apt-get looks
+#      before downloading. The rest (superseded versions, or a file that is not
+#      what its name says) are dropped, and apt downloads those packages.
 #   3. Install as before (`install-deps`, or `install --with-deps` when the
 #      browser has to be downloaded too).
-#   4. When the exact key was not restored, `apt-get autoclean` drops archives
-#      the package lists no longer offer (superseded versions from a fallback
-#      entry). Then the archives this job put there (the restored ones and the
-#      ones apt just downloaded, told apart from the image's own files by a
-#      marker) are saved under the exact key.
+#   4. `apt-get autoclean` drops archives the lists no longer offer. Then the
+#      archives this job put there (the seeded ones and the ones apt just
+#      downloaded, told apart from the image's own files by a marker) are
+#      saved, under a key ending in a hash of their contents, unless the
+#      restored entry already holds exactly those.
 #
-# Trust: apt checks a local archive against the hash in the signed package
-# lists before installing it, and downloads it again on a mismatch, so an
-# archive from the cache is installed only if it is the one the mirror would
-# have served. A pull request's cache entries are visible only to that pull
-# request: it can read main's entries but not write them.
+# Trust: apt installs a file it finds in /var/cache/apt/archives on its name
+# and size alone, without checking its hash. That is why step 2 checks each
+# cached archive against the lists that `apt-get update` has just fetched
+# and verified against the archive's signature. Whatever a cache entry holds,
+# apt is given only archives whose content those lists name. Entries are
+# written only by runs of this repo's workflows, and a pull request can read
+# main's entries but cannot write them.
+#
+# Playwright runs from the repo root: the workspace's node-linker is hoisted,
+# so the root's playwright is the one every package runs (one version in the
+# lockfile). A package that ever gets its own would need its directory here.
 #
 # The caller's step keeps `timeout-minutes`: a composite step cannot carry
 # one, and a cache miss still downloads at the mirror's speed.
@@ -40,11 +48,6 @@ inputs:
       'true' when ~/.cache/ms-playwright was restored, so only the system
       packages are installed; anything else also downloads Chromium.
     default: "false"
-  working-directory:
-    description: >-
-      Where to run `pnpm exec playwright` (a job's `defaults.run` does not
-      reach a composite action's steps).
-    default: "."
 
 runs:
   using: composite
@@ -52,41 +55,60 @@ runs:
     - name: Key the apt archive cache
       id: key
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
       run: |
         version=$(pnpm exec playwright --version)
         version=${version##* }
-        prefix="playwright-apt-${ImageOS:-unknown-os}-"
-        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-        echo "key=$prefix${ImageVersion:-unknown-image}-playwright-$version" >> "$GITHUB_OUTPUT"
+        os="playwright-apt-${ImageOS:-unknown-os}-"
+        echo "os=$os" >> "$GITHUB_OUTPUT"
+        echo "base=$os${ImageVersion:-unknown-image}-playwright-$version-" >> "$GITHUB_OUTPUT"
 
+    # Saved keys end in a hash of the archives, so `key` never matches
+    # exactly; the restore-keys pick the newest entry by prefix.
     - name: Restore apt's archives
       id: restore
       uses: actions/cache/restore@v4
       with:
         path: ~/.cache/playwright-apt
-        key: ${{ steps.key.outputs.key }}
-        restore-keys: ${{ steps.key.outputs.prefix }}
+        key: ${{ steps.key.outputs.base }}
+        restore-keys: |
+          ${{ steps.key.outputs.base }}
+          ${{ steps.key.outputs.os }}
 
     # The cache is an optimisation: a step of it that fails warns and lets
     # the install run as it would without it.
-    - name: Seed apt's archive directory
+    - name: Seed apt's archive directory with the archives the lists name
       shell: bash
       run: |
         cache="$HOME/.cache/playwright-apt"
+        warn() { echo "::warning title=apt archive cache::$1"; }
         mkdir -p "$cache"
         # Archives copied in or downloaded after this point are this job's.
         touch "$RUNNER_TEMP/playwright-apt.marker"
         shopt -s nullglob
         debs=("$cache"/*.deb)
-        if [ ${#debs[@]} -gt 0 ] && ! sudo cp -- "${debs[@]}" /var/cache/apt/archives/; then
-          echo "::warning title=apt archive cache::could not copy the cached archives into /var/cache/apt/archives; apt downloads them instead"
+        seeded=0
+        if [ ${#debs[@]} -gt 0 ]; then
+          sums="$RUNNER_TEMP/playwright-apt.sha256"
+          if sudo apt-get update -qq && lists=(/var/lib/apt/lists/*_Packages*) && [ ${#lists[@]} -gt 0 ] &&
+            /usr/lib/apt/apt-helper cat-file "${lists[@]}" | sed -n 's/^SHA256: //p' > "$sums"; then
+            for deb in "${debs[@]}"; do
+              sum=$(sha256sum "$deb" | cut -d' ' -f1)
+              if ! grep -qxF "$sum" "$sums"; then
+                echo "Dropped ${deb##*/}: the package lists name no archive with its SHA256."
+              elif sudo cp --preserve=timestamps -- "$deb" /var/cache/apt/archives/; then
+                seeded=$((seeded + 1))
+              else
+                warn "could not copy ${deb##*/} into /var/cache/apt/archives; apt downloads it instead"
+              fi
+            done
+          else
+            warn "could not read the package lists to check the cached archives against; apt downloads them instead"
+          fi
         fi
-        echo "Seeded /var/cache/apt/archives with ${#debs[@]} cached archives ($(du -sh "$cache" | cut -f1))."
+        echo "Seeded /var/cache/apt/archives with $seeded of ${#debs[@]} cached archives."
 
     - name: Install Chromium and its system packages
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
       env:
         BROWSER_CACHED: ${{ inputs.browser-cached }}
       run: |
@@ -98,29 +120,36 @@ runs:
 
     - name: Collect apt's archives
       id: collect
-      if: steps.restore.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        BASE: ${{ steps.key.outputs.base }}
+        RESTORED: ${{ steps.restore.outputs.cache-matched-key }}
       run: |
         cache="$HOME/.cache/playwright-apt"
         warn() { echo "::warning title=apt archive cache::$1"; }
+        # `key` is written only when there is something to save.
         sudo apt-get autoclean -qq || warn "apt-get autoclean failed; superseded archives may be cached too"
-        rm -f "$cache"/*.deb
-        mapfile -t debs < <(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -cnewer "$RUNNER_TEMP/playwright-apt.marker")
-        count=${#debs[@]}
-        if [ "$count" -eq 0 ]; then
+        mapfile -t debs < <(find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -cnewer "$RUNNER_TEMP/playwright-apt.marker" | sort)
+        if [ ${#debs[@]} -eq 0 ]; then
           warn "apt left no archives in /var/cache/apt/archives, so there is nothing to cache and the next run downloads them again"
-        elif ! cp -- "${debs[@]}" "$cache"/; then
-          warn "could not copy apt's archives for caching"
-          count=0
+          exit 0
         fi
-        echo "count=$count" >> "$GITHUB_OUTPUT"
-        echo "Caching $count archives ($(du -sh "$cache" | cut -f1))."
+        key="$BASE$(sha256sum -- "${debs[@]}" | cut -d' ' -f1 | sha256sum | cut -c1-16)"
+        if [ "$key" = "$RESTORED" ]; then
+          echo "The ${#debs[@]} archives are the restored entry's; nothing to save."
+          exit 0
+        fi
+        rm -f "$cache"/*.deb
+        if cp --preserve=timestamps -- "${debs[@]}" "$cache"/; then
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "Caching ${#debs[@]} archives ($(du -sh "$cache" | cut -f1)) as $key."
+        else
+          warn "could not copy apt's archives for caching"
+        fi
 
-    # Not when nothing was collected: an empty entry would be restored by its
-    # exact key on every later run, which then never collects again.
     - name: Save apt's archives
-      if: steps.restore.outputs.cache-hit != 'true' && steps.collect.outputs.count != '0'
+      if: steps.collect.outputs.key != ''
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/playwright-apt
-        key: ${{ steps.key.outputs.key }}
+        key: ${{ steps.collect.outputs.key }}

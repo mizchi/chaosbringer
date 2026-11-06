@@ -67,6 +67,8 @@ const problems = [];
 let blocks = 0;
 let parsed = 0;
 let execs = 0;
+/** `pnpm exec` commands in blocks whose working directory is only known at run time. */
+let unchecked = 0;
 
 /** Whether `pnpm exec <bin>` run in `cwd` (relative to the repo root) finds `bin`. */
 function execResolves(bin, cwd) {
@@ -133,8 +135,12 @@ for (const file of files) {
         `${file}: \`run:\` at ${path}${name ? ` ("${name}")` : ""} is not valid shell\n    ${msg}`,
       );
     }
-    // A working-directory built from an expression is only known at run time.
-    if (cwd.includes("${{")) continue;
+    // A working-directory built from an expression is only known at run time:
+    // counted, so the summary does not claim to have checked them.
+    if (cwd.includes("${{")) {
+      unchecked += [...shell.matchAll(/(?:^|[\s;&|(])pnpm\s+exec\s/g)].length;
+      continue;
+    }
     for (const line of shell.split("\n")) {
       // Comments may name the command they replaced.
       if (line.trimStart().startsWith("#")) continue;
@@ -154,12 +160,15 @@ for (const file of files) {
 }
 
 console.log(
-  `parsed ${parsed}/${files.length} workflow and composite action files, checked ${blocks} run: blocks and ${execs} \`pnpm exec\` commands`,
+  `parsed ${parsed}/${files.length} workflow and composite action files, checked ${blocks} run: blocks and ${execs} \`pnpm exec\` commands` +
+    (unchecked > 0 ? ` (${unchecked} more not checked: their working directory is an expression)` : ""),
 );
 if (problems.length > 0) {
   for (const p of problems) console.log("  FAIL " + p);
   process.exit(1);
 }
 console.log(
-  "every workflow and composite action parses as YAML, every run: block parses as shell, and every `pnpm exec` finds its bin",
+  "every workflow and composite action parses as YAML, every run: block parses as shell, and every " +
+    (unchecked > 0 ? "checked " : "") +
+    "`pnpm exec` finds its bin",
 );

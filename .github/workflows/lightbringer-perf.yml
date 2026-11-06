@@ -46,8 +46,6 @@ jobs:
       - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
         uses: ./.github/actions/install-playwright
-        with:
-          working-directory: packages/lightbringer
       - name: measure (median of 5 runs)
         env:
           BENCH_FIXED: "1"
@@ -93,8 +91,6 @@ jobs:
       - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
         uses: ./.github/actions/install-playwright
-        with:
-          working-directory: packages/lightbringer
       - name: measure production build with coverage
         env:
           PERF_COV: "1"

@@ -141,7 +141,6 @@ jobs:
         uses: ./.github/actions/install-playwright
         with:
           browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
-          working-directory: packages/lightbringer
 
       # The local specs only: they measure the vite fixture app the config's
       # webServer starts. example.spec.ts (example.com), react-dev.spec.ts
