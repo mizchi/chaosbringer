@@ -191,13 +191,30 @@ invariant violation per page, which reads as an accessibility bug in the app.
 An invariant declares such packages in `peers`; the presets already do.
 
 The data-safety presets (`invariants.dataSafety()`: `xssMarker`,
-`injectedMarkup`, `prototypePollution`, `renderedGarbage`; and `notBlank`,
-which `dataSafety()` leaves out) catch bad data that did damage without
-throwing: a payload that ran, `NaN` on screen, a polluted prototype. From the
-shell, `--invariants data-safety,not-blank` (or `--data-safety`) turns them
-on for the crawl, `shard` and `scan`, each with its defaults; their options
-(`markers`, `tokens`, `ignore`, `urlPattern`) are code-only. The `Repro:`
-line carries the flag. Details: `docs/recipes/data-safety.md`.
+`injectedMarkup`, `prototypePollution`, `renderedGarbage`,
+`noOffsiteRedirect`; and `notBlank`, which `dataSafety()` leaves out) catch
+bad data that did damage without throwing: a payload that ran, `NaN` on
+screen, a polluted prototype, a `?next=` that sends the user to another
+site. From the shell, `--invariants data-safety,not-blank` (or
+`--data-safety`) turns them on for the crawl, `shard` and `scan`, each with
+its defaults; their options (`markers`, `tokens`, `ignore`, `urlPattern`)
+are code-only, but for `noOffsiteRedirect`'s `allow` (an SSO provider the
+site redirects to), which is `--offsite-redirect-allow <origins>`. The
+`Repro:` line carries the flags. Details: `docs/recipes/data-safety.md`.
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+// An open redirect: a page that leaves for another origin by a script, a
+// meta refresh or a 3xx (not a click) fails; `allow` lets the SSO through.
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F",
+  invariants: [invariants.noOffsiteRedirect({ allow: ["https://login.example.com"] })],
+});
+// Every page's off-site navigations, with what started them:
+// report.pages[0].offsiteNavigations
+//   → [{ from, to, trigger: "script", reflected: { in: "query", param: "next" } }]
+```
 
 ## Driving a known path instead of a random one
 

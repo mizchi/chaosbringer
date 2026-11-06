@@ -29,15 +29,18 @@ chaosbringer --url http://localhost:3000 --invariants data-safety,not-blank
 chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
 ```
 
-The names are `data-safety` (the four `dataSafety()` returns, not
+The names are `data-safety` (the five `dataSafety()` returns, not
 `not-blank`), `xss-marker`, `injected-markup`, `prototype-pollution`,
-`rendered-garbage`, `not-blank`, and `axe` for `--axe`. A list is
+`rendered-garbage`, `no-offsite-redirect`, `not-blank`, and `axe` for `--axe`. A list is
 comma-separated, the flag repeatable, and a check named twice (or a member
 named beside `data-safety`) runs once; an unknown name is refused with exit
 2 before the browser starts. The flags build each preset with its defaults:
 `markers`, `tokens`, `ignore`, `selector`, `urlPattern` and `when` have no
-flag, so a run that needs them uses the library. The `Repro:` line carries
-the flag back as one `--invariants` list.
+flag, so a run that needs them uses the library. The one that has a flag is
+`noOffsiteRedirect`'s `allow`: `--offsite-redirect-allow
+https://login.example.com` (comma-separated, repeatable, origins only;
+refused without the check). The `Repro:` line carries the flags back as one
+`--invariants` list and one `--offsite-redirect-allow` list.
 
 A failure is a page error of type `invariant-violation`, which always fails
 the run's exit code.
@@ -55,24 +58,30 @@ doesn't throw.
 | `injectedMarkup({ markers, attribute, anyJavascriptUrl })` | `data.injected-markup` | an element carries `attribute` (default `data-cb-injected`), or an `href` / `src` / `action` / `formaction` / `xlink:href` holds a `javascript:` URL that names a marker |
 | `prototypePollution()` | `data.prototype-pollution` | `Object.prototype` has an enumerable key |
 | `renderedGarbage({ tokens, ignore, selector })` | `data.rendered-garbage` | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` as a word |
+| `noOffsiteRedirect({ allow })` | `navigation.no-offsite-redirect` | the page sent the browser to another origin on its own (a script, a meta refresh, a 3xx; not a click, not an iframe) that `allow` does not list. `open redirect: …` when the target was in the page's own URL |
 | `notBlank({ selector, minText, errorText })` | `data.not-blank` | the page shows fewer than `minText` (default 1) characters of visible text, or shows one of `errorText` (strings match as substrings, or RegExps) |
 
-`invariants.dataSafety(options)` returns the first four, in that order. It
+`invariants.dataSafety(options)` returns the first five, in that order. It
 leaves `notBlank` out because a canvas or image-only page is blank by
 design; add it when every page you crawl shows text.
 
 Every preset takes `name`, `urlPattern` and `when` (default
-`"afterActions"`). `dataSafety` takes `when` and `urlPattern` for all four,
+`"afterActions"`), but `noOffsiteRedirect`, which always runs `afterVisit`
+and takes `allow` instead of `when`. `dataSafety` takes `when` for the first
+four and `urlPattern` for all five,
 and `markers` for `xssMarker` and `injectedMarkup` (the two that read a
 canary); `prototypePollution` and `renderedGarbage` don't take `markers`. It
 also takes one options object per preset (`xssMarker`, `injectedMarkup`,
-`prototypePollution`, `renderedGarbage`) whose values win. The `data.`
+`prototypePollution`, `renderedGarbage`, `noOffsiteRedirect`) whose values
+win: `dataSafety({ noOffsiteRedirect: { allow: ["https://login.example.com"] } })`. The `data.`
 prefix keeps `chaosbringer scan` reporting a failure as an
 `invariant-violation` finding (an `a11y` prefix would make it an
 accessibility one): `high` for `data.xss-marker`, `data.injected-markup` and
 `data.prototype-pollution`, `medium` for the others, so `--fail-on high`
-stops on hostile data that ran or reached the DOM. One that shows only in a
-chaos crawl (a page that renders `undefined` once its API answers 500) is a
+stops on hostile data that ran or reached the DOM. `noOffsiteRedirect` is
+reported as scan's own `open-redirect` finding instead (`security`, `high`
+when the target was in the URL, `low` when not), which scan raises with or
+without the check. One that shows only in a chaos crawl (a page that renders `undefined` once its API answers 500) is a
 `fault-new-error` resilience finding.
 
 > **Behaviour change:** these used to be `medium` `invariant-violation`
@@ -93,7 +102,36 @@ and lists up to three samples per frame:
 [data.rendered-garbage] rendered garbage: NaN in "Total: NaN", undefined in "Hello undefined" (+1 more)
 [data.not-blank] blank page: 0 characters of visible text in body, fewer than 1
 [data.xss-marker] XSS marker set: in frame http://localhost:3001/embed: window.__xss_fired
+[navigation.no-offsite-redirect] open redirect: http://localhost:3000/go?next=https%3A%2F%2Fevil.invalid%2F -> https://evil.invalid/ (script redirect, to the URL in its "next" query parameter)
 ```
+
+### What `noOffsiteRedirect` counts
+
+The crawl blocks a navigation to another origin before it leaves the
+browser, and follows a redirect hop (so the other host does receive a
+302's request), then stops there. Each is recorded in
+`pages[].offsiteNavigations` with its `trigger`: a `script`, a
+`meta-refresh` and a `server-redirect` are the page leaving on its own,
+which the check fails; a `click` (a crawler step was running: the user asked
+to go) and a `frame` (an iframe) are not. A link straight to another origin
+is never clicked. `reflected` says the target was in the page's own query
+(`{ in: "query", param: "next" }`) or fragment, as written or URL-decoded:
+the open redirect, which the message calls by name. A 302 to a host that is
+down is the same redirect, with `failed` set, not a failed load of the
+page.
+
+`allow` takes origins (`"https://login.example.com"`, no path) and RegExps
+tested on the target URL, for the redirects a site means: an SSO provider, a
+payment page. A crawl only sees the redirects its URLs carry: a `?next=`
+the site never links to with an off-site value is not probed (send one on
+the start URL, as above). See the README's [off-site
+redirects](../../packages/chaosbringer/README.md#off-site-redirects-and-open-redirects)
+for the report fields and output lines.
+
+> **Behaviour change:** `dataSafety()` and `--data-safety` used to have
+> four checks. With `noOffsiteRedirect` in them, a run that passed can fail
+> on a page that redirects off-site; pass `allow` (or
+> `--offsite-redirect-allow`) for the origins it may go to.
 
 ### What `renderedGarbage` leaves alone
 

@@ -161,7 +161,7 @@ Every report includes:
 - `report.seed` — the seed actually used (random if you didn't pass one).
 - `report.reproCommand` — a shell-safe invocation that rebuilds the same run from its CLI flags.
 
-Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict`, `--fail-on-http` and `--fail-on-network` fail on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`. A run with dead links, passing or not, says so under the verdict line, in `--compact` and `--quiet` alike: `  Dead links: 1 (first: http://localhost:3000/old-page <- http://localhost:3000/)`; `--fail-on-dead-links` fails the run on them (`Failed: --fail-on-dead-links: 1 dead link (first: … <- …)`). A run with [warnings](#run-warnings-reportwarnings) says so on the next line, on stdout too: `  Warnings: 1 (first: network fault "api-500" never matched anything — …)`; `--fail-on-warnings` fails the run on them.
+Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict`, `--fail-on-http` and `--fail-on-network` fail on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`. A run with dead links, passing or not, says so under the verdict line, in `--compact` and `--quiet` alike: `  Dead links: 1 (first: http://localhost:3000/old-page <- http://localhost:3000/)`; `--fail-on-dead-links` fails the run on them (`Failed: --fail-on-dead-links: 1 dead link (first: … <- …)`). A run whose pages [redirected off-site](#off-site-redirects-and-open-redirects) on their own (a script, a meta refresh, a 3xx) says so on the next line, failing or not: `  Off-site redirects: 1 (first: http://localhost:3000/go?next=… -> https://evil.invalid/)`; `invariants.noOffsiteRedirect()` (in `--data-safety`) fails the run on them. A run with [warnings](#run-warnings-reportwarnings) says so on the line after, on stdout too: `  Warnings: 1 (first: network fault "api-500" never matched anything — …)`; `--fail-on-warnings` fails the run on them.
 
 `reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise) and `--ignore-http`, the `--axe` / `--invariants` / `--visual-*` checks, `--strict` and the `--fail-on-http` / `--fail-on-network` / `--fail-on-dead-links` / `--fail-on-warnings` rules. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict` / `--baseline-missing`, which compare against another run's report.
 
@@ -598,7 +598,7 @@ Stats land in `report.iframeFaults` — one row per fault with `selector`, `acti
 
 ## Invariants
 
-Invariants are assertions that must hold on every page. They run either `afterLoad` (right after navigation) or `afterActions` (default — after chaos clicks/inputs). Returning `false`, throwing, or returning a string all count as a failure; returning `true` or `void` means the invariant held.
+Invariants are assertions that must hold on every page. They run either `afterLoad` (right after navigation) or `afterActions` (default — after chaos clicks/inputs). A third phase, `afterVisit`, runs once at the end of every visit, also on a page the crawl stopped at (it [redirected off-site](#off-site-redirects-and-open-redirects), its load failed), where the other two never run; `ctx.page` may show another site or an error page there, so an `afterVisit` check reads what the crawl recorded (`ctx.offsiteNavigations`, `ctx.errors`), as `invariants.noOffsiteRedirect()` does. Returning `false`, throwing, or returning a string all count as a failure; returning `true` or `void` means the invariant held.
 
 ```ts
 import { chaos, type Invariant } from "chaosbringer";
@@ -875,16 +875,21 @@ chaosbringer --url http://localhost:3000 --strict --data-safety
 chaosbringer --url http://localhost:3000 --invariants data-safety,not-blank
 # A reflected payload delivered on the start URL (it only sets a marker):
 chaosbringer --url 'http://localhost:3000/search?q=%3Cdetails%20open%20ontoggle%3D%22window.__cb_xss_fired%3D1%22%3E%3C%2Fdetails%3E' --invariants xss-marker
+# An open redirect: does /login send the browser wherever ?next= says?
+chaosbringer --url 'http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F' --invariants no-offsite-redirect
+# A site whose login goes to an SSO provider:
+chaosbringer --url http://localhost:3000 --data-safety --offsite-redirect-allow https://login.example.com
 chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
 ```
 
 | Name | Builds | Fails when |
 |---|---|---|
-| `data-safety` | `invariants.dataSafety()`: the next four | any of them does |
+| `data-safety` | `invariants.dataSafety()`: the next five | any of them does |
 | `xss-marker` | `invariants.xssMarker()` (`data.xss-marker`) | a marker (`window.__cb_xss_fired`, `window.__xss_fired`) is set: a payload ran |
 | `injected-markup` | `invariants.injectedMarkup()` (`data.injected-markup`) | a `data-cb-injected` element, or a `javascript:` URL or `on*` attribute naming a marker, is in the DOM |
 | `prototype-pollution` | `invariants.prototypePollution()` (`data.prototype-pollution`) | `Object.prototype` has an enumerable key |
 | `rendered-garbage` | `invariants.renderedGarbage()` (`data.rendered-garbage`) | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` |
+| `no-offsite-redirect` | `invariants.noOffsiteRedirect()` (`navigation.no-offsite-redirect`) | the page sent the browser to another origin on its own: a script, a meta refresh or a 3xx, not a click. `open redirect: …` when the target was in the page's own URL. See [Off-site redirects](#off-site-redirects-and-open-redirects) |
 | `not-blank` | `invariants.notBlank()` (`data.not-blank`) | the page shows no visible text. Not in `data-safety`, as `dataSafety()` leaves it out: a canvas or image-only page is blank by design |
 | `axe` | `invariants.axe()`, as `--axe` | an axe-core violation (needs `axe-core`) |
 
@@ -893,12 +898,91 @@ Each preset runs with its defaults: its options (your own `markers` or
 `tokens`, an `ignore` selector for a page that writes about `undefined`, a
 `urlPattern`, `when`) have no flag, and are set through the library, in
 `chaos({ invariants })`, `ChaosCrawler` or `runScan({ crawler: { invariants } })`.
+The one exception is `no-offsite-redirect`'s `allow`: `--offsite-redirect-allow
+<origins>` (comma-separated, repeatable, scheme and host only) lists the
+origins a page may redirect to, such as an SSO provider. It is refused (exit
+2) for a value that is not a bare origin, and without the check it configures
+(`--invariants no-offsite-redirect` or `--data-safety`).
 A violation is an `invariant-violation` page error, which fails the run in
 every mode; `scan` reports it as an `invariant-violation` finding, `high`
 for `xss-marker`, `injected-markup` and `prototype-pollution`, `medium`
-otherwise. `shard` forwards both flags to its workers and `flake` to every
+otherwise; `no-offsite-redirect` is reported as scan's own `open-redirect`
+finding instead. `shard` forwards the flags to its workers and `flake` to every
 run; `minimize` checks them on every replay (a v2 trace records them); `drive`
-takes neither.
+takes none of them.
+
+## Off-site redirects and open redirects
+
+The crawl stays on its origin. A navigation to another one is blocked
+before it leaves the browser, and a redirect hop is let through, so a page
+whose URL answers with a 3xx to another origin is followed there and the
+crawl stops (that host does receive the request). Each such navigation is
+recorded on its page in `pages[].offsiteNavigations`, beside the bare URLs
+of `blockedNavigations`:
+
+```jsonc
+{
+  "from": "http://localhost:3000/go?next=https%3A%2F%2Fevil.invalid%2F",
+  "to": "https://evil.invalid/",
+  "trigger": "script",                          // click | script | meta-refresh | server-redirect | frame
+  "reflected": { "in": "query", "param": "next" } // the target is in the page's own URL (query or fragment)
+  // "failed": "net::ERR_CONNECTION_REFUSED"    // a redirect whose target did not load
+}
+```
+
+| `trigger` | What started it | A redirect? |
+|---|---|---|
+| `click` | a crawler step was running (a button whose handler sets `location`, a same-site link that redirected off-site). A link straight to another origin is never clicked at all (`actions[].blockedExternal`) | no: the user asked to go |
+| `script` | a script, with no step running: `location.href = …`, `location.replace()`, a form it submitted | yes |
+| `meta-refresh` | `<meta http-equiv="refresh">` or a `Refresh` header | yes |
+| `server-redirect` | the page's URL answered a 3xx to another origin | yes |
+| `frame` | an iframe navigating off-site | no: not the page |
+
+A page that redirected is one the crawl stops at: its `redirectedTo` names
+the target (the URL the crawler blocked, never the browser's error page
+`chrome-error://chromewebdata/`), and it carries no links, actions, perf or
+the other site's errors. A 302 to a host that is down is the same
+off-site redirect, with the error in `failed` and the page's warning
+(`redirected off-site to <url>, which failed to load (net::ERR_…); not
+crawled`): the page is `success` with no errors, not a failed load of its
+own URL. The full report lists every off-site navigation under `OFF-SITE
+NAVIGATIONS` (`<page> -> <target> (script redirect; target from the "next"
+query parameter)`), and the compact and `--quiet` output count the
+redirects under the verdict line, after the dead links: `  Off-site
+redirects: 1 (first: <page> -> <target>)`. With `--github-annotations` each
+redirect is a `::warning` when its target was in the page's URL and a
+`::notice` otherwise.
+
+None of that fails a run. `invariants.noOffsiteRedirect({ allow })` does
+(it is in `dataSafety()`, and `--invariants no-offsite-redirect`): it fails
+every page that redirected to an origin `allow` does not list (an origin
+string, `"https://login.example.com"`, or a RegExp tested on the target
+URL), as an `invariant-violation` that is an `error` annotation and fails
+the run in every mode:
+
+```text
+[navigation.no-offsite-redirect] open redirect: http://localhost:3000/go?next=… -> https://evil.invalid/ (script redirect, to the URL in its "next" query parameter)
+[navigation.no-offsite-redirect] off-site redirect: http://localhost:3000/chat -> https://discord.example/invite (server redirect)
+```
+
+It runs `afterVisit`, a phase for checks that read what the crawl recorded
+(`ctx.offsiteNavigations`, `ctx.errors`) rather than the DOM: unlike
+`afterLoad` and `afterActions`, it also runs on a page the crawl stopped
+at. `scan` raises an `open-redirect` finding (category `security`) from the
+same records: `high` when the target was in the page's URL, `low` when not.
+
+> **Behaviour change:** `dataSafety()` and `--data-safety` now include
+> `noOffsiteRedirect`, so a run with them fails on a page that redirects
+> off-site on its own (pass `allow` / `--offsite-redirect-allow` for an SSO
+> provider). A script redirect's `redirectedTo` named the browser's error
+> page, `chrome-error://chromewebdata/`, and `blockedNavigations` listed it
+> beside the real target; both now name only the target. A 302 to a host
+> that is down was a failed load of the on-site URL (`[navigation]
+> page.goto: net::ERR_CONNECTION_REFUSED at <its URL>`, status `error`,
+> exit 1); it is now that off-site redirect, `success` with no errors, and
+> fails a run only through the check. The text report lists the off-site
+> navigations it used to only count, and the compact and `--quiet` output
+> have the `Off-site redirects:` line.
 
 ## Action heatmap
 
@@ -1118,7 +1202,7 @@ The `meta` entry holds the seed, the baseUrl, the start time and, from format **
  "setup":{"settle":"adaptive","excludePatterns":["/logout"],"storageState":"auth.json","invariants":"data-safety"}}
 ```
 
-The keys are `timeout`, `settle`, `excludePatterns`, `ignoreErrorPatterns`, `ignoreHttpPatterns`, `spaPatterns`, `storageState`, `harReplay`, `device`, `network`, `httpCache` (`false` for `--no-http-cache`), `invariants` (the `--invariants` / `--data-safety` presets as one `--invariants` value) and `axe` (`{ tags? }`). A file is recorded by its path, as the crawl was given it (a relative one resolves against the directory you replay from), never by its contents: the cookies of a `--storage-state` stay in that file. The crawl takes no secret of its own, so a trace holds none; an invariant set in code is a closure and is not recorded. A v1 trace (no `setup`) still reads, and replays with the defaults.
+The keys are `timeout`, `settle`, `excludePatterns`, `ignoreErrorPatterns`, `ignoreHttpPatterns`, `spaPatterns`, `storageState`, `harReplay`, `device`, `network`, `httpCache` (`false` for `--no-http-cache`), `invariants` (the `--invariants` / `--data-safety` presets as one `--invariants` value), `offsiteRedirectAllow` (`--offsite-redirect-allow`'s origins as one comma list) and `axe` (`{ tags? }`). A file is recorded by its path, as the crawl was given it (a relative one resolves against the directory you replay from), never by its contents: the cookies of a `--storage-state` stay in that file. The crawl takes no secret of its own, so a trace holds none; an invariant set in code is a closure and is not recorded. A v1 trace (no `setup`) still reads, and replays with the defaults.
 
 Replay skips link discovery and the RNG entirely: only URLs listed as `visit` entries are loaded, and only the recorded actions are performed. Missing selectors are logged as failed actions and the run continues.
 
@@ -1306,7 +1390,7 @@ They do not fail the run, and they are always shown: the full report ends with a
 | --- | --- |
 | No navigation errors, no invariant violations | **0** |
 | At least one page with `status: "error"` or `"timeout"` | **1** |
-| At least one invariant violation (any mode) | **1** |
+| At least one invariant violation (any mode), `noOffsiteRedirect` (in `--data-safety`) on a page that redirected off-site included | **1** |
 | A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
 | `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
@@ -1314,7 +1398,7 @@ They do not fail the run, and they are always shown: the full report ends with a
 | `--fail-on-network` and a request that failed at the transport level | **1** |
 | `--fail-on-dead-links` and a crawled link that answered 404 / 5xx | **1** |
 | `--fail-on-warnings` and a [run warning](#run-warnings-reportwarnings) (a fault that never fired, a sitemap that could not be read, a missing `--baseline`, …) | **1** |
-| The CLI refused to run: an unknown flag or `--invariants` name, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`, a `--seed-from-sitemap` path; a sitemap URL is fetched best-effort), a `--baseline` that is not there under `--baseline-missing fail`, or an optional peer `--axe` (or `--invariants axe`) / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
+| The CLI refused to run: an unknown flag or `--invariants` name, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex, an `--offsite-redirect-allow` that is not an origin or has no check to configure), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`, a `--seed-from-sitemap` path; a sitemap URL is fetched best-effort), a `--baseline` that is not there under `--baseline-missing fail`, or an optional peer `--axe` (or `--invariants axe`) / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
 | Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
@@ -1456,7 +1540,7 @@ chaosbringer minimize \
   --trace-out min.trace.jsonl
 ```
 
-`--url` defaults to the trace's `baseUrl`. Every replay runs with the crawl flags that shape a replay: `--timeout`, `--settle`, `--headless` / `--no-headless`, `--exclude`, `--ignore-error`, `--ignore-http`, `--ignore-analytics`, `--ignore-preset`, `--spa`, `--storage-state`, `--har-replay`, `--device`, `--network`, `--no-http-cache`, `--invariants`, `--data-safety`, `--axe`, `--axe-tags` (`REPLAY_CRAWL_FLAGS`; `minimize --help` prints the same list). A v2 trace records the ones its crawl was given (all but `--headless` / `--no-headless`), and those apply by default: `minimize` prints them (`replaying with the trace's setup: --settle adaptive --storage-state auth.json`). A flag given replaces what was recorded for its setting (`replaced by the flags given: --storage-state`); `--ignore-error`, `--ignore-analytics` and `--ignore-preset` are one setting, and so are `--invariants`, `--data-safety`, `--axe` and `--axe-tags`, except that `--axe-tags` given alone retags the recorded axe check (and is refused, exit 2, when the trace recorded none). A recorded relative `--storage-state` or `--har-replay` path is read from the directory `minimize` runs in, and when it is not there the refusal says it came from the trace's setup and that the flag replaces it. A `chaosbringer --trace-replay` does not read the recorded setup: give it the flags yourself. A crawl flag that cannot apply is refused, exit 2, with why (`chaosbringer minimize: --seed does not apply to minimize: the trace decides the actions, …`): `--seed`, `--max-actions`, `--aria-targets`, `--seed-from-sitemap`, `--shard` and `--trace-replay` (the trace decides the pages and the actions), `--strict` and the `--fail-on-*` gates (`--match` decides whether a replay reproduced), `--cdp` (every replay starts its own browser), and the `--perf*`, `--budget` and `--visual-*` flags (replays are not measured). So is a crawl command after `--`: the trace carries the crawl's setup, and a `Repro:` line's `--seed` is exactly what it replaces. `--max-pages` is accepted and changes nothing, which a stderr line says: a replay visits every page of the trace. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
+`--url` defaults to the trace's `baseUrl`. Every replay runs with the crawl flags that shape a replay: `--timeout`, `--settle`, `--headless` / `--no-headless`, `--exclude`, `--ignore-error`, `--ignore-http`, `--ignore-analytics`, `--ignore-preset`, `--spa`, `--storage-state`, `--har-replay`, `--device`, `--network`, `--no-http-cache`, `--invariants`, `--data-safety`, `--offsite-redirect-allow`, `--axe`, `--axe-tags` (`REPLAY_CRAWL_FLAGS`; `minimize --help` prints the same list). A v2 trace records the ones its crawl was given (all but `--headless` / `--no-headless`), and those apply by default: `minimize` prints them (`replaying with the trace's setup: --settle adaptive --storage-state auth.json`). A flag given replaces what was recorded for its setting (`replaced by the flags given: --storage-state`); `--ignore-error`, `--ignore-analytics` and `--ignore-preset` are one setting, and so are `--invariants`, `--data-safety`, `--offsite-redirect-allow`, `--axe` and `--axe-tags`, except that `--axe-tags` given alone retags the recorded axe check (and is refused, exit 2, when the trace recorded none), and `--offsite-redirect-allow` given alone replaces only the recorded allow list (refused, exit 2, when the recorded checks have no `no-offsite-redirect`). A recorded relative `--storage-state` or `--har-replay` path is read from the directory `minimize` runs in, and when it is not there the refusal says it came from the trace's setup and that the flag replaces it. A `chaosbringer --trace-replay` does not read the recorded setup: give it the flags yourself. A crawl flag that cannot apply is refused, exit 2, with why (`chaosbringer minimize: --seed does not apply to minimize: the trace decides the actions, …`): `--seed`, `--max-actions`, `--aria-targets`, `--seed-from-sitemap`, `--shard` and `--trace-replay` (the trace decides the pages and the actions), `--strict` and the `--fail-on-*` gates (`--match` decides whether a replay reproduced), `--cdp` (every replay starts its own browser), and the `--perf*`, `--budget` and `--visual-*` flags (replays are not measured). So is a crawl command after `--`: the trace carries the crawl's setup, and a `Repro:` line's `--seed` is exactly what it replaces. `--max-pages` is accepted and changes nothing, which a stderr line says: a replay visits every page of the trace. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
 
 ### `flake`
 
@@ -1591,7 +1675,8 @@ chaosbringer --url http://localhost:3000 \
 | `--budget <k=ms,...>` | Per-metric performance budget (repeatable; each ms > 0) | — |
 | `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed; exit 2 without it) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
-| `--invariants <list>` | Run invariant presets on every page, by name (comma-separated, repeatable, merged): `data-safety` (`invariants.dataSafety()`: `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`; not `not-blank`), any of those or `not-blank`, `axe` (= `--axe`). Each with its defaults; an unknown name exits 2. See [Bad and hostile data](#bad-and-hostile-data-from-the-cli) | — |
+| `--invariants <list>` | Run invariant presets on every page, by name (comma-separated, repeatable, merged): `data-safety` (`invariants.dataSafety()`: `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`, `no-offsite-redirect`; not `not-blank`), any of those or `not-blank`, `axe` (= `--axe`). Each with its defaults; an unknown name exits 2. See [Bad and hostile data](#bad-and-hostile-data-from-the-cli) | — |
+| `--offsite-redirect-allow <origins>` | Origins `no-offsite-redirect` lets a page redirect to (an SSO provider): comma-separated, repeatable, scheme and host only. Exit 2 for a value that is not an origin, or without the check. See [Off-site redirects](#off-site-redirects-and-open-redirects) | — |
 | `--data-safety` | Shorthand for `--invariants data-safety` | false |
 | `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`; exit 2 without them) | — |
 | `--visual-threshold <n>` | pixelmatch color distance (0..1) | 0.1 |
@@ -1628,7 +1713,7 @@ chaosbringer --url http://localhost:3000 \
 | `--fail-on-network` | Fail on a request that failed at the transport level (`net::ERR_…`; not the `ERR_ABORTED` of a stylesheet or script that answered 4xx / 5xx, which is an HTTP error) | false |
 | `--fail-on-dead-links` | Fail on a crawled link that answered 404 / 5xx | false |
 | `--fail-on-warnings` | Fail on a run with [warnings](#run-warnings-reportwarnings). From this CLI: a `--seed-from-sitemap` that could not be read or listed no URL, a `--network` profile or `--no-http-cache` that did not apply, a missing (or empty) `--baseline`, `--perf` that could not measure a page. The API's and the fixture's fault rules and drivers add their own | false |
-| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), any dead links (`Dead links: 1 (first: <url> <- <source>)`) and [warnings](#run-warnings-reportwarnings) (`Warnings: 1 (first: <message>)`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
+| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), any dead links (`Dead links: 1 (first: <url> <- <source>)`), [off-site redirects](#off-site-redirects-and-open-redirects) (`Off-site redirects: 1 (first: <page> -> <target>)`) and [warnings](#run-warnings-reportwarnings) (`Warnings: 1 (first: <message>)`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
 | `--help`, `-h` | Show help, with a line for every subcommand | — |
 | `--version`, `-V` | Print the installed version | — |
 
