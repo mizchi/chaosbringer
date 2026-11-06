@@ -43,7 +43,7 @@ jobs:
       # Bounded for a stalled apt mirror, and long enough for a slow one; see
       # chaos-pr-gate.yml. (No job timeout here: the default is 6 hours.)
       - run: pnpm exec playwright install --with-deps chromium
-        timeout-minutes: 15
+        timeout-minutes: 25
       - name: measure (median of 5 runs)
         env:
           BENCH_FIXED: "1"
@@ -86,7 +86,7 @@ jobs:
       # Bounded for a stalled apt mirror, and long enough for a slow one; see
       # chaos-pr-gate.yml. (No job timeout here: the default is 6 hours.)
       - run: pnpm exec playwright install --with-deps chromium
-        timeout-minutes: 15
+        timeout-minutes: 25
       - name: measure production build with coverage
         env:
           PERF_COV: "1"

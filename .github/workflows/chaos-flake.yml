@@ -18,8 +18,8 @@ permissions:
 jobs:
   flake:
     runs-on: ubuntu-latest
-    # 60 plus the install step's 15-minute bound.
-    timeout-minutes: 75
+    # 60 plus the install step's 25-minute bound.
+    timeout-minutes: 85
     defaults:
       run:
         working-directory: packages/chaosbringer
@@ -48,12 +48,12 @@ jobs:
       # chaos-pr-gate.yml.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Install Playwright system deps (cache hit)
         if: steps.pw-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: pnpm exec playwright install-deps chromium
 
       - name: Start fixture server

@@ -14,8 +14,8 @@ permissions:
 jobs:
   flaker-merge:
     runs-on: ubuntu-latest
-    # 20 plus the install step's 15-minute bound.
-    timeout-minutes: 35
+    # 20 plus the install step's 25-minute bound.
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
       # chaos-pr-gate.yml.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Restore flaker data

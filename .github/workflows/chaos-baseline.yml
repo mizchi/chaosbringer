@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     # 25 for every step but the Playwright install (the three `--perf` crawls
     # add ~2 minutes; the PR gate got the same +5), plus the install step's
-    # 15-minute bound: running into the timeout would fail the whole run.
-    timeout-minutes: 40
+    # 25-minute bound: running into the timeout would fail the whole run.
+    timeout-minutes: 50
     defaults:
       run:
         working-directory: packages/chaosbringer
@@ -52,18 +52,19 @@ jobs:
       # its Get: line, until the then 25-minute job timeout; that run uploaded
       # no baseline. No apt setting bounded that stall, so the step timeouts do:
       # a hang becomes a failed install step that says what hung, instead of
-      # a timed-out job. 15, not 8: a mirror can also be slow without
+      # a timed-out job. 25, not 8: a mirror can also be slow without
       # stalling. On Nov 5 2026 it served install-deps' ~22 MB of fonts at
       # ~39 kB/s: the same download took a CI job about 9.5 minutes, and the
-      # PR gate's 8-minute bound killed it.
+      # PR gate's 8-minute bound killed it. A day later one took 13.5 minutes
+      # (26 kB/s); ci.yml's build-and-test has the arithmetic behind 25.
       - name: Install Playwright Chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Install Playwright system deps (cache hit)
         if: steps.pw-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: pnpm exec playwright install-deps chromium
 
       - name: Start fixture server
