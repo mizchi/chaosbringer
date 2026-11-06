@@ -39,7 +39,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      # The two installs below run apt-get through sudo. The runner image
+      # The install below runs apt-get through sudo. The runner image
       # already bounds apt's own waits (/etc/apt/apt.conf.d/zz-retries: a 15 s
       # timeout and one retry, then the next mirror), and a chaos-baseline
       # nightly still hung 24 minutes on one InRelease fetch past that
@@ -49,16 +49,13 @@ jobs:
       # stalling. On Nov 5 2026 it served install-deps' ~22 MB of fonts at
       # ~39 kB/s: the same download took a CI job about 9.5 minutes, and this
       # step's 8-minute bound killed it. A day later one took 13.5 minutes
-      # (26 kB/s); ci.yml's build-and-test has the arithmetic behind 25.
-      - name: Install Playwright Chromium
-        if: steps.pw-cache.outputs.cache-hit != 'true'
+      # (26 kB/s). The action caches apt's archives, so the bound is for the
+      # runs that miss that cache (see ci.yml's build-and-test).
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Install Playwright system deps (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: pnpm exec playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.pw-cache.outputs.cache-hit }}
 
       # The chaos and perf baselines are picked separately. The chaos one
       # comes from the last successful chaos-baseline run on main. The perf

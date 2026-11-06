@@ -41,12 +41,26 @@ import { parse } from "yaml";
 
 const root = new URL("../", import.meta.url).pathname;
 const dir = new URL("../.github/workflows/", import.meta.url).pathname;
-const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
-if (files.length === 0) {
+const workflows = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+if (workflows.length === 0) {
   // A checker that finds nothing to check is the defect it is here to prevent.
   console.error("no workflow files under .github/workflows — this check ran on nothing");
   process.exit(2);
 }
+// The repo's own composite actions run shell for the workflows that use them,
+// so their `run:` blocks are read the same way. Paths are relative to the
+// repo root from here on.
+const actionsDir = join(root, ".github/actions");
+const actions = existsSync(actionsDir)
+  ? readdirSync(actionsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .flatMap((d) =>
+        ["action.yml", "action.yaml"]
+          .map((f) => `.github/actions/${d.name}/${f}`)
+          .filter((p) => existsSync(join(root, p))),
+      )
+  : [];
+const files = [...workflows.map((f) => `.github/workflows/${f}`), ...actions];
 
 const scratch = mkdtempSync(join(tmpdir(), "wf-shell-"));
 const problems = [];
@@ -87,7 +101,7 @@ function collectRuns(node, path, out, cwd = ".") {
 }
 
 for (const file of files) {
-  const text = readFileSync(join(dir, file), "utf8");
+  const text = readFileSync(join(root, file), "utf8");
   let doc;
   try {
     doc = parse(text);
@@ -140,12 +154,12 @@ for (const file of files) {
 }
 
 console.log(
-  `parsed ${parsed}/${files.length} workflow files, checked ${blocks} run: blocks and ${execs} \`pnpm exec\` commands`,
+  `parsed ${parsed}/${files.length} workflow and composite action files, checked ${blocks} run: blocks and ${execs} \`pnpm exec\` commands`,
 );
 if (problems.length > 0) {
   for (const p of problems) console.log("  FAIL " + p);
   process.exit(1);
 }
 console.log(
-  "every workflow parses as YAML, every run: block parses as shell, and every `pnpm exec` finds its bin",
+  "every workflow and composite action parses as YAML, every run: block parses as shell, and every `pnpm exec` finds its bin",
 );

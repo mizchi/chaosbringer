@@ -49,17 +49,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      # Bounded for a stalled apt mirror, and long enough for a slow one; see
-      # chaos-pr-gate.yml.
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      # Bounded for a stalled apt mirror, and long enough for a slow one on a
+      # run that misses the action's archive cache; see chaos-pr-gate.yml.
+      - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 25
-        run: npx playwright install-deps chromium
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Run dogfood loop with seeded-baseline assertion
         id: loop_run
