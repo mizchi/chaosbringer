@@ -29,13 +29,16 @@ const clip = (s: string, max = 90) => (s.length > max ? `${s.slice(0, max - 1)}â
 const exits = (run: CaseRun) => `${run.exitCode} / ${run.defaultExit}`;
 
 /**
- * Like `describeObserved`, but with the third-party server's ephemeral origin
- * replaced by `<third-party>`, so a blocked-navigation row doesn't churn on
- * every run as the port changes.
+ * Like `describeObserved`, but with the servers' ephemeral origins replaced
+ * by `<app>` and `<third-party>` (as written, or URL-encoded in a query), so
+ * an open-redirect row doesn't churn on every run as the ports change.
  */
 function reportObserved(s: ObservedSignal): string {
   if (s.kind === "blocked-navigation") return `blocked navigation to <third-party>${new URL(s.url).pathname}`;
-  return describeObserved(s);
+  return describeObserved(s)
+    .replace(/http:\/\/127\.0\.0\.1:\d+/g, "<app>")
+    .replace(/http:\/\/localhost:\d+/g, "<third-party>")
+    .replace(/http%3A%2F%2Flocalhost%3A\d+/gi, "<third-party>");
 }
 
 /** `pass` when the verdict and the delivery check both pass, else the first problem, in bold. */
