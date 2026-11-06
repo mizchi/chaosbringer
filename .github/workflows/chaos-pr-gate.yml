@@ -49,8 +49,9 @@ jobs:
       # stalling. On Nov 5 2026 it served install-deps' ~22 MB of fonts at
       # ~39 kB/s: the same download took a CI job about 9.5 minutes, and this
       # step's 8-minute bound killed it. A day later one took 13.5 minutes
-      # (26 kB/s). The action caches apt's archives, so the bound is for the
-      # runs that miss that cache (see ci.yml's build-and-test).
+      # (26 kB/s). The bound catches a stalled apt on any run; its size is set
+      # for the runs that miss the action's archive cache (see ci.yml's
+      # build-and-test).
       - name: Install Playwright Chromium and its system packages
         timeout-minutes: 25
         uses: ./.github/actions/install-playwright

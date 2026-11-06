@@ -17,23 +17,27 @@ description: >-
 #      newest for the OS.
 #   2. Run `apt-get update`, and copy each restored archive whose SHA256 the
 #      package lists name into /var/cache/apt/archives, where apt-get looks
-#      before downloading. The rest (superseded versions, or a file that is not
-#      what its name says) are dropped, and apt downloads those packages.
+#      before downloading. The rest (archives whose content no listed archive
+#      has, such as versions the lists no longer offer) are dropped, and apt
+#      downloads those packages. A listed archive apt does not use is kept.
 #   3. Install as before (`install-deps`, or `install --with-deps` when the
 #      browser has to be downloaded too).
 #   4. `apt-get autoclean` drops archives the lists no longer offer. Then the
 #      archives this job put there (the seeded ones and the ones apt just
 #      downloaded, told apart from the image's own files by a marker) are
 #      saved, under a key ending in a hash of their contents, unless the
-#      restored entry already holds exactly those.
+#      restored entry's key or an entry already saved (by a job that got here
+#      first) names exactly those. An entry is never overwritten: a file in
+#      it that the seed drops is downloaded again on each run, until a new
+#      image or Playwright version starts a new entry.
 #
 # Trust: apt installs a file it finds in /var/cache/apt/archives on its name
 # and size alone, without checking its hash. That is why step 2 checks each
-# cached archive against the lists that `apt-get update` has just fetched
-# and verified against the archive's signature. Whatever a cache entry holds,
-# apt is given only archives whose content those lists name. Entries are
-# written only by runs of this repo's workflows, and a pull request can read
-# main's entries but cannot write them.
+# cached archive against the lists apt holds after `apt-get update`, which it
+# verified against the archive's signature when it fetched them. Whatever a
+# cache entry holds, apt is given only archives whose content those lists
+# name. Entries are written only by runs of this repo's workflows, and a pull
+# request can read main's entries but cannot write them.
 #
 # Playwright runs from the repo root: the workspace's node-linker is hoisted,
 # so the root's playwright is the one every package runs (one version in the
@@ -92,8 +96,9 @@ runs:
           if sudo apt-get update -qq && lists=(/var/lib/apt/lists/*_Packages*) && [ ${#lists[@]} -gt 0 ] &&
             /usr/lib/apt/apt-helper cat-file "${lists[@]}" | sed -n 's/^SHA256: //p' > "$sums"; then
             for deb in "${debs[@]}"; do
-              sum=$(sha256sum "$deb" | cut -d' ' -f1)
-              if ! grep -qxF "$sum" "$sums"; then
+              if ! sum=$(sha256sum -- "$deb" | cut -d' ' -f1); then
+                warn "could not hash ${deb##*/}; apt downloads it instead"
+              elif ! grep -qxF "$sum" "$sums"; then
                 echo "Dropped ${deb##*/}: the package lists name no archive with its SHA256."
               elif sudo cp --preserve=timestamps -- "$deb" /var/cache/apt/archives/; then
                 seeded=$((seeded + 1))
@@ -134,12 +139,19 @@ runs:
           warn "apt left no archives in /var/cache/apt/archives, so there is nothing to cache and the next run downloads them again"
           exit 0
         fi
-        key="$BASE$(sha256sum -- "${debs[@]}" | cut -d' ' -f1 | sha256sum | cut -c1-16)"
+        if ! hash=$(sha256sum -- "${debs[@]}" | cut -d' ' -f1 | sha256sum | cut -c1-16); then
+          warn "could not hash apt's archives for caching"
+          exit 0
+        fi
+        key="$BASE$hash"
         if [ "$key" = "$RESTORED" ]; then
           echo "The ${#debs[@]} archives are the restored entry's; nothing to save."
           exit 0
         fi
-        rm -f "$cache"/*.deb
+        if ! rm -f -- "$cache"/*.deb; then
+          warn "could not clear $cache for caching"
+          exit 0
+        fi
         if cp --preserve=timestamps -- "${debs[@]}" "$cache"/; then
           echo "key=$key" >> "$GITHUB_OUTPUT"
           echo "Caching ${#debs[@]} archives ($(du -sh "$cache" | cut -f1)) as $key."
@@ -147,8 +159,20 @@ runs:
           warn "could not copy apt's archives for caching"
         fi
 
-    - name: Save apt's archives
+    # The jobs of a run compute the same key, and all but the first to save
+    # it would log a "Cache save failed" warning. They finish their installs
+    # minutes apart, so a lookup first skips almost all of those.
+    - name: Look for an entry holding these archives
+      id: saved
       if: steps.collect.outputs.key != ''
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/playwright-apt
+        key: ${{ steps.collect.outputs.key }}
+        lookup-only: true
+
+    - name: Save apt's archives
+      if: steps.collect.outputs.key != '' && steps.saved.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
         path: ~/.cache/playwright-apt

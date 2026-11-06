@@ -135,17 +135,17 @@ for (const file of files) {
         `${file}: \`run:\` at ${path}${name ? ` ("${name}")` : ""} is not valid shell\n    ${msg}`,
       );
     }
-    // A working-directory built from an expression is only known at run time:
-    // counted, so the summary does not claim to have checked them.
-    if (cwd.includes("${{")) {
-      unchecked += [...shell.matchAll(/(?:^|[\s;&|(])pnpm\s+exec\s/g)].length;
-      continue;
-    }
     for (const line of shell.split("\n")) {
       // Comments may name the command they replaced.
       if (line.trimStart().startsWith("#")) continue;
       for (const [, bin] of line.matchAll(/(?:^|[\s;&|(])pnpm\s+exec\s+([^\s;&|()]+)/g)) {
         if (bin.startsWith("-") || bin.includes("$") || bin.includes("GHEXPR")) continue;
+        // A working-directory built from an expression is only known at run
+        // time: counted, so the summary does not claim to have checked it.
+        if (cwd.includes("${{")) {
+          unchecked++;
+          continue;
+        }
         execs++;
         if (execResolves(bin, cwd)) continue;
         problems.push(
