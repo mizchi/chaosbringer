@@ -1,0 +1,51 @@
+name: ai-reviwer
+
+# Records a deterministic risk decision for every open PR (no LLM) in an
+# append-only ledger on the `ai-reviwer-ledger` branch. In `mode: observe`
+# (.ai-review/policy.yml) nothing is posted on PRs; in `advise` it adds risk
+# labels and a verdict comment. It never blocks or merges.
+# https://github.com/mizchi/ai-reviewer
+#
+# Not triggered by pull_request: on fork PRs that runs third-party code, so only
+# workflow_run / push / schedule hold write permissions here. The action reads PR
+# heads as git objects and never executes them.
+on:
+  # Decide once CI has finished: check runs are complete at this point. PRs with
+  # checks still running are left for the next run instead of being read as failures.
+  workflow_run:
+    workflows: ["CI", "chaos-pr-gate", "flaker-pr", "lightbringer-perf", "model plans", "playground-dogfood"]
+    types: [completed]
+  # Replay landed commits and backfill reverts. Limited to main so pushes to PR
+  # branches don't add a skipped "ai-reviwer" check to every PR.
+  push:
+    branches: [main]
+  # Catches up on anything an event missed (e.g. a PR whose CI was skipped by paths).
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+# Anything not listed is none.
+#   contents: write       push the ledger to its own branch
+#   pull-requests: write  list open PRs; verdict comment (advise and up)
+#   issues: write         risk labels (advise and up)
+#   checks: read          derive build/test evidence from check runs
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+
+concurrency:
+  group: ai-reviwer
+  cancel-in-progress: false
+
+jobs:
+  ai-reviwer:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # Pinned by sha, not a tag: this runs with write permissions.
+      - uses: mizchi/ai-reviewer@032356cf70aac69fa9ff5a73078bb27d5d78736d
