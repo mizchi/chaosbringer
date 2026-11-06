@@ -551,10 +551,21 @@ regression, so it drops straight into CI alongside the budget gate.
 ## CI
 
 [`.github/workflows/lightbringer-perf.yml`](https://github.com/mizchi/chaosbringer/blob/main/.github/workflows/lightbringer-perf.yml) is a working perf gate —
-lightbringer measuring its own fixtures — that doubles as the copy-this template:
+lightbringer measuring its own fixtures — that doubles as the copy-this template.
+It installs Playwright through this repo's own
+[`.github/actions/install-playwright`](https://github.com/mizchi/chaosbringer/blob/main/.github/actions/install-playwright/action.yml),
+which caches apt's archives. Copy that action too (it runs `pnpm exec playwright`
+from the repo root; the
+[GitHub Actions cookbook](https://github.com/mizchi/chaosbringer/blob/main/docs/cookbook/github-actions.md)
+says how to adopt it), or install directly. Either way, keep
+`timeout-minutes: 25` on the install step and add 25 to the job's own
+`timeout-minutes`, if it sets one. apt's Ubuntu mirror has taken over 10
+minutes, and a job timeout that leaves no room for it cancels the job before
+the step bound fires.
 
 ```yaml
 - run: pnpm exec playwright install --with-deps chromium
+  timeout-minutes: 25   # fails a stalled apt mirror by name
 - run: pnpm exec playwright test <your-specs> --repeat-each=5   # median needs N runs
 - run: node node_modules/lightbringer/scripts/median.mjs        # exits 1 on budget violation
 ```
