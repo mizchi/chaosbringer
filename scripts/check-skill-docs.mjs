@@ -20,17 +20,18 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 const skillDir =
-  process.argv[2] ?? new URL("../.claude/skills/chaosbringer", import.meta.url).pathname;
+  process.argv[2] ?? join(import.meta.dirname, "../.claude/skills/chaosbringer");
 // Import the package's *source*, not its build. `dist/` is gitignored and can
 // be stale or mid-rebuild, and a checker that reports real exports as missing
 // because of that is worse than no checker. Run under tsx.
 const pkgEntry = new URL("../packages/chaosbringer/src/index.ts", import.meta.url);
 const mod = await import(pkgEntry.href).catch((err) => {
   console.error(
-    `cannot import ${pkgEntry.pathname} — run this with tsx ` +
+    `cannot import ${fileURLToPath(pkgEntry)} — run this with tsx ` +
       `(\`pnpm check:skill-docs\`).\n${err.message}`,
   );
   process.exit(2);
@@ -100,7 +101,7 @@ const cliHelp = readFileSync(
 // since `chaosbringer model calibrate --runs 3` is parsed by `model/cli.ts`.
 // The union is deliberately loose: the failure worth catching is an invented
 // flag that appears in no parser at all.
-const cliDir = new URL("../packages/chaosbringer/src/", import.meta.url).pathname;
+const cliDir = join(import.meta.dirname, "../packages/chaosbringer/src");
 const cliSources = [];
 const collect = (dir) => {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -197,7 +198,7 @@ for (const rel of files) {
 // What this does catch is a flag that appears in no parser at all — a typo, a
 // rename, an invented option — in a scheduled workflow nobody watches.
 // Verified against a planted `--bogus-flag`.
-const workflowDir = new URL("../.github/workflows/", import.meta.url).pathname;
+const workflowDir = join(import.meta.dirname, "../.github/workflows");
 let workflowFiles = [];
 try {
   workflowFiles = readdirSync(workflowDir).filter((f) => /\.ya?ml$/.test(f));
