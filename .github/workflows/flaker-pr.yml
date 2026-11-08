@@ -14,7 +14,8 @@ permissions:
 jobs:
   flaker-merge:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 plus the install step's 25-minute bound.
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -40,9 +41,14 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
+      # Bounded for a stalled apt mirror, and long enough for a slow one on a
+      # run that misses the action's archive cache; see chaos-pr-gate.yml.
+      # Only when the browser cache missed, as before: this job has run its
+      # Vitest suites without the font packages on a cache hit.
+      - name: Install Playwright Chromium and its system packages
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
 
       - name: Restore flaker data
         uses: actions/cache@v4

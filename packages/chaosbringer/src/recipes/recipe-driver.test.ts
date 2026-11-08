@@ -131,3 +131,59 @@ describe("recipeDriver selection", () => {
     }
   });
 });
+
+// recipeDriver took no vars: a verified recipe with `{{password}}` typed the
+// braces on every crawl that matched it.
+describe("recipeDriver vars", () => {
+  const templated = (preconditions: ActionRecipe["preconditions"]) =>
+    recipe({
+      name: "login",
+      status: "verified",
+      preconditions,
+      steps: [{ kind: "fill", selector: "#p", value: "{{password}}" }],
+    });
+
+  it("matches preconditions with the vars filled in, and replays the steps with them", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert(templated([{ urlPattern: "^https://x/{{tenant}}/" }]));
+    const driver = recipeDriver({ store, vars: { tenant: "acme", password: "pw" } });
+    expect(await driver.selectAction(fakeStep("https://x/other/login"))).toBeNull();
+    const step = fakeStep("https://x/acme/login");
+    const pick = await driver.selectAction(step);
+    expect(pick?.kind).toBe("custom");
+    const fills: string[] = [];
+    const page = { ...step.page, fill: async (_s: string, v: string) => void fills.push(v) } as unknown as DriverStep["page"];
+    const result = await (pick as { perform: (p: DriverStep["page"]) => Promise<{ success: boolean }> }).perform(page);
+    expect(result.success).toBe(true);
+    expect(fills).toEqual(["pw"]);
+  });
+
+  it("passes the vars down a requires chain, to the dependency's steps", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert(recipe({ name: "auth", status: "candidate", steps: [{ kind: "fill", selector: "#p", value: "{{password}}" }] }));
+    store.upsert(recipe({ name: "login", status: "verified", requires: ["auth"], steps: [{ kind: "fill", selector: "#q", value: "{{user}}" }] }));
+    const step = fakeStep("https://x/acme/login");
+    const pick = await recipeDriver({ store, vars: { password: "pw", user: "ada" } }).selectAction(step);
+    expect(pick?.kind).toBe("custom");
+    const fills: string[] = [];
+    const page = { ...step.page, fill: async (_s: string, v: string) => void fills.push(v) } as unknown as DriverStep["page"];
+    const result = await (pick as { perform: (p: DriverStep["page"]) => Promise<{ success: boolean }> }).perform(page);
+    expect(result.success).toBe(true);
+    expect(fills).toEqual(["pw", "ada"]);
+    expect(store.get("auth")!.stats.successCount).toBe(1);
+  });
+
+  it("skips a recipe whose preconditions use a variable it was not given, and fails one whose steps do", async () => {
+    const store = new RecipeStore({ localDir: dir, globalDir: false, silent: true });
+    store.upsert(templated([{ urlPattern: "^https://x/{{tenant}}/" }]));
+    expect(await recipeDriver({ store, vars: { password: "pw" } }).selectAction(fakeStep("https://x/acme/login"))).toBeNull();
+    expect(store.get("login")!.stats.failCount).toBe(0);
+
+    store.upsert(templated([]));
+    const pick = await recipeDriver({ store }).selectAction(fakeStep("https://x/acme/login"));
+    const result = await (pick as { perform: (p: DriverStep["page"]) => Promise<{ success: boolean; error?: string }> }).perform(
+      fakeStep("https://x/acme/login").page,
+    );
+    expect(result).toMatchObject({ success: false, error: 'recipe:login: variable "password" is not defined' });
+  });
+});

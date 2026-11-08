@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { fakeSpan } from "./perf-fixtures.test-helpers.js";
-import { fnv1a, mergeReports, parseShardArg, shardOwns } from "./shard.js";
+import { UsageError } from "./cli-usage.js";
+import {
+  checkWorkerArgs,
+  fnv1a,
+  mergeReports,
+  mergeWorkerPaths,
+  parseShardArg,
+  parseShardCliArgs,
+  shardOwns,
+  shardReproCommand,
+} from "./shard.js";
+import { formatCompactReport, formatReport } from "./reporter.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
 
 function summary(overrides: Partial<CrawlSummary> = {}): CrawlSummary {
@@ -164,6 +175,22 @@ describe("mergeReports", () => {
     expect(merged.pagesVisited).toBe(3);
   });
 
+  it("keeps each shard's off-site navigations, so the merged report lists and counts them all", () => {
+    const nav = (from: string, to: string) => ({ from, to, trigger: "server-redirect" as const });
+    const a = report({
+      blockedExternalNavigations: 1,
+      pages: [page("http://localhost:3000/chat", [], { blockedNavigations: ["http://x.test/i"], offsiteNavigations: [nav("http://localhost:3000/chat", "http://x.test/i")] })],
+    });
+    const b = report({
+      blockedExternalNavigations: 1,
+      pages: [page("http://localhost:3000/go", [], { blockedNavigations: ["http://y.test/p"], offsiteNavigations: [nav("http://localhost:3000/go", "http://y.test/p")] })],
+    });
+    const merged = mergeReports([a, b]);
+    expect(merged.pages.flatMap((p) => p.offsiteNavigations ?? []).map((n) => n.to)).toEqual(["http://x.test/i", "http://y.test/p"]);
+    expect(formatCompactReport(merged).split("\n")).toContain("  Off-site redirects: 2 (first: http://localhost:3000/chat -> http://x.test/i)");
+    expect(formatReport(merged)).toContain("  http://localhost:3000/go -> http://y.test/p (server redirect)");
+  });
+
   it("sums blockedExternalNavigations and recoveryCount", () => {
     const a = report({ blockedExternalNavigations: 2, recoveryCount: 1 });
     const b = report({ blockedExternalNavigations: 3, recoveryCount: 4 });
@@ -268,5 +295,131 @@ describe("mergeReports", () => {
     const mixed = mergeReports([measured("http://x/a", idle), measured("http://x/b", { mode: "adaptive", quietMs: 100 })]);
     expect(mixed.perf).toBeDefined();
     expect(mixed.perf!.settle).toBeUndefined();
+  });
+});
+
+describe("shard CLI", () => {
+  const args = (argv: string[]) => {
+    const parsed = parseShardCliArgs(argv);
+    if (!parsed) throw new Error("parsed as --help");
+    return parsed;
+  };
+
+  it("refuses an unknown flag before a worker starts, by the main crawl's option table", async () => {
+    // Forwarded, it failed in each of the N workers and ended in
+    // `could not read …/shard-0.json` and exit 1.
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--bogus"]))).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+    });
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--max-pages", "0"]))).rejects.toMatchObject({
+      name: "UsageError",
+      message: "--max-pages must be >= 1 (got 0)",
+    });
+    await expect(checkWorkerArgs(args(["--count", "2"]))).rejects.toMatchObject({ message: "--url is required" });
+    await expect(checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--invariants", "nope"]))).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--invariants: unknown invariant "nope" \(known: data-safety, /),
+    });
+    expect(() => args(["--url", "http://x.test/"])).toThrow(UsageError);
+  });
+
+  it("gives every worker the seed given, or one drawn for the run", async () => {
+    expect((await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", "--seed", "42"]))).seed).toBe(42);
+    expect(Number.isInteger((await checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/"]))).seed)).toBe(true);
+  });
+
+  it("names the files the coordinator writes again from the merged report", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    expect((await run([])).files).toEqual({});
+    expect(
+      (await run(["--junit", "j.xml", "--heatmap-out", "h.json", "--failure-artifacts", "fa", "--cluster-artifacts", "--cluster-min-count", "2"]))
+        .files,
+    ).toEqual({ junit: "j.xml", heatmapOut: "h.json", clusterBundles: { bundleDir: "fa", minCount: 2 } });
+  });
+
+  // The merged report was judged by --strict / --baseline-strict alone: a
+  // forwarded --fail-on-http failed each worker's own report, and not the
+  // merged one, whose verdict line said PASS.
+  it("judges the merged report by the exit rules forwarded to the workers", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    expect(
+      (await run(["--strict", "--fail-on-http", "5xx", "--fail-on-network", "--fail-on-dead-links", "--fail-on-warnings"])).exitOptions,
+    ).toEqual({
+      strict: true,
+      baselineStrict: false,
+      http: "5xx",
+      network: true,
+      deadLinks: true,
+      warnings: true,
+    });
+    expect((await run([])).exitOptions).toEqual({ strict: false, baselineStrict: false });
+    await expect(run(["--fail-on-http", "500"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--fail-on-http must be one of 4xx, 5xx \(got "500"\)/),
+    });
+    await expect(run(["--ignore-http", "("])).rejects.toMatchObject({ name: "UsageError", message: expect.stringContaining("--ignore-http") });
+    // Forwarded as given, the value with its flag.
+    expect(args(["--count", "2", "--url", "http://x.test/", "--fail-on-http", "4xx"]).forward).toEqual([
+      "--url",
+      "http://x.test/",
+      "--fail-on-http",
+      "4xx",
+    ]);
+  });
+
+  // Each worker would have run without its baseline and warned.
+  it("refuses --baseline-missing fail on a baseline that is not there, once, before a worker starts", async () => {
+    const run = (extra: string[]) => checkWorkerArgs(args(["--count", "2", "--url", "http://x.test/", ...extra]));
+    await expect(run(["--baseline", "no-such-baseline.json", "--baseline-missing", "fail"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--baseline no-such-baseline\.json: not found, and --baseline-missing fail refuses a run without it/),
+    });
+    await expect(run(["--baseline-missing", "sometimes"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: expect.stringMatching(/^--baseline-missing must be one of warn, fail \(got "sometimes"\)/),
+    });
+    // The bootstrap run: warn is the default.
+    await expect(run(["--baseline", "no-such-baseline.json"])).resolves.toBeDefined();
+  });
+
+  it("reruns the whole sharded run from the merged Repro line", () => {
+    expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --max-pages 3 --shard 1/4 --strict", 4)).toBe(
+      "chaosbringer shard --count 4 --url http://x.test/ --seed 7 --max-pages 3 --strict",
+    );
+    expect(shardReproCommand("chaosbringer --url http://x.test/ --seed 7 --shard 0/2", 2)).toBe(
+      "chaosbringer shard --count 2 --url http://x.test/ --seed 7",
+    );
+  });
+
+  // `shard --quiet` silences the workers, whose lines were the only ones to
+  // name the bundles, trace and log they wrote.
+  it("merges the paths the silenced workers wrote, in the main command's order", () => {
+    const worker0 = [
+      "[PASS] 2 pages, 0 errors, 1.0s (seed=7)",
+      "Log saved to: run.log",
+      "Wrote 0 cluster bundle(s) to out/clusters/",
+      "Report saved to: /tmp/chaos-shard-x/shard-0.json",
+      "JUnit XML saved to: junit.xml",
+    ].join("\n");
+    const worker1 = [
+      "[FAIL] 2 pages, 3 errors, 1.0s (seed=7)",
+      "  Failed: --strict: 1 unhandled rejection",
+      "",
+      "Heatmap saved to: heat.json",
+      "Wrote 2 failure bundle(s) to out/",
+      "Trace saved to: run.trace.jsonl",
+      "Log saved to: run.log",
+      "Wrote 1 cluster bundle(s) to out/clusters/",
+      "Report saved to: /tmp/chaos-shard-x/shard-1.json",
+      "JUnit XML saved to: junit.xml",
+    ].join("\n");
+    // The heatmap, the cluster bundles and the JUnit file are the coordinator's,
+    // written again from the merged report.
+    expect(mergeWorkerPaths([worker0, worker1, "Wrote 1 failure bundle(s) to out/\n"])).toEqual([
+      "Wrote 3 failure bundle(s) to out/",
+      "Trace saved to: run.trace.jsonl",
+      "Log saved to: run.log",
+    ]);
+    expect(mergeWorkerPaths(["[PASS] 1 pages, 0 errors\nReport saved to: /tmp/x.json\n"])).toEqual([]);
   });
 });

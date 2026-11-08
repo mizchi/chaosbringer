@@ -8,11 +8,11 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 
 | Layer | Library | What it touches | When to use |
 |---|---|---|---|
-| **Application state** | (your test setup; see [`#60`](https://github.com/mizchi/chaosbringer/issues/60) for a built-in hook) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
+| **Application state** | `chaos({ setup })` hook ([below](#pre-run-setup-hook)) | Backend rows, storage state, fixtures | "Crawler needs N todos to navigate" |
 | **Network** | `chaosbringer` `faults.*` | HTTP between browser and server (Playwright `route()`) | "What does the UI do when `/api/x` is 500 / slow / aborted" |
 | **Page lifecycle / runtime** | `chaosbringer` `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults) | Inside the server process, before the handler runs | "Do the server's own OTel traces / metrics show the fault, and does the handler degrade gracefully" |
-| **Cloudflare bindings** | (proposed [`#61`](https://github.com/mizchi/chaosbringer/issues/61) `@mizchi/cf-faults`) | KV / Service Binding / D1 / Cache wrappers | "How does the Worker behave when its KV throws" |
+| **Cloudflare bindings** | [`@mizchi/cf-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
 
 **Common confusion:** `faults.status(500, ...)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` (or run both layers together).
 
@@ -42,7 +42,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 - **Authenticated crawls** via Playwright storageState, **device emulation** (iPhone, Pixel, …), **network throttling** (slow-3g, fast-3g, offline).
 - **Sitemap seeding** — prepend every URL in a sitemap.xml (or sitemap index) to the queue.
 - **Parallel sharding** — split a crawl across N processes with `--shard i/N`, then merge via the `shard` subcommand.
-- **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary.
+- **GitHub Actions annotations** — emit `::error` / `::warning` lines so failures show up on the run summary, at the level the run's exit rules give each one.
 - **Playwright Test integration** for when you'd rather run chaos inside an existing test file.
 - **CLI** for running from a shell or CI, with `minimize` / `flake` / `shard` / `diff` / `parity` / `cluster-artifacts` / `recipes` / `load` subcommands.
 
@@ -54,20 +54,6 @@ npx playwright install chromium
 ```
 
 `chaosbringer` targets ESM. Programmatic consumers need `"type": "module"` (or `.mts` files) and `playwright` as a peer dependency.
-
-### Installing from a git ref
-
-`chaosbringer` is currently distributed via GitHub (no npm package yet). Both forms work:
-
-```bash
-# pin a commit SHA
-pnpm add chaosbringer@github:mizchi/chaosbringer#<sha>
-
-# track main
-pnpm add chaosbringer@github:mizchi/chaosbringer
-```
-
-The package's `prepare` script runs `tsc` on install, so `pnpm install` / `npm install` builds `dist/` automatically — no manual step needed.
 
 ## Quick start — CLI
 
@@ -88,7 +74,7 @@ chaosbringer --url http://localhost:3000 --seed 1234567 --max-pages 20
 chaosbringer scan --url http://localhost:3000 --max-pages 30   # → chaosbringer-scan/scan-report.md
 ```
 
-`scan` is described in [`docs/recipes/scan.md`](../../docs/recipes/scan.md).
+`scan` is described in [`docs/recipes/scan.md`](../../docs/recipes/scan.md), and `drive` in [`docs/recipes/drive.md`](../../docs/recipes/drive.md).
 
 ### Preview a crawl in an existing Chromium tab
 
@@ -173,11 +159,15 @@ main();
 
 Every report includes:
 - `report.seed` — the seed actually used (random if you didn't pass one).
-- `report.reproCommand` — a shell-safe invocation that rebuilds the same run.
+- `report.reproCommand` — a shell-safe invocation that rebuilds the same run from its CLI flags.
 
-Both are printed in the compact header (`[PASS] … (seed=42)`) and the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`).
+Both are printed in the full report (`Seed: 42` / `Repro: chaosbringer --url … --seed 42`), and the seed in the compact header (`[PASS] … (seed=42)`). A failing `--compact` run adds the rules that failed it (`Failed: --strict: 1 unhandled rejection`), three error clusters and the `Repro:` line. The clusters a failing rule counts come first, largest first (under `--baseline-strict` the ones the baseline did not have, then invariant violations and the kinds `--strict`, `--fail-on-http` and `--fail-on-network` fail on), then the rest; with `--baseline`, a cluster the baseline did not have is marked `(new)`. A run with dead links, passing or not, says so under the verdict line, in `--compact` and `--quiet` alike: `  Dead links: 1 (first: http://localhost:3000/old-page <- http://localhost:3000/)`; `--fail-on-dead-links` fails the run on them (`Failed: --fail-on-dead-links: 1 dead link (first: … <- …)`). A run whose pages [redirected off-site](#off-site-redirects-and-open-redirects) on their own (a script, a meta refresh, a 3xx) says so on the next line, failing or not: `  Off-site redirects: 1 (first: http://localhost:3000/go?next=… -> https://evil.invalid/)`; `invariants.noOffsiteRedirect()` (in `--data-safety`) fails the run on them. A run with [warnings](#run-warnings-reportwarnings) says so on the line after, on stdout too: `  Warnings: 1 (first: network fault "api-500" never matched anything — …)`; `--fail-on-warnings` fails the run on them.
 
-To rerun an exact failure locally, copy the `Repro:` line from CI.
+`reproCommand` carries every CLI flag that changes what the run does or how it exits: from `--storage-state`, `--device` and `--timeout` to the ignore patterns (written back as `--ignore-analytics` / `--ignore-preset` where they match one, `--ignore-error` otherwise) and `--ignore-http`, the `--axe` / `--invariants` / `--visual-*` checks, `--strict` and the `--fail-on-http` / `--fail-on-network` / `--fail-on-dead-links` / `--fail-on-warnings` rules. It leaves out the flags that only change what the run writes or shows (`--output`, `--junit`, `--github-annotations`, `--log-*`, `--screenshots` / `--screenshot-dir`, `--failure-artifacts` / `--failure-max`, `--cluster-artifacts` / `--cluster-min-count`, `--heatmap*`, `--compact`, `--quiet`, `--headless` / `--no-headless`, `--har-record`, `--bind` / `--bind-title`, `--visual-diff-dir`, `--visual-update`), and `--baseline` / `--baseline-strict` / `--baseline-missing`, which compare against another run's report.
+
+Fault rules (`faultInjection`, `lifecycleFaults`, `runtimeFaults`, `iframeFaults`) and invariants set in code have no flag. The command cannot carry them, and a failure they caused reruns clean without them, so it ends in a comment that counts them and names them as their stats do: `Repro: chaosbringer --url … --seed 42 # + 1 fault rule not expressible on the CLI: api-500`. A shell skips the comment (zsh only with `setopt interactivecomments`; without it the CLI exits 2 and says to drop it). The invariants `--axe`, `--invariants` / `--data-safety` and `--visual-baseline` build are carried as those flags (`--data-safety` and every `--invariants` as one `--invariants` list, `--invariants axe` as `--axe`). To rerun such a run, run its `chaos({...})` / `ChaosCrawler` config again with the printed seed. A `chaosbringer scan` chaos crawl's report holds the `chaosbringer scan … --faults <fault>` command that reruns it instead. Its comment also names the `runScan` options that change the crawls and have no scan flag, as `crawler.<option>` / `perf.<option>`: `crawler.spaPatterns`, a HAR replay's `crawler.har`, `crawler.httpCache: false`, a `crawler.settle` other than scan's adaptive one, `perf.memory`.
+
+To rerun an exact failure of a CLI run locally, copy the `Repro:` line from CI.
 
 ## Fault injection
 
@@ -257,9 +247,11 @@ faultInjection: [
 
 To enumerate *every* combination rather than the ones you thought of, see [model-driven faults](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/model-driven-faults.md).
 
-Per-rule `matched` / `injected` counters end up in `report.faultInjections`. At the end of a run, chaosbringer warns on the logger about every configured fault that did not take effect — on **all four layers**, not just the network one, and naming which of three things happened: `fault_rule_unmatched` (nothing matched the pattern), `fault_rule_unfired` (it matched and the firing policy said no), `fault_rule_uncounted` (the row carried no usable counter, so nothing measured it). Each carries `rule` and `layer`. Useful for catching typo'd `urlPattern` regexes, rules shadowed by an earlier catch-all, and schedules that never reach the occurrence you meant.
+Per-rule `matched` / `injected` counters end up in `report.faultInjections`. At the end of a run, every configured fault that did not take effect — on **all four layers**, not just the network one — is a [`report.warnings`](#run-warnings-reportwarnings) entry, shown in the report, the compact and `--quiet` output and the GitHub annotations, and a logger event, naming which of three things happened: `fault_rule_unmatched` (nothing matched the pattern; warning code `fault-unmatched`), `fault_rule_unfired` (it matched and the firing policy said no, or a lifecycle fault threw; `fault-unfired`), `fault_rule_uncounted` (the row carried no usable counter, so nothing measured it; `fault-uncounted`). Each carries `rule` and `layer`. Useful for catching typo'd `urlPattern` regexes, rules shadowed by an earlier catch-all, and schedules that never reach the occurrence you meant. `--fail-on-warnings` (`chaos({ failOnWarnings: true })`) fails such a run.
 
-Two exported readers give you the same thing without scraping the log: `faultWarnings(report)` returns those events for a report you already hold, and `unfiredFaults(report)` returns the three diagnoses as strings — an empty array is the assertion you want in a test, since `report.faultInjections[0].injected > 0` only ever covers one layer (and reads `undefined > 0` on the other three).
+A network rule cannot reach WebSocket traffic: Playwright's routes see HTTP requests only. A rule that matched nothing and whose pattern names only `ws:` / `wss:` URLs, or matches a WebSocket the run's pages opened, carries `faultInjections[].webSocket: { connections, first, webSocketOnly }`, and its warning (`fault-websocket`) says so instead of blaming the pattern.
+
+Two exported readers give you the same thing without scraping the log: `faultWarnings(report)` returns those events for a report you already hold, and `unfiredFaults(report)` returns the three diagnoses as strings, the messages of the warnings — an empty array is the assertion you want in a test, since `report.faultInjections[0].injected > 0` only ever covers one layer (and reads `undefined > 0` on the other three). After `testPage()`, which returns no report, build one from the crawler's getters and the page's result: `unfiredFaults({ faultInjections: crawler.getFaultStats(), runtimeFaults: crawler.getRuntimeFaultStats(), pages: [result] })`.
 
 A third counter, `suppressed`, appears on a row only when it is non-zero. Rules are first-match-wins, but a *scheduled* rule advances its occurrence whenever its pattern matches — that is what lets two rules on one URL agree about what "occurrence 1" means. So a scheduled rule can decide `inject` and still not act, because a rule ahead of it answered the request. Without `suppressed` that reads as `matched: 3, injected: 0`, which is exactly what an all-`pass` schedule reports: a planned fault that did not happen, indistinguishable from one that was never planned. `RuntimeFaultStats` carries the same field for the same reason, and there `fired` counts effects, not decisions.
 
@@ -281,6 +273,25 @@ faultInjection: [
 ```
 
 If you reverse the order, the catch-all swallows every request and `fulfill-api` will show `matched: 0` in the report (and trigger the unmatched-rule warning described above). Chaosbringer also runs a best-effort static check at crawl start and emits one `fault_rule_shadowed` warning per shadowed pair — catching the common pathological case (broad regex before specific one) before the crawl has consumed a single request.
+
+### Service workers
+
+A request a service worker's `fetch` handler takes never reaches the page's route: what goes to the network is the worker's own request, and Playwright hands that to the context's routes only. So when `faultInjection` is set, the crawl also routes the context it launched, and a rule sees the worker's requests — the ones it forwards to the network, and the worker script itself — with the same first-match-wins order, counters and occurrence numbering as the page's own, ahead of `--har-replay`. The worker stays in place, so the app keeps its cache and offline path.
+
+Three things still escape every network rule:
+
+- what the worker answers from its own cache, which makes no request;
+- every request the worker takes where the crawler does not own the context: `testPage()` on your page (the crawler leaves your context alone), or an attached browser;
+- every request the worker takes when `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` is set: Playwright then hands a worker's requests to no route at all, the crawl's included.
+
+A page a worker controlled carries `serviceWorker: "routed"` or `"unrouted"` in its result (recorded when network rules are configured), and a network rule that matched nothing then says the worker may be why — in `unfiredFaults` and in `fault_rule_unmatched`'s `serviceWorker` field — instead of blaming the pattern. `runtimeFaults` patch `fetch` in the page, ahead of the worker, and fire either way; on your own context, `serviceWorkers: "block"` takes the worker out. A forwarded request has `resourceType` `"fetch"` whatever the page asked for, so a rule limited to `resourceTypes: ["document"]` or `["script"]` does not match it.
+
+> **Behaviour change:** on a site with a service worker, network rules used to
+> match nothing the worker handled, so a run injected nothing there and drew
+> nothing from the RNG for it. They now fire on those requests — a catch-all
+> rule can fail the worker script itself — and a `probability` rule draws for
+> each one, so a pinned seed on such a site produces a different action
+> sequence.
 
 ### Fault profiles
 
@@ -430,7 +441,7 @@ Every lifecycle helper accepts the same overrides:
 
 ### Stats
 
-Every fault gets one row in `report.lifecycleFaults` with `matched` (URL-pattern matches), `fired` (post-probability), and `errored` (executor threw — e.g. SecurityError on opaque origins). Misbehaving faults are caught and counted; they never abort the rest of the crawl.
+Every fault gets one row in `report.lifecycleFaults` with `matched` (URL-pattern matches), `fired` (post-probability), and `errored` (executor threw — e.g. SecurityError on opaque origins). Misbehaving faults are caught and counted, each throw a `lifecycle-fault-failed` [warning](#run-warnings-reportwarnings) with the error; they never abort the rest of the crawl.
 
 ```json
 {
@@ -485,11 +496,33 @@ Promise-shaped kinds, for the failure modes a network mock cannot express:
 
 (The default was originally justified by a spurious `ERR_ABORTED` Chromium was said to emit alongside an empty intercepted body. That does not reproduce on Chromium 147 — no `requestfailed`, no ERR_ABORTED on any channel, the same single console line either way — so treat the body choice as being about your client's parsing path, not about browser noise.)
 
+### Fault echoes
+
+Chromium logs the answer a fault gave as it logs any other: `Failed to load resource: the server responded with a status of 500` for a `faults.status(500)`, `Failed to load resource: net::ERR_FAILED` and a `network` error for a `faults.abort()`. That is the fault, not something the app did, so the crawler tags each such error with the rule that caused it (`PageError.causedByFault: "<rule name>"`, the name `faultInjections[].rule` uses) and leaves it out of the summary counts, the error clusters, `--strict`, `--fail-on-http` and `--fail-on-network`. It is counted as `summary.faultEchoes` and as the rule's `faultInjections[].echoes`, and the text report marks it `(echo of fault <rule>)`. A strict fault test needs no ignore pattern for the status it injects:
+
+```ts
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000/cart",
+  strict: true,
+  faultInjection: [faults.status(500, { urlPattern: /\/api\/cart$/, name: "cart-500" })],
+});
+// passed unless the page did something wrong with the 500 (threw, left a rejection, logged an error)
+// report.faultInjections → [{ rule: "cart-500", matched: 1, injected: 1, echoes: 1 }]
+```
+
+The match is by request, not by URL pattern or message: a 500 the server really returned on the same endpoint, on a request the rule let through (`probability`, `schedule`), is no echo and fails `--strict` as before. Every layer that answers or aborts a request tags its echoes: the page's route, the service-worker route (matched by method and URL: each firing is spent on the next page request of that method and URL the worker serves, and tags it only when it ended as the fault ends a request, so a firing the worker's fallback absorbed tags nothing), a `faults.hang` whose `releaseAfterMs` aborts it, and a server-side `5xx` that `@mizchi/server-faults` reports in its `x-chaos-fault-*` headers under `server: { mode: "remote" }` (tagged `server:5xx`). A `delay` passes the request on, so what the server answers after it is the server's.
+
+`strictCountsFaultEchoes: true` (on `ChaosCrawler`, `chaos()` and the fixture's `chaosOptions`) records them untagged and counts them everywhere, as before this option existed; the rule's `echoes` still counts them.
+
+> **Behaviour change:** the echo of a fault the run injected used to be an ordinary console / network error: it failed `--strict` (and the fixture's `strict`), appeared in `errorClusters` and the `--baseline` diff, and was counted in `summary.consoleErrors` / `networkErrors` and the `N errors` of the verdict line. It is now tagged, counted as `summary.faultEchoes`, and left out of `PageResult.hasErrors`, flake's page status, the failure bundles and the fixture's `expectNoErrors` / `chaosExpect.toHaveNoErrors` too. It stays in `page.errors`, in `report.totalErrors` (the raw count) and in the `--junit` output, which writes a `<failure>` per error for flaker as it always did. A `--baseline` written before shows those clusters as resolved, which fails nothing. An ignore pattern written for it (`"Failed to load resource.*503"`) still works but is no longer needed, and it also hid the app's own 503s.
+
 The network layer gains the matching `faults.hang({ urlPattern, releaseAfterMs })`: the request is held open and never answered. Without `releaseAfterMs` the route is parked and counted in `report.heldRequests`, then aborted when the run is done with the page: at teardown for a page the crawler owns, and before `testPage()` returns for one it does not (a parked route left behind would make the caller's *next* action on that page wait on a request nothing will ever answer). If you drive the page yourself across several steps, `crawler.release()` drains on demand.
 
 Since the crawler navigates with `waitUntil: "networkidle"`, prefer hanging what an action fires *after* load, or set the bound.
 
-Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws, and that throw is recorded as a page error of type `exception` — so `summary.jsExceptions` reads 1 and an error cluster appears carrying Playwright's own timeout message. **The page threw nothing.** The classification is the crawler's, not the app's, and it is the expected outcome of the fault rather than a finding. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+Know what that costs before you read the report: a hang on a load-time request means `page.goto` spends its whole `timeout` and then throws. The page is recorded as `status: "timeout"` with a page error of type `navigation` carrying Playwright's own timeout message (`page.goto: Timeout 30000ms exceeded.`), and an error cluster appears for it. It is the expected outcome of the fault rather than a finding. **The page threw nothing**, and the report says so: a `navigation` error is not a JS exception, so it is not in `summary.jsExceptions` and `--strict` does not count it. The timed-out page still fails the run, as every page that did not load does. `report.heldRequests` (now printed in the text report too) is the number that tells you which one you are looking at.
+
+> **Behaviour change:** a failed `page.goto` used to be recorded as an `exception`, with Playwright's call log and its ANSI colour codes in the message and the cluster key. It counted in `summary.jsExceptions`, so `--strict` said `2 JS exceptions` for a site that threw nothing, and the call log names the `waitUntil` of `--settle`, so the same failure was a different cluster under `--settle adaptive`. It is now type `navigation`, its message stops before the call log (the stack keeps it), and no message or cluster key carries ANSI codes. A `--baseline` an older version wrote is read with the new keys, so upgrading reports no new or resolved cluster for it.
 
 `never-settle-fetch` honours `init.signal`, which is what makes it a fair test of a bounded request rather than a way to fail every client. Note what the caller sees: under `AbortSignal.timeout(ms)` the rejection is a `TimeoutError`, not an `AbortError` — a `catch` branching only on `err.name === "AbortError"` misses it. An explicit `AbortController.abort()` still gives `AbortError`.
 
@@ -565,7 +598,7 @@ Stats land in `report.iframeFaults` — one row per fault with `selector`, `acti
 
 ## Invariants
 
-Invariants are assertions that must hold on every page. They run either `afterLoad` (right after navigation) or `afterActions` (default — after chaos clicks/inputs). Returning `false`, throwing, or returning a string all count as a failure; returning `true` or `void` means the invariant held.
+Invariants are assertions that must hold on every page. They run either `afterLoad` (right after navigation) or `afterActions` (default — after chaos clicks/inputs). A third phase, `afterVisit`, runs once at the end of every visit, also on a page the crawl stopped at (it [redirected off-site](#off-site-redirects-and-open-redirects), its load failed), where the other two never run; `ctx.page` may show another site or an error page there, so an `afterVisit` check reads what the crawl recorded (`ctx.offsiteNavigations`, `ctx.errors`), as `invariants.noOffsiteRedirect()` does. Returning `false`, throwing, or returning a string all count as a failure; returning `true` or `void` means the invariant held.
 
 ```ts
 import { chaos, type Invariant } from "chaosbringer";
@@ -702,7 +735,7 @@ Emulate mobile devices or throttle the network to catch bugs that only surface o
 chaosbringer --url http://localhost:3000 --device "iPhone 14" --network slow-3g
 ```
 
-- `--device <name>` — any Playwright device descriptor (`iPhone 14`, `Pixel 7`, `iPad Pro 11`, `Desktop Chrome`, …). Sets viewport, user-agent, device pixel ratio, mobile / touch flags via `newContext({ ...devices[name] })`. Unknown names fail validation up-front.
+- `--device <name>` — any Playwright device descriptor (`iPhone 14`, `Pixel 7`, `iPad Pro 11`, `Desktop Chrome`, …). Sets viewport, user-agent, device pixel ratio, mobile / touch flags via `newContext({ ...devices[name] })`. Unknown names fail validation up-front (the CLI: `chaosbringer: --device "Nope 9" is not a known Playwright device descriptor`, exit 2).
 - `--network <profile>` — `slow-3g`, `fast-3g`, or `offline`. Attaches a CDP session per page and calls `Network.emulateNetworkConditions` with the same values Chrome DevTools' presets use.
 
 Combining the two lets you measure perf budgets under realistic conditions: `chaosbringer --url … --device "Pixel 7" --network slow-3g --budget lcp=4000`.
@@ -715,7 +748,7 @@ Prepend every URL in a sitemap.xml (or sitemap index) to the crawl queue — ess
 chaosbringer --url https://docs.example.com --seed-from-sitemap https://docs.example.com/sitemap.xml
 ```
 
-Accepts a URL or a local path. Sitemap indexes are followed breadth-first; referenced URLs outside the baseUrl origin are dropped to avoid wasting visit budget. A runaway index (suspected cycle) fails fast.
+Accepts a URL or a local path. The CLI checks a path before the browser starts (`chaosbringer: --seed-from-sitemap ./sitemap.xml: no such file`, exit 2; `scan --sitemap` the same); a URL is fetched by the crawl, and one that fails is skipped with a `sitemap-unreadable` [warning](#run-warnings-reportwarnings) (logger event `sitemap_fetch_failed`), so a server that is down for a moment does not refuse the run; a sitemap that lists no URL on the crawl's origin is a `sitemap-empty` warning. Sitemap indexes are followed breadth-first; referenced URLs outside the baseUrl origin are dropped to avoid wasting visit budget. A runaway index (suspected cycle) fails fast.
 
 ```ts
 import { fetchSitemapUrls } from "chaosbringer";
@@ -754,7 +787,7 @@ await chaos({
 });
 ```
 
-The file is read by Playwright and not modified by the crawl. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
+The file is read by Playwright and not modified by the crawl. The CLI (and `scan`, `flake`, `shard`, `minimize`, `drive`) checks it before the browser starts: a file that is not there, or is not storageState JSON, exits 2 with `chaosbringer: --storage-state auth.json: no such file`. If the session expires mid-run, you'll see auth-redirect pages surface as errors — regenerate the state file and rerun.
 
 ## HAR record / replay
 
@@ -767,6 +800,8 @@ chaosbringer --url http://localhost:3000 --seed 42 --har-record chaos.har
 # Later: replay without the server running
 chaosbringer --url http://localhost:3000 --seed 42 --har-replay chaos.har
 ```
+
+A `--har-replay` file that is not there, or is not HAR JSON (`{"log": {"entries": [...]}}`; a `.zip` HAR only has to exist), is refused before the browser starts, with exit 2.
 
 Programmatic:
 
@@ -787,7 +822,7 @@ await chaos({
 
 - `notFound: "fallback"` (default) lets unmatched URLs fall through to the real network.
 - `notFound: "abort"` fails them — useful when you want to prove a run is fully deterministic.
-- Fault injection rules still apply in replay mode and take precedence over HAR responses.
+- Fault injection rules still apply in replay mode and take precedence over HAR responses — on a service worker's requests too.
 
 > **Heads up — `notFound: "abort"` with `traceparent` injection:** when
 > `traceparent` is enabled, every outgoing request carries a freshly-generated
@@ -799,10 +834,10 @@ await chaos({
 
 ## Accessibility (axe-core)
 
-Install `axe-core` as a peer and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
+Install `axe-core` as a dev dependency and opt in with either the `invariants.axe()` preset or the `--axe` flag. Each visited page is scanned; violations are reported as invariant failures (name: `a11y-axe`), which always fail the run.
 
 ```bash
-pnpm add axe-core
+pnpm add -D axe-core
 chaosbringer --url http://localhost:3000 --axe
 chaosbringer --url http://localhost:3000 --axe --axe-tags wcag2aa,best-practice
 ```
@@ -822,9 +857,145 @@ await chaos({
 });
 ```
 
-`axe-core` is an optional peer dependency — the preset fails with a clear install hint if it isn't present. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
+`axe-core` is an optional peer dependency. Without it, the run is refused before its browser starts: `--axe` (also `--invariants axe`, and the same on `scan`) exits 2 with ``chaosbringer: --axe needs axe-core: an optional peer dependency that is not installed. Install it with `pnpm add -D axe-core` …`` (the line names `--invariants axe` when that is how it was asked for), and `new ChaosCrawler()`, `chaos()`, the fixture and `scenarioLoad()` throw `MissingPeerError` (its `packages` and `installCommand` say what to install). The preset declares the package in its `peers`, which is what the crawler checks. The preset is thin; drop to a custom invariant if you need multiple axe runs per page, per-URL rule overrides, or full-result capture (passes / incomplete).
 
-A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+axe is injected over CDP, so a page's Content-Security-Policy does not block it, and the page's iframes are scanned with it, same-origin and cross-origin (axe-core 4.3+; older versions scan the top document only). A cross-origin iframe loads only with `blockExternalNavigation: false`: the default guard blocks its document, and the blocked frame is skipped. So is an iframe that can't run axe: one sandboxed without `allow-scripts`, or one whose scan doesn't finish within 10s (a stuck widget). To leave embeds you don't own out of the scan, `exclude` them (`exclude: ["iframe"]`).
+
+A failing scan is rendered on one line: `[a11y-axe] 3 a11y violations: color-contrast(×5, serious), image-alt(×2, critical), region(×1)`. Violations inside an iframe follow, per frame URL: `[a11y-axe] 3 a11y violations: image-alt(×1, critical); in frame https://example.com/embed: button-name(×1, critical), image-alt(×1, critical)`. Because violations cluster by their fingerprint, a11y regressions show up in the baseline diff just like any other invariant.
+
+## Bad and hostile data from the CLI
+
+`--strict` fails a run on what throws. A page that shows `Total: NaN EUR`,
+or runs a script a query parameter carried, throws nothing and passes.
+The [data-safety presets](../../docs/recipes/data-safety.md) catch those,
+and `--invariants` turns them on by name:
+
+```bash
+chaosbringer --url http://localhost:3000 --strict --data-safety
+chaosbringer --url http://localhost:3000 --invariants data-safety,not-blank
+# A reflected payload delivered on the start URL (it only sets a marker):
+chaosbringer --url 'http://localhost:3000/search?q=%3Cdetails%20open%20ontoggle%3D%22window.__cb_xss_fired%3D1%22%3E%3C%2Fdetails%3E' --invariants xss-marker
+# An open redirect: does /login send the browser wherever ?next= says?
+chaosbringer --url 'http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F' --invariants no-offsite-redirect
+# A site whose login goes to an SSO provider:
+chaosbringer --url http://localhost:3000 --data-safety --offsite-redirect-allow https://login.example.com
+chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
+```
+
+| Name | Builds | Fails when |
+|---|---|---|
+| `data-safety` | `invariants.dataSafety()`: the next five | any of them does |
+| `xss-marker` | `invariants.xssMarker()` (`data.xss-marker`) | a marker (`window.__cb_xss_fired`, `window.__xss_fired`) is set: a payload ran |
+| `injected-markup` | `invariants.injectedMarkup()` (`data.injected-markup`) | a `data-cb-injected` element, or a `javascript:` URL or `on*` attribute naming a marker, is in the DOM |
+| `prototype-pollution` | `invariants.prototypePollution()` (`data.prototype-pollution`) | `Object.prototype` has an enumerable key |
+| `rendered-garbage` | `invariants.renderedGarbage()` (`data.rendered-garbage`) | visible text shows `undefined`, `NaN`, `[object Object]` or `Invalid Date` |
+| `no-offsite-redirect` | `invariants.noOffsiteRedirect()` (`navigation.no-offsite-redirect`) | the page sent the browser to another origin on its own: a script, a meta refresh or a 3xx, not a click to a URL the page wrote. `open redirect: …` when the target was in the page's own URL. See [Off-site redirects](#off-site-redirects-and-open-redirects) |
+| `not-blank` | `invariants.notBlank()` (`data.not-blank`) | the page shows no visible text. Not in `data-safety`, as `dataSafety()` leaves it out: a canvas or image-only page is blank by design |
+| `axe` | `invariants.axe()`, as `--axe` | an axe-core violation (needs `axe-core`) |
+
+A name given twice, or a member of `data-safety` named beside it, runs once.
+Each preset runs with its defaults: its options (your own `markers` or
+`tokens`, an `ignore` selector for a page that writes about `undefined`, a
+`urlPattern`, `when`) have no flag, and are set through the library, in
+`chaos({ invariants })`, `ChaosCrawler` or `runScan({ crawler: { invariants } })`.
+The one exception is `no-offsite-redirect`'s `allow`: `--offsite-redirect-allow
+<origins>` (comma-separated, repeatable, scheme and host only) lists the
+origins a page may redirect to, such as an SSO provider. It is refused (exit
+2) for a value that is not a bare origin, and without the check it configures
+(`--invariants no-offsite-redirect` or `--data-safety`); `scan` takes it
+either way, and raises no `open-redirect` finding for those origins.
+A violation is an `invariant-violation` page error, which fails the run in
+every mode; `scan` reports it as an `invariant-violation` finding, `high`
+for `xss-marker`, `injected-markup` and `prototype-pollution`, `medium`
+otherwise; `no-offsite-redirect` is reported as scan's own `open-redirect`
+finding instead. `shard` forwards the flags to its workers and `flake` to every
+run; `minimize` checks them on every replay (a v2 trace records them); `drive`
+takes none of them.
+
+## Off-site redirects and open redirects
+
+The crawl stays on its origin. A navigation to another one is blocked
+before it leaves the browser, and a redirect hop is let through, so a page
+whose URL answers with a 3xx to another origin is followed there and the
+crawl stops (that host does receive the request). Each such navigation is
+recorded on its page in `pages[].offsiteNavigations`, beside the bare URLs
+of `blockedNavigations`:
+
+```jsonc
+{
+  "from": "http://localhost:3000/go?next=https%3A%2F%2Fevil.invalid%2F",
+  "to": "https://evil.invalid/",
+  "trigger": "script",                          // click | script | meta-refresh | server-redirect | frame
+  "reflected": { "in": "query", "param": "next" } // the target is in the page's own URL (query or fragment)
+  // "failed": "net::ERR_CONNECTION_REFUSED"    // a redirect whose target did not load
+}
+```
+
+| `trigger` | What started it | A redirect? |
+|---|---|---|
+| `click` | a crawler step went to a URL the page wrote: a link or a form to another origin, a button whose handler sets `location` to a fixed URL (a share button). A link straight to another origin is never clicked at all (`actions[].blockedExternal`) | no: the user asked to go |
+| `script` | a script: `location.href = …`, `location.replace()`, a form it submitted, with no step running; or while a step ran, to a target taken from the page's own URL (a "Continue" button that follows `?next=`) | yes |
+| `meta-refresh` | `<meta http-equiv="refresh">` or a `Refresh` header | yes |
+| `server-redirect` | a URL of the site answered a 3xx to another origin: the page's own, or one a step went to (a form posted to an endpoint that redirects; `from` is then that endpoint's URL, which `reflected` is read from) | yes |
+| `frame` | an iframe navigating off-site | no: not the page |
+
+A page that redirected is one the crawl stops at: its `redirectedTo` names
+the target (the URL the crawler blocked, never the browser's error page
+`chrome-error://chromewebdata/`), and it carries no links, actions, perf or
+the other site's errors. A 302 to a host that is down is the same
+off-site redirect, with the error in `failed` and the page's warning
+(`redirected off-site to <url>, which failed to load (net::ERR_…); not
+crawled`): the page is `success` with no errors, not a failed load of its
+own URL. The full report lists every off-site navigation under `OFF-SITE
+NAVIGATIONS` (`<page> -> <target> (script redirect; target from the "next"
+query parameter)`), and the compact and `--quiet` output count the
+redirects under the verdict line, after the dead links: `  Off-site
+redirects: 1 (first: <page> -> <target>)`, each `<page> -> <target>` pair
+once (a delayed redirect that fires again each time the crawler goes back
+is one). A page that went to `about:blank` or a `data:` URL left for no
+other site, and is not one. With `--github-annotations` each redirect is a
+`::warning` when its target was in the page's URL and a `::notice`
+otherwise; on a page the check below failed, its `::error` stands for them.
+
+None of that fails a run. `invariants.noOffsiteRedirect({ allow })` does
+(it is in `dataSafety()`, and `--invariants no-offsite-redirect`): it fails
+every page that redirected to an origin `allow` does not list (an origin
+string, `"https://login.example.com"`, or a RegExp tested on the target
+URL), as an `invariant-violation` that is an `error` annotation and fails
+the run in every mode:
+
+```text
+[navigation.no-offsite-redirect] open redirect: http://localhost:3000/go?next=… -> https://evil.invalid/ (script redirect, to the URL in its "next" query parameter)
+[navigation.no-offsite-redirect] off-site redirect: http://localhost:3000/chat -> https://discord.example/invite (server redirect)
+```
+
+It runs `afterVisit`, a phase for checks that read what the crawl recorded
+(`ctx.offsiteNavigations`, `ctx.errors`) rather than the DOM: unlike
+`afterLoad` and `afterActions`, it also runs on a page the crawl stopped
+at. Only the crawler records off-site navigations: under `scenarioLoad`, which
+runs every invariant after every step, the check always passes. `scan` raises
+an `open-redirect` finding (category `security`) from the same records: `high`
+when the target was in the page's URL, `low` when not, and none for an origin
+its `--offsite-redirect-allow` (`ScanOptions.offsiteRedirectAllow`) or a
+`noOffsiteRedirect({ allow })` among its crawler's invariants allows.
+
+> **Behaviour change:** `dataSafety()` and `--data-safety` now include
+> `noOffsiteRedirect`, so a run with them fails on a page that redirects
+> off-site on its own (pass `allow` / `--offsite-redirect-allow` for an SSO
+> provider). A script redirect's `redirectedTo` named the browser's error
+> page, `chrome-error://chromewebdata/`, and `blockedNavigations` listed it
+> beside the real target; both now name only the target. A 302 to a host
+> that is down was a failed load of the on-site URL (`[navigation]
+> page.goto: net::ERR_CONNECTION_REFUSED at <its URL>`, status `error`,
+> exit 1); it is now that off-site redirect, `success` with no errors, and
+> fails a run only through the check. `summary.blockedExternalNavigations`
+> follows: a script redirect counted twice (the target and the error page)
+> and now counts once, and a 302 to a host that is down counted 0 and now
+> counts 1. In `scan`, that 302 was a `high` `page-load-failed` finding and
+> is now an `open-redirect` (`low` unless the target was in the page's URL),
+> so `--fail-on high` no longer fails on it. The text report lists the
+> off-site navigations it used to only count, and the compact and `--quiet`
+> output have the `Off-site redirects:` line.
 
 ## Action heatmap
 
@@ -864,11 +1035,13 @@ writeFileSync("junit.xml", buildJunitXml(report, { suiteName: "smoke" }));
 
 Mapping is one `<testcase>` per visited page:
 
-- `status="error"` / `"timeout"` → `<error>` (HTTP code or `timeout` in `type`)
+- `status="error"` / `"timeout"` → `<failure>` with `type="error"` / `"timeout"`, and `navigation error` / `navigation timeout` (or `HTTP <code>` when the page has a `statusCode`, `renderer crash` when it crashed) in `message`. chaosbringer 0.12.1 and earlier wrote `<error>`; a failure is what importers that only look for `<failure>` (flaker 0.14's `--adapter junit`) count as failed. The suite's `errors` count is always 0. Dashboards that classify by element, not by `type`, show these pages differently from before: Allure as Failed rather than Broken, GitLab as failed rather than error
 - `status="success"` with `errors[].length > 0` → `<failure>` (concatenates all PageError entries)
-- otherwise → passing testcase, no children
+- otherwise → passing testcase, no children, written `<testcase …></testcase>` rather than self-closed (flaker 0.14's JUnit import reads a self-closed testcase followed by a failing one as a single failed testcase)
 
-Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped.
+Each PageError in a failure's body is `[type] message`, then the page's own stack frames: not the stack's first line, which repeats the message, and not the frames of chaosbringer's own code or Node's. A `navigation` error has no stack in the body: its stack is the crawler's own `page.goto` call. (The body used to print the message twice, then chaosbringer's `dist/crawler.js` frames.)
+
+Test names strip the `baseUrl` prefix so `/docs/intro` shows up rather than the full URL. Special XML chars (`< > & " '`) in messages and URLs are escaped. ANSI colour codes (Playwright's call log has them) and other control characters XML cannot carry are dropped.
 
 ## Visual regression
 
@@ -905,7 +1078,7 @@ await chaos({
 ```
 
 - Baseline filenames are derived from each page's URL (path + query, sanitized) so different routes don't collide.
-- `pixelmatch` and `pngjs` are optional peer deps — install them explicitly (`pnpm add pixelmatch pngjs`). The invariant fails with a clear install hint when they're missing.
+- `pixelmatch` and `pngjs` are optional peer deps — install them explicitly (`pnpm add -D pixelmatch pngjs`). Without either, the run is refused before its browser starts, the first run that only writes baselines too: `--visual-baseline` exits 2 naming the missing package, and the library throws `MissingPeerError`.
 - Dimension mismatches between baseline and current are treated as full-diff failures — resize or re-record the baseline intentionally rather than auto-accepting.
 - Takes `fullPage: true` screenshots by default. Flip to viewport-only via `fullPage: false` in the programmatic API if your layout is sensitive to scroll position.
 - Pair with `--device iPhone 14` to record device-specific baselines; the baseline dir is per-crawl so split baselines across devices by using different dirs.
@@ -935,11 +1108,13 @@ failures/0000__checkout_review__a91c2f0e/
 ├── page.html        # `await page.content()` snapshot
 ├── errors.json      # full PageError[] (console / exception / network / invariant)
 ├── trace.jsonl      # meta + visits + actions, sliced up to and including this page
-├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl`
+├── repro.sh         # `chaosbringer --url <base> --trace-replay ./trace.jsonl <the run's flags>`
 └── info.json        # URL, status, sourceUrl, recovery, seed, timestamps
 ```
 
-`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. Combine with `--strict` or `--baseline` to gate CI on the same shape of failure.
+`repro.sh` is executable — `cd` into the bundle and run it to replay the same sequence locally. It replays with the run's own flags (the report's `reproCommand` less `--seed` and `--trace-out`), so a `--storage-state` / `--device` / `--settle` crawl replays logged in, emulated and settled the same way, and a `--strict` run exits the same way. The script changes into its own directory first, and files the run read are written as absolute paths, so it also runs by path from anywhere. Like the `Repro:` line it calls `chaosbringer` from `PATH`; with a project-local install, run it as `npm exec -c ./repro.sh`. Fault rules and invariants set in code are not replayed, and a comment line in the script names them, as on the `Repro:` line. Add `--baseline` to gate CI on the same shape of failure.
+
+When a run wrote any, the CLI says where they went and how many there are, in every output mode: `Wrote 3 failure bundle(s) to ./failures/`, next to `Report saved to:`. The `--trace-out` and `--log-file` files get a line each too (`Trace saved to: …`, `Log saved to: …`).
 
 `maxArtifacts` caps the bundle count per run for runs that produce many failures (default: unlimited). Per-artifact opt-outs are available programmatically (`saveScreenshot: false`, `saveHtml: false`, `saveTrace: false`) when bundle size matters more than completeness.
 
@@ -959,7 +1134,7 @@ await chaos({
 });
 ```
 
-Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
+Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Each value is a number of ms above 0; anything else exits 2 naming the metric (`chaosbringer: --budget lcp must be a finite number (got "abc")`), as does an unknown key. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
 
 Where the numbers come from, measured once the page load has settled:
 
@@ -1007,6 +1182,7 @@ Before you trust a number:
 - **Leak `trends` need `--perf-mem`.** Without the forced GC, a step's uncollected garbage reads as growth, and non-leaking pages get flagged.
 - **A probabilistic fault shares the crawler's RNG**, so the same seed with and without it is a different crawl. Compare within one run (`perf.degradation`) or use a `schedule`.
 - **Gate CPU regressions on `scriptMs`**, which scales with the work; `blockingMs` reads 0 until a task crosses 50 ms. For hand-set budgets on a shared runner, allow +20–25% or +20 ms, whichever is larger, over the median of 3–5 runs.
+- **`perf emit-budgets` gives every budget an absolute floor** on top of the ×1.25 headroom (`scriptMs` +8 ms, `blockingMs` +5 ms, `interactionMs` +16 ms, `requestCount` +1, …), so a 0 ms `blockingMs` median gets a budget of 5 ms rather than 0, and the medians of a clean batch of 3–5 runs of the same seed stay within budget. A single run gated alone can still fail now and then, on an outlier or on a task that crosses the 50 ms `blockingMs` line, so gate on a batch. `--floor <metric>=<n>` (repeatable) sets one, `--floor <metric>=0` turns it off.
 - **A click that navigates has no `interactionMs`**, and work a harness runs through `page.evaluate` does not show in `blockingMs`.
 
 The details, with the measurements behind them, are in perf.md's [settling](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle), [noise](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#how-much-noise-to-expect) and [caveats](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#caveats) sections.
@@ -1019,7 +1195,8 @@ For failures that are hard to diagnose from a seed alone, record the exact seque
 # Record
 chaosbringer --url http://localhost:3000 --seed 42 --trace-out chaos.trace.jsonl
 
-# Replay the exact sequence (no RNG, no discovery)
+# Replay the exact sequence (no RNG, no discovery); a trace that is not
+# there or does not parse exits 2 before the browser starts
 chaosbringer --url http://localhost:3000 --trace-replay chaos.trace.jsonl
 
 # Shrink the trace to the minimum subsequence that still reproduces a failure
@@ -1029,26 +1206,36 @@ chaosbringer minimize --url http://localhost:3000 \
   --trace-out min.trace.jsonl
 ```
 
-A trace is line-delimited JSON: a leading `meta` entry with the seed + baseUrl, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+A trace is line-delimited JSON: a leading `meta` entry, then alternating `visit` and `action` lines. Each `action` carries the selector that was clicked (or the scroll amount, or the input target), so replay can locate the same element in a fresh page. The format version is tracked (`meta.v`, `TRACE_FORMAT_VERSION`) — parsing refuses traces written by incompatible future versions rather than silently misinterpreting them.
+
+The `meta` entry holds the seed, the baseUrl, the start time and, from format **v2**, the crawl's `setup`: the options that change how a replay loads, settles and judges its pages, each only when it is not the default (`TraceSetup`, from `traceSetupOf(options)`):
+
+```json
+{"kind":"meta","v":2,"seed":42,"baseUrl":"http://localhost:3000","startTime":1762300000000,
+ "setup":{"settle":"adaptive","excludePatterns":["/logout"],"storageState":"auth.json","invariants":"data-safety"}}
+```
+
+The keys are `timeout`, `settle`, `excludePatterns`, `ignoreErrorPatterns`, `ignoreHttpPatterns`, `spaPatterns`, `storageState`, `harReplay`, `device`, `network`, `httpCache` (`false` for `--no-http-cache`), `invariants` (the `--invariants` / `--data-safety` presets as one `--invariants` value), `offsiteRedirectAllow` (`--offsite-redirect-allow`'s origins as one comma list) and `axe` (`{ tags? }`). A file is recorded by its path, as the crawl was given it (a relative one resolves against the directory you replay from), never by its contents: the cookies of a `--storage-state` stay in that file. The crawl takes no secret of its own, so a trace holds none; an invariant set in code is a closure and is not recorded. A v1 trace (no `setup`) still reads, and replays with the defaults.
 
 Replay skips link discovery and the RNG entirely: only URLs listed as `visit` entries are loaded, and only the recorded actions are performed. Missing selectors are logged as failed actions and the run continues.
 
-`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Output goes to `--trace-out` (defaults to `min.trace.jsonl`).
+`minimize` drives repeated replays via delta debugging (ddmin) — it keeps removing action entries and re-running as long as `--match` still fires against an error cluster. Every replay runs with the trace's recorded `setup` (logged in with its `--storage-state`, settled with its `--settle`, …), and a crawl flag given to `minimize` replaces what was recorded for it. Output goes to `--trace-out` (defaults to `min.trace.jsonl`), in format v2, recording the setup its replays reproduced under.
 
 ## Baseline diff (regression detection)
 
 Pass a previous report to `--baseline` and the current run is diffed against it — new error clusters and newly failing pages are surfaced separately from ones that were already broken.
 
 ```bash
-# First run: writes chaos-report.json as usual (no baseline yet, warns and continues)
+# First run: writes chaos-report.json as usual (no baseline yet: a baseline-missing warning)
 chaosbringer --url http://localhost:3000 --baseline chaos-report.json
 
 # Subsequent runs: compare against the prior report
 chaosbringer --url http://localhost:3000 --baseline chaos-report.json --baseline-strict
 ```
 
-- `--baseline <path>` — diff against this report. A missing file produces a warning, not an error (the run still writes its own report so a later invocation has a baseline to compare against).
+- `--baseline <path>` — diff against this report. A missing file produces a `baseline-missing` [warning](#run-warnings-reportwarnings), not an error (the run still writes its own report so a later invocation has a baseline to compare against).
 - `--baseline-strict` — exit 1 when the diff contains new clusters or newly failing pages. Resolved / unchanged entries never fail the run.
+- `--baseline-missing warn|fail` — what a missing `--baseline` file does. `warn` (the default) is the bootstrap run above. `fail` refuses the run before the browser starts, exit 2 (`chaosbringer: --baseline chaos-report.json: not found, and --baseline-missing fail refuses a run without it …`), and so does `fail` with no `--baseline` at all (an unset `--baseline "$PREV"`): a CI cache miss or a typo'd path turned a `--baseline-strict` gate green. `chaos({ baselineMissing: "fail" })` throws the same way before its `setup` hook runs.
 
 Programmatic:
 
@@ -1068,15 +1255,19 @@ for (const c of report.diff?.newClusters ?? []) {
 
 Clusters are matched by the same fingerprint used for `errorClusters` (URL / line:col / long numeric ids stripped), so `HTTP 500 on /api/users/42` and `HTTP 500 on /api/users/99` collapse to the same entry. Pages are matched by URL.
 
+Each side's cluster keys are recomputed from the cluster's `sample.message` with the current fingerprint, so a baseline an older version wrote compares by the keys this version gives the same errors. In particular its failed navigations (`exception|page.goto: … Call log: …`) read as the `navigation` type they are now, and its renderer crashes (`exception|page.waitForTimeout: Page crashed`) as `crash`: upgrading does not show them as new and resolved, nor fail `--baseline-strict`.
+
 ## GitHub Actions annotations
 
-Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster and dead link. GitHub surfaces these on the Checks tab alongside test output.
+Opt in with `--github-annotations` and chaosbringer prints a [workflow command](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions) for every error cluster, dead link, [off-site redirect](#off-site-redirects-and-open-redirects) and [warning](#run-warnings-reportwarnings). GitHub surfaces these on the Checks tab alongside test output.
 
 ```bash
 chaosbringer --url http://localhost:3000 --strict --github-annotations
 ```
 
-Severity maps from cluster type: invariants / exceptions / network errors / crashes are `::error`, console errors and unhandled rejections are `::warning` (upgraded to error under `--strict`). Dead links always annotate as error with the source page in the message.
+The level follows the run's exit rules, so `::error` marks what fails the run and `::warning` what does not, with one exception: a JS exception is always `::error`, also on a run without `--strict` that exits 0. Invariant violations, failed navigations and crashes fail every run and are always `::error`. Under `--baseline-strict`, a cluster the baseline did not have is `::error`. Console errors and unhandled rejections are `::warning`, and `::error` under `--strict`. A console cluster of HTTP responses (`Failed to load resource: the server responded with a status of …`) is `::error` under a `--fail-on-http` level that its status meets: `--fail-on-http 5xx` marks the 500s and leaves a 404 image a warning. Network errors are `::warning`, and `::error` under `--fail-on-network`. Dead links are `::warning`, and `::error` under `--fail-on-dead-links`, with the source page in the message. Each run warning is `::warning title=chaosbringer warning: <code>::<message>`, and `::error` under `--fail-on-warnings`. An off-site redirect (`title=Off-site redirect: <page>`) is `::warning` when its target was in the page's URL (an open redirect) and `::notice` otherwise; on a page `no-offsite-redirect` failed it is not annotated, as that violation's `::error` names it. The echo of a fault the run injected is in no cluster, so it is not annotated at all.
+
+> **Behaviour change:** network errors and dead links used to annotate as `::error` on a run that exited 0. They are `::warning` unless `--fail-on-network` / `--fail-on-dead-links` fails the run on them. And a console cluster that failed a `--baseline-strict` run as new used to be `::warning`; it is `::error`.
 
 ## Model-driven fault coverage
 
@@ -1145,15 +1336,66 @@ Runnable: [`examples/model-faults/`](https://github.com/mizchi/chaosbringer/tree
 
 ## Error clustering
 
-`CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (URLs, line:col, and long numeric ids stripped).
+`CrawlReport.errorClusters` collapses repeated errors so a run with 100 identical `console.error("Failed to load X")` calls surfaces as one cluster line with `count: 100`. Each cluster is keyed by `type` + a normalised fingerprint (ANSI colour codes and Playwright's `Call log:` dropped; URLs, line:col, and long numeric ids stripped).
 
 ```
 ERROR CLUSTERS
   [console]×42 [5 urls] Failed to load resource: the server responded with a status of <n> (Not Found)
+    resource: http://localhost:3000/img/hero.png
+    resource: http://localhost:3000/fonts/body.woff2
   [exception]×3 fixture: boom
 ```
 
 Use it to triage noisy fuzz runs — high-count clusters are the first thing to look at.
+
+The browser's "Failed to load resource" message names no file, so its console error carries the file as `resourceUrl`, and the cluster lists every one as `resourceUrls` (the text report shows the first five). The message itself stays as the browser wrote it, so the cluster key that `--baseline` compares does not depend on which files failed.
+
+## HTTP errors
+
+A subresource or API request that answers 4xx / 5xx (an image's 404, a `fetch`'s 500) is recorded as the browser records it: one console error, `Failed to load resource: the server responded with a status of 500 (Internal Server Error)`. The crawler pairs that line with the response it is about and adds the request's `status` and `method` to it (`PageError.status`, `PageError.method`), so the text report reads `resource: http://localhost:3000/api/cart (POST 500)`. It is still the one error, with the message and cluster key it always had, so a `--baseline` written before still matches. The page's own document is not among them: a crawled page that answers 404 / 5xx is a recovered page and a dead link.
+
+`summary.httpErrors` counts them: `{ total, "4xx", "5xx", byStatus: { "404": 2, "500": 1 } }`. They are console errors, so `--strict` fails on them as before; without `--strict`, `--fail-on-http 5xx` fails the run on a response of 500 and up, and `--fail-on-http 4xx` on one of 400 and up (`chaos({ failOnHttp: "5xx" })`). The reason names the first one:
+
+```
+  Failed: --fail-on-http 5xx: 1 HTTP response >= 500 (first: POST http://localhost:3000/api/cart 500 on http://localhost:3000/cart)
+```
+
+`--ignore-http <regex>` (repeatable; `ignoreHttpPatterns`) takes a request URL out: its 4xx / 5xx is not counted and its "Failed to load resource" line is dropped. That line names no URL, so `--ignore-error` cannot single out one endpoint (a logged-out session check's 401, a missing favicon); this can. A transport failure of the same URL is still recorded.
+
+A request that fails at the transport level (`net::ERR_CONNECTION_RESET`, a socket the server destroyed) is a `network` error, with its `method`. A stylesheet or script that answered 4xx / 5xx also fails as `net::ERR_ABORTED`; that is the HTTP error again, and not recorded as a `network` error (it used to be). No rule fails a run on network errors by default, `--strict` included; `--fail-on-network` (`chaos({ failOnNetwork: true })`) does.
+
+## Run warnings (`report.warnings`)
+
+Some setups test less than they say, and used to pass in silence: a fault rule whose `urlPattern` has a typo, a `--seed-from-sitemap` URL that 404s, a `--network` profile that did not apply, a driver that throws. Each went only to the logger, which writes nowhere without `--log-file`. They are now `report.warnings`, one entry per distinct problem:
+
+```json
+"warnings": [
+  { "code": "fault-unmatched", "message": "network fault \"api-500\" never matched anything — the pattern did not see the request (or page, or iframe) you expected", "count": 1, "rule": "api-500", "layer": "network" },
+  { "code": "sitemap-unreadable", "message": "sitemap https://example.com/sitemap.xml could not be read (sitemap fetch https://example.com/sitemap.xml failed: HTTP 404), so the crawl started from the base URL alone", "count": 1, "source": "https://example.com/sitemap.xml" }
+]
+```
+
+| `code` | What happened |
+| --- | --- |
+| `fault-unmatched` / `fault-unfired` / `fault-uncounted` | A fault rule on any layer did not take effect, in [`unfiredFaults`](#fault-injection)' words |
+| `fault-websocket` | A network rule matched nothing and its pattern names WebSocket URLs (only `ws:` / `wss:` ones, or ones the pages opened): network faults route HTTP requests, and Playwright's routes do not see WebSocket traffic |
+| `fault-shadowed` | A network rule an earlier one shadows ([first match wins](#rule-order-first-match-wins)) |
+| `server-faults-unseen` | `server: { mode: "remote" }` saw no `x-chaos-fault-*` header in the whole run |
+| `sitemap-unreadable` / `sitemap-empty` | `--seed-from-sitemap` could not be read, or listed no URL on the crawl's origin |
+| `network-profile-failed` / `http-cache-disable-failed` | `--network` or `--no-http-cache` did not apply to a page |
+| `perf-session-failed` / `coverage-attach-failed` | `--perf` measurement (or `coverageFeedback`) could not attach to a page, or perf could not finish it: that page went unmeasured, and `--perf-budgets` checked nothing on it |
+| `lifecycle-fault-failed` | A lifecycle fault threw while firing, so the page ran without it; the message says why |
+| `driver-threw` / `driver-out-of-range` / `driver-operation-unsupported` | The driver threw, or picked a candidate or operation the crawler could not perform |
+| `flow-incomplete` | A `flowDriver` journey ended before its last step: a step whose `urlPattern` / `when` never matched a page the crawl reached, or a step that threw (`flowDriver(...).stats()` and every `Driver.stats()` say how far it got) |
+| `baseline-missing` | The `--baseline` report was not there, so no diff was made. An empty path (`--baseline "$PREV"` with `PREV` unset) counts as missing |
+
+Identical warnings (the same code and message: a profile that failed on every page) are one entry with a `count`. The codes are stable and exported as `RunWarningCode` / `RUN_WARNING_CODES`. Not the pages' console warnings, which `report.totalWarnings` counts.
+
+They do not fail the run, and they are always shown: the full report ends with a `WARNINGS` section, the compact and `--quiet` output have a `  Warnings: 2 (first: <message>)` line under the verdict (on stdout, with the dead-link line), `--github-annotations` emits each as `::warning`, `chaos()` returns them as `result.warnings` (and prints nothing, as it prints nothing else), the Playwright fixture's `chaos.warnings()` has them after `testPage()`, `parallelChaos` judges them on its merged report, `scan` lists its crawls' warnings in its summary and Markdown, and `flake` its runs' once each. `--fail-on-warnings` (`chaos({ failOnWarnings: true })`, `ExitCodeOptions.warnings`, the fixture's `chaosOptions.failOnWarnings`) fails a run that has any, exit 1: `Failed: --fail-on-warnings: 2 warnings (first: <message>)`. The fixture's `strict` alone does not. Under it the fixture's `crawl()` fails on any; `testPage()` fails only on what that call raised (a lifecycle fault that threw on the page, say), not on a fault rule that has not fired yet, which the test's next `testPage()` may still fire: check `chaos.warnings()` at the end of the test for those.
+
+`--log-console` alone now logs: every line goes to stderr, from `warn` up unless `--log-level` says otherwise. With `--log-file` it writes to the console by level, as before.
+
+> **Behaviour change:** a report has a new `warnings` field, the compact and `--quiet` output a `Warnings:` line, and `--github-annotations` a `::warning` per warning, on runs that printed none of it before. `--log-console` without `--log-file` used to print nothing. A missing `--baseline` used to print `Baseline not found at <path> — skipping diff.` on stderr (and nothing under `--quiet`); it is a `baseline-missing` warning. `unfiredFaults` says a lifecycle fault that threw every time threw, instead of "the firing policy said no". An empty `--baseline` / `baseline: ""` used to skip the diff without a word; it is a `baseline-missing` warning. `parallelChaos` under `failOnWarnings` judges the merged report's warnings, not each shard's, and each shard's own `result` is judged without them.
 
 ## Exit codes
 
@@ -1161,10 +1403,53 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 | --- | --- |
 | No navigation errors, no invariant violations | **0** |
 | At least one page with `status: "error"` or `"timeout"` | **1** |
-| At least one invariant violation (any mode) | **1** |
+| At least one invariant violation (any mode), `noOffsiteRedirect` (in `--data-safety`) on a page that redirected off-site included | **1** |
+| A renderer crash (any mode) | **1** |
 | `--strict` and any console error / JS exception / **unhandled rejection** | **1** |
+| `--baseline-strict` and a new cluster / newly failing page vs the baseline | **1** |
+| `--fail-on-http 5xx` and a subresource / API response of 500 and up (`4xx`: of 400 and up) | **1** |
+| `--fail-on-network` and a request that failed at the transport level | **1** |
+| `--fail-on-dead-links` and a crawled link that answered 404 / 5xx | **1** |
+| `--fail-on-warnings` and a [run warning](#run-warnings-reportwarnings) (a fault that never fired, a sitemap that could not be read, a missing `--baseline`, …) | **1** |
+| The CLI refused to run: an unknown flag or `--invariants` name, a malformed value (`--timeout 5s`, `--budget lcp=abc`, an `--exclude` that is not a regex, an `--offsite-redirect-allow` that is not an origin or has no check to configure), no `--url`, an input file that is missing or does not parse (`--storage-state`, `--har-replay`, `--trace-replay`, `--perf-budgets`, a `--seed-from-sitemap` path; a sitemap URL is fetched best-effort), a `--baseline` that is not there under `--baseline-missing fail`, or an optional peer `--axe` (or `--invariants axe`) / `--visual-baseline` needs that is not installed. Nothing ran, no browser started; stderr has one `chaosbringer: …` line naming the flag | **2** |
+| Nothing answered at `--url`: no page loaded and the start page's connection failed (`ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, the other net errors `load` stops on), and not because a redirect pointed at a host that is down, or under `--network offline`. No report, baseline or JUnit file is written (failure bundles and `--trace-out` written during the crawl may exist); stderr has one `chaosbringer: could not reach <url>: is the server running? (net::… at <url>)` line. `flake` and `scan` refuse the same way | **2** |
 
 `chaos()` returns `{ passed, exitCode }`; the CLI applies the same rule via `getExitCode`.
+
+Every subcommand refuses its arguments the same way: an unknown flag, or a missing required flag or operand, exits **2** before anything runs, with one `chaosbringer <sub>: …` line on stderr (`chaosbringer scan: unknown option --bogus (see chaosbringer scan --help)`, `chaosbringer perf gate: --budgets <file> is required (see chaosbringer perf gate --help)`). An unknown flag of the main crawl, `shard`, `flake`, `minimize` or `drive` names the flag it misspells when one is close (`chaosbringer: unknown option --max-page: did you mean --max-pages? (see chaosbringer --help)`). So does a malformed value, such as `scan --max-pages abc`, `flake --runs 1`, `load --workers abc`, `parity --timeout 5s`, `cluster-artifacts --min-count abc` or `perf emit-budgets --floor scriptMs=-1`: every numeric flag is checked as a number, and one where 0 turns the check off (`--perf-ratio`, `--perf-delta-ms`) refuses 0. So do the input files of a command that starts a browser (`shard` and `flake` take every input file of the main command, `scan` its `--storage-state` and a `--sitemap` path, `drive` its `--storage-state`, `--har-replay` and `--plan`, `minimize` its `--trace` and the `--storage-state` / `--har-replay` it replays with, recorded or given, `recipes verify`, `recipes repair` and `load` their `--vars-file`): a file that is not there or does not parse is refused before the browser starts, naming the flag and the path (`chaosbringer flake: --storage-state ./auth.json: no such file`). So is a recipe one of those three would replay with a `{{name}}` placeholder no `--var` or `--vars-file` defines (`chaosbringer recipes verify: auth/login: variable "password" is not defined …`), and a `drive --secret` whose environment variable is unset, a `--plan` value with a `{{name}}` no `--secret` names, or a `--save-secrets` path drive could not write. `scan` checks every crawl option before its clean crawl (an invalid `--exclude` regex, an unknown `--device`), and an unknown `--invariants` name, and `scan --axe` / `--invariants axe` the axe-core install. What a subcommand reports about the run keeps its own code: 1 for a flaky verdict, cluster or page (`flake`), a regression, a failed gate, a failure `minimize` could not reproduce (its `chaosbringer minimize: the failure did not reproduce: …` line) or a file it could not read (`diff failed: failed to read …`), and `perf`'s 2 for inputs it refuses to compare (a `refusing to compare: …` line).
+
+> **Behaviour change:** a subcommand's usage error used to be `<sub> failed:
+> Unknown option '--bogus'. …` (or the whole help text) and exit 1, so a CI
+> step read a mistyped flag as "the run found something". `load`, `drive` and
+> `recipes verify` already exited 2 for some of theirs, without the one line;
+> `recipes show` and the other `recipes` subs that need a name printed their
+> usage and exited 0 without one. A script that checked a subcommand for
+> exactly 1 on a typo now sees 2.
+
+> **Behaviour change:** a run that could not be made because of how it was
+> invoked now exits 2 before its browser starts, where it used to fail with
+> exit 1, the code of a run that found something: a missing or malformed
+> `--storage-state`, `--har-replay` or `--trace-replay` (crawl, `shard`,
+> `flake`; `scan` and `drive` take `--storage-state`), `minimize --trace`, and
+> a missing or malformed `drive --plan` (`drive failed: …` and exit 1, which
+> is drive's code for a goal it did not reach), a crawl option only the crawler
+> checked under `scan` (`--exclude '('`, `--device`), `--axe` without
+> axe-core (it failed every page as an invariant violation) and
+> `--visual-baseline` without pixelmatch / pngjs (its second run did; the
+> first now refuses too), and `parity` / `journey --timeout 5s`, which ran
+> with a 5 ms timeout. A malformed number that used to be read as NaN and
+> ignored (`parity --perf-ratio abc`, `cluster-artifacts --min-count abc`)
+> exits 2 instead of 0, and so does an empty one where it used to be read
+> as 0 (`perf regress --threshold ""`, `scan --seed ""`,
+> `--perf-samples ""`). A `--seed-from-sitemap` (or `scan --sitemap`) path
+> that is not there exits 2 where the run went on without its seeds and
+> exit 0. In code, `new ChaosCrawler()`, `chaos()` and the
+> Playwright fixture throw `MissingPeerError` for an `axe()` or
+> `visualRegression()` invariant whose package is not installed, instead of
+> reporting a violation on every page, and so does `scenarioLoad()` instead
+> of failing every iteration.
+
+The echo of a fault the run injected counts in none of these (see [Fault echoes](#fault-echoes)).
 
 > **Behaviour change:** `--strict` now also fails on an unhandled rejection. It
 > used to ignore them, so a run whose entire finding was "the app left a
@@ -1176,32 +1461,36 @@ Use it to triage noisy fuzz runs — high-count clusters are the first thing to 
 
 ## Playwright Test integration
 
-Use the pre-configured `chaosTest`:
+The fixture lives at the `chaosbringer/fixture` subpath — the package root does not export it, so that only this entry point needs `@playwright/test` installed. Use the pre-configured `chaosTest`:
 
 ```ts
-import { chaosTest, chaosExpect } from "chaosbringer";
+import { chaosTest, chaosExpect } from "chaosbringer/fixture";
 
 chaosTest("chaos-test homepage", async ({ page, chaos }) => {
-  await page.goto("http://localhost:3000");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/");
   chaosExpect.toHaveNoExceptions(result);
   chaosExpect.toLoadWithin(result, 3000);
 });
 ```
 
+A relative URL resolves against `baseURL` from the Playwright config's `use` — the one `page.goto` resolves against — unless `chaosOptions.baseUrl` is set, which takes precedence. An absolute URL is used as given.
+
+`toHaveNoExceptions` counts what the page's code threw (`exception`, `unhandled-rejection`). A failed navigation (`navigation`) and a renderer crash (`crash`) are the page's status, not exceptions, and `toLoadWithin` is what fails for them: a page whose status is `error` or `timeout` did not load within any bound, however fast it failed.
+
+> **Behaviour change:** a failed `page.goto` used to be an `exception`, so `toHaveNoExceptions` failed for a page that did not load, and so did a renderer crash (as the `Page crashed` error of the next call). It no longer does. Check the page's status, with `toLoadWithin` (which now fails for an `error` or `timeout` page) or `toHaveNoErrors`, to catch a page that did not load.
+
 Or extend your existing test:
 
 ```ts
 import { test as base } from "@playwright/test";
-import { withChaos, type ChaosFixtures } from "chaosbringer";
+import { withChaos, type ChaosFixtures } from "chaosbringer/fixture";
 
 const test = base.extend<ChaosFixtures>(
   withChaos({ maxActionsPerPage: 10, ignoreErrorPatterns: ["analytics"] }),
 );
 
 test("my feature", async ({ page, chaos }) => {
-  await page.goto("/dashboard");
-  const result = await chaos.testPage(page, page.url());
+  const result = await chaos.testPage(page, "/dashboard");
   chaos.expectNoErrors(result);
 });
 ```
@@ -1210,13 +1499,45 @@ Or crawl from within a fixture-based test:
 
 ```ts
 chaosTest("crawl entire site", async ({ chaos }) => {
-  const report = await chaos.crawl("http://localhost:3000");
+  const report = await chaos.crawl("/");
   chaos.expectNoErrors(report);
   chaos.expectNoDeadLinks(report);
 });
 ```
 
+Every `crawl()` attaches its report to the test as `chaos-report.json`, so it is in the HTML report next to the failure.
+
 `expectNoDeadLinks` / `chaosExpect.toHaveNoDeadLinks` surface each broken URL together with the page it was found on, so a CI failure points straight at the broken anchor without cross-referencing the full JSON report.
+
+`chaosOptions` — set per file with `chaosTest.use({ chaosOptions })`, or as `withChaos()`'s defaults — also carries faults, invariants, a seed, and `strict`:
+
+```ts
+import { expect } from "@playwright/test";
+import { faults } from "chaosbringer";
+import { chaosTest } from "chaosbringer/fixture";
+
+chaosTest.use({
+  chaosOptions: {
+    seed: 42,
+    // Load the page only: the assertion below is about it, not about
+    // wherever a random click would have gone.
+    maxActionsPerPage: 0,
+    faultInjection: [faults.status(503, { urlPattern: /\/api\/stock/ })],
+    // The console line Chromium logs for the injected 503 is the fault's
+    // echo, which strict does not count: no ignore pattern needed.
+    strict: true,
+  },
+});
+
+chaosTest("stock page survives a down API", async ({ page, chaos }) => {
+  await chaos.testPage(page, "/stock");
+  await expect(page.getByRole("status")).toHaveText("Stock unavailable");
+});
+```
+
+`strict: true` fails the test on any run `--strict` would exit 1 on — it asks the same `getExitCode` — and `crawl()` attaches its report before it does. Without it the fixture fails nothing on its own. The console error Chromium logs for an error status a `faults.status` rule answered ("Failed to load resource: the server responded with a status of 503") is that fault's echo, which it does not count (see [Fault echoes](#fault-echoes)); `strictCountsFaultEchoes: true` counts it again. A rule that never fired (or any other [run warning](#run-warnings-reportwarnings)) is in `report.warnings` after `crawl()`, and in `chaos.warnings()` after `testPage()`; `strict` does not fail on it, `failOnWarnings: true` does (on `testPage()`, only on what that call raised: a rule aimed at a later page has not fired yet). `ignoreErrorPatterns` replaces `COMMON_IGNORE_PATTERNS` rather than adding to them: spread them in (`[...COMMON_IGNORE_PATTERNS, "…"]`) to add a pattern of your own. `lifecycleFaults` and `runtimeFaults` are accepted too. On `testPage()`, `faultInjection` rules are routed on your page and `runtimeFaults` are installed on it as an init script before it navigates; both stay on that page for the rest of the test. `testPage()` returns no report, so read the counters off the crawler: `chaos.crawler.getFaultStats()` for the network rules, `getRuntimeFaultStats()` for the runtime faults — which used to stay at zero on this path, whatever fired (as did `getIframeFaultStats()` on a `ChaosCrawler` of your own). The crawler leaves your context alone, so a request a service worker takes on your page never reaches a `faultInjection` rule (`result.serviceWorker` is `"unrouted"`; see [Service workers](#service-workers)): use `runtimeFaults`, or a context created with `serviceWorkers: "block"`.
+
+`chaosOptions` is checked for misspelled keys the way `ChaosCrawler` checks its options: `maxActionPerPage` or `stirct` throws `unknown chaosOptions key "stirct" — did you mean "strict"?` as the fixture is set up, and so does `runChaosTest()`. A `ChaosCrawler` option the fixture does not take (`timeout`, `iframeFaults`) throws too. Both used to be dropped without a word: the test ran with 5 actions a page, or without `strict`.
 
 ## Subcommands
 
@@ -1232,7 +1553,7 @@ chaosbringer minimize \
   --trace-out min.trace.jsonl
 ```
 
-`--max-pages`, `--timeout`, `--ignore-analytics` are forwarded to each replay. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal.
+`--url` defaults to the trace's `baseUrl`. Every replay runs with the crawl flags that shape a replay: `--timeout`, `--settle`, `--headless` / `--no-headless`, `--exclude`, `--ignore-error`, `--ignore-http`, `--ignore-analytics`, `--ignore-preset`, `--spa`, `--storage-state`, `--har-replay`, `--device`, `--network`, `--no-http-cache`, `--invariants`, `--data-safety`, `--offsite-redirect-allow`, `--axe`, `--axe-tags` (`REPLAY_CRAWL_FLAGS`; `minimize --help` prints the same list). A v2 trace records the ones its crawl was given (all but `--headless` / `--no-headless`), and those apply by default: `minimize` prints them (`replaying with the trace's setup: --settle adaptive --storage-state auth.json`). A flag given replaces what was recorded for its setting (`replaced by the flags given: --storage-state`); `--ignore-error`, `--ignore-analytics` and `--ignore-preset` are one setting, and so are `--invariants`, `--data-safety`, `--offsite-redirect-allow`, `--axe` and `--axe-tags`, except that `--axe-tags` given alone retags the recorded axe check (and is refused, exit 2, when the trace recorded none), and `--offsite-redirect-allow` given alone replaces only the recorded allow list (refused, exit 2, when the recorded checks have no `no-offsite-redirect`). A recorded relative `--storage-state` or `--har-replay` path is read from the directory `minimize` runs in, and when it is not there the refusal says it came from the trace's setup and that the flag replaces it. A `chaosbringer --trace-replay` does not read the recorded setup: give it the flags yourself. A crawl flag that cannot apply is refused, exit 2, with why (`chaosbringer minimize: --seed does not apply to minimize: the trace decides the actions, …`): `--seed`, `--max-actions`, `--aria-targets`, `--seed-from-sitemap`, `--shard` and `--trace-replay` (the trace decides the pages and the actions), `--strict` and the `--fail-on-*` gates (`--match` decides whether a replay reproduced), `--cdp` (every replay starts its own browser), and the `--perf*`, `--budget` and `--visual-*` flags (replays are not measured). So is a crawl command after `--`: the trace carries the crawl's setup, and a `Repro:` line's `--seed` is exactly what it replaces. `--max-pages` is accepted and changes nothing, which a stderr line says: a replay visits every page of the trace. `min.trace.jsonl` is the default output path. Visit entries are preserved — only action entries are candidates for removal. The first replay runs the whole trace: when that does not match `--match`, there is no failure to shrink, so `minimize` writes nothing and exits 1 with one line saying so (it used to shrink anyway, keep every action and report success). The second runs no actions at all, so a failure on the page loads alone minimizes to none.
 
 ### `flake`
 
@@ -1242,7 +1563,17 @@ Run the same crawl N times and separate error clusters into stable (fire every r
 chaosbringer flake --url http://localhost:3000 --runs 5 --seed 42
 ```
 
-With a fixed `--seed`, RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when any cluster / page flaked, so CI can gate on it. `--output <path>` also writes the analysis as JSON.
+Every flag of the main crawl is taken and given to every run: `--exclude`, `--settle`, `--storage-state`, `--strict`, `--ignore-preset`, `--invariants`, `--device`, `--fail-on-http`, … The crawl's checks refuse a bad value or a missing input file before Run 1, exit 2. A run's `Repro:` line can be pasted whole after a `--`, with or without its leading `chaosbringer` (or `npx chaosbringer`, `pnpm exec chaosbringer`, `node dist/cli.js`), as the shell splits it:
+
+```bash
+chaosbringer flake --runs 5 -- chaosbringer --url http://localhost:3000 --seed 9 --exclude /logout --settle adaptive
+```
+
+flake's own flags (`--runs`, `--output`, `--quiet`) go before the `--`; one of them after it is refused, and so is a crawl flag (or the URL) given on both sides, exit 2 (`chaosbringer flake: --seed is given both before and after --: give it on one side`). After the `--`, `--output` and `--quiet` would be the crawl's (its report path, which flake does not write), so the refusal says so rather than telling you to move them: before the `--`, `--output` is flake's analysis JSON. A pasted command's `--version` is refused too, and `flake --version` prints the version and runs nothing, as the main command does. An unknown flag on either side is refused with the one it misspells (`unknown option --exlude: did you mean --exclude?`), and a subcommand after the `--` (`chaosbringer scan …`) with `it is a subcommand, and flake reruns a plain crawl command`. A file a run writes is its own, so the trace of the run that failed is still there for `minimize`: `--trace-out t.jsonl` writes `t.run1.jsonl`, `t.run2.jsonl`, …, and so do `--har-record` and `--log-file` (`--failure-artifacts`, `--screenshot-dir` and `--perf-out` get a `run-<N>/` directory each; `--screenshots` without `--screenshot-dir` writes `screenshots/run-<N>/`). The flags that write or format one crawl's report (`--compact`, `--heatmap`, `--heatmap-top`, `--heatmap-out`, `--junit`, `--github-annotations`, `--cluster-artifacts`, `--cluster-min-count`) are accepted and not applied, which a stderr line says. A run's `--bind` prints its attach hint, as the main crawl's does.
+
+Each run is judged by the crawl's own exit rules with the same flags (`getExitCode`: a failed, timed-out or crashed page, an invariant violation, and `--strict`, `--fail-on-*` and `--baseline-strict` when given), and the report opens with the verdicts (`Verdicts (the crawl's exit rules): 2 passed, 1 failed — FLAKY`, then each failing run's seed and reasons; `analysis.verdicts`, `analysis.verdictFlaky`). The verdict is flaky when some runs pass and some fail; every run failing alike is a stable failure, not a flake.
+
+With a fixed `--seed`, every run uses it and RNG-driven variance is impossible, so any flake points at non-determinism outside chaosbringer (server, network, timers, or observable ordering). Without one, each run draws its own seed, as an unseeded crawl does, and the verdicts name each run's. Pair with `--har-replay` or `--trace-replay` to narrow further. Exits 1 when the verdict flaked or any cluster / page flaked, so CI can gate on it, and 2 when nothing answered at `--url` (`chaosbringer flake: could not reach <url>: is the server running? (…)`, after the first run): a site that is down fails the same way every run, which used to read as a stable cluster and exit 0. `--output <path>` also writes the analysis as JSON. The runs' [warnings](#run-warnings-reportwarnings) are listed once each (`analysis.warnings`, identical ones folded across runs), and fail nothing unless `--fail-on-warnings` is given, which judges each run's verdict by them.
 
 Programmatic equivalent — `chaos()` does **not** throw when `strict: true` triggers a failure; it returns `{ report, passed: false, exitCode: 1 }`. That means you can collect reports across runs even with `strict: true` and pass them to `flakeReport()`:
 
@@ -1254,7 +1585,8 @@ for (const seed of [1, 2, 3, 4, 5]) {
   const { report } = await chaos({ ...sharedOpts, seed, strict: true });
   reports.push(report);
 }
-const analysis = flakeReport(reports);
+// Judged by the rules chaos() ran with: `strict: true` here.
+const analysis = flakeReport(reports, { strict: true });
 ```
 
 ### `shard`
@@ -1269,9 +1601,9 @@ chaosbringer shard \
   --output chaos-report.json
 ```
 
-All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are forwarded verbatim to each worker. For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
+All non-shard options (`--url`, `--max-pages`, `--seed`, `--baseline`, `--strict`, …) are checked before any worker starts, with every check the main command makes before its browser starts (`--heatmap-top`, `--cluster-artifacts` without `--failure-artifacts`, the `--perf-budgets` file), so an unknown flag, a malformed value or a file it cannot use exits 2 once (`chaosbringer shard: unknown option --bogus`) instead of failing in every worker, and are then forwarded verbatim to each worker. Every worker gets the same `--seed`: the one given, or one drawn for the run. That is what makes the merged report's seed, and its `Repro:` line, hold for the whole run: `chaosbringer shard --count 4 --url … --seed 123 …` reruns every shard (it used to be shard 0's line, which reran shard 0 alone). `--quiet` prints the merged verdict, why it failed, the paths the workers wrote and `Merged report saved to:`, and `--compact` the merged compact report and the same lines, as the main command does; neither mixes in the rest of the workers' own output. The failure bundle line sums what the workers wrote to each directory (`Wrote 3 failure bundle(s) to ./failures/`); every shard crawls the base URL, so a failing base URL counts once per shard. `--junit`, `--heatmap-out` and the `--cluster-artifacts` bundles are written again from the merged report once the workers are done, so they cover the whole run rather than whichever shard wrote the shared path last, and their lines come in the main command's order (`JUnit XML saved to:` after `Merged report saved to:`). For full URL-space coverage, pair with `--seed-from-sitemap` — each shard filters the sitemap URLs by hash, so every URL is processed by exactly one shard. Without a sitemap, each shard only explores the subgraph reachable via owned links; deep pages reachable only through non-owned parents may go unvisited.
 
-Exit code is the max of any worker's exit code and the merged report's (`--strict` / `--baseline-strict`). A single worker's non-zero exit still fails the overall run, even if the merged report looks clean.
+Exit code is the max of any worker's exit code and the merged report's, by the exit rules forwarded to the workers (`--strict`, `--baseline-strict`, `--fail-on-http`, `--fail-on-network`, `--fail-on-dead-links`, `--fail-on-warnings`). The merged report's `warnings` fold the shards' identical ones, and diagnose the faults that did not take effect again from the summed stats: a rule one shard never saw a request for may have fired on another. A single worker's non-zero exit still fails the overall run, even if the merged report looks clean. When every worker refused because nothing answered at `--url` (each prints its `could not reach …` line), no report is merged and the exit code is 2.
 
 You can also run shards by hand (e.g. as separate CI matrix jobs):
 
@@ -1285,7 +1617,7 @@ const merged = mergeReports([r0, r1, r2, r3]);
 
 ### `diff`
 
-Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both (likely third-party noise). Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed.
+Compare two independent crawl reports. Surfaces clusters that fire only on the left, only on the right, and on both sides, each with a raw sample message where it says more than the normalised cluster key. Designed for the dual-runtime regression workflow where the same site data is served by two runtimes and crawled with the same seed; there, a shared cluster is not caused by either runtime (third-party noise, or a bug both have).
 
 ```bash
 chaosbringer --url http://127.0.0.1:3000 --seed 1 --output left.json
@@ -1307,7 +1639,7 @@ chaosbringer parity \
   --output parity.json
 ```
 
-Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits non-zero on any mismatch so it slots into CI as a gate.
+Default mode is manual redirects (compare 3xx + Location directly — the most sensitive mode for routing-bug detection). `--follow-redirects` falls back to final-status comparison. Fetch-based only — JS exceptions / body predicates would need a Playwright session per probe and are out of scope. Exits 1 on any mismatch so it slots into CI as a gate, and 2 when it refuses its arguments: `--timeout` and `--perf-samples` must be integers of at least 1 (`--timeout 5s` was read as 5 ms and failed every slow path), and `--perf-delta-ms` and `--perf-ratio` numbers above 0, since 0 would turn the check off. `journey` checks its `--timeout`, `--perf-delta-ms` and `--perf-ratio` the same way.
 
 ### `cluster-artifacts`
 
@@ -1324,7 +1656,7 @@ chaosbringer --url http://localhost:3000 \
   --cluster-min-count 5
 ```
 
-`--min-count` (or `--cluster-min-count` inline) filters low-frequency noise. The inline form requires `--failure-artifacts` since it copies from the per-page bundles.
+`--min-count` (or `--cluster-min-count` inline) filters low-frequency noise; it and `--max-clusters` (at least 1) must be integers, or the command exits 2 (`--min-count abc` used to emit every cluster). The inline form requires `--failure-artifacts` since it copies from the per-page bundles.
 
 ## CLI reference
 
@@ -1344,18 +1676,22 @@ chaosbringer --url http://localhost:3000 \
 | `--exclude <pattern>` | Skip URLs matching regex (repeatable) | — |
 | `--ignore-error <pattern>` | Suppress errors matching regex (repeatable) | — |
 | `--ignore-analytics` | Suppress common analytics noise† | false |
+| `--ignore-http <pattern>` | Request URLs (regex, repeatable) whose 4xx / 5xx answer is no HTTP error: not counted, and its "Failed to load resource" line dropped. See [HTTP errors](#http-errors) | — |
 | `--spa <pattern>` | Mark matching URLs as SPA (errors bucketed separately, repeatable) | — |
 | `--log-file <path>` | JSON execution log | — |
-| `--log-level <level>` | `debug` / `info` / `warn` / `error` | info |
-| `--log-console` | Also log to console | false |
+| `--log-level <level>` | `debug` / `info` / `warn` / `error` | info (warn for `--log-console` alone) |
+| `--log-console` | Also log to the console; without `--log-file`, every line to stderr, from `warn` up by default (it used to need `--log-file` and printed nothing alone) | false |
 | `--seed <n>` | Seed for deterministic action selection | random |
 | `--har-record <path>` | Capture network traffic to a HAR file | — |
-| `--har-replay <path>` | Replay network traffic from a HAR file | — |
-| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls | — |
-| `--budget <k=ms,...>` | Per-metric performance budget (repeatable) | — |
-| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed) | false |
+| `--har-replay <path>` | Replay network traffic from a HAR file (checked before the browser starts) | — |
+| `--storage-state <path>` | Playwright storageState JSON for authenticated crawls (checked before the browser starts) | — |
+| `--budget <k=ms,...>` | Per-metric performance budget (repeatable; each ms > 0) | — |
+| `--axe` | Enable axe-core a11y scan on every page (requires `axe-core` installed; exit 2 without it) | false |
 | `--axe-tags <list>` | Comma-separated axe tags | `wcag2a,wcag2aa,wcag21a,wcag21aa` |
-| `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`) | — |
+| `--invariants <list>` | Run invariant presets on every page, by name (comma-separated, repeatable, merged): `data-safety` (`invariants.dataSafety()`: `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`, `no-offsite-redirect`; not `not-blank`), any of those or `not-blank`, `axe` (= `--axe`). Each with its defaults; an unknown name exits 2. See [Bad and hostile data](#bad-and-hostile-data-from-the-cli) | — |
+| `--offsite-redirect-allow <origins>` | Origins `no-offsite-redirect` lets a page redirect to (an SSO provider): comma-separated, repeatable, scheme and host only. Exit 2 for a value that is not an origin, or without the check. See [Off-site redirects](#off-site-redirects-and-open-redirects) | — |
+| `--data-safety` | Shorthand for `--invariants data-safety` | false |
+| `--visual-baseline <dir>` | Enable visual regression against PNG baselines in `<dir>` (requires `pixelmatch` + `pngjs`; exit 2 without them) | — |
 | `--visual-threshold <n>` | pixelmatch color distance (0..1) | 0.1 |
 | `--visual-max-diff-pixels <n>` | Absolute pixel budget before failing | 0 |
 | `--visual-max-diff-ratio <n>` | Ratio pixel budget (0..1) | — |
@@ -1364,11 +1700,11 @@ chaosbringer --url http://localhost:3000 \
 | `--failure-artifacts <dir>` | Per-failure bundle (screenshot + html + errors + trace + repro.sh) | — |
 | `--failure-max <n>` | Cap the number of failure bundles per run | unlimited |
 | `--trace-out <path>` | Write a JSONL trace of visits + actions | — |
-| `--trace-replay <path>` | Replay a previously recorded trace | — |
+| `--trace-replay <path>` | Replay a previously recorded trace (checked before the browser starts) | — |
 | `--device <name>` | Emulate a Playwright device (e.g. `iPhone 14`) | — |
 | `--network <profile>` | CDP throttling: `slow-3g` / `fast-3g` / `offline` | — |
 | `--no-http-cache` | Disable the browser HTTP cache on every page (`httpCache: false`), for cold-cache measurement. Otherwise the cache is on, except in runs with fault injection, `traceparent` or HAR replay, which route every request and so run cold | cache on |
-| `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware) | — |
+| `--seed-from-sitemap <url\|path>` | Prepend URLs from sitemap.xml (index-aware; a path is checked before the browser starts, a URL is fetched best-effort) | — |
 | `--shard <i/N>` | Run as shard i of N. See the `shard` subcommand to spawn + merge. | — |
 | `--heatmap` | Print an action-frequency heatmap after the report | false |
 | `--heatmap-top <n>` | Limit the heatmap to the top N rows | 20 |
@@ -1382,15 +1718,21 @@ chaosbringer --url http://localhost:3000 \
 | `--perf-out <dir>` | Write each page's full perf report (+ trace / coverage) to `<dir>`; implies `--perf` | — |
 | `--baseline <path>` | Diff this run against a previous report | — |
 | `--baseline-strict` | Fail on new clusters / newly failing pages vs baseline | false |
-| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link | false |
+| `--baseline-missing <warn\|fail>` | A missing `--baseline` file: `warn` runs without a diff (a `baseline-missing` warning), `fail` refuses the run, exit 2 | warn |
+| `--github-annotations` | Emit GitHub Actions workflow commands for each cluster / dead link / [run warning](#run-warnings-reportwarnings), `::error` for what fails the run under its rules (and every JS exception) and `::warning` otherwise, and for each [off-site redirect](#off-site-redirects-and-open-redirects) no check failed: `::warning` when its target was in the page's URL, `::notice` otherwise | false |
 | `--compact` | Compact output | false |
-| `--strict` | Fail on console errors + JS exceptions | false |
-| `--quiet` | Minimal output | false |
-| `--help` | Show help | — |
+| `--strict` | Fail on console errors, JS exceptions and unhandled rejections (not on the [echo of a fault](#fault-echoes) the run injected) | false |
+| `--fail-on-http <5xx\|4xx>` | Fail on a subresource / API response of 500 and up (`5xx`) or 400 and up (`4xx`). See [HTTP errors](#http-errors) | — |
+| `--fail-on-network` | Fail on a request that failed at the transport level (`net::ERR_…`; not the `ERR_ABORTED` of a stylesheet or script that answered 4xx / 5xx, which is an HTTP error) | false |
+| `--fail-on-dead-links` | Fail on a crawled link that answered 404 / 5xx | false |
+| `--fail-on-warnings` | Fail on a run with [warnings](#run-warnings-reportwarnings). From this CLI: a `--seed-from-sitemap` that could not be read or listed no URL, a `--network` profile or `--no-http-cache` that did not apply, a missing (or empty) `--baseline`, `--perf` that could not measure a page. The API's and the fixture's fault rules and drivers add their own | false |
+| `--quiet` | Print only the verdict line (`[PASS] 12 pages, 0 errors, …`), any dead links (`Dead links: 1 (first: <url> <- <source>)`), [off-site redirects](#off-site-redirects-and-open-redirects) (`Off-site redirects: 1 (first: <page> -> <target>)`) and [warnings](#run-warnings-reportwarnings) (`Warnings: 1 (first: <message>)`), on FAIL the rules that failed it (`Failed: --strict: 1 unhandled rejection`), and the paths written: the failure bundles (`Wrote 3 failure bundle(s) to ./failures/`), the `--trace-out` and `--log-file` files, the report, the JUnit XML. The full and `--compact` output end with the same lines | false |
+| `--help`, `-h` | Show help, with a line for every subcommand | — |
+| `--version`, `-V` | Print the installed version | — |
 
-† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in `src/crawler.ts`.
+† `--ignore-analytics` suppresses matches for `googletagmanager`, `google-analytics`, `analytics.google`, `hotjar`, `clarity.ms`, `segment.io`, `amplitude`, `cloudflareinsights`, `facebook.net`, and generic `net::ERR_FAILED` from blocked resources. See `COMMON_IGNORE_PATTERNS` in [`src/ignore-presets.ts`](https://github.com/mizchi/chaosbringer/blob/main/packages/chaosbringer/src/ignore-presets.ts).
 
-Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI.
+Fault injection and invariants are programmatic-only — they can't be expressed in a shell command and are intentionally absent from the CLI. A run that sets them says so at the end of its `Repro:` line (see [Reproducible runs](#reproducible-runs)).
 
 ## Action weighting
 
@@ -1419,7 +1761,8 @@ new ChaosCrawler({
 - `exception` — uncaught JS errors
 - `unhandled-rejection` — unhandled promise rejections
 - `invariant-violation` — a declared invariant failed
-- `crash` — the page crashed
+- `navigation` — the crawler's own navigation of the page failed (`page.goto: net::ERR_EMPTY_RESPONSE at …`, a load timeout). The page threw nothing: its `error` / `timeout` status is the finding, and this says why. Not counted as a JS exception
+- `crash` — the page's renderer process died (out of memory, a browser bug). The page gets `status: "error"`, `summary.crashes` counts it, and the run fails in every mode. Under `--cdp` the attached tab is the only one, so the crawl stops there
 
 `PageResult.status` reports the navigation outcome (`success` / `error` / `timeout` / `recovered`), not whether the page was healthy. A page can be `success` with exceptions on it — check `PageResult.hasErrors` or `report.summary.pagesWithErrors` for the full picture.
 
@@ -1451,10 +1794,12 @@ new ChaosCrawler({
     "pagesWithErrors": 1,
     "consoleErrors": 1,
     "jsExceptions": 1,
+    "crashes": 0,
     "unhandledRejections": 0,
     "invariantViolations": 0
   },
-  "faultInjections": [{ "rule": "api-500", "matched": 4, "injected": 4 }]
+  "faultInjections": [{ "rule": "api-500", "matched": 4, "injected": 4 }],
+  "warnings": []
 }
 ```
 
@@ -1462,7 +1807,7 @@ new ChaosCrawler({
 
 ### `fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` at end of run
 
-One event per configured fault that did not take effect, on any of the four layers (`network`, `runtime`, `lifecycle`, `iframe`). Each carries `rule` and `layer`; which event you get says what to go fix.
+One event per configured fault that did not take effect, on any of the four layers (`network`, `runtime`, `lifecycle`, `iframe`), and one `report.warnings` entry with the same diagnosis (`fault-unmatched`, `fault-unfired`, `fault-uncounted`, `fault-websocket`; see [Run warnings](#run-warnings-reportwarnings)). Each carries `rule` and `layer`; which event you get says what to go fix.
 
 **`fault_rule_unmatched`** — the pattern matched nothing (`matched: 0`). Usually one of:
 
@@ -1470,8 +1815,10 @@ One event per configured fault that did not take effect, on any of the four laye
 - A broader catch-all earlier in the array is shadowing this rule — see [Rule order: first match wins](#rule-order-first-match-wins).
 - The crawl never visited a page that issues the matching request (raise `maxPages` or check `excludePatterns`).
 - For a `runtimeFaults` rule: the app makes the call from a context the init-script patch does not cover, or issues no client-side call at all.
+- For a network rule on a PWA: a service worker took the request. The event then carries `serviceWorker: { reach, pages }` and `unfiredFaults` says so instead of blaming the pattern. `reach: "routed"` is the crawl's own context, where the rule does see what the worker forwards (as a `resourceType: "fetch"` request) and misses only what it answers from its own cache; `"unrouted"` is `testPage()` on your context, an attached browser, or a crawl with `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` set, where the rule sees nothing the worker takes. See [Service workers](#service-workers).
+- For a network rule on a WebSocket URL: Playwright's routes do not see WebSocket traffic, so no network fault reaches it. The event then carries `webSocket: { connections, first, webSocketOnly }` and the warning is `fault-websocket`.
 
-**`fault_rule_unfired`** — the pattern was right and the firing policy declined: `matched` is non-zero and nothing fired. A `schedule` shorter than the number of matching calls, a `probability` that never rolled, or (when `suppressed` is present on the event) a rule ahead of this one answering the request first.
+**`fault_rule_unfired`** — the pattern was right and the firing policy declined: `matched` is non-zero and nothing fired. A `schedule` shorter than the number of matching calls, a `probability` that never rolled, or (when `suppressed` is present on the event) a rule ahead of this one answering the request first. For a lifecycle fault with `errored` non-zero, the fault threw each time (its `lifecycle-fault-failed` warnings, and `lifecycle_fault_failed` events, say why), and the message says that instead.
 
 **`fault_rule_uncounted`** — the row carried no usable counter, so nothing measured whether it fired. Not the same finding as the two above: the run decides nothing about that fault. Expect this only from a hand-built or older-version report, not from a completed crawl.
 
@@ -1479,7 +1826,7 @@ An earlier version emitted only `fault_rule_unmatched`, and only for the network
 
 ### `fault_rule_shadowed` warning at crawl start
 
-Emitted (best-effort) when a later rule's `urlPattern` looks fully shadowed by an earlier one — typically a `/^https?:\/\//`-style catch-all placed before a specific override. Each warning includes `earlierRule`, `laterRule`, and a `sampleUrl` derived from the later pattern that the earlier rule also matches. Reorder so specific rules come first, or narrow the catch-all's pattern. False negatives are accepted (the detector is heuristic, not a regex-superset prover), but false positives are designed to be rare — `probability < 1` and non-overlapping `methods` filters disable the check for that pair.
+Emitted (best-effort), and a `fault-shadowed` entry of `report.warnings`, when a later rule's `urlPattern` looks fully shadowed by an earlier one — typically a `/^https?:\/\//`-style catch-all placed before a specific override. Each warning includes `earlierRule`, `laterRule`, and a `sampleUrl` derived from the later pattern that the earlier rule also matches. Reorder so specific rules come first, or narrow the catch-all's pattern. False negatives are accepted (the detector is heuristic, not a regex-superset prover), but false positives are designed to be rare — `probability < 1` and non-overlapping `methods` filters disable the check for that pair.
 
 ### Loopback (`127.0.0.1`) sub-resources blocked under Chromium 130+
 

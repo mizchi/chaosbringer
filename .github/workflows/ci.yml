@@ -7,8 +7,19 @@ on:
 
 jobs:
   build-and-test:
+    # Node 24, which every other job runs, and Node 22, the oldest release
+    # line still supported upstream that the packages' `engines` (>=20) admit
+    # (20 reached its end of life in April 2026). A change that needs a newer
+    # Node fails the 22 leg.
+    name: build-and-test (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The job's own 10 minutes plus the Playwright install step's 25-minute
+    # bound (see that step): every job here that installs Playwright adds it.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -16,23 +27,35 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The lint and docs checks below do not depend on the Node version, so
+      # they run on the Node 24 leg only.
       - name: Lint — no NUL bytes in source (all workspace packages)
+        if: matrix.node == 24
         run: pnpm -r lint:nul
+
+      # `vp lint src` (Oxlint, configured in the package's vite.config.ts),
+      # correctness rules as errors (as lightbringer's own leg below lints its
+      # package). Reads `src/` only, so it does not depend on the build step.
+      - name: Lint
+        if: matrix.node == 24
+        run: pnpm -F chaosbringer lint
 
       # The skill's snippets are the first thing a new reader runs, and a
       # snippet naming an export that does not exist was the most-reported
       # friction across twelve evaluation runs. Reads `src/`, not `dist/`, so it
       # does not depend on the build step below.
       - name: Check the chaosbringer skill's docs against the real exports
+        if: matrix.node == 24
         run: pnpm check:skill-docs
 
       - name: Check that workflow shell blocks parse
+        if: matrix.node == 24
         run: pnpm check:workflow-shell
 
       - name: Build
@@ -45,33 +68,50 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+      # The install runs apt-get through sudo, and the runner's Ubuntu mirror
+      # is sometimes slow rather than down. On Nov 5-6 2026 it served the
+      # ~16-22 MB of fonts that install fetches (the libraries are already on
+      # the image) at 22-46 kB/s, 8 to 13.5 minutes per install step.
+      # A 10-minute job was cancelled partway through its tests, and an
+      # 8-minute step bound killed the download.
+      #
+      # The action keeps apt's downloaded archives in the Actions cache, so a
+      # run that restores them asks the mirror only for its package lists (see
+      # .github/actions/install-playwright). The step bound is for the runs
+      # that miss that cache: a slow mirror still finishes inside it, and a
+      # stalled one fails the install step by name instead of timing out the
+      # job (chaos-pr-gate.yml has the 24-minute hang that bound is for).
+      # 25 minutes covered every fetch seen. Each job's timeout is what it
+      # needed before plus these 25 minutes.
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Test
         run: pnpm -F chaosbringer test
 
       - name: Typecheck examples
+        if: matrix.node == 24
         run: |
           pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" typecheck
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
           pnpm -F "@mizchi/chaosbringer-example-model-faults" typecheck
           pnpm -F "@mizchi/chaosbringer-example-perf-patterns" typecheck
+          pnpm -F "@mizchi/chaosbringer-example-data-patterns" typecheck
 
   lightbringer:
-    # lightbringer is its own published package with its own toolchain (tsup,
-    # vitest 4, oxlint, Playwright specs), and chaosbringer's `--perf` runs on
-    # its `lightbringer/core` build, so it gets its own leg instead of riding
-    # on build-and-test: a break here names itself in the checks list.
+    # lightbringer is its own published package with its own toolchain
+    # (`vp pack` / tsdown, `vp test` / Vitest 5, `vp lint` / Oxlint, Playwright
+    # specs), and chaosbringer's `--perf` runs on its `lightbringer/core`
+    # build, so it gets its own leg instead of riding on build-and-test: a
+    # break here names itself in the checks list.
     # `lightbringer-perf.yml` is the separate, path-filtered budget gate; this
     # job is correctness, on every PR.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: packages/lightbringer
@@ -82,7 +122,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -112,13 +152,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       # The local specs only: they measure the vite fixture app the config's
       # webServer starts. example.spec.ts (example.com), react-dev.spec.ts
@@ -135,7 +173,8 @@ jobs:
     # Both need the Playwright Chromium browser (chaosbringer drives Chromium
     # internally) and a `pnpm install` of the workspace.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 10 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +182,9 @@ jobs:
           - cloudflare-worker
           - playwright-test
           - model-faults
+          # One crawl per case and no medians to take, so the whole catalog
+          # fits one runner unsharded (PATTERN_SHARD works if it grows).
+          - data-patterns
         # perf-patterns measures every pattern one after another (parallel
         # browsers on one runner would blur the numbers being compared), so a
         # single job grew to ~7 minutes. It is split over runners instead:
@@ -162,7 +204,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -175,13 +217,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Test example
         run: pnpm -F "@mizchi/chaosbringer-example-${{ matrix.example }}" test
@@ -198,10 +238,11 @@ jobs:
     # nobody invokes, are indistinguishable from the outside.
     #
     # Its own job rather than a step in example-tests: ~5 minutes of browser
-    # work would push that job's 2m34s close to its 10-minute limit, and a
-    # separate leg names itself in the checks list when it breaks.
+    # work would more than double that job's 2m34s, and a separate leg names
+    # itself in the checks list when it breaks.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 plus the install step's 25-minute bound (see build-and-test).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -209,7 +250,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -222,13 +263,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright system deps only (cache hit path)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.playwright-cache.outputs.cache-hit }}
 
       - name: Red-team suites
         run: pnpm -F "@mizchi/chaosbringer-example-model-faults" test:adversarial

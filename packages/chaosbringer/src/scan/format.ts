@@ -5,6 +5,7 @@
 
 import { SCAN_FAULT_LABELS, type ScanAnalysis, type ScanFaultKind, type ScanFinding, type ScanSeverity } from "./analyze.js";
 import type { ScanEndpoint } from "./endpoints.js";
+import { warningTimes } from "../run-warnings.js";
 
 /** Where a perf-patterns catalog entry lives, for the report's links. */
 const PERF_PATTERN_URL = "https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns";
@@ -15,8 +16,15 @@ export interface ScanSummaryInput {
   durationMs: number;
   pagesVisited: number;
   actions: number;
-  /** Absent when the chaos crawls were turned off; `runs` is empty when no endpoint was found. */
-  chaos?: { runs: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number }>; endpoints: ScanEndpoint[] };
+  /**
+   * Absent when the chaos crawls were turned off; `runs` is empty when no
+   * endpoint was found. A run's `reproCommand` is the `chaosbringer scan`
+   * command that reruns it (`scanReproCommand`).
+   */
+  chaos?: {
+    runs: Array<{ fault: ScanFaultKind; pagesVisited: number; faultsInjected: number; reproCommand?: string }>;
+    endpoints: ScanEndpoint[];
+  };
   files: { baseline: string; chaos: Partial<Record<ScanFaultKind, string>>; perfDir: string };
 }
 
@@ -44,6 +52,7 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   const { high, medium, low } = analysis.counts;
   lines.push(`**${analysis.findings.length} finding${analysis.findings.length === 1 ? "" : "s"}**: ${ICON.high} ${high} high · ${ICON.medium} ${medium} medium · ${ICON.low} ${low} low`, "");
   for (const w of analysis.coverageWarnings) lines.push(`> ⚠️ ${w}`, "");
+  for (const w of analysis.warnings ?? []) lines.push(`> ⚠️ Crawl warning (\`${w.code}\`): ${w.message}${warningTimes(w)}`, "");
   for (const e of analysis.environment) {
     const hosts = e.hosts.length > 0 ? ` (${e.hosts.join(", ")})` : "";
     lines.push(
@@ -74,12 +83,20 @@ export function formatScanMarkdown(analysis: ScanAnalysis, s: ScanSummaryInput):
   lines.push("## Files", "");
   lines.push(`- clean crawl report: \`${s.files.baseline}\``);
   for (const [kind, path] of Object.entries(s.files.chaos)) {
-    lines.push(`- chaos crawl report (${SCAN_FAULT_LABELS[kind as ScanFaultKind]}): \`${path}\``);
+    const repro = s.chaos?.runs.find((r) => r.fault === kind)?.reproCommand;
+    lines.push(`- chaos crawl report (${SCAN_FAULT_LABELS[kind as ScanFaultKind]}): \`${path}\`${repro ? `, rerun with \`${repro}\`` : ""}`);
   }
   lines.push(`- per-page perf sidecars: \`${s.files.perfDir}\``);
+  // A chaos crawl's report used to hold the plain crawl's command, which reran
+  // without the fault and passed.
+  const rerun =
+    Object.keys(s.files.chaos).length > 0
+      ? " To reproduce a resilience finding, rerun the `chaosbringer scan … --faults <fault>` command above, its report's `reproCommand`: " +
+        "it reruns the clean crawl, which finds the endpoints, then that fault's crawl. The clean crawl's `reproCommand` reruns the clean crawl alone."
+      : " The clean crawl's report has the command that reruns it, its `reproCommand`.";
   lines.push(
     "",
-    "Drill into a step with `chaosbringer perf drilldown`, compare two scans' perf with `chaosbringer perf regress`, and reproduce a crawl with the `reproCommand` in its report.",
+    `Drill into a step with \`chaosbringer perf drilldown\` and compare two scans' perf with \`chaosbringer perf regress\`.${rerun}`,
     "",
   );
   return lines.join("\n");
@@ -89,7 +106,8 @@ function findingSection(f: ScanFinding, i: number): string[] {
   const out = [`<a id="${anchor(i)}"></a>`, `### ${ICON[f.severity]} ${f.title}`, ""];
   out.push(`\`${f.rule}\` · ${f.category} · ${f.severity} · seen ${f.occurrences}×`, "");
   for (const e of f.evidence) out.push(`- ${e}`);
-  if (f.occurrences > f.evidence.length) out.push(`- … and ${f.occurrences - f.evidence.length} more`);
+  // Not `occurrences` less the lines: "2× on 2 pages" is one line for two errors.
+  if (f.unlisted) out.push(`- … and ${f.unlisted} more`);
   out.push("", f.hint, "");
   if (f.patterns && f.patterns.length > 0) {
     out.push(`Catalog patterns with this signal: ${f.patterns.map((p) => `[${p}](${PERF_PATTERN_URL}/${p}.ts)`).join(", ")}`, "");
@@ -102,6 +120,9 @@ export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
   const { high, medium, low } = analysis.counts;
   const lines = [`scan: ${analysis.findings.length} findings (${high} high, ${medium} medium, ${low} low)`];
   for (const w of analysis.coverageWarnings) lines.push(`  ⚠️  ${w}`);
+  // What made a crawl test less than it was set up to: the crawls'
+  // `report.warnings`, which a scan used to leave in its JSON files.
+  for (const w of analysis.warnings ?? []) lines.push(`  ⚠️  crawl warning: ${w.message}${warningTimes(w)}`);
   for (const f of analysis.findings.slice(0, max)) {
     lines.push(`  ${ICON[f.severity]} [${f.category}] ${f.title} — ${shortWhere(f)}`);
   }
@@ -109,9 +130,17 @@ export function formatScanSummary(analysis: ScanAnalysis, max = 20): string {
   return lines.join("\n");
 }
 
+/**
+ * The first place and how many other places: `places`, not `occurrences`,
+ * which for an error finding counts errors. Four throws on one page read
+ * `/multi (+3)`, as if four pages had thrown. Without `places` (a finding
+ * built by hand, a 0.13.0 report) the places listed: never more than there
+ * were.
+ */
 function shortWhere(f: ScanFinding): string {
   const first = f.where[0] ?? "";
-  return f.occurrences > 1 ? `${first} (+${f.occurrences - 1})` : first;
+  const places = f.places ?? f.where.length;
+  return places > 1 ? `${first} (+${places - 1})` : first;
 }
 
 function anchor(i: number): string {

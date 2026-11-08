@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ErrorCluster } from "./clusters.js";
 import { buildGithubAnnotations, formatGithubAnnotation, printGithubAnnotations } from "./github.js";
+import { getExitCode } from "./reporter.js";
 import type { CrawlReport, CrawlSummary, PageError } from "./types.js";
 
 function cluster(over: Partial<ErrorCluster> & { key: string; fingerprint: string; type: PageError["type"] }): ErrorCluster {
@@ -73,6 +74,19 @@ describe("buildGithubAnnotations", () => {
     expect(out[1]!.level).toBe("warning");
   });
 
+  it("annotates a failed navigation and a renderer crash as errors: both always fail the run", () => {
+    const report = makeReport({
+      errorClusters: [
+        cluster({ key: "k1", type: "navigation", fingerprint: "page.goto: net::ERR_EMPTY_RESPONSE at <url>" }),
+        cluster({ key: "k2", type: "crash", fingerprint: "renderer crashed" }),
+      ],
+    });
+    expect(buildGithubAnnotations(report).map((a) => [a.level, a.title])).toEqual([
+      ["error", "[navigation] page.goto: net::ERR_EMPTY_RESPONSE at <url>"],
+      ["error", "[crash] renderer crashed"],
+    ]);
+  });
+
   it("upgrades warnings to errors in strict mode", () => {
     const report = makeReport({
       errorClusters: [cluster({ key: "k", type: "console", fingerprint: "f" })],
@@ -81,7 +95,32 @@ describe("buildGithubAnnotations", () => {
     expect(buildGithubAnnotations(report, { strict: true })[0]!.level).toBe("error");
   });
 
-  it("adds a separate error annotation for each dead link", () => {
+  it("annotates a cluster the baseline did not have as error under --baseline-strict, which fails the run on it", () => {
+    const fresh = cluster({ key: "console|new", type: "console", fingerprint: "new" });
+    const old = cluster({ key: "console|old", type: "console", fingerprint: "old" });
+    const report = makeReport({
+      errorClusters: [fresh, old],
+      diff: {
+        baselineSeed: 1,
+        newClusters: [{ key: fresh.key, type: "console", fingerprint: "new", before: 0, after: 1 }],
+        resolvedClusters: [],
+        unchangedClusters: [{ key: old.key, type: "console", fingerprint: "old", before: 1, after: 1 }],
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(getExitCode(report, { baselineStrict: true })).toBe(1);
+    expect(buildGithubAnnotations(report, { baselineStrict: true }).map((a) => a.level)).toEqual(["error", "warning"]);
+    expect(buildGithubAnnotations(report, {}).map((a) => a.level)).toEqual(["warning", "warning"]);
+  });
+
+  it("annotates a JS exception as error even on a run that exits 0", () => {
+    const report = makeReport({ errorClusters: [cluster({ key: "exception|e", type: "exception", fingerprint: "TypeError" })] });
+    expect(getExitCode(report, {})).toBe(0);
+    expect(buildGithubAnnotations(report, {})[0]!.level).toBe("error");
+  });
+
+  it("adds a separate annotation for each dead link: error only when --fail-on-dead-links fails the run on it", () => {
     const report = makeReport({
       summary: makeSummary({
         discovery: {
@@ -103,9 +142,11 @@ describe("buildGithubAnnotations", () => {
     });
     const out = buildGithubAnnotations(report);
     expect(out).toHaveLength(1);
-    expect(out[0]!.level).toBe("error");
+    // It was `error` on a run that exited 0.
+    expect(out[0]!.level).toBe("warning");
     expect(out[0]!.title).toContain("Dead link");
     expect(out[0]!.message).toContain("HTTP 404");
+    expect(buildGithubAnnotations(report, { deadLinks: true })[0]!.level).toBe("error");
   });
 
   it("includes cluster URL count in the message when multiple URLs are involved", () => {
@@ -123,6 +164,27 @@ describe("buildGithubAnnotations", () => {
     const out = buildGithubAnnotations(report);
     expect(out[0]!.message).toContain("3 URLs");
     expect(out[0]!.title).toContain("×3");
+  });
+
+  it("annotates each off-site redirect once, and none on a page the no-offsite-redirect check failed, whatever it is named", () => {
+    const nav = (i: number) => ({ from: "http://x/go", to: `http://evil.test/${i}`, trigger: "script" as const });
+    const page = (url: string, navs: ReturnType<typeof nav>[], errors: PageError[] = []) => ({
+      url,
+      status: "success" as const,
+      loadTime: 1,
+      errors,
+      hasErrors: errors.length > 0,
+      warnings: [],
+      links: [],
+      offsiteNavigations: navs,
+    });
+    // Four redirects: more than the violation lists by name.
+    const failed = page("http://x/go", [1, 2, 3, 4].map(nav), [
+      { type: "invariant-violation", message: "[sso-check] off-site redirect: … (+1 more)", invariantName: "sso-check", offsiteRedirect: true, timestamp: 0 },
+    ]);
+    const repeated = page("http://x/again", [nav(5), nav(5), nav(5)].map((n) => ({ ...n, from: "http://x/again" })));
+    const out = buildGithubAnnotations(makeReport({ pages: [failed, repeated] })).filter((a) => a.title.startsWith("Off-site redirect"));
+    expect(out.map((a) => [a.level, a.message])).toEqual([["notice", "http://x/again -> http://evil.test/5 (script redirect)"]]);
   });
 });
 

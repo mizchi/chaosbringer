@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/playwright-v8-coverage",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "V8 precise-coverage collector for Playwright (CDP Profiler.takePreciseCoverage) with novelty-scoring helpers. Extracted from chaosbringer.",
   "license": "MIT",
   "author": "mizchi",
@@ -31,12 +31,12 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "vitest run",
+    "test": "vp test run",
     "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "playwright",
@@ -55,8 +55,9 @@
     }
   },
   "devDependencies": {
-    "playwright": "^1.52.0",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

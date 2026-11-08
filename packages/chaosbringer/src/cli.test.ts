@@ -1,0 +1,353 @@
+/**
+ * The main CLI as a user meets it, run as a process: `cli.ts` parses
+ * `process.argv` and exits as soon as it is imported. None of these get as
+ * far as starting a browser, and each spawn makes sure of it: its
+ * PLAYWRIGHT_BROWSERS_PATH is a directory with no browser in it, so a launch
+ * would fail with Playwright's "Executable doesn't exist" instead of the one
+ * line a row expects.
+ */
+import { execFile, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it } from "vitest";
+import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
+import { progressText, SUBCOMMANDS } from "./cli-usage.js";
+
+const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
+const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
+/** Nothing listens here; a crawl that got this far would fail, not hang. */
+const URL_ARG = ["--url", "http://127.0.0.1:9/"];
+/** Where the spawned CLI looks for browsers: nowhere that has one. */
+const NO_BROWSERS = mkdtempSync(join(tmpdir(), "cli-no-browsers-"));
+const ENV = { ...process.env, PLAYWRIGHT_BROWSERS_PATH: NO_BROWSERS };
+afterAll(() => rmSync(NO_BROWSERS, { recursive: true, force: true }));
+
+function cli(args: string[]) {
+  const r = spawnSync(process.execPath, ["--import", "tsx", CLI, ...args], {
+    cwd: PACKAGE_DIR,
+    encoding: "utf8",
+    timeout: 60_000,
+    env: ENV,
+  });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+/** Async, so `it.concurrent` rows run side by side: each spawn compiles the CLI with tsx. */
+function cliAsync(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ["--import", "tsx", CLI, ...args],
+      { cwd: PACKAGE_DIR, timeout: 60_000, env: ENV },
+      (err, stdout, stderr) => {
+        const status = err ? (typeof err.code === "number" ? err.code : null) : 0;
+        resolve({ status, stdout, stderr });
+      },
+    );
+  });
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+describe("--help", () => {
+  it("lists every subcommand of the dispatch table, one line each with its summary", () => {
+    const r = cli(["-h"]);
+    expect(r.status).toBe(0);
+    const section = r.stdout.split("\nSUBCOMMANDS")[1]?.split("\n\n")[0] ?? "";
+    const rows = section.split("\n").slice(1);
+    expect(rows.map((row) => row.trim().split(/\s+/)[0])).toEqual(Object.keys(SUBCOMMANDS));
+    for (const [name, sub] of Object.entries(SUBCOMMANDS)) {
+      expect(rows).toContainEqual(expect.stringMatching(new RegExp(`^  ${name} +${escapeRegExp(sub.summary)}$`)));
+    }
+  });
+});
+
+describe("--help on --strict", () => {
+  it("names all three kinds it fails on", () => {
+    // It said "any console errors"; JS exceptions and unhandled rejections fail it too.
+    const line = cli(["-h"]).stdout.split("\n").find((l) => l.trimStart().startsWith("--strict "));
+    expect(line).toBe("  --strict              Fail on console errors, JS exceptions and unhandled rejections");
+  });
+});
+
+describe("--version", () => {
+  it.each([["--version"], ["-V"]])("%s prints the package.json version and exits 0", (flag) => {
+    const { version } = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { version: string };
+    const r = cli([flag]);
+    expect(r.stdout).toBe(`${version}\n`);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+  });
+});
+
+describe("progressText", () => {
+  it("redraws one line on a terminal, and writes a line per page anywhere else", () => {
+    expect(progressText(2, 5, true)).toBe("\rProgress: 2/5 pages");
+    expect(progressText(2, 5, false)).toBe("Progress: 2/5 pages\n");
+  });
+});
+
+describe("usage errors", () => {
+  it.each([
+    // With the flag it misspells, when one is close.
+    [["--max-page", "3"], "unknown option --max-page: did you mean --max-pages?"],
+    [[...URL_ARG, "--bogus"], "unknown option --bogus"],
+    [["-x"], "unknown option -x"],
+    [[...URL_ARG, "--max-pages", "abc"], '--max-pages must be a finite number (got "abc")'],
+    [[...URL_ARG, "--max-pages", "0"], "--max-pages must be >= 1 (got 0)"],
+    [[...URL_ARG, "--timeout", "5s"], '--timeout must be a finite number (got "5s")'],
+    // It said `"performanceBudget.lcp" must be a positive number of ms (got null)`.
+    [[...URL_ARG, "--budget", "lcp=abc"], '--budget lcp must be a finite number (got "abc")'],
+    // validateOptions refused it as `excludePatterns entry has invalid regex`, without the flag.
+    [[...URL_ARG, "--exclude", "("], '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
+    // Input files are read before the browser starts: these failed inside the
+    // crawl with a stack trace and exit 1, the code of a run that found something.
+    [[...URL_ARG, "--storage-state", "missing-state.json"], "--storage-state missing-state.json: no such file"],
+    [[...URL_ARG, "--har-replay", "missing.har"], "--har-replay missing.har: no such file"],
+    [[...URL_ARG, "--trace-replay", "missing.jsonl"], "--trace-replay missing.jsonl: no such file"],
+    // A bare `ENOENT: no such file or directory, open '…'`, without the flag.
+    [[...URL_ARG, "--perf-budgets", "missing-budgets.json"], "--perf-budgets missing-budgets.json: no such file"],
+    // Dropped with a logger warning nobody saw: the run passed without its seeds.
+    [[...URL_ARG, "--seed-from-sitemap", "missing-sitemap.xml"], "--seed-from-sitemap missing-sitemap.xml: no such file"],
+    // Refused by validateOptions, which used to throw from inside main().
+    [[...URL_ARG, "--cdp-target", "x"], '"cdpTargetId" requires "cdpEndpoint"'],
+    // A level it does not know would have failed nothing.
+    [[...URL_ARG, "--fail-on-http", "500"], '--fail-on-http must be one of 4xx, 5xx (got "500"): 5xx fails on a response of 500 and up, 4xx on one of 400 and up'],
+    // A missing baseline was a warning and exit 0, also under --baseline-strict.
+    [
+      [...URL_ARG, "--baseline", "missing-baseline.json", "--baseline-missing", "fail"],
+      "--baseline missing-baseline.json: not found, and --baseline-missing fail refuses a run without it " +
+        "(drop the flag, or pass --baseline-missing warn, for the first run, whose report becomes the baseline)",
+    ],
+    [[...URL_ARG, "--baseline-missing", "fail"], "--baseline-missing fail needs a --baseline <path> to require"],
+    [[...URL_ARG, "--invariants", "data-safety,xss"], '--invariants: unknown invariant "xss" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)'],
+    [[], "--url is required"],
+    // A Repro: line's `# + …` note, pasted into a zsh without interactivecomments.
+    [
+      [...URL_ARG, "#", "+", "1", "fault", "rule", "not", "expressible", "on", "the", "CLI:", "api-500"],
+      'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+        "`setopt interactivecomments`); drop the `#` and everything after it",
+    ],
+  ])("%j is one line on stderr and exit 2, before anything runs", (args, message) => {
+    const r = cli(args);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([`chaosbringer: ${message} (see chaosbringer --help)`]);
+    expect(r.stdout).toBe("");
+    expect(r.status).toBe(2);
+  });
+
+  it("folds a refusal parseArgs words over several lines into the one line", () => {
+    const r = cli([...URL_ARG, "--timeout", "-5"]);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([
+      expect.stringMatching(/^chaosbringer: Option '--timeout' argument is ambiguous\. .*'--timeout=-XYZ'\. \(see chaosbringer --help\)$/),
+    ]);
+    expect(r.status).toBe(2);
+  });
+
+  it("refuses --perf-budgets emitted under another settle mode in one chaosbringer: line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-budgets-"));
+    try {
+      const file = join(dir, "budgets.json");
+      writeFileSync(file, JSON.stringify({ version: 1, budgets: {}, settle: { mode: "adaptive", quietMs: 500 } }));
+      const r = cli([...URL_ARG, "--perf-budgets", file]);
+      expect(r.stderr.trimEnd().split("\n")).toEqual([
+        expect.stringMatching(new RegExp(`^chaosbringer: --perf-budgets ${escapeRegExp(file)}: refusing to enforce: .*--allow-settle-mismatch`)),
+      ]);
+      expect(r.stdout).toBe("");
+      expect(r.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The subcommands' own refusals: they printed `<sub> failed: Unknown option
+  // '--bogus'. To specify a positional …` and exited 1, which a CI step reads
+  // as "the run found something", and the README promised 2. One row per
+  // subcommand, and per sub of recipes / model / perf, for the unknown flag,
+  // plus the refusals each makes of its own arguments.
+  const RECIPES_SUBS = ["list", "show", "history", "promote", "demote", "delete", "prune", "rollback", "harvest", "verify", "diff", "lint", "repair"];
+  const MODEL_SUBS = ["calibrate", "compile", "run", "shrink"];
+  const PERF_SUBS = ["emit-budgets", "gate", "regress", "drilldown"];
+  const subRows: Array<[argv: string[], command: string, message: string]> = [
+    ...Object.keys(SUBCOMMANDS)
+      .filter((name) => !["recipes", "model", "perf", "shard"].includes(name))
+      .map((name): [string[], string, string] => [[name, "--bogus"], name, "unknown option --bogus"]),
+    ...RECIPES_SUBS.map((sub): [string[], string, string] => [["recipes", sub, "--bogus"], `recipes ${sub}`, "unknown option --bogus"]),
+    ...MODEL_SUBS.map((sub): [string[], string, string] => [["model", sub, "--bogus"], `model ${sub}`, "unknown option --bogus"]),
+    ...PERF_SUBS.map((sub): [string[], string, string] => [["perf", sub, "--bogus"], `perf ${sub}`, "unknown option --bogus"]),
+    // shard checks what it forwards against the main crawl's flags, once,
+    // instead of letting each of N workers refuse it.
+    [["shard", "--count", "2", ...URL_ARG, "--bogus"], "shard", "unknown option --bogus"],
+    [["shard", "--count", "2", ...URL_ARG, "--max-pages", "abc"], "shard", '--max-pages must be a finite number (got "abc")'],
+    // The main CLI's own checks past the crawler's options: each worker
+    // refused these, and the run ended in "no reports produced" and exit 1.
+    [["shard", "--count", "2", ...URL_ARG, "--heatmap-top", "abc"], "shard", '--heatmap-top must be a finite number (got "abc")'],
+    [
+      ["shard", "--count", "2", ...URL_ARG, "--cluster-artifacts"],
+      "shard",
+      "--cluster-artifacts requires --failure-artifacts <dir>: it copies from the per-page bundles",
+    ],
+    [
+      ["shard", "--count", "2", ...URL_ARG, "--perf-budgets", "missing-budgets.json"],
+      "shard",
+      "--perf-budgets missing-budgets.json: no such file",
+    ],
+    [["shard", "--count", "2"], "shard", "--url is required"],
+    [["shard", ...URL_ARG], "shard", "--count <N> is required and must be an integer >= 1"],
+    [["recipes", "frob"], "recipes", `unknown subcommand "frob" (expected ${RECIPES_SUBS.join(", ")})`],
+    [["model", "frob"], "model", 'unknown command "frob" (expected calibrate, compile, run or shrink)'],
+    [["perf", "frob"], "perf", 'unknown subcommand "frob" (expected emit-budgets, gate, regress or drilldown)'],
+    // Missing operands, missing required flags, malformed values.
+    [["scan"], "scan", "--url is required"],
+    [["scan", ...URL_ARG, "--max-pages", "abc"], "scan", '--max-pages must be an integer >= 1 (got "abc")'],
+    // A chaos report's reproCommand with its `# + …` note, pasted into a zsh
+    // without interactivecomments: parseArgs' "Unexpected argument '#'. This
+    // command does not take positional arguments" did not say to drop it.
+    [
+      ["scan", ...URL_ARG, "--seed", "7", "--faults", "abort", "#", "+", "1", "invariant", "not", "expressible", "on", "the", "CLI:", "cart-total"],
+      "scan",
+      'unexpected argument "#": the shell passed a comment on as arguments (zsh does without ' +
+        "`setopt interactivecomments`); drop the `#` and everything after it",
+    ],
+    [["scan", ...URL_ARG, "crawl"], "scan", 'unexpected argument "crawl": scan takes no positional arguments'],
+    // These printed `[scan] clean crawl of …`, then `scan failed: …` and exit
+    // 1, the code --fail-on gates on.
+    [["scan", ...URL_ARG, "--exclude", "("], "scan", '--exclude "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)'],
+    [["scan", ...URL_ARG, "--storage-state", "missing-state.json"], "scan", "--storage-state missing-state.json: no such file"],
+    [["scan", ...URL_ARG, "--sitemap", "missing-sitemap.xml"], "scan", "--sitemap missing-sitemap.xml: no such file"],
+    [["scan", ...URL_ARG, "--invariants", "nope"], "scan", '--invariants: unknown invariant "nope" (known: data-safety, xss-marker, injected-markup, prototype-pollution, rendered-garbage, no-offsite-redirect, not-blank, axe)'],
+    [["flake"], "flake", "--url is required"],
+    [["flake", ...URL_ARG, "--runs", "1"], "flake", '--runs must be an integer >= 2 (got "1")'],
+    // These started Run 1/3 and failed inside the crawler with exit 1, which
+    // chaos-flake.yml reads as "flakes were found".
+    [["flake", ...URL_ARG, "--max-pages", "abc"], "flake", '--max-pages must be a finite number (got "abc")'],
+    [["flake", ...URL_ARG, "--max-actions-per-page", "1.5"], "flake", "--max-actions-per-page must be an integer (got 1.5)"],
+    [["flake", ...URL_ARG, "--timeout", "5s"], "flake", '--timeout must be a finite number (got "5s")'],
+    [["flake", ...URL_ARG, "--storage-state", "missing-state.json"], "flake", "--storage-state missing-state.json: no such file"],
+    [["flake", ...URL_ARG, "--trace-replay", "missing.jsonl"], "flake", "--trace-replay missing.jsonl: no such file"],
+    [["flake", ...URL_ARG, "--har-replay", "missing.har"], "flake", "--har-replay missing.har: no such file"],
+    [
+      ["flake", ...URL_ARG, "--baseline", "missing-baseline.json", "--baseline-missing", "fail"],
+      "flake",
+      "--baseline missing-baseline.json: not found, and --baseline-missing fail refuses a run without it " +
+        "(drop the flag, or pass --baseline-missing warn, for the first run, whose report becomes the baseline)",
+    ],
+    [["shard", "--count", "2", ...URL_ARG, "--har-replay", "missing.har"], "shard", "--har-replay missing.har: no such file"],
+    // A crawl flag or the URL given on both sides of flake's `--`, and an
+    // unknown flag after it.
+    [["flake", "--seed", "1", "--", "chaosbringer", ...URL_ARG, "--seed", "2"], "flake", "--seed is given both before and after --: give it on one side"],
+    [["flake", "--", "chaosbringer", ...URL_ARG, "--exlude", "/x"], "flake", "unknown option --exlude: did you mean --exclude?"],
+    // --url defaults to the trace's.
+    [["minimize"], "minimize", "--trace is required"],
+    [["minimize", "--trace", "t.jsonl", "--match", "x", "--seed", "1"], "minimize", "--seed does not apply to minimize: the trace decides the actions, so there is no random choice for a seed to make"],
+    // The numbers of the subcommands that read them with parseInt / parseFloat:
+    // `--timeout 5s` was 5 ms, and a run that timed out on it exited 1.
+    // One row per command here; every flag and value is in cli-numeric-flags.test.ts.
+    [["minimize", ...URL_ARG, "--trace", "t.jsonl", "--match", "x", "--timeout", "5s"], "minimize", '--timeout must be a finite number (got "5s")'],
+    [["minimize", ...URL_ARG, "--trace", "missing.jsonl", "--match", "x"], "minimize", "--trace missing.jsonl: no such file"],
+    [["cluster-artifacts", "r.json", "--bundle-dir", "b", "--max-clusters", "abc"], "cluster-artifacts", '--max-clusters must be a finite number (got "abc")'],
+    [["parity", "--left", "http://a.test", "--right", "http://b.test", "--paths", "p.txt", "--timeout", "5s"], "parity", '--timeout must be a finite number (got "5s")'],
+    [["journey", "--left", "http://a.test", "--right", "http://b.test", "--steps", "s.json", "--timeout", "5s"], "journey", '--timeout must be a finite number (got "5s")'],
+    [["diff", "a.json"], "diff", "expected exactly two report paths, got 1"],
+    [["cluster-artifacts", "r.json"], "cluster-artifacts", "--bundle-dir is required"],
+    [["parity", "--left", "http://a.test"], "parity", "--left, --right, and --paths are all required"],
+    [["journey"], "journey", "--left, --right, and --steps are all required"],
+    [["load"], "load", "--base-url is required"],
+    [["load", "--base-url", "http://a.test", "--workers", "abc"], "load", "--workers must be a positive integer, got abc"],
+    [["drive"], "drive", "--url and --goal are required"],
+    // These were `drive failed: …` and exit 1, drive's code for a goal it did
+    // not reach; the storage state only failed once the browser was up.
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--storage-state", "missing-state.json"], "drive", "--storage-state missing-state.json: no such file"],
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "missing-plan.json"], "drive", "--plan missing-plan.json: no such file"],
+    // The commands that replay recipes read --var / --vars-file before the
+    // store or a browser; drive its --secret environment variables.
+    [["drive", ...URL_ARG, "--goal", "x", "--plan", "p.json", "--secret", "pw=CB_TEST_UNSET_SECRET"], "drive", '--secret "pw=CB_TEST_UNSET_SECRET": environment variable CB_TEST_UNSET_SECRET is not set'],
+    [["load", "--base-url", "http://a.test", "--vars-file", "missing-vars.json"], "load", "--vars-file missing-vars.json: no such file"],
+    [["recipes", "verify", "x", "--base-url", "http://a.test", "--var", "password"], "recipes verify", '--var "password": expected NAME=VALUE'],
+    [["recipes", "repair", "x", "--var", "=x"], "recipes repair", '--var "=x": expected NAME=VALUE'],
+    [["recipes", "show"], "recipes show", "expected a recipe name"],
+    [["recipes", "rollback", "x"], "recipes rollback", "--to-version N is required"],
+    [["recipes", "verify", "x", "--base-url", "staging.test"], "recipes verify", '--base-url must be an absolute http(s) URL, got "staging.test"'],
+    // An empty value (an unset variable in `--min-success-rate "$RATE"`) was
+    // read as 0, which promotes the recipe whatever its success rate.
+    [
+      ["recipes", "verify", "x", "--base-url", "http://a.test", "--min-success-rate", ""],
+      "recipes verify",
+      '--min-success-rate must be a number in 0..1, got ""',
+    ],
+    [["model", "compile"], "model compile", "--traces, --out are required"],
+    [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--max-runs", "0"], "model shrink", '--max-runs needs a positive integer, got "0"'],
+    [["perf", "gate", "r.json"], "perf gate", "--budgets <file> is required"],
+    [["perf", "regress", "base/"], "perf regress", "--current <report.json...> is required"],
+    // Number("") is 0: an unset variable in `--threshold "$T"` compared at 0,
+    // and `--retries "$N"` ran without retries.
+    [["perf", "regress", "base/", "--threshold", "", "--current", "c.json"], "perf regress", '--threshold must be a number >= 0 (got "")'],
+    [["model", "shrink", "--plan", "p", ...URL_ARG, "--config", "c", "--retries", ""], "model shrink", '--retries needs a non-negative integer, got ""'],
+  ];
+
+  it("has a row for every subcommand", () => {
+    expect(new Set(subRows.map(([argv]) => argv[0]))).toEqual(new Set(Object.keys(SUBCOMMANDS)));
+  });
+
+  // Each row spawns the CLI through tsx, which compiles it first. Five at a
+  // time beside the suite's browser tests, one took longer than vitest's
+  // default 5s on a 4-core machine and failed on the clock, not the output.
+  it.concurrent.each(subRows)("%j is one `chaosbringer %s:` line on stderr and exit 2", async (args, command, message) => {
+    const r = await cliAsync(args);
+    expect(r.stderr.trimEnd().split("\n")).toEqual([
+      `chaosbringer ${command}: ${message} (see chaosbringer ${command} --help)`,
+    ]);
+    expect(r.stdout).toBe("");
+    expect(r.status).toBe(2);
+  }, 30_000);
+
+  it("keeps a run that failed on its input as `<sub> failed:` and exit 1", async () => {
+    const r = await cliAsync(["diff", "missing-left.json", "missing-right.json"]);
+    expect(r.stderr).toMatch(/^diff failed: failed to read missing-left\.json: ENOENT/);
+    expect(r.status).toBe(1);
+  });
+
+  it("names the flag for a malformed number, where parseInt read a prefix of it", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    expect(() => options(["--max-pages", "3x"])).toThrow("--max-pages must be a finite number");
+    expect(() => options(["--max-actions-per-page", "1.5"])).toThrow("--max-actions-per-page must be an integer");
+    expect(options(["--max-pages", "3", "--max-actions", "0", "--timeout", "5000"])).toMatchObject({
+      maxPages: 3,
+      maxActionsPerPage: 0,
+      timeout: 5000,
+    });
+  });
+
+  it("names the flag for a regex or a device the crawler would refuse as an option field", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    // validateOptions said `ignoreErrorPatterns entry has invalid regex`, `spaPatterns …` and `"device" …`.
+    expect(() => options(["--ignore-error", "("])).toThrow(
+      '--ignore-error "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)',
+    );
+    expect(() => options(["--spa", "("])).toThrow('--spa "(" is not a valid regex (Invalid regular expression: /(/: Unterminated group)');
+    expect(() => options(["--device", "Nope 9"])).toThrow('--device "Nope 9" is not a known Playwright device descriptor');
+    expect(options(["--spa", "^/app", "--ignore-error", "ResizeObserver", "--device", "iPhone 13"])).toMatchObject({
+      spaPatterns: ["^/app"],
+      ignoreErrorPatterns: ["ResizeObserver"],
+      device: "iPhone 13",
+    });
+  });
+
+  it("names `--budget <metric>` for a budget value it cannot use, and keeps the valid syntax", () => {
+    const options = (argv: string[]) => crawlerOptionsFromCli(parseCrawlArgs(argv).values, "http://x.test/");
+    expect(() => options(["--budget", "lcp=abc"])).toThrow('--budget lcp must be a finite number (got "abc")');
+    expect(() => options(["--budget", "ttfb=200,lcp=2.5s"])).toThrow('--budget lcp must be a finite number (got "2.5s")');
+    expect(() => options(["--budget", "fcp=0"])).toThrow("--budget fcp must be > 0 (got 0)");
+    expect(() => options(["--budget", "fcp=-5"])).toThrow("--budget fcp must be > 0 (got -5)");
+    expect(() => options(["--budget", "lcp="])).toThrow('--budget expects key=ms pairs (got "lcp=")');
+    expect(() => options(["--budget", "lpc=2500"])).toThrow(
+      "--budget lpc: unknown metric (known: ttfb, fcp, lcp, tbt, domContentLoaded, load)",
+    );
+    expect(options(["--budget", "ttfb=200, fcp=1800", "--budget", "lcp=2500"]).performanceBudget).toEqual({
+      ttfb: 200,
+      fcp: 1800,
+      lcp: 2500,
+    });
+  });
+});

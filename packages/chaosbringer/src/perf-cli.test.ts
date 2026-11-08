@@ -3,20 +3,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  checkBrowserVersions,
   checkKeyVersions,
   checkSettleModes,
   crawlBudgetsSettleMismatch,
   emitPerfBudgets,
   formatPerfGate,
+  formatRegressCoverage,
   gatePerf,
   missingKeys,
   perfGateNothingChecked,
   perfOutFromRepro,
+  regressCoverage,
   regressNothingMeasured,
   regressPerf,
   runPerfCli,
   splitCurrentOperands,
 } from "./perf-cli.js";
+import { DEFAULT_BUDGET_FLOORS } from "lightbringer/core";
 import { appRun, fakeAction, fakePage, fakeReport, fakeSpan } from "./perf-fixtures.test-helpers.js";
 import type { CrawlReport, PerfSettleRecord, PerfSpanReport } from "./types.js";
 
@@ -34,6 +38,17 @@ function keyed(report: CrawlReport, keyVersion: number): CrawlReport {
   };
 }
 
+/** `report` as a crawl measured with browser `version` records it (`perf.browser`). */
+function browsed(report: CrawlReport, version: string): CrawlReport {
+  return {
+    ...report,
+    perf: {
+      ...(report.perf ?? { vitals: {}, slowestActions: [], hotInitiators: [], thirdParty: [], totals: { spans: 0, pages: 0 } }),
+      browser: version,
+    },
+  };
+}
+
 /** `report` as a crawl settled with `settle` records it (`perf.settle`). */
 function settled(report: CrawlReport, settle: PerfSettleRecord): CrawlReport {
   return {
@@ -43,7 +58,7 @@ function settled(report: CrawlReport, settle: PerfSettleRecord): CrawlReport {
 }
 
 describe("emitPerfBudgets", () => {
-  it("writes ceil(median × headroom) per key for lightbringer's emit metrics", () => {
+  it("writes max(ceil(median × headroom), ceil(median + floor)) per key for lightbringer's emit metrics", () => {
     const runs = [
       appRun({ durationMs: 100, blockingMs: 10, interactionMs: 40 }),
       appRun({ durationMs: 120, blockingMs: 20, interactionMs: 60 }),
@@ -54,18 +69,29 @@ describe("emitPerfBudgets", () => {
     expect(skipped).toEqual([]);
     expect(file.version).toBe(1);
     expect(file.headroom).toBe(1.25);
+    expect(file.floors).toEqual(DEFAULT_BUDGET_FLOORS);
     expect(file.budgets["/app :: click #go"]).toEqual({
-      durationMs: Math.ceil(110 * 1.25),
-      scriptMs: 0,
+      // 110 + 34 > 110 × 1.25
+      durationMs: 110 + 34,
+      scriptMs: 8,
+      // 20 × 1.25 = 25 > 20 + 5
       blockingMs: Math.ceil(20 * 1.25),
-      layoutCount: 0,
-      recalcStyleMs: 0,
-      encodedKB: 0,
-      requestCount: 0,
-      interactionMs: Math.ceil(50 * 1.25),
+      layoutCount: 2,
+      recalcStyleMs: 7,
+      encodedKB: 5,
+      requestCount: 1,
+      // 50 + 16 = 66 > 50 × 1.25
+      interactionMs: 50 + 16,
     });
     // No interaction on the load span: no interactionMs budget for it.
     expect(file.budgets["/app :: load"]).not.toHaveProperty("interactionMs");
+  });
+
+  it("takes caller floors and records them; a floor of 0 is the headroom rule alone", () => {
+    const floors = { ...DEFAULT_BUDGET_FLOORS, requestCount: 0, blockingMs: 50 };
+    const { file } = emitPerfBudgets([appRun({ blockingMs: 10 })], { floors });
+    expect(file.floors).toEqual(floors);
+    expect(file.budgets["/app :: click #go"]).toMatchObject({ requestCount: 0, blockingMs: 60, scriptMs: 8 });
   });
 
   it("skips keys seen in fewer than half the reports, and says which", () => {
@@ -206,6 +232,37 @@ describe("regressPerf", () => {
     const loadOnly = fakeReport([fakePage("http://localhost:3000/app", fakeSpan("/app :: load"))], []);
     expect(missingKeys([appRun({})], [loadOnly])).toEqual(["/app :: click #go"]);
   });
+
+  it("regressCoverage counts the keys both sides measured, the keys only one side did, and each side's browser", () => {
+    const base = browsed(appRun({}), "141.0.7390.37");
+    base.actions.push(fakeAction(fakeSpan("/app :: click #gone")));
+    const cur = browsed(appRun({}), "141.0.7390.54");
+    cur.actions.push(fakeAction(fakeSpan("/app :: click #new")), fakeAction(fakeSpan("/app :: click #new2")));
+    const c = regressCoverage([base, base], [cur]);
+    expect(c).toEqual({
+      shared: 2,
+      onlyCurrent: ["/app :: click #new", "/app :: click #new2"],
+      onlyBaseline: ["/app :: click #gone"],
+      browser: { baseline: "Chromium 141", current: "Chromium 141" },
+    });
+    expect(formatRegressCoverage(c)).toBe(
+      "[regress] compared 2 perfKey(s) on both sides (2 only in current, 1 only in baseline); browser Chromium 141 vs Chromium 141",
+    );
+    // Reports written before the browser was recorded, and a side mixing majors (--allow-browser-mismatch).
+    expect(regressCoverage([appRun({})], [cur, browsed(appRun({}), "153.0.8010.12")]).browser).toEqual({
+      baseline: "unrecorded",
+      current: "Chromium 141, Chromium 153",
+    });
+  });
+
+  it("regressCoverage finds no shared key between crawls of different routes", () => {
+    const other = fakeReport([fakePage("http://localhost:3000/other", fakeSpan("/other :: load"))], []);
+    expect(regressCoverage([appRun({})], [other])).toMatchObject({
+      shared: 0,
+      onlyCurrent: ["/other :: load"],
+      onlyBaseline: ["/app :: click #go", "/app :: load"],
+    });
+  });
 });
 
 describe("checkSettleModes", () => {
@@ -257,6 +314,21 @@ describe("checkKeyVersions", () => {
   });
 });
 
+describe("checkBrowserVersions", () => {
+  const src = (side: string, browser?: string) => ({ side, source: side, browser });
+  it("compares across a patch or minor version of the same major", () => {
+    expect(checkBrowserVersions([src("baseline", "153.0.8010.12"), src("current", "153.1.0.0")])).toBeUndefined();
+    expect(checkBrowserVersions([src("baseline"), src("current")])).toBeUndefined();
+  });
+
+  it("refuses a browser upgrade, and a baseline that predates recording the browser", () => {
+    expect(checkBrowserVersions([src("baseline", "141.0.7390.37"), src("current", "153.0.8010.12")])).toContain(
+      "baseline: Chromium 141; current: Chromium 153",
+    );
+    expect(checkBrowserVersions([src("baseline"), src("current", "153.0.8010.12")])).toContain("baseline: unrecorded");
+  });
+});
+
 describe("crawlBudgetsSettleMismatch", () => {
   const file = (settle?: PerfSettleRecord) => ({
     version: 1,
@@ -291,6 +363,8 @@ describe("argument helpers", () => {
   it("perfOutFromRepro reads --perf-out, quoted or not", () => {
     expect(perfOutFromRepro("chaosbringer --url x --perf-out perf-dir")).toBe("perf-dir");
     expect(perfOutFromRepro("chaosbringer --perf-out 'my dir' --seed 1")).toBe("my dir");
+    // A value starting with `-` is joined with `=`, which parseArgs requires.
+    expect(perfOutFromRepro("chaosbringer --perf-out=-out --seed 1")).toBe("-out");
     expect(perfOutFromRepro("chaosbringer --perf")).toBeUndefined();
     expect(perfOutFromRepro(undefined)).toBeUndefined();
   });
@@ -323,12 +397,15 @@ describe("runPerfCli", () => {
     return p;
   }
 
-  it("prints help with no subcommand and fails on an unknown one", async () => {
+  // A usage error is thrown, and cli.ts prints it as one
+  // `chaosbringer perf <sub>: …` line with exit 2; `command` names the sub.
+  it("prints help with no subcommand and refuses an unknown one", async () => {
     await runPerfCli([]);
     expect(logged()).toContain("emit-budgets");
-    await runPerfCli(["frobnicate"]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain('unknown subcommand "frobnicate"');
+    await expect(runPerfCli(["frobnicate"])).rejects.toMatchObject({
+      name: "UsageError",
+      message: 'unknown subcommand "frobnicate" (expected emit-budgets, gate, regress or drilldown)',
+    });
   });
 
   it("emit-budgets writes the file, then gate passes the same runs and fails a slower one", async () => {
@@ -352,6 +429,56 @@ describe("runPerfCli", () => {
     expect(errored()).toContain("[perf gate] FAILED: 1 violation(s)");
   });
 
+  it("emit-budgets --floor overrides a floor, records the floors, and gate reads the file", async () => {
+    const runs = [1, 2, 3].map((i) => write(`f${i}.json`, appRun({})));
+    const out = join(dir, "floors.json");
+    await runPerfCli(["emit-budgets", ...runs, "--floor", "requestCount=0", "--floor", "scriptMs=20", "--out", out]);
+    expect(process.exitCode).toBe(0);
+    const file = JSON.parse(readFileSync(out, "utf-8"));
+    expect(file).toMatchObject({ version: 1, headroom: 1.25, floors: { ...DEFAULT_BUDGET_FLOORS, requestCount: 0, scriptMs: 20 } });
+    expect(file.budgets["/app :: click #go"]).toMatchObject({ requestCount: 0, scriptMs: 20, blockingMs: 5 });
+    expect(logged()).toContain("floors durationMs+34 scriptMs+20");
+    // A fresh run with a few ms of scheduler noise passes; one more request fails.
+    await runPerfCli(["gate", write("fresh.json", appRun({ blockingMs: 4, durationMs: 30 })), "--budgets", out]);
+    expect(process.exitCode).toBe(0);
+    await runPerfCli(["gate", write("req.json", appRun({ requestCount: 1 })), "--budgets", out]);
+    expect(process.exitCode).toBe(1);
+    expect(logged()).toContain("✗ /app :: click #go  requestCount median=1 > budget 0");
+  });
+
+  it("gate still reads a budgets file written before floors were recorded", async () => {
+    const old = write("old.json", { version: 1, headroom: 1.25, budgets: { "/app :: click #go": { blockingMs: 0 } } });
+    await runPerfCli(["gate", write("r.json", appRun({})), "--budgets", old]);
+    expect(process.exitCode).toBe(0);
+    await runPerfCli(["gate", write("b.json", appRun({ blockingMs: 3 })), "--budgets", old]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  // Checked before any report is read: the report path here does not exist.
+  it.each([
+    [["--floor", "scriptMs"], '--floor "scriptMs": expected <metric>=<n>'],
+    [["--floor", "bogusMs=3"], '--floor "bogusMs=3": unknown metric "bogusMs" (expected one of durationMs, scriptMs, blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount, interactionMs)'],
+    [["--floor", "scriptMs=-1"], '--floor "scriptMs=-1": n must be a number >= 0'],
+    [["--floor", "scriptMs=abc"], '--floor "scriptMs=abc": n must be a number >= 0'],
+    [["--floor=scriptMs="], '--floor "scriptMs=": n must be a number >= 0'],
+  ])("emit-budgets refuses %j as a usage error before reading a report", async (flags, message) => {
+    const out = join(dir, "never.json");
+    await expect(runPerfCli(["emit-budgets", join(dir, "missing.json"), ...flags, "--out", out])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf emit-budgets",
+      message,
+    });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("emit-budgets refuses a --floor with no value", async () => {
+    await expect(runPerfCli(["emit-budgets", join(dir, "missing.json"), "--floor"])).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+      command: "perf emit-budgets",
+    });
+    expect(process.exitCode).toBe(0);
+  });
+
   it("emit-budgets logs the skipped keys", async () => {
     const rare = fakeReport([], [fakeAction(fakeSpan("/x :: click #rare"))]);
     const paths = [write("a.json", appRun({})), write("b.json", appRun({})), write("c.json", appRun({})), write("d.json", rare)];
@@ -370,19 +497,26 @@ describe("runPerfCli", () => {
   });
 
   it("gate and emit-budgets refuse missing arguments", async () => {
-    await runPerfCli(["gate", "r.json"]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain("--budgets <file> is required");
-    process.exitCode = 0;
-    await runPerfCli(["emit-budgets"]);
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    await expect(runPerfCli(["gate", "r.json"])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf gate",
+      message: "--budgets <file> is required",
+    });
+    await expect(runPerfCli(["emit-budgets"])).rejects.toMatchObject({ name: "UsageError", command: "perf emit-budgets" });
+    // parseArgs' own refusal names the sub too.
+    await expect(runPerfCli(["gate", "--bogus"])).rejects.toMatchObject({
+      code: "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+      command: "perf gate",
+    });
     await expect(runPerfCli(["emit-budgets", write("x.json", {}), "--out", join(dir, "o.json")])).rejects.toThrow(
       /not a chaosbringer crawl report/,
     );
-    await expect(runPerfCli(["emit-budgets", write("y.json", appRun({})), "--headroom", "0.5"])).rejects.toThrow(
-      /--headroom must be a number >= 1/,
-    );
+    await expect(runPerfCli(["emit-budgets", write("y.json", appRun({})), "--headroom", "0.5"])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf emit-budgets",
+      message: '--headroom must be a number >= 1 (got "0.5")',
+    });
+    expect(process.exitCode).toBe(0);
   });
 
   it("regress refuses (exit 2) a baseline whose perfKeys are another version, unless --allow-key-mismatch", async () => {
@@ -440,9 +574,13 @@ describe("runPerfCli", () => {
     await runPerfCli(["regress", baseDir, "--current", join(baseDir, "r1.json")]);
     expect(process.exitCode).toBe(0);
 
-    await runPerfCli(["regress", baseDir]);
-    expect(process.exitCode).toBe(1);
-    expect(errored()).toContain("--current <report.json...> is required");
+    await expect(runPerfCli(["regress", baseDir])).rejects.toMatchObject({
+      name: "UsageError",
+      command: "perf regress",
+      message: "--current <report.json...> is required",
+    });
+    // Not a refused comparison: that is exit 2 with its own line, set here.
+    expect(process.exitCode).toBe(0);
   });
 
   it("regress fails when the current side has no reports or no spans, and lists vanished keys", async () => {
@@ -470,6 +608,57 @@ describe("runPerfCli", () => {
     await runPerfCli(["regress", baseDir, "--current", loadOnly]);
     expect(process.exitCode).toBe(0);
     expect(logged()).toContain("1 baseline key(s) not measured in current");
+  });
+
+  // A clean run printed its header and "no regressions past the gate." and
+  // nothing else, so two compared keys and forty read the same.
+  it("regress says how many perfKeys it compared and with which browsers, under the header and before the verdict", async () => {
+    const base = [1, 2, 3].map((i) => write(`b${i}.json`, browsed(appRun({ blockingMs: 100 }), "141.0.7390.37")));
+    const cur = [1, 2, 3].map((i) => write(`c${i}.json`, browsed(appRun({ blockingMs: 100 }), "141.0.7390.37")));
+    await runPerfCli(["regress", ...base, "--current", ...cur]);
+    expect(process.exitCode).toBe(0);
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    const header = lines.findIndex((l: string) => l.includes("[regress] baseline "));
+    const count = lines.indexOf(
+      "[regress] compared 2 perfKey(s) on both sides (0 only in current, 0 only in baseline); browser Chromium 141 vs Chromium 141",
+    );
+    const verdict = lines.findIndex((l: string) => l.includes("no regressions past the gate"));
+    expect(header).toBeGreaterThanOrEqual(0);
+    expect(count).toBe(header + 1);
+    expect(verdict).toBeGreaterThan(count);
+
+    logSpy.mockClear();
+    await runPerfCli(["regress", ...base, "--current", ...cur, "--json"]);
+    expect(JSON.parse(logged())).toMatchObject({ comparedKeys: 2, missingKeys: [], failed: false });
+  });
+
+  // Both sides measured spans, but none under a common key (another site,
+  // seed or route map): every key was "new" or "missing", and regress passed
+  // having compared no median.
+  it("regress refuses (exit 2) when no perfKey appears on both sides", async () => {
+    const base = write("b.json", appRun({}));
+    const other = write(
+      "o.json",
+      fakeReport(
+        [fakePage("http://localhost:3000/other", fakeSpan("/other :: load"))],
+        [fakeAction(fakeSpan("/other :: click #x"))],
+      ),
+    );
+    await runPerfCli(["regress", base, "--current", other]);
+    expect(process.exitCode).toBe(2);
+    expect(errored()).toContain(
+      "refusing to compare: no perfKey appears on both sides (2 key(s) only in the baseline, 2 only in current)",
+    );
+    // Refused before comparing: no count line, no verdict.
+    expect(logged()).not.toContain("[regress] compared");
+    expect(logged()).not.toContain("no regressions past the gate");
+
+    // --json is refused the same way, before anything is printed that could read as a pass.
+    process.exitCode = 0;
+    logSpy.mockClear();
+    await runPerfCli(["regress", base, "--current", other, "--json"]);
+    expect(process.exitCode).toBe(2);
+    expect(logged()).toBe("");
   });
 
   it("gate fails on an empty report set, reports without spans, or budgets that match nothing", async () => {
@@ -598,8 +787,10 @@ describe("runPerfCli", () => {
 
     function tracedRun(opts: { reportPath?: string; tracePath?: string; perfOut?: string }): CrawlReport {
       const click = { ...fakeSpan(KEY, { durationMs: 200, blockingMs: 120 }), traceWindowUs: [1000, 300000] as [number, number] };
-      const page = fakePage("http://localhost:3000/app", fakeSpan("/app :: load"), {
-        ...(opts.reportPath
+      const page = fakePage(
+        "http://localhost:3000/app",
+        fakeSpan("/app :: load"),
+        opts.reportPath
           ? {
               perfPage: {
                 vitals: {},
@@ -607,8 +798,8 @@ describe("runPerfCli", () => {
                 reportPath: opts.reportPath,
               },
             }
-          : {}),
-      });
+          : {},
+      );
       return fakeReport([page], [fakeAction(click)], {
         reproCommand: `chaosbringer --url http://localhost:3000/app --seed 1${opts.perfOut ? ` --perf-out ${opts.perfOut}` : ""}`,
       });
@@ -737,9 +928,11 @@ describe("runPerfCli", () => {
     });
 
     it("refuses a wrong operand count", async () => {
-      await runPerfCli(["drilldown", "r.json"]);
-      expect(process.exitCode).toBe(1);
-      expect(errored()).toContain("expected <report.json> <perfKey>");
+      await expect(runPerfCli(["drilldown", "r.json"])).rejects.toMatchObject({
+        name: "UsageError",
+        command: "perf drilldown",
+        message: "expected <report.json> <perfKey>",
+      });
     });
   });
 });

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1](https://github.com/mizchi/chaosbringer/compare/playwright-faults-v0.3.0...playwright-faults-v0.3.1) (2026-10-10)
+
+### Packaging
+
+* The tarball ships `dist` only: no `src`, no source maps ([#184](https://github.com/mizchi/chaosbringer/pull/184)). No code changes.
+
 ## [0.3.0](https://github.com/mizchi/chaosbringer/compare/playwright-faults-v0.2.0...playwright-faults-v0.3.0) (2026-10-01)
 
 ### Features

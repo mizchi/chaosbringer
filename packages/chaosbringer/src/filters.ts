@@ -3,7 +3,8 @@
  * Extracted from ChaosCrawler so they can be tested without Playwright.
  */
 
-import type { CrawlSummary, PageResult, DiscoveryMetrics } from "./types.js";
+import { isFaultEcho } from "./resource-outcomes.js";
+import type { CrawlSummary, DiscoveryMetrics, HttpErrorSummary, PageError, PageResult } from "./types.js";
 
 /** True if any pattern (regex string) matches `value`. Invalid regex is skipped. */
 export function matchesAnyPattern(
@@ -105,14 +106,22 @@ export function summarizePages(
   const errorPages = results.filter((r) => r.status === "error").length;
   const timeoutPages = results.filter((r) => r.status === "timeout").length;
   const recoveredPages = results.filter((r) => r.status === "recovered").length;
-  const pagesWithErrors = results.filter((r) => r.errors.length > 0).length;
+  // The browser's echoes of a fault the run injected are not the app's
+  // errors (`PageError.causedByFault`): counted on their own, and in nothing else.
+  const pagesWithErrors = results.filter((r) => r.errors.some((e) => !isFaultEcho(e))).length;
 
-  const allErrors = results.flatMap((r) => r.errors);
+  const recorded = results.flatMap((r) => r.errors);
+  const allErrors = recorded.filter((e) => !isFaultEcho(e));
+  const faultEchoes = recorded.length - allErrors.length;
   const consoleErrors = allErrors.filter((e) => e.type === "console").length;
   const networkErrors = allErrors.filter((e) => e.type === "network").length;
+  // Not `navigation`: the crawler's own goto failing is no error the page
+  // threw, and the page's status already counts it.
   const jsExceptions = allErrors.filter((e) => e.type === "exception").length;
+  const crashes = allErrors.filter((e) => e.type === "crash").length;
   const unhandledRejections = allErrors.filter((e) => e.type === "unhandled-rejection").length;
   const invariantViolations = allErrors.filter((e) => e.type === "invariant-violation").length;
+  const httpErrors = summarizeHttpErrors(allErrors);
 
   const loadTimes = results.map((r) => r.loadTime);
   const avgLoadTime =
@@ -149,10 +158,26 @@ export function summarizePages(
     consoleErrors,
     networkErrors,
     jsExceptions,
+    crashes,
     unhandledRejections,
     invariantViolations,
+    httpErrors,
+    faultEchoes,
     avgLoadTime,
     avgMetrics,
     discovery,
   };
+}
+
+/** `summary.httpErrors`: the console errors that carry an HTTP `status`. */
+export function summarizeHttpErrors(errors: readonly PageError[]): HttpErrorSummary {
+  const out: HttpErrorSummary = { total: 0, "4xx": 0, "5xx": 0, byStatus: {} };
+  for (const e of errors) {
+    if (e.type !== "console" || e.status === undefined || isFaultEcho(e)) continue;
+    out.total++;
+    if (e.status >= 500) out["5xx"]++;
+    else out["4xx"]++;
+    out.byStatus[e.status] = (out.byStatus[e.status] ?? 0) + 1;
+  }
+  return out;
 }

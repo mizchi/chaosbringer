@@ -94,11 +94,42 @@ describe("clusterErrors", () => {
     expect(clusters[1]!.count).toBe(2);
   });
 
+  it("records the distinct files behind a failed-load cluster, which its message does not name", () => {
+    const failed = (resourceUrl?: string) =>
+      err({ type: "console", message: "Failed to load resource: the server responded with a status of 404 (Not Found)", resourceUrl });
+    const clusters = clusterErrors([failed(), failed("http://x/a.png"), failed("http://x/b.js"), failed("http://x/a.png")]);
+    expect(clusters).toHaveLength(1);
+    // Kept although the first error had none.
+    expect(clusters[0]!.resourceUrls).toEqual(["http://x/a.png", "http://x/b.js"]);
+    expect(clusterErrors([err({ type: "console", message: "oops" })])[0]!.resourceUrls).toBeUndefined();
+  });
+
   it("records invariant names per cluster", () => {
     const clusters = clusterErrors([
       err({ type: "invariant-violation", message: "[has-h1] no <h1>", invariantName: "has-h1" }),
       err({ type: "invariant-violation", message: "[has-h1] no <h1>", invariantName: "has-h1" }),
     ]);
     expect(clusters[0]!.invariantNames).toEqual(["has-h1"]);
+  });
+});
+
+describe("fingerprintError on a navigation failure's Playwright message", () => {
+  // What `page.goto` rejects with, byte for byte: Playwright colours the call
+  // log it appends, and the call log names the `waitUntil` the crawl's
+  // `--settle` picked.
+  const goto = (waitUntil: string) =>
+    "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:4517/reset\nCall log:\n" +
+    `\u001b[2m  - navigating to "http://127.0.0.1:4517/reset", waiting until "${waitUntil}"\u001b[22m\n`;
+
+  it("gives the same failure one key whatever --settle is, without the call log or its colours", () => {
+    const idle = fingerprintError(err({ type: "navigation", message: goto("networkidle") }));
+    const load = fingerprintError(err({ type: "navigation", message: goto("load") }));
+    expect(idle).toBe(load);
+    expect(idle).toBe("page.goto: net::ERR_EMPTY_RESPONSE at <url>");
+  });
+
+  it("drops ANSI colour codes from any message", () => {
+    const fp = fingerprintError(err({ type: "console", message: "\u001b[31mred\u001b[39m alert" }));
+    expect(fp).toBe("red alert");
   });
 });

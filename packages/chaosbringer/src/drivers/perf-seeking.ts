@@ -21,7 +21,7 @@
  */
 import { candidatePerfKey } from "../perf-key.js";
 import type { CrawlReport, LastActionPerf } from "../types.js";
-import type { Driver, DriverCandidate, DriverPick, DriverStep } from "./types.js";
+import type { Driver, DriverCandidate, DriverPick } from "./types.js";
 
 export interface PerfSeekingDriverOptions {
   /**

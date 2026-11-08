@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/server-faults",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Framework-agnostic server-side fault injection (5xx + latency) for Web Standard Request/Response.",
   "license": "MIT",
   "author": "mizchi",
@@ -47,12 +47,12 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "vitest run",
+    "test": "vp test run",
     "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "fault-injection",
@@ -63,7 +63,8 @@
     "response"
   ],
   "devDependencies": {
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

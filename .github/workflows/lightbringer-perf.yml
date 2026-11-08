@@ -40,7 +40,12 @@ jobs:
       # --gate` cannot drift), and a monorepo checkout has no dist/ until
       # it is built. Without this step the gate dies on a missing module.
       - run: pnpm build
-      - run: pnpm exec playwright install --with-deps chromium
+      # Bounded for a stalled apt mirror, and long enough for a slow one on a
+      # run that misses the action's archive cache; see chaos-pr-gate.yml.
+      # (No job timeout here: the default is 6 hours.)
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
       - name: measure (median of 5 runs)
         env:
           BENCH_FIXED: "1"
@@ -80,7 +85,12 @@ jobs:
       # --gate` cannot drift), and a monorepo checkout has no dist/ until
       # it is built. Without this step the gate dies on a missing module.
       - run: pnpm build
-      - run: pnpm exec playwright install --with-deps chromium
+      # Bounded for a stalled apt mirror, and long enough for a slow one on a
+      # run that misses the action's archive cache; see chaos-pr-gate.yml.
+      # (No job timeout here: the default is 6 hours.)
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
       - name: measure production build with coverage
         env:
           PERF_COV: "1"

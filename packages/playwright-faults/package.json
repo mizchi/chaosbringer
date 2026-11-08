@@ -1,6 +1,6 @@
 {
   "name": "@mizchi/playwright-faults",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Network / page-lifecycle / JS-runtime fault injection primitives for Playwright. Extracted from chaosbringer.",
   "license": "MIT",
   "author": "mizchi",
@@ -31,12 +31,12 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "vitest run",
+    "test": "vp test run",
     "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "playwright",
@@ -54,8 +54,9 @@
     }
   },
   "devDependencies": {
-    "playwright": "^1.52.0",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -30,7 +30,7 @@ export default defineConfig({
   },
   // serves fixtures/app for the bench specs (rerender / reflow / input)
   webServer: {
-    command: `pnpm exec vite --port ${port} --strictPort`,
+    command: `pnpm exec vp dev --port ${port} --strictPort`,
     url: origin,
     reuseExistingServer: !process.env.CI,
   },

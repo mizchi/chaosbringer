@@ -9,9 +9,28 @@
 export { ChaosCrawler } from "./crawler.js";
 export { validateOptions } from "./validate.js";
 export { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
-export { formatReport, formatCompactReport, saveReport, printReport, getExitCode, type ExitCodeOptions } from "./reporter.js";
+export {
+  formatReport,
+  formatCompactReport,
+  saveReport,
+  printReport,
+  getExitCode,
+  type ExitCodeOptions,
+  type HttpFailLevel,
+} from "./reporter.js";
 export { Logger, createNullLogger, type LogEntry, type LogLevel, type LoggerOptions } from "./logger.js";
 export { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
+// `report.warnings`: what was set up wrong for a run, not what it found.
+export {
+  addRunWarning,
+  BASELINE_MISSING_MODES,
+  mergeRunWarnings,
+  RUN_WARNING_CODES,
+  type BaselineMissingMode,
+  type RunWarning,
+  type RunWarningCode,
+  type RunWarningInput,
+} from "./run-warnings.js";
 export {
   faults,
   type FaultHelperOptions,
@@ -180,6 +199,36 @@ export { candidatePerfKey, compilePerfKeyGlob } from "./perf-key.js";
 export { DEFAULT_SETTLE_QUIET_MS, ACTION_SETTLE_CAP_MS } from "./settle.js";
 export { invariants, axe, buildAxeRunPayload, formatAxeViolations, type AxeInvariantOptions } from "./invariants.js";
 export {
+  AXE_PEERS,
+  MissingPeerError,
+  VISUAL_REGRESSION_PEERS,
+  isMissingPeerError,
+  type PeerNeed,
+} from "./peers.js";
+export {
+  dataSafety,
+  injectedMarkup,
+  notBlank,
+  prototypePollution,
+  renderedGarbage,
+  xssMarker,
+  type DataInvariantOptions,
+  type DataSafetyOptions,
+  type InjectedMarkupOptions,
+  type NotBlankOptions,
+  type PrototypePollutionOptions,
+  type RenderedGarbageOptions,
+  type XssMarkerOptions,
+} from "./data-invariants.js";
+export {
+  describeOffsiteNavigation,
+  isOffsiteRedirect,
+  noOffsiteRedirect,
+  offsiteRedirects,
+  reflectedIn,
+  type NoOffsiteRedirectOptions,
+} from "./offsite-navigation.js";
+export {
   stateMachineCurrent,
   stateMachineInvariant,
   stateMachineKey,
@@ -264,6 +313,7 @@ export {
   type DriverProviderCandidate,
   type DriverProviderInput,
   type DriverProviderResult,
+  type DriverStats,
   type DriverStep,
   type FieldValueProvider,
   type FlowDriverOptions,
@@ -312,7 +362,9 @@ export {
   parseRecipeHistoryFilename,
   aggregateFirings,
   preconditionsHold,
+  rebaseRecipe,
   recipeHistoryFilename,
+  recipeOrigin,
   recipeStoreScenario,
   recipeStoreScenarioWithStats,
   repairRecipe,
@@ -323,9 +375,15 @@ export {
   seedToGoal,
   SNAPSHOT_FORMAT_VERSION,
   snapshotPath,
+  recipeVariables,
+  substituteCondition,
+  substituteConditions,
   substituteStep,
   substituteSteps,
   substituteString,
+  templateNames,
+  UndefinedVariableError,
+  VARIABLE_NAME_RE,
   recipeDriver,
   recipeFilename,
   RecipeStore,
@@ -417,6 +475,7 @@ export {
   type EndpointReport,
   type LatencyStats,
   type LoadReport,
+  type LoadStop,
   type NetworkSample,
   type Scenario,
   type ScenarioContext,
@@ -442,6 +501,7 @@ export {
   type VisualRegressionOptions,
 } from "./visual.js";
 export {
+  READABLE_TRACE_VERSIONS,
   TRACE_FORMAT_VERSION,
   actionToTraceEntry,
   groupTrace,
@@ -449,15 +509,18 @@ export {
   parseTrace,
   readTrace,
   serializeTrace,
+  traceSetupOf,
   writeTrace,
   type TraceAction,
   type TraceEntry,
   type TraceGroup,
   type TraceMeta,
+  type TraceSetup,
   type TraceVisit,
 } from "./trace.js";
 export {
   ddmin,
+  minimizeActions,
   minimizeTrace,
   reportMatches,
   traceWithActions,
@@ -470,6 +533,7 @@ export {
   type FlakeAnalysis,
   type ClusterOccurrence,
   type PageOccurrence,
+  type RunVerdict,
 } from "./flake.js";
 export {
   buildGithubAnnotations,
@@ -517,11 +581,14 @@ export {
 // "Did my fault actually fire?", in one shape across all four layers.
 export {
   faultFirings,
+  faultRunWarnings,
   faultWarnings,
   unfiredFaults,
   type Firing,
   type FaultLayer,
+  type FaultStatsReport,
   type FaultWarning,
+  type ServiceWorkerReach,
 } from "./firings.js";
 
 // The network fault layer, applied to a page you drive yourself. Everything
@@ -541,6 +608,8 @@ export type {
   CrawlerEvents,
   ChaosTestOptions,
   PageResult,
+  OffsiteNavigation,
+  OffsiteNavigationTrigger,
   PageError,
   ActionResult,
   ActionTarget,
@@ -549,6 +618,7 @@ export type {
   PerformanceMetrics,
   CrawlReport,
   CrawlSummary,
+  HttpErrorSummary,
   Invariant,
   InvariantContext,
   Fault,
@@ -556,6 +626,8 @@ export type {
   FaultRule,
   FaultSchedule,
   FaultInjectionStats,
+  CrawlFaultInjectionStats,
+  FaultWebSocketReach,
   LifecycleAction,
   LifecycleFault,
   LifecycleFaultStats,
@@ -590,6 +662,7 @@ export type {
   ClusterDiffEntry,
   PageDiffEntry,
   FailureArtifactsOptions,
+  ReproFlag,
   TraceparentInjectionOptions,
   ChaosRemoteServer,
   ServerFaultEvent,
@@ -623,5 +696,62 @@ export {
   type ScanFinding,
   type ScanSeverity,
 } from "./scan/analyze.js";
+// What `ScanOptions.invariants` (`--invariants`) names: a data-safety preset, or the bundle.
+export type { InvariantPresetName } from "./cli-invariants.js";
 export { deriveScanEndpoints, type ScanEndpoint } from "./scan/endpoints.js";
 export { formatScanMarkdown, formatScanSummary } from "./scan/format.js";
+
+// Goal-driven browser operation over the accessibility snapshot.
+export {
+  drive,
+  defaultRecipeName,
+  type DriveCandidateView,
+  type DriveDecider,
+  type DriveDecision,
+  type DriveHistoryEntry,
+  type DriveInput,
+  type DriveOptions,
+  type DriveProblem,
+  type DriveResult,
+  type DriveStatus,
+  type DriveUntil,
+} from "./drive/drive.js";
+export { classifySecretField, DriveSecrets, type SecretFieldKind } from "./drive/secrets.js";
+export {
+  anthropicDecider,
+  openRouterDecider,
+  parseDriveDecision,
+  planDecider,
+  renderDrivePrompt,
+  type AnthropicDeciderOptions,
+  type OpenRouterDeciderOptions,
+  type DrivePlanStep,
+} from "./drive/deciders.js";
+export {
+  ariaCandidates,
+  ariaOutline,
+  parseAriaSnapshot,
+  readAria,
+  type AriaActionType,
+  type AriaCandidate,
+  type AriaCandidateOptions,
+  type AriaNode,
+  type AriaView,
+  type OutlineOptions,
+} from "./aria-snapshot.js";
+export {
+  recipeChaos,
+  type RecipeChaosFinding,
+  type RecipeChaosOptions,
+  type RecipeChaosResult,
+  type RecipeChaosRun,
+} from "./drive/chaos.js";
+export { siteProblems, watchProblems, type ProblemWatch } from "./drive/problems.js";
+export {
+  attachHint,
+  bindBrowser,
+  resolveBind,
+  type BindOptions,
+  type BindSpec,
+  type BoundBrowser,
+} from "./browser-bind.js";

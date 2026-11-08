@@ -1,0 +1,21 @@
+{
+  "name": "@mizchi/chaosbringer-example-data-patterns",
+  "private": true,
+  "type": "module",
+  "description": "A catalog of tiny apps that mishandle bad or hostile data: each entry has a buggy and a fixed variant, chaosbringer delivers the data, and three crawls prove the buggy variant is flagged, the same page is clean on benign data, and the fix is clean on the bad data.",
+  "scripts": {
+    "test": "vp test run",
+    "report": "tsx scripts/report.ts",
+    "typecheck": "tsc --noEmit",
+    "scan-check": "tsx scripts/scan-check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "chaosbringer": "workspace:*",
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}

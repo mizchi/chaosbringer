@@ -1,8 +1,11 @@
 import { definePattern, html, page, type Variant } from "../pattern.js";
 
-const ROWS = 2000;
+// 5,000 rather than 2,000: Chromium 153 builds an Intl formatter in less than
+// half the time Chromium 141 did, and at 2,000 rows the slow page measured
+// 106.6 ms against the 100 ms bound in CI (fixed: 9.4 ms).
+const ROWS = 5000;
 
-// An orders table: "Show orders" draws 2,000 rows, each with a price and a
+// An orders table: "Show orders" draws 5,000 rows, each with a price and a
 // date in the user's locale. Both pages build the same rows with the same
 // DOM calls; they differ only in how they format the two cells.
 //
@@ -74,8 +77,9 @@ export default definePattern({
     key: "/ :: click *",
     metric: "render.scriptMs",
     direction: "lower",
-    // slow: ~245 ms (4,000 formatters built); fixed: ~20 ms (the same
-    // 6,000 cells created and 4,000 values formatted by two formatters).
+    // slow: 10,000 formatters built, about 2.5x the 106.6 ms CI measured at
+    // 2,000 rows on Chromium 153; fixed: the same 15,000 cells created and
+    // 10,000 values formatted by two formatters, about 2.5x 9.4 ms.
     minImprovement: { ratio: 5, absolute: 100 },
   },
 });

@@ -31,31 +31,81 @@ assertSlo(report, {
 ```
 
 Each worker, on each iteration:
-1. Pulls the list of currently-verified recipes (filter applied).
+1. Pulls the list of current recipes of `status` (default `"verified"`;
+   `status: "candidate"` load-tests the candidates), filter applied.
 2. Picks one (selection strategy — default uniform).
 3. If the recipe has non-sentinel `requires`, runs them in topological
    order first, deduping anything already replayed on this Page.
-4. Runs the recipe. Stats land back on the store.
-5. Thinks for the scenario's think-time, then loops.
+4. Runs the recipe. Stats land back on the store (`record: false`
+   leaves it as it was). A replay whose navigation could not connect to
+   `baseUrl` is not recorded: a host that is down says nothing about
+   the recipe.
+5. Thinks for the scenario's think-time, then loops. A failed iteration
+   waits too, at least 100ms.
 
 The `LoadReport` has one scenario named `"recipe-mix"` (configurable
 via `scenarioName`). Latency / fault timeline / throughput all behave
 exactly like a hand-written `scenarioLoad` run.
 
+Every replay goes to `baseUrl`. A recipe keeps the absolute URLs it was
+recorded with (`chaosbringer drive` saves `http://localhost:3000/login`),
+and its navigations to that origin move onto `baseUrl`'s origin, path
+and query kept, so a library recorded on localhost load-tests staging.
+The origin is the one the recipe's first step navigates to ([Replaying
+on another host](./recipe-cli.md#replaying-on-another-host) has the
+rest). Navigations to another origin (an SSO page, a payment provider)
+are left alone, and a recipe whose site is a template (`{{base}}/signup`,
+below) goes wherever `vars` says. `rebaseRecipe(recipe, baseUrl)` shows
+the result for one recipe.
+
+## When the run stops early
+
+- **Nothing to replay at the start** — no recipe of `status` passes the
+  filter: `scenarioLoadFromStore` throws before it launches a browser
+  (`chaosbringer load` exits 2).
+- **Nothing left mid-run** — the recorded replays can change the
+  statuses the candidates are read from (a candidate promoted, the last
+  verified recipe demoted): the run stops at once, and
+  `report.stopped` is `{ cause: "scenario", reason: "recipe-mix: no
+  verified recipes in the store any more — …" }`.
+- **The base URL does not answer** — 3 iterations in a row whose
+  navigation to `baseUrl`'s origin could not connect
+  (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, …): the run
+  stops, and `report.stopped` is `{ cause: "unreachable", reason: "base
+  URL unreachable: …" }`. `stopOnUnreachable: N` changes the count,
+  `false` turns it off.
+
+The report covers what ran until the stop either way.
+
 ## Recipe templating
 
 Recipes can now declare `{{var}}` placeholders. Substitution happens
-in three positions:
+in these positions:
 
-| Step kind | Templated field |
+| Where | Templated field |
 |---|---|
-| `navigate` | `url` |
-| `fill` | `value` |
-| `select` | `value` |
+| `navigate` step | `url` |
+| `fill` step | `value` |
+| `select` step | `value` |
+| precondition / postcondition | `urlPattern`, with the value escaped so it matches as text (`{{id}}` = `1.5` matches `1.5`, not `125`) |
+| precondition / postcondition | `hasSelector`, `hidesSelector`, as written (`text=Welcome, {{name}}`) |
 
-Selectors, keys, click coordinates, and timeouts are **not**
+Step selectors, keys, click coordinates, and timeouts are **not**
 templated — those are stable references that shouldn't vary per
 iteration.
+
+Every replay substitutes, whether or not it was given `vars`. A
+placeholder `vars` has no value for fails the replay at the first step (or
+postcondition) that uses it, before anything runs: `{ ok: false, failedAt:
+{ index, reason: 'variable "email" is not defined' } }`. `recipeDriver`
+skips a recipe whose preconditions use one. `recipeVariables(recipe)` lists
+what a recipe needs. A name is letters, digits, `_`, `.` and `-`, starting
+with a letter or `_`; `{{` text that does not fit (`{{ }}`, `{{7*7}}`) is
+left as written. There is no escape for text that does fit: to type a
+literal `{{name}}`, pass `vars: { name: "{{name}}" }` (a substituted value
+is not read again). From the CLI, `chaosbringer load --var NAME=VALUE`
+and `--vars-file FILE` give every iteration the same values (see
+[recipe-cli.md](./recipe-cli.md#recipes-with-variables)).
 
 ```json
 {
@@ -89,9 +139,10 @@ Each iteration gets a fresh email. With 5 workers × 60 iterations,
 that's 300 unique signups — exactly the kind of data-variation that's
 painful to write in imperative `defineScenario`.
 
-A missing variable **throws** the moment a step references it. We do
-not silently substitute empty strings — a typo would otherwise let a
-form submit with a blank password.
+A missing variable fails that iteration's replay before any step runs
+(`variable "password" is not defined`), and the failure is recorded
+against the recipe. It is never typed as an empty string: a typo would
+otherwise let a form submit with a blank password.
 
 ## Selection strategies
 
@@ -201,9 +252,10 @@ investigation that you want guaranteed concurrency on.
   checkout) sees the same `vars` for all links. If you need per-link
   vars, split into two iterations of single-step recipes instead.
 - **The `recipe-mix` scenario reports one step**: `pick-and-replay`.
-  Per-recipe step-level latency is NOT in the LoadReport — it's in
-  the store's per-recipe `stats.avgDurationMs`. Use both views
-  together when diagnosing.
+  Per-recipe latency is NOT in the LoadReport — it's in the result's
+  `recipes` (firings and `avgDurationMs` per recipe), and in the store's
+  per-recipe `stats.avgDurationMs`. Use both views together when
+  diagnosing.
 - **Recipes captured from one host can't be replayed against another
   without templating.** Make `{{base}}` part of every captured recipe
   if you want cross-environment portability.

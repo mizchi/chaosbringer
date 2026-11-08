@@ -28,6 +28,16 @@ export interface ScenarioContext {
   /** 0-based iteration counter inside this worker. */
   iteration: number;
   baseUrl: string;
+  /**
+   * End the whole run: every worker stops at its next step boundary, and
+   * the report records `reason` as `stopped` (cause `"scenario"`). For a
+   * step that finds nothing left to do — `recipeStoreScenario` calls it
+   * when no recipe is eligible any more. It does not fail the step that
+   * calls it; throw as well for that. It does fail the run's SLO gate:
+   * `evaluateSlo` / `assertSlo` count any stopped run as a violation. Always
+   * set by `scenarioLoad`.
+   */
+  stopRun?: (reason: string) => void;
 }
 
 export interface ScenarioStep {
@@ -112,6 +122,19 @@ export interface ScenarioLoadOptions {
 
   /** Hard cap on iterations per worker (overrides duration). */
   maxIterationsPerWorker?: number;
+  /**
+   * Stop the run once this many iterations in a row, across all workers,
+   * failed because the browser could not connect to `baseUrl`: a navigation
+   * to its origin failed with a connection-level net error
+   * (`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, …) on the
+   * request to the site itself, not on a redirect the site answered with.
+   * The report says so in `stopped`, so a down or mistyped host reads as
+   * that rather than as a run of failures. An iteration that failed on a
+   * navigation a `faultInjection` rule aborted is left out of the count: an
+   * injected `connectionrefused` is not the host being down. Default 3;
+   * `false` never stops. A stopped run fails `evaluateSlo` / `assertSlo`.
+   */
+  stopOnUnreachable?: number | false;
   /**
    * Bucket width for the timeline in `LoadReport`. Default: 1000ms.
    * Smaller buckets are finer-grained but blow up the report size linearly.
@@ -264,6 +287,22 @@ export interface TimelinePerf {
   blockingMsP95: number;
 }
 
+/** Why a run ended early (`LoadReport.stopped`). */
+export interface LoadStop {
+  /**
+   * `"unreachable"`: `stopOnUnreachable` iterations in a row could not
+   * connect to `baseUrl`. `"scenario"`: a step called `ctx.stopRun`.
+   */
+  cause: "unreachable" | "scenario";
+  /**
+   * One line, e.g. `base URL unreachable: http://localhost:3000
+   * (net::ERR_CONNECTION_REFUSED at http://localhost:3000/login, 3 iterations in a row)`.
+   */
+  reason: string;
+  /** Wall-clock ms the stop was asked for. */
+  at: number;
+}
+
 export interface LoadReport {
   baseUrl: string;
   startTime: number;
@@ -276,6 +315,12 @@ export interface LoadReport {
     /** Present when `perf` was on: how many workers measured, in total. */
     perf?: { level: "light"; sampledWorkers: number };
   };
+  /**
+   * Set when the run ended before its `duration` or iteration cap; absent
+   * when it ran to the end. Every worker finished the step it was in, so the
+   * rest of the report covers what ran until then.
+   */
+  stopped?: LoadStop;
   totals: {
     iterations: number;
     iterationFailures: number;

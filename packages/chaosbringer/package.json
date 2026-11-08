@@ -1,6 +1,6 @@
 {
   "name": "chaosbringer",
-  "version": "0.11.2",
+  "version": "0.15.0",
   "description": "Playwright-based chaos testing tool for web applications",
   "license": "MIT",
   "author": "mizchi",
@@ -38,9 +38,9 @@
     "build": "tsc && node scripts/copy-assets.mjs",
     "prepare": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsc --watch",
-    "test": "vitest run",
-    "test:ai": "vitest run fixtures/runner/real-ai.e2e.test.ts",
-    "lint": "biome check src/",
+    "test": "vp test run",
+    "test:ai": "vp test run fixtures/runner/real-ai.e2e.test.ts",
+    "lint": "vp lint src",
     "lint:nul": "node scripts/check-no-nul.mjs src fixtures scripts",
     "crawl": "tsx src/cli.ts",
     "fixture:serve": "tsx fixtures/site/server.ts",
@@ -55,7 +55,7 @@
   },
   "files": [
     "dist",
-    "src"
+    "!dist/**/*.map"
   ],
   "keywords": [
     "playwright",
@@ -72,10 +72,10 @@
     "lightbringer": "workspace:^"
   },
   "peerDependencies": {
-    "@playwright/test": "^1.40.0",
+    "@playwright/test": "^1.59.0",
     "axe-core": "^4.0.0",
-    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0",
-    "playwright": "^1.40.0",
+    "pixelmatch": "^5.3.0 || ^6.0.0 || ^7.0.0 || ^8.0.0",
+    "playwright": "^1.59.0",
     "pngjs": "^7.0.0"
   },
   "peerDependenciesMeta": {
@@ -93,17 +93,18 @@
     }
   },
   "devDependencies": {
-    "@mizchi/flaker": "^0.11.0",
-    "@playwright/test": "^1.52.0",
-    "@types/node": "^22.0.0",
-    "@types/pixelmatch": "^5.2.6",
+    "@mizchi/flaker": "^0.14.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.4",
+    "@types/pixelmatch": "^7.1.0",
     "@types/pngjs": "^6.0.5",
-    "axe-core": "^4.11.3",
-    "pixelmatch": "^7.1.0",
-    "playwright": "^1.52.0",
+    "axe-core": "^4.14.0",
+    "pixelmatch": "^8.0.0",
+    "playwright": "^1.63.0",
     "pngjs": "^7.0.0",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

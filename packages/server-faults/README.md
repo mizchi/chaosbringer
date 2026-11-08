@@ -119,6 +119,8 @@ if (response) {
 ## Observability example
 
 ```ts
+import { serverFaults, toOtelAttrs } from "@mizchi/server-faults";
+
 const fault = serverFaults({
   status5xxRate: 0.1,
   observer: {
@@ -126,9 +128,11 @@ const fault = serverFaults({
       // wire to OTel / Datadog / console — no framework dep imposed by this lib
       faultsCounter.add(1, {
         kind,
-        path: attrs["fault.path"],
-        method: attrs["fault.method"],
+        path: attrs.path,
+        method: attrs.method,
       });
+      // or every attribute under the dotted `fault.*` names below
+      span.addEvent("fault", toOtelAttrs(attrs));
     },
   },
 });
@@ -136,19 +140,20 @@ const fault = serverFaults({
 
 ### Semantic conventions for `attrs`
 
-`observer.onFault(kind, attrs)` passes a strongly-typed `FaultAttrs` object whose keys follow OTel-style `fault.*` naming so dashboards / pipelines can be reused across consumers.
+`observer.onFault(kind, attrs)` passes a strongly-typed `FaultAttrs` object with flat camelCase keys. `toOtelAttrs(attrs)` renames them to OTel-style `fault.*` names (and drops the absent ones), so dashboards / pipelines can be reused across consumers.
 
-| Attribute | Type | Required | Notes |
-|---|---|---|---|
-| `fault.kind` | `"5xx" \| "latency" \| "abort" \| "partial" \| "slowStream"` | always | mirrors the `kind` arg, so the attrs object is self-describing |
-| `fault.path` | `string` | always | URL pathname (no host, no query) |
-| `fault.method` | `string` | always | HTTP method, uppercased |
-| `fault.target_status` | `number` | when `kind === "5xx"` | the synthetic HTTP status returned |
-| `fault.latency_ms` | `number` | when `kind === "latency"` | milliseconds actually slept |
-| `fault.abort_style` | `"hangup" \| "reset"` | when `kind === "abort"` | how the connection was torn down |
-| `fault.after_bytes` | `number` | when `kind === "partial"` | bytes of the real body emitted before truncation |
-| `fault.chunk_delay_ms` | `number` | when `kind === "slowStream"` | milliseconds slept between chunks |
-| `fault.chunk_size` | `number` | when `kind === "slowStream"` and configured | rechunked output size |
+| `FaultAttrs` key | `toOtelAttrs` key | Type | Required | Notes |
+|---|---|---|---|---|
+| `kind` | `fault.kind` | `"5xx" \| "latency" \| "abort" \| "partial" \| "slowStream"` | always | mirrors the `kind` arg, so the attrs object is self-describing |
+| `path` | `fault.path` | `string` | always | URL pathname (no host, no query) |
+| `method` | `fault.method` | `string` | always | HTTP method, uppercased |
+| `targetStatus` | `fault.target_status` | `number` | when `kind === "5xx"` | the synthetic HTTP status returned |
+| `latencyMs` | `fault.latency_ms` | `number` | when `kind === "latency"` | milliseconds actually slept |
+| `abortStyle` | `fault.abort_style` | `"hangup" \| "reset"` | when `kind === "abort"` | how the connection was torn down |
+| `afterBytes` | `fault.after_bytes` | `number` | when `kind === "partial"` | bytes of the real body emitted before truncation |
+| `chunkDelayMs` | `fault.chunk_delay_ms` | `number` | when `kind === "slowStream"` | milliseconds slept between chunks |
+| `chunkSize` | `fault.chunk_size` | `number` | when `kind === "slowStream"` and configured | rechunked output size |
+| `traceId` | `fault.trace_id` | `string` | when the request carried a valid W3C `traceparent` | its trace-id, 32 lowercase hex |
 
 The shape is part of the public contract: additions are backward-compatible, renames are not. This is why we shipped a stable schema before any consumer pinned to ad-hoc keys.
 

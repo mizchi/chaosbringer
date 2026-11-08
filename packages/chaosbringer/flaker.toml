@@ -40,19 +40,16 @@ min_runs = 5
 window_days = 14
 detection_threshold_ratio = 0.02
 
-[profile.local]
+[gate.iteration]
 strategy = "affected"
 max_duration_seconds = 60
 fallback_strategy = "weighted"
 skip_flaky_tagged = true
 
-[profile.ci]
+[gate.merge]
 strategy = "hybrid"
 sample_percentage = 30
-# adaptive needs >=30 commits of FNR history to converge; enable once
-# `flaker status` reports moderate+ data confidence.
-adaptive = false
 skip_flaky_tagged = true
 
-[profile.scheduled]
+[gate.release]
 strategy = "full"

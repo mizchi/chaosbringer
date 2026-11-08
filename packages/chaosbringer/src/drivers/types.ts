@@ -144,8 +144,24 @@ export interface DriverStep {
   rng: Rng;
   /** Lazy screenshot — only captured when a driver actually asks for it. */
   screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
+  /**
+   * The page as an accessibility outline (`aria-snapshot.ts`): landmarks,
+   * headings, text and controls, indented as the tree nests them, with
+   * `[#N]` marking `candidates[N]`. Lazy like `screenshot`: a snapshot is
+   * taken only when a driver asks. Absent where the runner has no page tree
+   * to offer.
+   */
+  outline?: () => Promise<string>;
   /** Invariant violations observed since the previous step. */
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;
+  /**
+   * What the run is for, in words: the crawl's `driverGoal`. `aiDriver`
+   * puts it in the prompt as `Goal: …` when it was built without a `goal`
+   * of its own; the other built-in drivers do not read it. Absent when no
+   * goal was given, and on the steps `recipes repair` / `investigate`
+   * build, whose goal is a success check, not a hint.
+   */
+  goal?: string;
   /**
    * What the previous action on this page cost — the last `history` entry's
    * span. Present only with `perf` on (and `perf.actions` not false) and
@@ -236,6 +252,30 @@ export interface Driver {
   onActionComplete?(action: ActionResult, step: DriverStep): void;
   onPageStart?(url: string): void;
   onPageEnd?(url: string): void;
+  /**
+   * Optional: how far the scripted journeys in this driver got, one row per
+   * journey (`flowDriver` returns its own; the combinators return their
+   * children's). Read by the crawler once the run is over: a journey that
+   * ended before its last step is a `flow-incomplete` entry of
+   * `report.warnings`.
+   */
+  stats?(): DriverStats[];
+}
+
+/** One scripted journey's progress: `Driver.stats()`. */
+export interface DriverStats {
+  /** The driver's `name`. */
+  driver: string;
+  /** Steps done in the current pass (all of them once a pass completed). */
+  completed: number;
+  /** Steps in the journey. */
+  total: number;
+  /** Passes completed; a `loop` journey counts each one. */
+  laps: number;
+  /** The step the journey waits for, while it is not done. */
+  next?: string;
+  /** Set when a step threw and the journey stopped there (a non-`optional` step). */
+  halted?: { step: string; error: string };
 }
 
 /**
@@ -280,6 +320,11 @@ export interface DriverProviderInput {
    * configured `screenshotMode`.
    */
   screenshot: (mode?: ScreenshotMode) => Promise<Buffer>;
+  /**
+   * `DriverStep.outline`, lazy the same way: a provider whose prompt has no
+   * outline slot never pays for the snapshot.
+   */
+  outline?: () => Promise<string>;
   candidates: ReadonlyArray<DriverProviderCandidate>;
   history: ReadonlyArray<DriverHistoryEntry>;
   invariantViolations: ReadonlyArray<DriverInvariantViolation>;

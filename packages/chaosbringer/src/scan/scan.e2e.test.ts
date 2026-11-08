@@ -2,9 +2,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { formatScanSummary } from "./format.js";
 import { runScan } from "./run.js";
 import type { ScanReportFile } from "./run.js";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
+import type { CrawlReport } from "../types.js";
+import type { ScanFaultKind } from "./analyze.js";
 
 /**
  * `runScan` end to end on a small site with one bug of each kind the scan's
@@ -80,6 +83,9 @@ describe("runScan", () => {
     expect(fragile.length).toBeGreaterThan(0);
     expect(fragile.every((f) => f.category === "resilience")).toBe(true);
     expect(fragile.some((f) => f.where.includes(`${base}/list`))).toBe(true);
+    // The browser's lines about the requests the status, abort and hang
+    // faults answered are their echoes, tagged by the crawl: no finding.
+    expect(fragile.filter((f) => /Failed to load resource/.test(f.title))).toEqual([]);
     // The clean crawl renders the list without an error.
     expect(result.analysis.findings.some((f) => f.category === "bug" && f.where.includes(`${base}/list`))).toBe(false);
 
@@ -95,5 +101,42 @@ describe("runScan", () => {
     const md = readFileSync(result.files.markdown, "utf-8");
     expect(md).toContain(`# chaosbringer scan: ${base}/`);
     expect(md).toContain("layout-thrash");
+
+    // A chaos crawl's report reruns the scan with its fault. It held the
+    // plain crawl's command, which has no flag for the fault: it reran clean.
+    // No scan flag sets `actionWeights`, which the command dropped without a word.
+    const note = "# + 1 option not expressible on the CLI: crawler.actionWeights";
+    const status = `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults 500 --no-coverage ${note}`;
+    const saved = (kind: ScanFaultKind) => JSON.parse(readFileSync(result.files.chaos[kind] ?? "", "utf-8")) as CrawlReport;
+    expect(saved("status").reproCommand).toBe(status);
+    expect(saved("hang").reproCommand).toBe(
+      `chaosbringer scan --url ${base}/ --seed 7 --max-pages 5 --max-actions 4 --faults hang --hang-ms 1500 --no-coverage ${note}`,
+    );
+    expect(file.chaos.find((c) => c.fault === "status")?.reproCommand).toBe(status);
+    expect(md).toContain(`, rerun with \`${status}\``);
+    expect(result.baseline.reproCommand).toMatch(new RegExp(`^chaosbringer --url ${base}/ --seed 7 `));
   }, 180_000);
+
+  // Each crawl's report had them, and the scan's output said nothing.
+  it("shows its crawls' warnings in its summary, its Markdown and its JSON", async () => {
+    const dir = join(outDir, "warned");
+    const missing = join(outDir, "no-such-sitemap.xml");
+    const result = await runScan({
+      url: `${base}/docs/`,
+      maxPages: 1,
+      maxActionsPerPage: 0,
+      seed: 7,
+      outDir: dir,
+      coverage: false,
+      chaos: false,
+      crawler: { headless: true, seedFromSitemap: missing },
+    });
+    const message = result.baseline.warnings?.[0]?.message ?? "";
+    expect(message).toMatch(new RegExp(`^sitemap ${missing} could not be read`));
+    expect(result.analysis.warnings).toEqual([expect.objectContaining({ code: "sitemap-unreadable", message })]);
+    expect(formatScanSummary(result.analysis).split("\n")).toContain(`  ⚠️  crawl warning: ${message}`);
+    expect(readFileSync(result.files.markdown, "utf-8")).toContain(`> ⚠️ Crawl warning (\`sitemap-unreadable\`): ${message}`);
+    const file = JSON.parse(readFileSync(result.files.json, "utf-8")) as ScanReportFile;
+    expect(file.warnings?.map((w) => w.code)).toEqual(["sitemap-unreadable"]);
+  }, 120_000);
 });

@@ -6,6 +6,8 @@
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { parseNumberFlag } from "./cli-crawl-options.js";
+import { UsageError } from "./cli-usage.js";
 import { writeClusterArtifacts } from "./cluster-artifacts.js";
 import type { CrawlReport } from "./types.js";
 
@@ -24,10 +26,13 @@ Each cluster bundle contains:
 Options:
   --bundle-dir <dir>   Directory of per-page failure bundles (required)
   --output-dir <dir>   Where to write cluster bundles (default <bundle-dir>/clusters)
-  --max-clusters <n>   Cap on number of cluster bundles emitted
+  --max-clusters <n>   Cap on number of cluster bundles emitted (an integer >= 1)
   --min-count <n>      Skip clusters whose count is below n (default 1)
   --json               Print a JSON summary instead of a human-readable one
   --help               Show this help
+
+Exit code is 2 when it refuses its arguments (no report path, no
+--bundle-dir, a --max-clusters / --min-count that is not an integer).
 
 Examples:
   chaosbringer cluster-artifacts chaos-report.json --bundle-dir ./artifacts
@@ -52,16 +57,19 @@ export async function runClusterArtifactsCli(argv: string[]): Promise<void> {
     return;
   }
   if (positionals.length !== 1) {
-    console.error("cluster-artifacts: expected exactly one report path");
-    console.error(HELP);
-    process.exitCode = 1;
-    return;
+    throw new UsageError(`expected exactly one report path, got ${positionals.length}`);
   }
-  if (!values["bundle-dir"]) {
-    console.error("cluster-artifacts: --bundle-dir is required");
-    process.exitCode = 1;
-    return;
-  }
+  if (!values["bundle-dir"]) throw new UsageError("--bundle-dir is required");
+
+  // Before the report is read, and checked: parseInt made `--min-count abc`
+  // and `--max-clusters abc` NaN, which no count compares below or above, so
+  // every cluster was written. An empty value is unset.
+  const maxClusters = values["max-clusters"]
+    ? parseNumberFlag("--max-clusters", values["max-clusters"], { min: 1, integer: true })
+    : undefined;
+  const minCount = values["min-count"]
+    ? parseNumberFlag("--min-count", values["min-count"], { min: 0, integer: true })
+    : undefined;
 
   const reportPath = positionals[0];
   let report: CrawlReport;
@@ -77,8 +85,8 @@ export async function runClusterArtifactsCli(argv: string[]): Promise<void> {
   const results = writeClusterArtifacts(report, {
     bundleDir: values["bundle-dir"],
     outputDir: values["output-dir"],
-    maxClusters: values["max-clusters"] ? parseInt(values["max-clusters"], 10) : undefined,
-    minCount: values["min-count"] ? parseInt(values["min-count"], 10) : undefined,
+    maxClusters,
+    minCount,
   });
 
   if (values.json) {

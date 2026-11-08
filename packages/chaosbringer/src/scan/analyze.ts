@@ -22,15 +22,19 @@
 
 import { isLoadKey } from "../perf-key.js";
 import { reportSpans } from "../perf-summary.js";
-import type { CrawlReport, PageResult, PerfSpanReport } from "../types.js";
+import type { CrawlReport, OffsiteNavigation, PageResult, PerfSpanReport } from "../types.js";
+import { describeOffsiteNavigation, offsiteRedirects } from "../offsite-navigation.js";
 import type { ErrorCluster } from "../clusters.js";
+import { unreachableTarget, unreachableTargetMessage } from "../unreachable-target.js";
+import { CRAWLER_NAVIGATION_ERROR, stripAnsi } from "../error-text.js";
 import { registrableDomain } from "lightbringer/analyze";
 import { escapeRegExp } from "../filters.js";
 import { endpointLabel, isOwnApiRequest } from "./endpoints.js";
-import { ORB_SERVED_NOTE } from "./orb.js";
+import { SERVED_NOTE } from "./blocked-responses.js";
+import { mergeRunWarnings, type RunWarning } from "../run-warnings.js";
 
 export type ScanSeverity = "high" | "medium" | "low";
-export type ScanCategory = "bug" | "resilience" | "perf" | "a11y";
+export type ScanCategory = "bug" | "security" | "resilience" | "perf" | "a11y";
 
 export interface ScanFinding {
   /** The rule that raised it, e.g. `js-exception`, `span-blocking`. Stable across runs. */
@@ -40,13 +44,33 @@ export interface ScanFinding {
   title: string;
   /**
    * Where it was seen, worst first: page URLs, or perfKeys for a step
-   * (`<urlPattern> :: <kind>`), capped at `SCAN_WHERE_CAP`. `occurrences`
-   * counts all of them.
+   * (`<urlPattern> :: <kind>`), or files, capped at `SCAN_WHERE_CAP`.
+   * `places` counts all of them.
    */
   where: string[];
+  /**
+   * How many distinct places it was seen at: `where` before the cap.
+   * `analyzeScan` always sets it; optional for a finding built elsewhere or
+   * read from an older `scan-report.json`, which the formatters count by
+   * `where` instead.
+   */
+  places?: number;
+  /**
+   * How often it was seen: the errors for an error finding (four throws on
+   * one page are 4, in 1 place), else the places.
+   */
   occurrences: number;
   /** The measured facts, one short line each. */
   evidence: string[];
+  /**
+   * How many items `evidence` leaves out: it lists the first `SCAN_WHERE_CAP`
+   * of a finding's pages, steps or files. Absent when it leaves none out. Not
+   * `occurrences` less the lines: an error finding's `occurrences` counts
+   * errors, and its first line sums them up. Not `places` less the cap
+   * either: an error finding's evidence lists the files a failed load is
+   * about (`resource: <url>`), not its pages.
+   */
+  unlisted?: number;
   /** What usually causes it and where to look. */
   hint: string;
   /** perf-patterns catalog entries that show this signal (`examples/perf-patterns/src/patterns/<name>.ts`). */
@@ -60,11 +84,19 @@ export interface ScanAnalysis {
   environment: ScanEnvironmentNote[];
   /**
    * Why the findings may not cover the site: the clean crawl barely reached
-   * it (one page, no links, a near-empty start page). A bot check, a rate
-   * limit or an error page reads as a clean site with few findings; this says
-   * so instead. Empty when the crawl looked normal.
+   * it (one page, no links, a near-empty start page it got no further than).
+   * A bot check, a rate limit or an error page reads as a clean site with few
+   * findings; this says so instead. Empty when the crawl looked normal.
    */
   coverageWarnings: string[];
+  /**
+   * The warnings of the scan's crawls (`CrawlReport.warnings`), clean and
+   * chaos, identical ones folded: what made a crawl test less than it was set
+   * up to, such as a `crawler.seedFromSitemap` that could not be read, or a
+   * chaos crawl's fault that matched nothing. Optional for an analysis built
+   * elsewhere or read from an older `scan-report.json`.
+   */
+  warnings?: RunWarning[];
 }
 
 /** How many locations a finding lists. */
@@ -184,6 +216,13 @@ export interface AnalyzeScanOptions {
    * requests to them; without it they count every request.
    */
   endpointPattern?: string;
+  /**
+   * The off-site URLs a page may redirect to (an SSO provider): those
+   * redirects raise no `open-redirect`. `runScan` builds it from
+   * `offsiteRedirectAllow` and the `allow` of every `noOffsiteRedirect()`
+   * among the crawls' invariants. Default: none is allowed.
+   */
+  offsiteRedirectAllowed?: (url: string) => boolean;
 }
 
 /**
@@ -201,9 +240,10 @@ export interface AnalyzeScanOptions {
  *   and is deliberate);
  * - media the scanning browser cannot decode: Playwright's Chromium ships
  *   without the H.264 / AAC codecs that Chrome has;
- * - a file the browser's opaque-response blocking stopped while the crawler
- *   intercepted requests, that serves fine when fetched (`orb.ts` relabels
- *   those errors after the crawls).
+ * - a response the browser refused (opaque-response blocking while the
+ *   crawler intercepted requests, or a `Cross-Origin-Resource-Policy` sent
+ *   only to the headless browser) that serves fine when fetched
+ *   (`blocked-responses.ts` relabels those errors after the crawls).
  */
 export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; reason: string }> = [
   netCause("net::ERR_TUNNEL_CONNECTION_FAILED", "a proxy on the scanning machine refused the host"),
@@ -217,8 +257,13 @@ export const ENVIRONMENT_CAUSES: ReadonlyArray<{ code: string; pattern: RegExp; 
   netCause("net::ERR_ABORTED", "cancelled in flight, mostly by the crawl navigating on"),
   {
     code: "net::ERR_BLOCKED_BY_ORB (served fine)",
-    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_ORB ${ORB_SERVED_NOTE}`)),
+    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_ORB ${SERVED_NOTE}`)),
     reason: "the browser's opaque-response blocking stopped a file that serves fine when fetched directly; Chromium does that now and then while a page's requests are intercepted, as the crawler's are",
+  },
+  {
+    code: "net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin (served fine)",
+    pattern: new RegExp(escapeRegExp(`net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin ${SERVED_NOTE}`)),
+    reason: "the response kept other sites out (Cross-Origin-Resource-Policy) for the scanning browser only, mostly with a bot block of its HeadlessChrome user agent; fetched directly it serves fine",
   },
   {
     code: "media: no supported source",
@@ -232,7 +277,7 @@ function netCause(code: string, reason: string): { code: string; pattern: RegExp
   return { code, pattern: new RegExp(`${escapeRegExp(code)}\\b`), reason };
 }
 
-function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
+export function environmentCause(message: string): (typeof ENVIRONMENT_CAUSES)[number] | undefined {
   return ENVIRONMENT_CAUSES.find((c) => c.pattern.test(message));
 }
 
@@ -344,7 +389,7 @@ export const RULE_PATTERNS: Record<string, readonly string[]> = {
 type Located = { where: string; value: number; line: string };
 
 const SEVERITY_ORDER: Record<ScanSeverity, number> = { high: 0, medium: 1, low: 2 };
-const CATEGORY_ORDER: Record<ScanCategory, number> = { bug: 0, resilience: 1, a11y: 2, perf: 3 };
+const CATEGORY_ORDER: Record<ScanCategory, number> = { bug: 0, security: 1, resilience: 2, a11y: 3, perf: 4 };
 
 export function analyzeScan(
   baseline: CrawlReport,
@@ -360,6 +405,7 @@ export function analyzeScan(
   chaos = chaos.map((r) => ({ ...r, report: splitEnvironment(r.report).report }));
   const findings: ScanFinding[] = [
     ...pageFailures(baseline),
+    ...openRedirectFindings([baseline, ...chaos.map((c) => c.report)], options.offsiteRedirectAllowed),
     ...errorFindings(baseline, envPages),
     ...perfFindings(baseline),
     ...resilienceFindings(baseline, chaos, options),
@@ -376,7 +422,9 @@ export function analyzeScan(
   );
   const counts: Record<ScanSeverity, number> = { high: 0, medium: 0, low: 0 };
   for (const f of findings) counts[f.severity]++;
-  return { findings, counts, environment, coverageWarnings: coverageWarnings(baseline) };
+  // `splitEnvironment` leaves the warnings as they were.
+  const warnings = mergeRunWarnings([baseline.warnings, ...chaos.map((c) => c.report.warnings)]);
+  return { findings, counts, environment, coverageWarnings: coverageWarnings(baseline), warnings };
 }
 
 /** Requests / KB under which a start page is suspiciously empty for a real site. */
@@ -386,6 +434,19 @@ function coverageWarnings(report: CrawlReport): string[] {
   const out: string[] = [];
   const start = report.pages[0];
   if (!start) return ["The crawl visited no page."];
+  // What the hints below guess at is what the site served, and a start page
+  // that did not load served nothing: a server that is down was told it may
+  // be a single-page app, a bot check or a consent wall.
+  const unreachable = unreachableTarget(report);
+  if (unreachable) {
+    const message = unreachableTargetMessage(unreachable);
+    return [message.charAt(0).toUpperCase() + message.slice(1)];
+  }
+  // It did load: what it served is unknown past the crash.
+  if (crashed(start)) return ["The start page's renderer crashed; see the page-crash finding."];
+  if (start.status === "error" || start.status === "timeout") {
+    return [`The start page did not load (${start.status}), so the crawl had nothing to follow; see the page findings.`];
+  }
   const net = start.perfPage?.network;
   // Links the crawl could follow: same-site, and not back to the page itself.
   const onward = start.links.filter((l) => sameOrigin(l, start.url) && pageIdentity(l) !== pageIdentity(start.url));
@@ -394,7 +455,16 @@ function coverageWarnings(report: CrawlReport): string[] {
       "The crawl reached only the start page, and it had no same-site links to follow. It may be a single-page app with no URL per view, or the site served a bot check, a rate limit or an error page, or it needs a login (--storage-state). The findings cover that one page.",
     );
   }
-  if (net && net.totalRequests <= NEAR_EMPTY_START.requests && net.totalEncodedKB < NEAR_EMPTY_START.kb) {
+  // Only when the crawl got no further: a small static site's start page is
+  // just as light, and a 10-page crawl of one was told it may have been
+  // served a bot check. A bot check or a consent wall stops the crawl too.
+  const stoppedAtStart = report.pages.length <= 1;
+  if (
+    stoppedAtStart &&
+    net &&
+    net.totalRequests <= NEAR_EMPTY_START.requests &&
+    net.totalEncodedKB < NEAR_EMPTY_START.kb
+  ) {
     out.push(
       `The start page was nearly empty (${net.totalRequests} requests, ${fmt(net.totalEncodedKB)} KB). If the site normally shows more, it served the crawler something else (a bot check, a consent wall); re-run later or from another network.`,
     );
@@ -450,16 +520,6 @@ function thirdPartyScript(c: ErrorCluster, baseUrl: string): string | undefined 
   }
 }
 
-/**
- * The crawler's own navigation failing (`page.goto: Timeout 30000ms
- * exceeded`), recorded as an exception on the page. Not the site's script:
- * the page's failed or timed-out load is reported by the page rules.
- */
-const CRAWLER_NAVIGATION_ERROR = /^(?:page\.(?:goto|reload|goBack|goForward|waitForNavigation|waitForLoadState):|Navigation to .* is interrupted)/;
-
-function isCrawlerError(c: ErrorCluster): boolean {
-  return c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(c.sample.message);
-}
 
 function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvironmentNote[] {
   const byCode = new Map<string, { reason: string; count: number; hosts: Set<string> }>();
@@ -490,18 +550,24 @@ function environmentNotes(environment: readonly EnvironmentCluster[]): ScanEnvir
 
 // ---------------------------------------------------------------- bugs
 
+/** A page whose renderer crashed: status `error`, but it loaded, and the `page-crash` rule reports it. */
+function crashed(p: PageResult): boolean {
+  return p.errors.some((e) => e.type === "crash");
+}
+
 function pageFailures(report: CrawlReport): ScanFinding[] {
   const out: ScanFinding[] = [];
-  const failed = report.pages.filter((p) => p.status === "error" || p.status === "timeout");
+  const failed = report.pages.filter((p) => (p.status === "error" || p.status === "timeout") && !crashed(p));
   if (failed.length > 0) {
     out.push({
       rule: "page-load-failed",
       severity: "high",
       category: "bug",
       title: "Pages that did not load",
-      where: capWhere(failed.map((p) => p.url)),
+      ...placesOf(failed.map((p) => p.url)),
       occurrences: failed.length,
       evidence: failed.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: ${p.status}${linkedFrom(p)}`),
+      ...unlistedOf(failed.length),
       hint: "The navigation failed or timed out. A timeout on a page that renders fine in a browser is usually a request that never settles (a long poll, a stream, an analytics beacon) — check the page's network tab.",
     });
   }
@@ -512,9 +578,10 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       severity: "high",
       category: "bug",
       title: "Pages answered with a server error",
-      where: capWhere(server.map((p) => p.url)),
+      ...placesOf(server.map((p) => p.url)),
       occurrences: server.length,
       evidence: server.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
+      ...unlistedOf(server.length),
       hint: "The server failed on these URLs. They were reached by following the site's own links, so a user can reach them too.",
     });
   }
@@ -528,12 +595,64 @@ function pageFailures(report: CrawlReport): ScanFinding[] {
       severity: "medium",
       category: "bug",
       title: "Links to pages that do not exist",
-      where: capWhere(broken.map((p) => p.url)),
+      ...placesOf(broken.map((p) => p.url)),
       occurrences: broken.length,
       evidence: broken.slice(0, SCAN_WHERE_CAP).map((p) => `${p.url}: HTTP ${p.statusCode}${linkedFrom(p)}`),
+      ...unlistedOf(broken.length),
       hint: "Each URL was found in a link on the site. Fix or remove the link on the page it was linked from.",
     });
   }
+  return out;
+}
+
+/**
+ * `open-redirect`, from the off-site navigations the crawls recorded
+ * (`PageResult.offsiteNavigations`): a page that sent the browser to another
+ * origin on its own (a script, a meta refresh, a 3xx), passively, on what the
+ * crawls happened to visit. A target taken from the page's own URL is an
+ * open redirect, `high`; one written into the page (a /chat that sends users
+ * to a chat service, a login that goes to an SSO) is `low`, worth a look and
+ * often what the site means. A click and an iframe are not redirects, and
+ * one to a URL `allowed` passes is not reported. The clean crawl and the
+ * chaos crawls visit the same pages: each redirect is counted once.
+ */
+function openRedirectFindings(reports: readonly CrawlReport[], allowed: (url: string) => boolean = () => false): ScanFinding[] {
+  const seen = new Map<string, OffsiteNavigation>();
+  for (const nav of reports.flatMap((r) => offsiteRedirects(r.pages))) {
+    if (allowed(nav.to)) continue;
+    const key = `${nav.from} -> ${nav.to}`;
+    if (!seen.has(key)) seen.set(key, nav);
+  }
+  const all = [...seen.values()];
+  const out: ScanFinding[] = [];
+  const push = (navs: OffsiteNavigation[], f: Pick<ScanFinding, "severity" | "title" | "hint">) => {
+    if (navs.length === 0) return;
+    out.push({
+      rule: "open-redirect",
+      category: "security",
+      ...f,
+      ...placesOf(navs.map((n) => n.from)),
+      occurrences: navs.length,
+      evidence: navs.slice(0, SCAN_WHERE_CAP).map(describeOffsiteNavigation),
+      ...unlistedOf(navs.length),
+    });
+  };
+  push(
+    all.filter((n) => n.reflected),
+    {
+      severity: "high",
+      title: "Open redirect: a page sends the browser to the URL in its own address",
+      hint: "Whoever writes a link to the page picks the site it sends the user to, from the site's own trusted URL: a phishing page, a fake sign-in. Resolve the target against the site's origin and follow it only when the origin is unchanged or on an allowlist; otherwise go to a default page.",
+    },
+  );
+  push(
+    all.filter((n) => !n.reflected),
+    {
+      severity: "low",
+      title: "Off-site redirect: a page sends the browser to another origin on its own",
+      hint: "The target is not in the page's URL, so this is not an open redirect as crawled; often it is meant (an SSO provider, a chat invite). Check that nothing a user controls (a cookie, a stored setting, a header) chooses it.",
+    },
+  );
   return out;
 }
 
@@ -541,8 +660,25 @@ function linkedFrom(p: PageResult): string {
   return p.sourceUrl ? ` (linked from ${p.sourceUrl})` : "";
 }
 
+/**
+ * A cluster of the site's own errors: not `navigation`, the crawler's own
+ * navigation failing (`page.goto: Timeout 30000ms exceeded`). That is no
+ * error of the site's script, and the page's failed or timed-out load is
+ * reported by the page rules.
+ */
+type SiteErrorCluster = ErrorCluster & { type: Exclude<ErrorCluster["type"], "navigation"> };
+
+function isSiteError(c: ErrorCluster): c is SiteErrorCluster {
+  if (c.type === "navigation") return false;
+  // A report an older version wrote recorded the crawler's failed
+  // navigation as an `exception` (`analyzeScan` reads reports already on
+  // disk); `diffReports` reads an older baseline the same way.
+  return !(c.type === "exception" && CRAWLER_NAVIGATION_ERROR.test(stripAnsi(c.sample.message)));
+}
+
+/** A rule per type of the site's own errors (`SiteErrorCluster`). */
 const ERROR_RULES: Record<
-  ErrorCluster["type"],
+  SiteErrorCluster["type"],
   { rule: string; severity: ScanSeverity; category: ScanCategory; title: string; hint: string }
 > = {
   exception: {
@@ -589,18 +725,60 @@ const ERROR_RULES: Record<
   },
 };
 
+/**
+ * The data-safety presets (`--invariants`, `invariants.dataSafety()`), by
+ * the names they report under. Hostile data that ran, reached the DOM as
+ * markup or polluted `Object.prototype` is a security bug, `high` like an
+ * uncaught exception; garbage text or a blank page stays `medium`, as every
+ * other invariant does. The category stays `bug`, and so does the rule
+ * (`invariant-violation`): the title names the preset.
+ */
+const DATA_SAFETY_FINDINGS: Readonly<Record<string, { severity: ScanSeverity; hint: string }>> = {
+  "data.xss-marker": {
+    severity: "high",
+    hint: "A payload in the data ran as script. Put data into the page as text (textContent, a framework's default interpolation), never into an HTML string or a template that is evaluated.",
+  },
+  "data.injected-markup": {
+    severity: "high",
+    hint: "Data reached the DOM as markup or as a javascript: URL. Put it into the page as text, and allow only http(s) URLs in links and sources.",
+  },
+  "data.prototype-pollution": {
+    severity: "high",
+    hint: "A __proto__ key in the data reached Object.prototype through a merge or a query parser. Skip __proto__ / constructor / prototype keys, or build objects with Object.create(null) or a Map.",
+  },
+  "data.rendered-garbage": {
+    severity: "medium",
+    hint: "A value was rendered without a check: undefined, NaN, [object Object] or Invalid Date on screen. Check the value where it enters and show a fallback.",
+  },
+  "data.not-blank": {
+    severity: "medium",
+    hint: "The page rendered nothing (or an error screen): usually an error caught and swallowed. Show an error state instead.",
+  },
+};
+
+/** The data-safety preset a cluster of invariant violations is from, if any. */
+function dataSafetyRule(c: ErrorCluster): { severity: ScanSeverity; hint: string } | undefined {
+  if (c.type !== "invariant-violation") return undefined;
+  const name = (c.invariantNames ?? []).find((n) => Object.hasOwn(DATA_SAFETY_FINDINGS, n));
+  return name === undefined ? undefined : DATA_SAFETY_FINDINGS[name];
+}
+
 function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): ScanFinding[] {
   const out: ScanFinding[] = [];
   // Documents that answered 4xx/5xx: the browser logs each as "Failed to load
   // resource", which `pageFailures` already reports as the page's own finding.
   const failedDocs = new Set(report.pages.filter((p) => (p.statusCode ?? 0) >= 400).map((p) => p.url));
   for (const c of report.errorClusters ?? []) {
+    if (!isSiteError(c)) continue;
+    // `open-redirect` reports these from the navigations themselves,
+    // checked or not: the violation would be the same finding twice.
+    if (c.type === "invariant-violation" && c.sample.offsiteRedirect) continue;
     const r = ERROR_RULES[c.type];
-    if (isCrawlerError(c)) continue;
     if (c.type === "console" && /Failed to load resource/i.test(c.sample.message) && c.urls.length > 0 && c.urls.every((u) => failedDocs.has(u))) {
       continue;
     }
     const isAxe = c.type === "invariant-violation" && (c.invariantNames ?? []).some((n) => n.startsWith("a11y"));
+    const data = dataSafetyRule(c);
     const auth = c.type === "console" && /Failed to load resource: the server responded with a status of 40[13]\b/.test(c.sample.message);
     const thirdParty = thirdPartyScript(c, report.baseUrl);
     const knockOn =
@@ -608,14 +786,17 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
       NETWORK_EXCEPTION.test(c.sample.message) &&
       c.urls.length > 0 &&
       c.urls.every((u) => envPages.has(u));
+    // The files a "Failed to load resource" is about (the message names
+    // none), less the failed documents: the page rules report those.
+    const resources = (c.resourceUrls ?? []).filter((u) => !failedDocs.has(u));
     out.push({
       rule: isAxe ? "a11y-violation" : r.rule,
       // A 401 / 403 is usually an auth check answering a logged-out visitor;
       // a third-party script's error is the embed's, though the site chose it.
-      severity: auth ? "low" : thirdParty && r.severity === "high" ? "medium" : r.severity,
+      severity: auth ? "low" : (data?.severity ?? (thirdParty && r.severity === "high" ? "medium" : r.severity)),
       category: isAxe ? "a11y" : r.category,
       title: `${isAxe ? "Accessibility violation" : r.title}: ${truncate(c.sample.message, 120)}`,
-      where: capWhere(c.urls),
+      ...placesOf(c.urls),
       occurrences: c.count,
       evidence: [
         `${c.count}× on ${c.urls.length} page${c.urls.length === 1 ? "" : "s"}`,
@@ -625,17 +806,17 @@ function errorFindings(report: CrawlReport, envPages: ReadonlySet<string>): Scan
         ...(knockOn
           ? ["Every page it fired on also had a request fail for a reason of the scan's own (see the notes): it may be that failure's knock-on effect. Check in a normal browser."]
           : []),
+        // Last, so the report's "… and N more" follows the list it counts.
+        ...resources.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`),
       ],
-      hint: r.hint,
+      ...unlistedOf(resources.length),
+      hint: data?.hint ?? r.hint,
     });
   }
   return out;
 }
 
 // ---------------------------------------------------------- resilience
-
-/** Console noise a fault itself produces: the browser logging the failed request. */
-const FAULT_ECHO = /Failed to load resource|net::ERR_|status of 5\d\d/i;
 
 function resilienceFindings(
   baseline: CrawlReport,
@@ -646,13 +827,21 @@ function resilienceFindings(
   const known = new Set((baseline.errorClusters ?? []).map((c) => c.key));
 
   // Errors that only a fault produced, merged over the runs by cluster.
-  const fresh = new Map<string, { c: ErrorCluster; count: number; urls: Set<string>; faults: ScanFaultKind[] }>();
+  const fresh = new Map<string, { c: SiteErrorCluster; count: number; urls: Set<string>; faults: ScanFaultKind[] }>();
   for (const { fault, report } of runs) {
     for (const c of report.errorClusters ?? []) {
       if (known.has(c.key)) continue;
-      if (c.type === "network" || c.type === "invariant-violation") continue;
-      if (c.type === "console" && FAULT_ECHO.test(c.sample.message)) continue;
-      if (isCrawlerError(c)) continue;
+      // An invariant's other than the data-safety presets' is left to the
+      // bug findings (an axe violation of an error state is still the
+      // page's). A data-safety one only under a fault is what the fault
+      // made the page show: `undefined` where a field was, a blank page.
+      if (c.type === "network" || (c.type === "invariant-violation" && !dataSafetyRule(c))) continue;
+      // The browser's own line about a request the fault answered is in no
+      // cluster: the crawl tags it with the fault (`PageError.causedByFault`)
+      // and leaves it out. This used to drop every console cluster matching
+      // `Failed to load resource|net::ERR_|status of 5xx`, which also hid a
+      // real 500 from another endpoint that only failed under the fault.
+      if (!isSiteError(c)) continue;
       const entry = fresh.get(c.key) ?? { c, count: 0, urls: new Set<string>(), faults: [] };
       entry.count += c.count;
       for (const u of c.urls) entry.urls.add(u);
@@ -665,17 +854,23 @@ function resilienceFindings(
     out.push({
       rule: "fault-new-error",
       // A console.error is the app catching the failure and logging it: worth
-      // a look at what the UI showed, not a crash.
-      severity: severe ? "high" : "low",
+      // a look at what the UI showed, not a crash. A data-safety violation
+      // is what the UI showed.
+      severity: severe ? "high" : c.type === "invariant-violation" ? "medium" : "low",
       category: "resilience",
       title: `Only when an API request fails: ${ERROR_RULES[c.type].title}: ${truncate(c.sample.message, 100)}`,
-      where: capWhere([...urls]),
+      ...placesOf([...urls]),
       occurrences: count,
       evidence: [
         `${count}× under ${faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")}; never in the clean crawl`,
         ...(c.sample.stack ? [truncate(firstStackFrame(c.sample.stack), 160)] : []),
       ],
-      hint: "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
+      // Nothing threw for a data-safety one: the page caught the failure
+      // and rendered what the response left behind.
+      hint:
+        c.type === "invariant-violation"
+          ? "The code assumes the request succeeds: when it fails, the page renders what the failed response left (undefined, NaN, nothing). Check response.ok and show an error state (message + retry) instead."
+          : "The code assumes the request succeeds. Check response.ok / catch the rejection, and give the UI an error state (message + retry) instead of throwing.",
     });
   }
 
@@ -700,11 +895,12 @@ function resilienceFindings(
       severity: "high",
       category: "resilience",
       title: "Pages that stop loading when an API request fails",
-      where: capWhere(urls),
+      ...placesOf(urls),
       occurrences: urls.length,
       evidence: urls
         .slice(0, SCAN_WHERE_CAP)
         .map((u) => `${u}: ${broke.get(u)!.status} under ${broke.get(u)!.faults.map((f) => SCAN_FAULT_LABELS[f]).join(", ")} (loaded in the clean crawl)`),
+      ...unlistedOf(urls.length),
       hint: "The page's load depends on the request finishing. Render the shell first and fill the data in when it arrives (or fails).",
     });
   }
@@ -999,12 +1195,13 @@ function perfFindings(report: CrawlReport): ScanFinding[] {
       severity: unused >= SCAN_THRESHOLDS.unusedJsPct.poor ? "medium" : "low",
       category: "perf",
       title: `${fmt(unused)}% of the shipped JS never ran during the crawl`,
-      where: capWhere(js.lowUsage.map((f) => f.url)),
+      ...placesOf(js.lowUsage.map((f) => f.url)),
       occurrences: js.lowUsage.length,
       evidence: [
         `${fmt(js.totalBytes / 1024)} KB of JS, ${fmt(js.usedBytes / 1024)} KB executed`,
         ...js.lowUsage.slice(0, SCAN_WHERE_CAP).map((f) => `${f.url}: ${fmt(f.usedPct)}% used of ${fmt(f.totalBytes / 1024)} KB`),
       ],
+      ...unlistedOf(js.lowUsage.length),
       hint: "Split code the first view does not need behind import() (routes, dialogs, editors) and drop unused dependencies.",
     });
   }
@@ -1310,6 +1507,10 @@ export function assetIdentity(url: string): string {
   try {
     const u = new URL(url);
     u.hash = "";
+    // A copy, whatever the lint says: the loop deletes from the params it
+    // walks, and a live URLSearchParams iterator skips the entry after each
+    // one it deletes.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     for (const [k, v] of [...u.searchParams]) {
       if (CACHE_BUST_KEYS.has(k.toLowerCase()) || /^\d{8,}$/.test(v) || /^[0-9a-f]{16,}$/i.test(v)) u.searchParams.delete(k);
     }
@@ -1353,7 +1554,7 @@ function sameOrigin(a: string, b: string): boolean {
 function pushLocated(
   out: ScanFinding[],
   hits: Located[],
-  f: Omit<ScanFinding, "where" | "occurrences" | "evidence" | "severity">,
+  f: Omit<ScanFinding, "where" | "places" | "occurrences" | "evidence" | "severity">,
   t: { poor: number },
   warnSeverity: ScanSeverity,
 ): void {
@@ -1366,7 +1567,7 @@ function severityOf(hits: readonly Located[], t: { poor: number }, warnSeverity:
 
 function located(
   hits: Located[],
-  f: Omit<ScanFinding, "where" | "occurrences" | "evidence">,
+  f: Omit<ScanFinding, "where" | "places" | "occurrences" | "evidence">,
 ): ScanFinding {
   const sorted = [...hits].sort((a, b) => b.value - a.value);
   // One entry per location: a document's vitals can be reported by two visits.
@@ -1375,13 +1576,22 @@ function located(
   return {
     ...f,
     where: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.where),
+    places: unique.length,
     occurrences: unique.length,
     evidence: unique.slice(0, SCAN_WHERE_CAP).map((h) => h.line),
+    ...unlistedOf(unique.length),
   };
 }
 
-function capWhere(xs: readonly string[]): string[] {
-  return [...new Set(xs)].slice(0, SCAN_WHERE_CAP);
+/** `where` and `places` for `xs`: each place once, the first `SCAN_WHERE_CAP` of them listed. */
+function placesOf(xs: readonly string[]): Pick<ScanFinding, "where" | "places"> {
+  const unique = [...new Set(xs)];
+  return { where: unique.slice(0, SCAN_WHERE_CAP), places: unique.length };
+}
+
+/** `unlisted` for `n` items of which the evidence lists the first `SCAN_WHERE_CAP`. */
+function unlistedOf(n: number): Pick<ScanFinding, "unlisted"> {
+  return n > SCAN_WHERE_CAP ? { unlisted: n - SCAN_WHERE_CAP } : {};
 }
 
 function fmt(n: number): string {

@@ -48,13 +48,23 @@ export function diffMetrics(
   after: Record<string, number>,
 ): SpanRender {
   const d = (k: string) => (after[k] ?? 0) - (before[k] ?? 0);
+  // A count or a time only grows, unless the counter started over: Chromium
+  // 153 resets them when a navigation swaps in a new document, so a span that
+  // navigated read a negative delta (render.scriptMs -0.7). What the new
+  // document counted since is then the honest, lower-bound answer.
+  const grown = (k: string) => {
+    const a = after[k] ?? 0;
+    const b = before[k] ?? 0;
+    return a >= b ? a - b : a;
+  };
   return {
-    recalcStyleCount: d("RecalcStyleCount"),
-    recalcStyleMs: round(d("RecalcStyleDuration") * 1000),
-    layoutCount: d("LayoutCount"),
-    layoutMs: round(d("LayoutDuration") * 1000),
+    recalcStyleCount: grown("RecalcStyleCount"),
+    recalcStyleMs: round(grown("RecalcStyleDuration") * 1000),
+    layoutCount: grown("LayoutCount"),
+    layoutMs: round(grown("LayoutDuration") * 1000),
+    // Nodes go down when the page removes some: a real negative.
     nodes: d("Nodes"),
-    scriptMs: round(d("ScriptDuration") * 1000),
+    scriptMs: round(grown("ScriptDuration") * 1000),
   };
 }
 

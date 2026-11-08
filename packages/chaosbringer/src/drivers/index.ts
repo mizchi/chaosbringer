@@ -24,6 +24,7 @@ export type {
   DriverProviderCandidate,
   DriverProviderInput,
   DriverProviderResult,
+  DriverStats,
   DriverStep,
   ScreenshotMode,
 } from "./types.js";

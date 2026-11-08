@@ -8,6 +8,7 @@
  * 2. `withRecipes()` — extend an existing `test`. Use when you have a
  *    regular Playwright Test file and want recipes as one tool.
  * 3. `runRecipe()` with `{{var}}` templating — data-driven replays.
+ * 4. A recipe recorded on another host replays at the config's `baseURL`.
  */
 
 import { test as base, expect } from "@playwright/test";
@@ -98,4 +99,27 @@ recipesTest("templated recipe drives different start URLs", async ({ page, store
   });
   await runRecipe("site/visit-templated", { vars: { base: BASE } });
   expect(page.url()).toContain("/about");
+});
+
+// ---------- pattern 4: a recipe recorded on another host ----------
+
+recipesTest("replays a recipe recorded elsewhere at the config's baseURL", async ({ page, store, runRecipe }) => {
+  // What `chaosbringer drive --save-recipe` stores after a run against a
+  // dev server that is not up now: absolute URLs on that server. The
+  // fixture moves them onto `baseURL` from playwright.config.ts.
+  const recordedOn = "http://127.0.0.1:1";
+  store.upsert({
+    ...seedHomeRecipe(),
+    name: "site/visit-about-recorded-elsewhere",
+    steps: [
+      { kind: "navigate", url: `${recordedOn}/`, expectAfter: { hasSelector: "h1" } },
+      {
+        kind: "click",
+        selector: 'a[href="/about"]',
+        expectAfter: { urlContains: "/about", timeoutMs: 3000 },
+      },
+    ],
+  });
+  await runRecipe("site/visit-about-recorded-elsewhere");
+  expect(page.url()).toBe(`${BASE}/about`);
 });

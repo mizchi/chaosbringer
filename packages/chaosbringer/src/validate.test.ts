@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { validateOptions } from "./validate.js";
+import { ChaosCrawler } from "./crawler.js";
+import { CHAOS_TEST_OPTION_NAMES, validateChaosTestOptions, validateOptions } from "./validate.js";
 
 function base(extra: Record<string, unknown> = {}): any {
   return { baseUrl: "http://localhost:3000", ...extra };
@@ -148,6 +149,18 @@ describe("validateOptions", () => {
     expect(() => validateOptions(base({ excludePatterns: ["("] }))).toThrow(
       /excludePatterns/
     );
+  });
+
+  it("rejects an invalid ignoreHttpPatterns regex", () => {
+    expect(() => validateOptions(base({ ignoreHttpPatterns: ["("] }))).toThrow(/ignoreHttpPatterns entry has invalid regex/);
+    expect(() => validateOptions(base({ ignoreHttpPatterns: ["/favicon\\.ico$"] }))).not.toThrow();
+  });
+
+  it("rejects a strictCountsFaultEchoes that is not a boolean", () => {
+    expect(() => validateOptions(base({ strictCountsFaultEchoes: "false" as unknown as boolean }))).toThrow(
+      /"strictCountsFaultEchoes" must be a boolean/,
+    );
+    expect(() => validateOptions(base({ strictCountsFaultEchoes: true }))).not.toThrow();
   });
 
   it("accepts a RegExp literal for fault urlPattern", () => {
@@ -498,6 +511,61 @@ describe("config errors that used to pass silently", () => {
       }),
     ).not.toThrow();
   });
+
+  it("refuses an invariant `when` that names no phase", () => {
+    // The crawler runs an invariant only in the phase `when` names, so
+    // `"afterAction"` (the docs had it) never ran the check: an invariant that
+    // always fails gave no errors and a strict exit of 0.
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        invariants: [{ name: "no-xss-fired", when: "afterAction" as never, check: () => false }],
+      }),
+    ).toThrow(
+      'chaosbringer: invariant "no-xss-fired" when must be "afterLoad", "afterActions" or "afterVisit" (got "afterAction")',
+    );
+    expect(() =>
+      validateOptions({
+        baseUrl: "http://127.0.0.1:1",
+        invariants: [{ name: "n", when: null as never, check: () => true }],
+      }),
+    ).toThrow(/invariant "n" when .*\(got null\)/);
+  });
+
+  it("accepts each phase, and no `when` at all", () => {
+    for (const when of [undefined, "afterLoad", "afterActions"] as const) {
+      expect(() =>
+        validateOptions({
+          baseUrl: "http://127.0.0.1:1",
+          invariants: [{ name: "ok", when, check: () => true }],
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("refuses an invariant whose check is not a function", () => {
+    // Accepted before, then every page reported "inv.check is not a function"
+    // as a violation of the invariant rather than a mistake in the config.
+    for (const check of [undefined, true, "() => true"]) {
+      expect(() =>
+        validateOptions({
+          baseUrl: "http://127.0.0.1:1",
+          invariants: [{ name: "no-check", check: check as never }],
+        }),
+      ).toThrow('chaosbringer: invariant "no-check" check must be a function');
+    }
+  });
+
+  it("refuses the bad `when` when the crawler is constructed, before any page loads", () => {
+    expect(
+      () =>
+        new ChaosCrawler({
+          baseUrl: "http://127.0.0.1:1",
+          maxPages: 1,
+          invariants: [{ name: "no-xss-fired", when: "afterAction" as never, check: () => false }],
+        }),
+    ).toThrow(/invariant "no-xss-fired" when must be/);
+  });
 });
 
 describe("a misspelled option is an error, not silence", () => {
@@ -521,6 +589,21 @@ describe("a misspelled option is an error, not silence", () => {
     expect(() => validateOptions({ ...base, invariant: [] } as never)).toThrow(/invariants/);
   });
 
+  it("names the chaos() exit options a typo meant", () => {
+    // chaos() hands a key it does not know to the crawler, which ignores it:
+    // the run passed without the gate the caller asked for.
+    for (const [typo, meant] of [
+      ["failOnHtp", "failOnHttp"],
+      ["failOnDeadLink", "failOnDeadLinks"],
+      ["failOnNetworks", "failOnNetwork"],
+      ["baselineStric", "baselineStrict"],
+    ]) {
+      expect(() => validateOptions({ ...base, [typo!]: true } as never)).toThrow(
+        new RegExp(`unknown option "${typo}".*did you mean "${meant}"`, "s"),
+      );
+    }
+  });
+
   it("suggests the nearest name, not the first one that scores", () => {
     // `shard` used to suggest `har` — two edits, and earlier in the list than
     // `shardIndex`. A suggestion that makes no sense is worse than none.
@@ -539,8 +622,40 @@ describe("a misspelled option is an error, not silence", () => {
     // `chaos()` destructures these out before the crawler sees them, but a
     // caller who hands the same object straight to `ChaosCrawler` must not be
     // punished for it.
-    for (const key of ["strict", "baseline", "baselineStrict", "setup", "server"]) {
+    for (const key of ["strict", "baseline", "baselineStrict", "setup", "server", "failOnHttp", "failOnNetwork", "failOnDeadLinks"]) {
       expect(() => validateOptions({ ...base, [key]: 1 } as never)).not.toThrow();
+    }
+  });
+});
+
+describe("a misspelled chaosOptions key is an error too", () => {
+  it("refuses a near miss of a fixture option, naming the one meant", () => {
+    // The fixture copies the keys it knows into the crawler's options, so the
+    // crawler's own check never saw these: `maxActionPerPage: 0` ran 5 actions
+    // and `stirct: true` failed nothing.
+    expect(() => validateChaosTestOptions({ maxActionPerPage: 0 } as never)).toThrow(
+      /unknown chaosOptions key "maxActionPerPage" — did you mean "maxActionsPerPage"/,
+    );
+    expect(() => validateChaosTestOptions({ stirct: true } as never)).toThrow(/did you mean "strict"/);
+    expect(() => validateChaosTestOptions({ faultInjections: [] } as never)).toThrow(
+      /did you mean "faultInjection"/,
+    );
+  });
+
+  it("refuses a crawler option the fixture does not take, rather than suggesting a fixture one", () => {
+    // Not typos, and dropped all the same. The near-miss check alone would
+    // have offered `seed` for `seedFromSitemap`.
+    expect(() => validateChaosTestOptions({ seedFromSitemap: "/sitemap.xml" } as never)).toThrow(
+      /chaosOptions "seedFromSitemap" is a ChaosCrawler option the fixture does not take/,
+    );
+    expect(() => validateChaosTestOptions({ timeout: 1 } as never)).toThrow(/"timeout"/);
+  });
+
+  it("accepts every fixture option, and leaves a caller's own keys alone", () => {
+    const all = Object.fromEntries(CHAOS_TEST_OPTION_NAMES.map((k) => [k, undefined]));
+    expect(() => validateChaosTestOptions(all)).not.toThrow();
+    for (const key of ["myAppPort", "dbUrl", "baseline", "setup"]) {
+      expect(() => validateChaosTestOptions({ [key]: 1 } as never)).not.toThrow();
     }
   });
 });

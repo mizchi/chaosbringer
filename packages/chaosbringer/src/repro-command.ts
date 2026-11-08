@@ -7,74 +7,232 @@
  * without booting a browser.
  *
  * Only options that differ from the default are emitted, so the line stays
- * short enough to paste.
+ * short enough to paste. Every main-CLI flag either reaches the command — a
+ * branch here, or the CLI's own `cliReproFlags` — or is left out on purpose;
+ * `repro-command.test.ts` holds that list and fails on a flag that is in
+ * neither.
+ *
+ * Fault rules and invariants set in code have no flag. The command ends in a
+ * comment that counts and names them (`unreplayedNote`): a `chaos()` run
+ * whose 500 broke a page used to print a command that reran it clean and
+ * passed, and said nothing.
  */
+import { invariantsFlagBuilds } from "./cli-invariants.js";
 import { DEFAULT_OPTIONS } from "./defaults.js";
+import { toRegExp } from "./fault-router.js";
+import { iframeFaultName } from "./iframe-faults.js";
+import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS } from "./ignore-presets.js";
+import { lifecycleFaultName } from "./lifecycle-faults.js";
+import { runtimeFaultName } from "./runtime-faults.js";
 import { settleReproArg } from "./settle.js";
 import { PERF_BUDGET_KEYS } from "./types.js";
-import type { CrawlerOptions } from "./types.js";
+import type { CrawlerOptions, ReproFlag } from "./types.js";
 
-/** Shell-quote a value for inclusion in a reproducible CLI invocation. */
-function shellQuote(s: string): string {
+/**
+ * Shell-quote a value for inclusion in a reproducible CLI invocation.
+ *
+ * `?` and `&` used to pass unquoted: `--url http://x/?a=1&b=2` ran
+ * `chaosbringer --url http://x/?a=1` in the background, and zsh refuses a `?`
+ * that matches no file. A leading `=` is zsh's `=command` expansion.
+ */
+export function shellQuote(s: string): string {
   if (s === "") return "''";
-  if (/^[A-Za-z0-9_\-:/.=?&@%+,]+$/.test(s)) return s;
+  if (/^[A-Za-z0-9_\-:/.=@%+,]+$/.test(s) && !s.startsWith("=")) return s;
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Flags as shell words. A value starting with `-` is joined to its flag
+ * (`--exclude=-x`): `parseArgs` refuses `--exclude -x` as ambiguous.
+ */
+export function formatReproFlags(flags: readonly ReproFlag[]): string[] {
+  return flags.flatMap(({ flag, value }) => {
+    if (value === undefined) return [flag];
+    return value.startsWith("-") ? [`${flag}=${shellQuote(value)}`] : [flag, shellQuote(value)];
+  });
 }
 
 export function buildReproCommand(
 options: Required<CrawlerOptions>,
 seed: number,
 ): string {
-  const parts: string[] = ["chaosbringer", "--url", shellQuote(options.baseUrl)];
-  parts.push("--seed", String(seed));
-  if (options.cdpEndpoint) parts.push("--cdp", shellQuote(options.cdpEndpoint));
-  if (options.cdpTargetId) parts.push("--cdp-target", shellQuote(options.cdpTargetId));
-  if (options.terminalBrowser) parts.push("--terminal-browser");
+  return withUnreplayedNote(["chaosbringer", ...formatReproFlags(reproFlags(options, seed))].join(" "), options);
+}
+
+/**
+ * `command`, ending in a `# + …` comment when `options` set something it
+ * cannot carry. `unflagged` names other options it cannot carry (`scan`'s).
+ */
+export function withUnreplayedNote(command: string, options: UnreplayedOptions, unflagged: readonly string[] = []): string {
+  const note = unreplayedNote(options, unflagged);
+  return note ? `${command} # + ${note}` : command;
+}
+
+type UnreplayedOptions = Pick<
+  CrawlerOptions,
+  "faultInjection" | "lifecycleFaults" | "runtimeFaults" | "iframeFaults" | "invariants" | "cliReproFlags"
+>;
+
+/**
+ * The invariants a CLI flag builds, by the names it gives them
+ * (`cli-crawl-options.ts`); `--invariants`' depend on its value.
+ */
+function cliFlagBuilds({ flag, value }: ReproFlag): readonly string[] {
+  if (flag === "--axe") return ["a11y-axe"];
+  if (flag === "--visual-baseline") return ["visual-regression"];
+  if (flag === "--invariants" && value !== undefined) return invariantsFlagBuilds(value);
+  return [];
+}
+
+/** How many names a note lists before `+N more`. */
+const NOTE_NAMES = 5;
+
+/**
+ * What a run set that no flag of its repro command carries, counted and
+ * named, e.g. `1 fault rule not expressible on the CLI: scan:api-500`;
+ * `undefined` when there is nothing. The fault layers and the invariants
+ * other than the ones `--axe` / `--invariants` / `--visual-baseline` built
+ * (`cliReproFlags`), then `unflagged`,
+ * the other options the caller found no flag for (`scanReproCommand`'s
+ * `crawler.spaPatterns`). A rule is named as its stats name it, an unnamed
+ * network rule by its pattern.
+ *
+ * It follows a `#` on the repro line and in `repro.sh`, so it stays a plain
+ * comment: control characters (a newline would start a command) become
+ * spaces, and a name a shell would expand is quoted, which also keeps it
+ * inert in a shell that reads `#` as a word (zsh without
+ * `interactivecomments`).
+ */
+export function unreplayedNote(options: UnreplayedOptions, unflagged: readonly string[] = []): string | undefined {
+  const invariants = (options.invariants ?? []).map((i) => i.name);
+  for (const flag of options.cliReproFlags ?? []) {
+    for (const built of cliFlagBuilds(flag)) {
+      const at = invariants.indexOf(built);
+      if (at >= 0) invariants.splice(at, 1);
+    }
+  }
+  const groups: Array<[string, string[]]> = [
+    // An unnamed rule as `faultInjections[].rule` names it: by its compiled
+    // pattern, so `"/api/"` is `/\/api\//` in both.
+    ["fault rule", (options.faultInjection ?? []).map((r) => r.name ?? String(toRegExp(r.urlPattern) ?? r.urlPattern))],
+    ["lifecycle fault", (options.lifecycleFaults ?? []).map(lifecycleFaultName)],
+    ["runtime fault", (options.runtimeFaults ?? []).map(runtimeFaultName)],
+    ["iframe fault", (options.iframeFaults ?? []).map(iframeFaultName)],
+    ["invariant", invariants],
+    ["option", [...unflagged]],
+  ];
+  const present = groups.filter(([, names]) => names.length > 0);
+  if (present.length === 0) return undefined;
+  const counts = present.map(([noun, names]) => `${names.length} ${noun}${names.length === 1 ? "" : "s"}`);
+  const names = present.flatMap(([, n]) => n).map((n) => shellQuote(n.replace(/\p{Cc}+/gu, " ")));
+  const listed = names.length > NOTE_NAMES ? [...names.slice(0, NOTE_NAMES), `+${names.length - NOTE_NAMES} more`] : names;
+  return `${counts.join(", ")} not expressible on the CLI: ${listed.join(", ")}`;
+}
+
+/** The flags of `buildReproCommand`, unquoted; a bundle's `repro.sh` is built from them too. */
+export function reproFlags(options: Required<CrawlerOptions>, seed: number): ReproFlag[] {
+  const flags: ReproFlag[] = [];
+  const push = (flag: string, value?: string) => flags.push(value === undefined ? { flag } : { flag, value });
+  const pushPath = (flag: string, value: string) => flags.push({ flag, value, path: true });
+  push("--url", options.baseUrl);
+  push("--seed", String(seed));
+  if (options.cdpEndpoint) push("--cdp", options.cdpEndpoint);
+  if (options.cdpTargetId) push("--cdp-target", options.cdpTargetId);
+  if (options.terminalBrowser) push("--terminal-browser");
   if (options.maxPages !== DEFAULT_OPTIONS.maxPages) {
-    parts.push("--max-pages", String(options.maxPages));
+    push("--max-pages", String(options.maxPages));
   }
   if (options.maxActionsPerPage !== DEFAULT_OPTIONS.maxActionsPerPage) {
-    parts.push("--max-actions", String(options.maxActionsPerPage));
+    push("--max-actions", String(options.maxActionsPerPage));
+  }
+  // The navigation timeout decides which slow page is a `timeout` failure.
+  if (options.timeout !== DEFAULT_OPTIONS.timeout) {
+    push("--timeout", String(options.timeout));
   }
   for (const p of options.excludePatterns ?? []) {
-    parts.push("--exclude", shellQuote(p));
+    push("--exclude", p);
   }
   for (const p of options.spaPatterns ?? []) {
-    parts.push("--spa", shellQuote(p));
+    push("--spa", p);
+  }
+  flags.push(...ignoreReproFlags(options.ignoreErrorPatterns ?? []));
+  for (const p of options.ignoreHttpPatterns ?? []) {
+    push("--ignore-http", p);
   }
   if (options.storageState) {
-    parts.push("--storage-state", shellQuote(options.storageState));
+    pushPath("--storage-state", options.storageState);
+  }
+  // Replay serves the pages' responses from the file. Recording only writes
+  // one, and a repro would overwrite it, so `--har-record` is left out.
+  if (options.har?.mode === "replay") {
+    pushPath("--har-replay", options.har.path);
   }
   if (options.performanceBudget) {
     const budget = options.performanceBudget;
     const entries = PERF_BUDGET_KEYS.filter((k) => typeof budget[k] === "number")
       .map((k) => `${k}=${budget[k]}`)
       .join(",");
-    if (entries.length > 0) parts.push("--budget", entries);
+    if (entries.length > 0) push("--budget", entries);
   }
   if (options.traceOut) {
-    parts.push("--trace-out", shellQuote(options.traceOut));
+    push("--trace-out", options.traceOut);
   }
   if (options.traceReplay) {
-    parts.push("--trace-replay", shellQuote(options.traceReplay));
+    pushPath("--trace-replay", options.traceReplay);
   }
   if (options.device) {
-    parts.push("--device", shellQuote(options.device));
+    push("--device", options.device);
   }
   if (options.network) {
-    parts.push("--network", shellQuote(options.network));
+    push("--network", options.network);
   }
+  // Both change what a step can find or load: the snapshot adds targets the
+  // CSS scrape misses, and a cold cache refetches every sub-resource.
+  if (options.ariaTargets) push("--aria-targets");
+  if (options.httpCache === false) push("--no-http-cache");
   if (options.seedFromSitemap) {
-    parts.push("--seed-from-sitemap", shellQuote(options.seedFromSitemap));
+    if (/^https?:\/\//i.test(options.seedFromSitemap)) push("--seed-from-sitemap", options.seedFromSitemap);
+    else pushPath("--seed-from-sitemap", options.seedFromSitemap);
   }
   if (options.shardCount !== undefined && options.shardCount > 1) {
-    parts.push("--shard", `${options.shardIndex ?? 0}/${options.shardCount}`);
+    push("--shard", `${options.shardIndex ?? 0}/${options.shardCount}`);
   }
   // A settle mode changes what every step waits for, so what the repro sees.
   const settle = settleReproArg(options.settle);
-  if (settle !== null) parts.push("--settle", settle);
-  parts.push(...perfReproFlags(options));
-  return parts.join(" ");
+  if (settle !== null) push("--settle", settle);
+  flags.push(...perfFlags(options));
+  flags.push(...(options.cliReproFlags ?? []));
+  return flags;
+}
+
+/**
+ * `ignoreErrorPatterns` as the flags that build it. A run of patterns equal to
+ * `--ignore-analytics`'s list or to a preset becomes that flag, and any other
+ * pattern an `--ignore-error`. Longer lists are tried first, so
+ * `--ignore-analytics` (the `analytics` preset plus `net::ERR_FAILED`) is not
+ * read back as the preset and one stray pattern. `scan` has the same three
+ * flags, so its repro command uses this too.
+ */
+export function ignoreReproFlags(patterns: readonly string[]): ReproFlag[] {
+  const named: Array<{ flag: ReproFlag; patterns: readonly string[] }> = [
+    { flag: { flag: "--ignore-analytics" }, patterns: COMMON_IGNORE_PATTERNS },
+    ...Object.entries(IGNORE_PRESETS).map(([name, list]) => ({
+      flag: { flag: "--ignore-preset", value: name },
+      patterns: list,
+    })),
+  ].sort((a, b) => b.patterns.length - a.patterns.length);
+  const out: ReproFlag[] = [];
+  for (let i = 0; i < patterns.length; ) {
+    const hit = named.find((n) => n.patterns.length > 0 && n.patterns.every((p, j) => patterns[i + j] === p));
+    if (hit) {
+      out.push(hit.flag);
+      i += hit.patterns.length;
+    } else {
+      out.push({ flag: "--ignore-error", value: patterns[i] });
+      i++;
+    }
+  }
+  return out;
 }
 
 /**
@@ -91,7 +249,11 @@ seed: number,
 export function perfReproFlags(
   options: Pick<CrawlerOptions, "perf" | "perfBudgets" | "perfBudgetsFile">,
 ): string[] {
-  const out: string[] = [];
+  return formatReproFlags(perfFlags(options));
+}
+
+function perfFlags(options: Pick<CrawlerOptions, "perf" | "perfBudgets" | "perfBudgetsFile">): ReproFlag[] {
+  const out: ReproFlag[] = [];
   // Rules without `perf` turned measurement on (see the crawler), so the
   // repro measures too even when it cannot carry the rules themselves.
   const perf =
@@ -108,13 +270,17 @@ export function perfReproFlags(
     const budgetsImplyPerf =
       !!options.perfBudgetsFile && !!options.perfBudgets && options.perfBudgets.length > 0;
     if (!trace && !mem && !cov && p.outDir === undefined && !budgetsImplyPerf) {
-      out.push("--perf");
+      out.push({ flag: "--perf" });
     }
-    if (trace) out.push("--perf-trace");
-    if (mem) out.push("--perf-mem");
-    if (cov) out.push("--perf-cov");
-    if (p.outDir !== undefined) out.push("--perf-out", shellQuote(p.outDir));
+    if (trace) out.push({ flag: "--perf-trace" });
+    if (mem) out.push({ flag: "--perf-mem" });
+    if (cov) out.push({ flag: "--perf-cov" });
+    // An output, so not a `path`: from repro.sh, a relative --perf-out
+    // writes into the bundle rather than over the run's. An absolute one is
+    // still the run's directory, where the repro's files land beside the
+    // run's, named by another run id.
+    if (p.outDir !== undefined) out.push({ flag: "--perf-out", value: p.outDir });
   }
-  if (options.perfBudgetsFile) out.push("--perf-budgets", shellQuote(options.perfBudgetsFile));
+  if (options.perfBudgetsFile) out.push({ flag: "--perf-budgets", value: options.perfBudgetsFile, path: true });
   return out;
 }

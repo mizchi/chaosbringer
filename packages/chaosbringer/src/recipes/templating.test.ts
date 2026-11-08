@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   hasTemplates,
+  recipeVariables,
+  substituteCondition,
   substituteStep,
   substituteSteps,
   substituteString,
+  UndefinedVariableError,
 } from "./templating.js";
 import type { RecipeStep } from "./types.js";
 
@@ -30,6 +33,18 @@ describe("substituteString", () => {
 
   it("throws when a referenced variable is missing", () => {
     expect(() => substituteString("{{missing}}", {})).toThrow(/missing/);
+    expect(() => substituteString("{{missing}}", {})).toThrow(UndefinedVariableError);
+  });
+
+  // `name in vars` found Object.prototype's: `{{constructor}}` typed the
+  // source of `function Object()` instead of failing as undefined.
+  it("does not take a variable from the prototype", () => {
+    expect(() => substituteString("{{constructor}}", {})).toThrow(UndefinedVariableError);
+    expect(() => substituteString("{{toString}}", {})).toThrow(UndefinedVariableError);
+  });
+
+  it("does not read a substituted value as a template again", () => {
+    expect(substituteString("{{name}}", { name: "{{name}}" })).toBe("{{name}}");
   });
 
   it("passes through strings without placeholders", () => {
@@ -108,5 +123,37 @@ describe("substituteSteps", () => {
     expect((out[1] as { value: string }).value).toBe("a@b");
     // First (untemplated) step is reused by reference inside the new array.
     expect(out[0]).toBe(steps[0]);
+  });
+});
+
+describe("substituteCondition", () => {
+  it("escapes a value in a urlPattern, and inserts it into a selector as written", () => {
+    expect(substituteCondition({ urlPattern: "^/orders/{{id}}$", hasSelector: "text=Order {{id}}" }, { id: "1.0(x)" })).toEqual({
+      urlPattern: "^/orders/1\\.0\\(x\\)$",
+      hasSelector: "text=Order 1.0(x)",
+    });
+  });
+
+  it("returns the condition itself when it has no placeholder", () => {
+    const c = { urlPattern: "^/done", hidesSelector: ".spinner" };
+    expect(substituteCondition(c, {})).toBe(c);
+  });
+});
+
+describe("recipeVariables", () => {
+  it("names each placeholder of the steps and conditions once, in order of use", () => {
+    expect(
+      recipeVariables({
+        preconditions: [{ urlPattern: "^{{base}}/" }],
+        steps: [
+          { kind: "navigate", url: "{{base}}/login" },
+          { kind: "fill", selector: "#u", value: "{{ user }}" },
+          { kind: "fill", selector: "#p", value: "{{password}}" },
+          { kind: "press", key: "{{not-a-field}}" },
+          { kind: "select", selector: "#plan", value: "{{plan}}" },
+        ],
+        postconditions: [{ hasSelector: "text=Hi {{user}}" }],
+      }),
+    ).toEqual(["base", "user", "password", "plan"]);
   });
 });

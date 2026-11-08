@@ -11,19 +11,26 @@
  * processes and merges their reports.
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { parseArgs } from "node:util";
+import { dirname, join } from "node:path";
+import { isUsageError, UsageError } from "./cli-usage.js";
+import { writeClusterArtifacts } from "./cluster-artifacts.js";
+import { errorMessage } from "./errors.js";
+import { buildActionHeatmap } from "./heatmap.js";
+import { buildJunitXml } from "./junit.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { clusterErrors } from "./clusters.js";
 import { summarizePages } from "./filters.js";
-import { printReport, getExitCode } from "./reporter.js";
+import { randomSeed } from "./random.js";
+import { type ExitCodeOptions, formatQuietReport, printReport, getExitCode } from "./reporter.js";
+import { faultRunWarnings } from "./firings.js";
+import { addRunWarning, mergeRunWarnings, type RunWarning, type RunWarningCode } from "./run-warnings.js";
 import type {
   ActionResult,
   CrawlReport,
   DiscoveryMetrics,
-  FaultInjectionStats,
+  CrawlFaultInjectionStats,
   PageResult,
   PerfSettleRecord,
 } from "./types.js";
@@ -57,7 +64,10 @@ export function shardOwns(url: string, shardIndex: number, shardCount: number): 
  * wins), actions concatenated, error clusters re-merged by stable key with
  * counts summed and url/invariantName sets unioned. Scalars (duration,
  * blockedExternalNavigations, recoveryCount) fold as makes physical sense:
- * counts sum, duration is max-end minus min-start (wall-clock).
+ * counts sum, duration is max-end minus min-start (wall-clock). Fault stats
+ * of every layer sum by rule, and `warnings` merge identical ones, but the
+ * faults that did not take effect are diagnosed again from the summed stats:
+ * a rule one shard never saw a request for may have fired in another.
  */
 export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   if (reports.length === 0) {
@@ -123,19 +133,51 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
   const errorClusters = clusterErrors(mergedPages.flatMap((p) => p.errors));
 
   // Merge fault-injection stats by rule name.
-  const faultByRule = new Map<string, FaultInjectionStats>();
+  const faultByRule = new Map<string, CrawlFaultInjectionStats>();
   for (const r of reports) {
     for (const f of r.faultInjections ?? []) {
       const existing = faultByRule.get(f.rule);
       if (existing) {
         existing.matched += f.matched;
         existing.injected += f.injected;
+        if (f.suppressed) existing.suppressed = (existing.suppressed ?? 0) + f.suppressed;
+        if (f.echoes) existing.echoes = (existing.echoes ?? 0) + f.echoes;
+        if (f.webSocket) {
+          const ws = existing.webSocket;
+          existing.webSocket = ws
+            ? { connections: ws.connections + f.webSocket.connections, first: ws.first ?? f.webSocket.first, webSocketOnly: ws.webSocketOnly }
+            : { ...f.webSocket };
+        }
       } else {
-        faultByRule.set(f.rule, { ...f });
+        faultByRule.set(f.rule, { ...f, ...(f.webSocket ? { webSocket: { ...f.webSocket } } : {}) });
       }
     }
   }
+  // A rule that matched once merged matched nothing the WebSocket note is about.
+  for (const f of faultByRule.values()) if (f.matched > 0) delete f.webSocket;
   const faultInjections = faultByRule.size > 0 ? [...faultByRule.values()] : undefined;
+  const lifecycleFaults = sumByName(reports.map((r) => r.lifecycleFaults), (f) => f.name, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+    a.errored += b.errored;
+  });
+  const runtimeFaults = sumByName(reports.map((r) => r.runtimeFaults), (f) => f.rule, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+    if (b.suppressed) a.suppressed = (a.suppressed ?? 0) + b.suppressed;
+  });
+  const iframeFaults = sumByName(reports.map((r) => r.iframeFaults), (f) => f.rule, (a, b) => {
+    a.matched += b.matched;
+    a.fired += b.fired;
+    if (b.suppressed) a.suppressed = (a.suppressed ?? 0) + b.suppressed;
+  });
+  const warnings = mergeShardWarnings(reports, {
+    faultInjections,
+    lifecycleFaults,
+    runtimeFaults,
+    iframeFaults,
+    pages: mergedPages,
+  });
 
   const totalErrors = mergedPages.reduce((sum, p) => sum + p.errors.length, 0);
   const totalWarnings = mergedPages.reduce((sum, p) => sum + p.warnings.length, 0);
@@ -156,13 +198,57 @@ export function mergeReports(reports: readonly CrawlReport[]): CrawlReport {
     actions,
     summary,
     faultInjections,
+    ...(lifecycleFaults ? { lifecycleFaults } : {}),
+    ...(runtimeFaults ? { runtimeFaults } : {}),
+    ...(iframeFaults ? { iframeFaults } : {}),
     errorClusters,
     har: first.har,
     diff: undefined,
+    warnings,
     // Rebuilt from the merged pages, like the clusters: a per-shard summary
     // cannot be added up (percentiles do not sum).
     perf: buildCrawlPerfSummary(mergedPages, actions, { settle: agreedSettle(reports) }),
   };
+}
+
+/**
+ * Rows of one fault layer summed by name across shards (a copy of the first
+ * row, `add` folding in the rest); undefined when no shard had the layer.
+ */
+function sumByName<T extends object>(
+  lists: ReadonlyArray<readonly T[] | undefined>,
+  name: (row: T) => string,
+  add: (into: T, row: T) => void,
+): T[] | undefined {
+  if (lists.every((l) => l === undefined)) return undefined;
+  const byName = new Map<string, T>();
+  for (const row of lists.flatMap((l) => l ?? [])) {
+    const existing = byName.get(name(row));
+    if (existing) add(existing, row);
+    else byName.set(name(row), { ...row });
+  }
+  return [...byName.values()];
+}
+
+/** The warnings `faultRunWarnings` writes, which a merge diagnoses again. */
+const FAULT_STATS_CODES: ReadonlySet<RunWarningCode> = new Set(["fault-unmatched", "fault-unfired", "fault-uncounted", "fault-websocket"]);
+
+/**
+ * The shards' warnings as one list: the fault diagnoses again from the
+ * merged stats (a rule that matched nothing on one shard may have fired on
+ * another); `server-faults-unseen` only when every shard that crawled saw no
+ * header; the rest merged, identical ones folded and their counts added.
+ */
+function mergeShardWarnings(reports: readonly CrawlReport[], merged: Parameters<typeof faultRunWarnings>[0]): RunWarning[] | undefined {
+  if (reports.every((r) => r.warnings === undefined)) return undefined;
+  const unseen = reports.every((r) => (r.warnings ?? []).some((w) => w.code === "server-faults-unseen"));
+  const out = mergeRunWarnings(
+    reports.map((r) =>
+      (r.warnings ?? []).filter((w) => !FAULT_STATS_CODES.has(w.code) && (unseen || w.code !== "server-faults-unseen")),
+    ),
+  );
+  for (const w of faultRunWarnings(merged)) addRunWarning(out, w);
+  return out;
 }
 
 /**
@@ -204,7 +290,7 @@ export function parseShardArg(value: string): { shardIndex: number; shardCount: 
 }
 
 /** Parsed CLI arguments for the shard coordinator. */
-interface ShardCliArgs {
+export interface ShardCliArgs {
   count: number;
   output: string;
   compact: boolean;
@@ -214,10 +300,12 @@ interface ShardCliArgs {
   forward: string[];
 }
 
-function parseShardCliArgs(argv: string[]): ShardCliArgs {
-  // First, split off --count / --output / --help, forward the rest to each
-  // child unchanged. We deliberately do NOT re-validate --url etc here; the
-  // child CLI handles that and errors propagate.
+/**
+ * Split off what the coordinator reads itself (--count, --output, --help) and
+ * forward the rest to each worker unchanged. Null after printing --help.
+ * Exported for tests; `checkWorkerArgs` checks what is forwarded.
+ */
+export function parseShardCliArgs(argv: string[]): ShardCliArgs | null {
   const forward: string[] = [];
   let count: number | null = null;
   let output = "chaos-report.json";
@@ -230,7 +318,7 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     const a = argv[i]!;
     if (a === "--count" || a === "--shards") {
       const v = argv[++i];
-      if (!v) throw new Error(`chaosbringer shard: ${a} requires a value`);
+      if (!v) throw new UsageError(`${a} requires a value`);
       count = Number(v);
       continue;
     }
@@ -240,7 +328,7 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     }
     if (a === "--output" || a === "-o") {
       const v = argv[++i];
-      if (!v) throw new Error("chaosbringer shard: --output requires a value");
+      if (!v) throw new UsageError("--output requires a value");
       output = v;
       continue;
     }
@@ -270,16 +358,100 @@ function parseShardCliArgs(argv: string[]): ShardCliArgs {
     }
     if (a === "--help" || a === "-h") {
       printShardHelp();
-      process.exit(0);
+      return null;
     }
     forward.push(a);
   }
 
   if (count === null || !Number.isFinite(count) || !Number.isInteger(count) || count < 1) {
-    throw new Error("chaosbringer shard: --count <N> is required and must be an integer >= 1");
+    throw new UsageError("--count <N> is required and must be an integer >= 1");
   }
 
   return { count, output, compact, quiet, strict, baselineStrict, forward };
+}
+
+/**
+ * Refuse, before any worker starts, the arguments every worker would refuse,
+ * by the main crawl's own option table and checks. An unknown flag used to
+ * be forwarded, refused by each of the N workers, and end in `could not read
+ * …/shard-0.json` and exit 1. Returns the seed the workers share: the one
+ * given, or a fresh one, so that every shard runs with it and the merged
+ * report's seed and Repro line hold for the whole run. And the files the
+ * main command writes from its report, which the coordinator writes again
+ * from the merged one.
+ */
+export async function checkWorkerArgs(
+  args: ShardCliArgs,
+): Promise<{ seed: number; files: ShardReportFiles; exitOptions: ExitCodeOptions }> {
+  // Imported on demand, like perf-cli in cli.ts: the library's
+  // `mergeReports` / `shardOwns` import this module, and cli-crawl-options
+  // imports `parseShardArg` from it.
+  const {
+    baselineMissingFromCli,
+    crawlCliExtras,
+    crawlCliPeerNeeds,
+    crawlerOptionsFromCli,
+    crawlUrlFromArgs,
+    exitOptionsFromCli,
+    parseCrawlArgs,
+    readCrawlPerfBudgets,
+  } = await import("./cli-crawl-options.js");
+  const { validateOptions } = await import("./validate.js");
+  const { checkInputFiles } = await import("./input-files.js");
+  const { assertPeers, isMissingPeerError } = await import("./peers.js");
+  try {
+    // The main CLI's checks, in its order, so whatever a worker would refuse
+    // before its browser starts is refused here, once.
+    const { values, positionals } = parseCrawlArgs([...args.forward, "--shard", `0/${args.count}`]);
+    const options = crawlerOptionsFromCli(values, crawlUrlFromArgs(values, positionals));
+    const { clusterMinCount } = crawlCliExtras(values);
+    // The merged report is judged by the workers' rules: --fail-on-http and
+    // the rest are forwarded like any other flag, and read here.
+    const exitOptions = exitOptionsFromCli(values);
+    // A --baseline-missing fail whose --baseline is not there, once rather
+    // than in each worker.
+    baselineMissingFromCli(values);
+    const budgets = await readCrawlPerfBudgets(values, options.settle);
+    if (budgets?.refusal) throw new UsageError(budgets.refusal.message);
+    if (budgets) options.perfBudgets = budgets.rules;
+    validateOptions(options);
+    checkInputFiles(options);
+    assertPeers(crawlCliPeerNeeds(values));
+    const bundleDir = values["failure-artifacts"];
+    const files: ShardReportFiles = {
+      ...(values.junit ? { junit: values.junit } : {}),
+      ...(values["heatmap-out"] ? { heatmapOut: values["heatmap-out"] } : {}),
+      ...(values["cluster-artifacts"] && bundleDir ? { clusterBundles: { bundleDir, minCount: clusterMinCount } } : {}),
+    };
+    return { seed: options.seed ?? randomSeed(), files, exitOptions };
+  } catch (err) {
+    throw isUsageError(err) || isMissingPeerError(err) ? err : new UsageError(errorMessage(err));
+  }
+}
+
+/**
+ * What the main command writes from its report: `--junit`, `--heatmap-out`
+ * and `--cluster-artifacts`' bundles. Every worker writes them to the same
+ * paths, so the file held one shard's pages and a cluster's bundle one
+ * shard's errors; the coordinator writes them again from the merged report.
+ */
+export interface ShardReportFiles {
+  junit?: string;
+  heatmapOut?: string;
+  /** `--failure-artifacts`, which holds the per-page bundles, and `--cluster-min-count`. */
+  clusterBundles?: { bundleDir: string; minCount?: number };
+}
+
+/**
+ * The command that reruns the whole sharded run: a worker's Repro line with
+ * `chaosbringer shard --count N` for its `--shard i/N`. Every worker ran
+ * with the same flags and seed, so any one of them stands for the rest. The
+ * merged report used to keep shard 0's line, which reran shard 0 alone.
+ */
+export function shardReproCommand(workerRepro: string, count: number): string {
+  return workerRepro
+    .replace(/^chaosbringer /, `chaosbringer shard --count ${count} `)
+    .replace(/ --shard \d+\/\d+(?= |$)/, "");
 }
 
 function printShardHelp(): void {
@@ -294,9 +466,15 @@ OPTIONS:
   --output <path>       Merged report output (default: chaos-report.json)
   --help                Show this help
 
-All other options are forwarded verbatim to each shard worker (e.g. --url,
---max-pages, --seed, --seed-from-sitemap, --baseline, --strict, --compact,
---quiet). Each worker receives an additional --shard i/N flag.
+All other options are the main crawl's (chaosbringer --help), checked before
+any worker starts and forwarded verbatim to each shard worker (e.g. --url,
+--max-pages, --seed, --seed-from-sitemap, --baseline, --strict). Each worker
+receives an additional --shard i/N flag, and the same --seed: the given one,
+or one drawn for the run. --junit, --heatmap-out and the --cluster-artifacts
+bundles are written again from the merged report. --quiet and --compact
+print the merged report the way the main command prints its own, without
+the workers' output but with the paths they wrote (failure bundles,
+--trace-out, --log-file, ...).
 
 For full URL-space coverage, combine with --seed-from-sitemap: each shard
 filters the sitemap URLs by hash so every URL is processed by exactly one
@@ -305,7 +483,48 @@ owned links — some pages may go unvisited.
 `);
 }
 
-/** Spawn one worker and resolve with {exitCode, reportPath}. */
+/**
+ * The lines of the main CLI's output that name a file or directory it wrote,
+ * in the order it prints them, but those of what the coordinator writes
+ * again from the merged report (ShardReportFiles, and `Report saved to:`, a
+ * worker's temp report).
+ */
+const WORKER_PATH_LINES = [
+  /^Wrote \d+ failure bundle\(s\) to /,
+  /^Trace saved to: /,
+  /^Log saved to: /,
+];
+
+/**
+ * The paths the silenced workers wrote, from their stdout, merged in the main
+ * CLI's order: a directory's bundle counts summed (each worker counts its
+ * own; the base URL, which every shard crawls, counts once per shard that
+ * bundled it), any other line once.
+ */
+export function mergeWorkerPaths(outputs: readonly string[]): string[] {
+  const merged = new Map<string, { rank: number; count?: number }>();
+  for (const output of outputs) {
+    for (const line of output.split("\n")) {
+      const rank = WORKER_PATH_LINES.findIndex((re) => re.test(line));
+      if (rank < 0) continue;
+      const bundles = /^Wrote (\d+) (.+)$/.exec(line);
+      if (bundles?.[1] !== undefined && bundles[2] !== undefined) {
+        const count = (merged.get(bundles[2])?.count ?? 0) + Number(bundles[1]);
+        merged.set(bundles[2], { rank, count });
+      } else if (!merged.has(line)) {
+        merged.set(line, { rank });
+      }
+    }
+  }
+  return [...merged]
+    .sort(([, a], [, b]) => a.rank - b.rank)
+    .map(([line, { count }]) => (count === undefined ? line : `Wrote ${count} ${line}`));
+}
+
+/**
+ * Spawn one worker and resolve with {exitCode, reportPath}, and with what it
+ * printed when `quiet` keeps that off the terminal.
+ */
 function runShardWorker(args: {
   nodeBin: string;
   scriptPath: string;
@@ -314,29 +533,41 @@ function runShardWorker(args: {
   reportPath: string;
   quiet: boolean;
   index: number;
-}): Promise<{ exitCode: number; reportPath: string }> {
+}): Promise<{ exitCode: number; reportPath: string; stdout: string }> {
   return new Promise((resolve) => {
     const child = spawn(
       args.nodeBin,
       [...args.execArgv, args.scriptPath, ...args.workerArgs],
       {
-        stdio: args.quiet ? ["ignore", "ignore", "inherit"] : "inherit",
+        stdio: args.quiet ? ["ignore", "pipe", "inherit"] : "inherit",
         env: { ...process.env, CHAOS_SHARD_INDEX: String(args.index) },
       }
     );
-    child.on("exit", (code) => {
-      resolve({ exitCode: code ?? 1, reportPath: args.reportPath });
+    let stdout = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    // `close`, not `exit`: the stdout pipe may still hold the last lines.
+    child.on("close", (code) => {
+      resolve({ exitCode: code ?? 1, reportPath: args.reportPath, stdout });
     });
     child.on("error", (err) => {
       console.error(`shard ${args.index}: spawn failed — ${err.message}`);
-      resolve({ exitCode: 1, reportPath: args.reportPath });
+      resolve({ exitCode: 1, reportPath: args.reportPath, stdout });
     });
   });
 }
 
-/** Entry point for the `shard` subcommand. Wired from src/cli.ts. */
+/**
+ * Entry point for the `shard` subcommand. Wired from src/cli.ts. Sets
+ * `process.exitCode` rather than exiting: a `process.exit` inside the `try`
+ * skipped the `finally`, and every run left its /tmp/chaos-shard-* behind.
+ */
 export async function runShardCli(argv: string[]): Promise<void> {
   const args = parseShardCliArgs(argv);
+  if (!args) return;
+  const { seed, files, exitOptions } = await checkWorkerArgs(args);
   const workdir = mkdtempSync(join(tmpdir(), "chaos-shard-"));
 
   try {
@@ -348,10 +579,18 @@ export async function runShardCli(argv: string[]): Promise<void> {
       console.log(`Running ${args.count} shard(s) in parallel...`);
     }
 
+    // --compact shows the merged report: N workers' progress lines and
+    // compact reports, interleaved, are not that.
+    const silenced = args.quiet || args.compact;
     const workers = Array.from({ length: args.count }, (_, i) => {
       const reportPath = join(workdir, `shard-${i}.json`);
+      // A later --seed wins in parseArgs, so this is the given one or the
+      // fresh one checkWorkerArgs drew: unseeded, each worker used to draw
+      // its own, and no seed reran the run.
       const workerArgs = [
         ...args.forward,
+        "--seed",
+        String(seed),
         "--shard",
         `${i}/${args.count}`,
         "--output",
@@ -363,7 +602,7 @@ export async function runShardCli(argv: string[]): Promise<void> {
         execArgv,
         workerArgs,
         reportPath,
-        quiet: args.quiet,
+        quiet: silenced,
         index: i,
       });
     });
@@ -372,6 +611,9 @@ export async function runShardCli(argv: string[]): Promise<void> {
 
     const reports: CrawlReport[] = [];
     for (const r of results) {
+      // Exit 2 is a worker that refused to run (the site did not answer,
+      // `could not reach …` on its stderr) and so wrote no report.
+      if (r.exitCode === 2) continue;
       try {
         const raw = readFileSync(r.reportPath, "utf-8");
         reports.push(JSON.parse(raw) as CrawlReport);
@@ -383,30 +625,57 @@ export async function runShardCli(argv: string[]): Promise<void> {
     }
 
     if (reports.length === 0) {
+      // Every worker refused, as the plain crawl would have: its exit 2, and
+      // their `could not reach …` lines (on the inherited stderr, one per
+      // worker) already say why.
+      if (results.every((r) => r.exitCode === 2)) {
+        process.exitCode = 2;
+        return;
+      }
       console.error("shard: no reports produced — aborting");
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const merged = mergeReports(reports);
+    if (merged.reproCommand) merged.reproCommand = shardReproCommand(merged.reproCommand, args.count);
 
     // Persist merged report.
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(args.output, JSON.stringify(merged, null, 2));
 
-    const exitOptions = { strict: args.strict, baselineStrict: args.baselineStrict };
-    printReport(merged, args.compact, exitOptions);
-    if (!args.quiet) {
-      console.log(`\nMerged report saved to: ${args.output}`);
-      const failed = results.filter((r) => r.exitCode !== 0).length;
-      if (failed > 0) {
-        console.log(`${failed}/${args.count} shard(s) exited non-zero`);
-      }
+    // The main CLI's output modes: --quiet is the verdict, why it failed
+    // and the paths written. It printed the whole merged report.
+    if (args.quiet) console.log(formatQuietReport(merged, exitOptions));
+    else printReport(merged, args.compact, exitOptions);
+    const announce = (line: string) => console.log(args.quiet ? line : `\n${line}`);
+    // The main command's path lines, in its order.
+    if (files.heatmapOut) {
+      mkdirSync(dirname(files.heatmapOut), { recursive: true });
+      writeFileSync(files.heatmapOut, JSON.stringify(buildActionHeatmap(merged.actions), null, 2));
+      announce(`Heatmap saved to: ${files.heatmapOut}`);
+    }
+    // The silenced workers' bundles, trace, log, … had no line at all.
+    if (silenced) for (const line of mergeWorkerPaths(results.map((r) => r.stdout))) announce(line);
+    if (files.clusterBundles) {
+      const written = writeClusterArtifacts(merged, files.clusterBundles);
+      const dir = `${files.clusterBundles.bundleDir.replace(/\/+$/, "")}/`;
+      announce(`Wrote ${written.length} cluster bundle(s) to ${dir}clusters/`);
+    }
+    announce(`Merged report saved to: ${args.output}`);
+    if (files.junit) {
+      mkdirSync(dirname(files.junit), { recursive: true });
+      writeFileSync(files.junit, buildJunitXml(merged));
+      console.log(`JUnit XML saved to: ${files.junit}`);
+    }
+    const failed = results.filter((r) => r.exitCode !== 0).length;
+    if (failed > 0) {
+      console.log(`${failed}/${args.count} shard(s) exited non-zero`);
     }
 
     // Exit code: max of (any shard non-zero) and (merged report's getExitCode).
     const reportExit = getExitCode(merged, exitOptions);
-    const workerExit = results.some((r) => r.exitCode !== 0) ? 1 : 0;
-    process.exit(Math.max(reportExit, workerExit));
+    const workerExit = failed > 0 ? 1 : 0;
+    process.exitCode = Math.max(reportExit, workerExit);
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }

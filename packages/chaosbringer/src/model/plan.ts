@@ -252,7 +252,7 @@ export function compilePlan(trace: ItfTrace, opts: CompilePlanOptions = {}): Fau
   const logOpField = opts.logOpField ?? "op";
   const uiVar = opts.uiVar ?? "ui";
   const unhandledVar = opts.unhandledVar ?? "unhandled";
-  const outcomes = { ...DEFAULT_ACTION_OUTCOMES, ...(opts.actionOutcomes ?? {}) };
+  const outcomes = { ...DEFAULT_ACTION_OUTCOMES, ...opts.actionOutcomes };
   const ignored = new Set(opts.ignoreActions ?? DEFAULT_IGNORED_ACTIONS);
   const last = finalState(trace);
 

@@ -53,9 +53,80 @@ when an API call fails.
 
 | rule | what it means |
 |---|---|
-| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl. The browser's own "Failed to load resource" line for the injected fault is not counted. The code assumes the request succeeds. |
+| `fault-new-error` | An exception, rejection or console error that never happened in the clean crawl, or, with `--invariants`, a data-safety violation (`undefined` on screen, a blank page) that only the fault produced. The browser's own "Failed to load resource" line (and network error) for a request the fault answered is not counted: the crawl tags it as the fault's echo (`PageError.causedByFault`) and clusters it nowhere. A real error status from another endpoint that only failed under the fault is counted. The code assumes the request succeeds. |
 | `fault-page-broken` | A page that loaded clean and fails or times out when its API call fails. |
 | `no-request-timeout` | A step that was still waiting when the hung request was finally failed, while the same step was fast in the clean crawl. The request has no client deadline. |
+
+## Data-safety checks
+
+Some damage throws nothing, so no error finding reports it: a total shown
+as `NaN`, a reflected payload that ran, a polluted `Object.prototype`.
+`--invariants <names>` runs the
+[data-safety presets](data-safety.md) on every page of every crawl, and
+`--data-safety` is `--invariants data-safety` (`xss-marker`,
+`injected-markup`, `prototype-pollution`, `rendered-garbage`,
+`no-offsite-redirect`; `not-blank` is separate, since a canvas or image-only
+page is blank by design):
+
+```bash
+chaosbringer scan --url http://localhost:3000 --data-safety --fail-on high
+chaosbringer scan --url 'http://localhost:3000/search?q=…' --invariants data-safety,not-blank
+```
+
+Each violation is an `invariant-violation` finding in the `bug` category,
+its title naming the preset (`Invariant violated: [data.xss-marker] …`):
+`high` for `xss-marker`, `injected-markup` and `prototype-pollution`,
+`medium` for `rendered-garbage` and `not-blank`. `no-offsite-redirect` is
+the exception: scan reports a redirect as its own `open-redirect` finding
+(below) with or without the check, and leaves out the check's violation,
+which would be the same finding twice. Scan delivers no bad data itself;
+from the shell, a query on `--url` is how hostile data reaches the page. The
+presets run with their defaults; set their options through
+`runScan({ crawler: { invariants } })`.
+
+> **Behaviour change:** this applies to data-safety presets passed through
+> `runScan({ crawler: { invariants } })` as well, which reached the scan
+> before the flag did. Their violations used to be `medium`
+> `invariant-violation` findings, below `--fail-on high`; the three hostile-data
+> ones are now `high`. One seen only in a chaos crawl used to be dropped and is
+> now a `medium` `fault-new-error` finding. Code that gates on the findings'
+> severity and passed can fail, and `analyzeScan` re-grades an old report the
+> same way.
+
+## Open redirects
+
+Scan raises `open-redirect`, in the `security` category, for a page that
+sent the browser to another origin on its own (a script, a meta refresh, a
+3xx, or a click that followed the page's own `?next=`), from the off-site
+navigations its crawls recorded (`pages[].offsiteNavigations`; a click to a
+URL the page wrote and an iframe are not redirects):
+
+| severity | when |
+|---|---|
+| `high` | the target was in the page's own URL, in a query parameter or the fragment (written or URL-decoded): an open redirect, where whoever writes the link picks the site the user lands on |
+| `low` | it was not: often meant (a `/chat` that sends users to a chat service, a login that goes to an SSO), worth a look |
+
+Each lists the pages and `<page> -> <target> (<trigger>; target from the
+"next" query parameter)` lines, in the terminal summary, the Markdown and
+`scan-report.json`, and `--fail-on high` (or `medium`, `low`) gates on it.
+It is passive: scan judges the URLs its crawls visited, and probes no
+redirect parameter itself, so a `?next=` the site never links to with an
+off-site value is found only when `--url` carries one
+(`--url 'http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F'`).
+
+`--offsite-redirect-allow <origins>` (`ScanOptions.offsiteRedirectAllow`;
+comma-separated, repeatable, scheme and host only) names the origins a page
+may redirect to, such as an SSO provider: their redirects raise no
+finding, and the `no-offsite-redirect` check lets them through. Unlike the
+crawl's, scan takes it with or without the check. A
+`noOffsiteRedirect({ allow })` in `runScan({ crawler: { invariants } })` is
+read the same way.
+
+> **Behaviour change:** a page that 302s to another origin whose host is
+> down used to be a `high` `page-load-failed` finding (the crawl failed
+> the on-site URL with `ERR_CONNECTION_REFUSED`). It is now that off-site
+> redirect, an `open-redirect` finding, `low` unless the target was in the
+> page's URL, so `--fail-on high` (or `medium`) no longer fails on it.
 
 ## Reading the report
 
@@ -73,7 +144,15 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 
 - **`where`** is a page URL, or, for a step, its perfKey
   (`<urlPattern> :: <kind>`, see [perf.md](perf.md#perfkey-the-key-that-survives-a-rerun)).
-  The key is stable across runs, so you can re-measure the same step.
+  The key is stable across runs, so you can re-measure the same step. The
+  table shows the first place and `(+N)` for the other places
+  (`ScanFinding.places`); `seen` counts the times, which for an error
+  finding are its errors: four throws on one page are `/multi` seen 4.
+- **Evidence** lists at most five pages, steps or files, and `… and N more`
+  counts the rest. A `console-error` for "Failed to load resource" lists the
+  files that failed (`resource: <url>`), since the browser's message names
+  none. A page that itself answered 4xx or 5xx is left to `broken-link` /
+  `http-5xx`.
 - **Catalog patterns** link to entries of the
   [perf-patterns catalog](../../examples/perf-patterns/README.md). Each
   entry is a tiny page with the anti-pattern, its fix, and the same
@@ -87,6 +166,16 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 
 ## Going further from a finding
 
+- **Rerun a resilience finding.** Each chaos crawl's report
+  (`chaos-<fault>-report.json`) has as its `reproCommand` the scan that
+  reruns it, also listed under "Files" in `scan-report.md`:
+  `chaosbringer scan --url … --seed 7 --faults 500` plus the other flags
+  that shaped it. It reruns the clean crawl, which finds the endpoints, then
+  that one fault's crawl. A plain `chaosbringer` crawl has no flag for the
+  fault, so it would rerun clean and pass. What a `runScan` call set that no
+  scan flag carries, from the fault layers and invariants to
+  `crawler.spaPatterns`, a HAR replay or `perf.memory`, is named in a
+  trailing `# + …` comment instead.
 - **See why a step is slow.** Re-run the clean crawl's `reproCommand` with
   `--perf-trace`, then run `chaosbringer perf drilldown <report> "<perfKey>"`.
 - **Turn a resilience finding into a test.** Write the fault the scan used
@@ -97,7 +186,20 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
   through.
 - **Guard against regressions.** Scan before and after a change, then run
   `chaosbringer perf regress <before>/clean-report.json --current <after>/clean-report.json`.
-- **Gate CI.** `--fail-on high` exits 1 when a high finding exists.
+- **Gate CI.** `--fail-on high` exits 1 when a high finding exists. A
+  mistyped flag or a bad value exits 2 before anything runs, with one
+  `chaosbringer scan: …` line, so a gate does not read it as a finding:
+  also an `--exclude` that is not a regex, an unknown `--device`, a
+  `--storage-state` file that is not there or not storageState JSON, an
+  `--invariants` name it does not know, and `--axe` (or `--invariants axe`)
+  without axe-core installed. These used to start the clean crawl
+  and end in `scan failed: …` and exit 1, the code `--fail-on` uses. A
+  `--sitemap` path that is not there, which the scan used to skip without
+  a word, exits 2 too. So
+  does a `--url` nothing answers on (the server is not running, the name
+  does not resolve): `chaosbringer scan: could not reach <url>: is the
+  server running? (net::ERR_CONNECTION_REFUSED at <url>)` and exit 2, after
+  the clean crawl.
 
 ## Options
 
@@ -108,10 +210,13 @@ Catalog patterns with this signal: long-task-click, eager-heavy-bundle, no-yield
 | `--no-chaos` | | the clean crawl only |
 | `--hang-ms` | 8000 | how long a hung request is held |
 | `--seed` | random | printed, so the run can be repeated |
-| `--axe` | off | axe-core on every page (needs `axe-core`) |
+| `--axe` | off | axe-core on every page (needs `axe-core`: exit 2 without it) |
+| `--invariants <list>` / `--data-safety` | off | the [data-safety checks](#data-safety-checks) on every page, by name: `data-safety`, `xss-marker`, `injected-markup`, `prototype-pollution`, `rendered-garbage`, `no-offsite-redirect`, `not-blank`, `axe` (= `--axe`); comma-separated, repeatable |
+| `--aria-targets` | off | also act on controls only the accessibility snapshot sees, such as a `<div onclick>` with a pointer cursor |
+| `--bind` / `--bind-title` | off | serve each crawl's browser to other Playwright clients: `npx playwright cli attach <title>`, or `npx playwright mcp --endpoint` |
 | `--no-coverage` | | skip coverage (and the unused-JS finding) |
-| `--storage-state` | | a Playwright storageState, for a logged-in scan |
-| `--sitemap` | | also start from the URLs of a sitemap.xml |
+| `--storage-state` | | a Playwright storageState, for a logged-in scan (read before the first crawl; exit 2 if missing or not JSON) |
+| `--sitemap` | | also start from the URLs of a sitemap.xml (a path is checked before the first crawl, exit 2 if missing; a URL is fetched best-effort) |
 | `--network slow-3g\|fast-3g` / `--device "<name>"` | | throttle / emulate; a site on localhost is too fast to cross the Web Vitals bounds otherwise |
 | `--exclude`, `--ignore-error`, `--ignore-analytics`, `--ignore-preset` | | as for the crawl |
 | `--fail-on high\|medium\|low` | | exit 1 at or above that severity |
@@ -155,11 +260,19 @@ The report leaves them out of the findings and lists them once, under
 - "no supported source" media errors: Playwright's Chromium ships without
   the H.264 / AAC codecs that Chrome has.
 - `net::ERR_BLOCKED_BY_ORB` on a file that serves fine: Chromium's
-  opaque-response blocking now and then stops a cross-origin image while the
-  page's requests are intercepted, as the crawler's are. After the crawls the
-  scan fetches each blocked URL once; one that answers 2xx as an image, media
-  or font goes here. One that does not (a 403 with an XML body) stays a
-  finding.
+  opaque-response blocking now and then stops a cross-origin image or script
+  while the page's requests are intercepted, as the crawler's are. After the
+  crawls the scan fetches each blocked URL once; one that answers 2xx as an
+  image, media, font, script or stylesheet goes here. One that does not (a
+  403 with an XML body) stays a finding.
+- `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` on a file that serves fine: a
+  server that answers the scanning browser's `HeadlessChrome` user agent with
+  a bot block carrying `Cross-Origin-Resource-Policy: same-origin` (eslint.org's
+  ad server does). Fetched directly, it answers 2xx without that header, so it
+  goes here, with the console's "Failed to load resource" echo. A file that
+  sends the header to everyone stays a finding.
+  Both probes fetch one URL per path, and its answer stands for every query
+  string of that path.
 
 An exception such as "Failed to fetch" on a page where one of these broke a
 request stays in the findings, but its evidence says it may be the knock-on
@@ -187,19 +300,31 @@ goes through the proxy, so it stops verifying the real sites' certificates
 as well.
 
 If the crawl barely reached the site (one page with no links, or a nearly
-empty start page), the report opens with a warning instead of reading as a
-clean site. That happens with a bot check, a rate limit, a consent wall, or a
-site that needs `--storage-state`. The crawler's own navigation errors
-(`page.goto: Timeout …`) are not reported as the site's exceptions; the page
-that failed to load is. A page that fails in a chaos crawl counts against the
-fault only if the fault hit that page's load.
+empty start page it got no further than), the report opens with a warning
+instead of reading as a clean site. That happens with a bot check, a rate
+limit, a consent wall, or a site that needs `--storage-state`. A light start
+page alone is no warning: a small static site has one too. Neither warning is
+given for a start page that did not load, which says so instead (and the scan
+CLI exits 2 when nothing answered there at all). The crawler's own
+navigation errors (`page.goto: Timeout …`, PageError type `navigation`) are
+not reported as the site's exceptions; the page that failed to load is. A page that fails in a chaos
+crawl counts against the fault only if the fault hit that page's load.
+
+The crawls' own `report.warnings` (what made a crawl test less than it was
+set up to: a `crawler.seedFromSitemap` that could not be read, a chaos
+crawl's fault that matched nothing) are listed once each in the terminal
+summary (`⚠️  crawl warning: …`), in the Markdown, and as `warnings` in
+`scan-report.json`.
 
 A same-site URL that redirects to another origin (a `/chat` that 302s to a
 Discord invite) is recorded with the page's `redirectedTo` and counted as a
 blocked external navigation; nothing of the other site is crawled or
-reported. The same goes for a click that ends up off-site (Wikipedia's
+reported, and the redirect is an [`open-redirect`](#open-redirects) finding
+(`low`, its target not being in the URL). A 302 to a host that is down is
+the same redirect, not a page that failed to load. The same goes for a click that ends up off-site (Wikipedia's
 "Create account" redirects to auth.wikimedia.org): the step records
-`leftSiteTo`, carries no measurement, and the crawler goes back to the page.
+`leftSiteTo`, carries no measurement, and the crawler goes back to the page;
+the site's redirect that took it there is an `open-redirect` finding too.
 Static files a page fetches with `fetch()` (CSS chunks, WebAssembly, 3D
 models) are not treated as API endpoints either, and neither are the pages
 the crawled ones link to: a router prefetching a linked route's data

@@ -124,7 +124,7 @@ export function collectRawTargets(): RawActionTarget[] {
   };
 
   // Links with priority for navigation
-  document.querySelectorAll("a[href]").forEach((el, i) => {
+  document.querySelectorAll("a[href]").forEach((el) => {
     const anchor = el as HTMLAnchorElement;
     const text = anchor.innerText?.trim() || "";
     const ariaLabel = anchor.getAttribute("aria-label");
@@ -619,6 +619,7 @@ export function weighActionTargets(
       fillValue: type === "input" ? fillValueFor(t) : undefined,
       selectValue: type === "select" ? selectValueFor(t) : undefined,
       geometry: t.geometry,
+      peerKey: t.role === null ? `tag:${t.tag}:${t.index}` : `role:${t.role}:${t.index}`,
     };
   });
 

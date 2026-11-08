@@ -56,7 +56,10 @@ export interface AiDriverOptions {
    * driver. Default: 0 (act on every pick).
    */
   minConfidence?: number;
-  /** Optional goal string forwarded to the provider. */
+  /**
+   * Optional goal string forwarded to the provider. Without one, the
+   * crawl's `driverGoal` (`DriverStep.goal`) is forwarded instead.
+   */
   goal?: string;
   /** Cost ceiling — call count / USD. Default: unlimited. */
   budget?: DriverBudget | DriverBudgetOptions;
@@ -95,14 +98,17 @@ export function aiDriver(opts: AiDriverOptions): Driver {
         // not, and the capture no longer runs before the provider has
         // said whether it wants one.
         screenshot: (mode) => step.screenshot(mode ?? screenshotMode),
+        ...(step.outline ? { outline: step.outline } : {}),
         // Destructure-to-omit: the selector is the one field that must
         // not cross, and `DriverProviderCandidate` is defined as exactly
         // this, so a field added to `DriverCandidate` reaches providers
         // without a second edit here.
-        candidates: step.candidates.map(({ selector, ...visible }) => visible),
+        candidates: step.candidates.map(({ selector: _selector, ...visible }) => visible),
         history: step.history,
         invariantViolations: step.invariantViolations,
-        goal: opts.goal,
+        // The driver's own goal first: one built for a narrow job inside a
+        // composite keeps it whatever the crawl as a whole is for.
+        goal: opts.goal ?? step.goal,
         stepIndex: step.stepIndex,
         ...(step.lastActionPerf ? { lastActionPerf: withoutKey(step.lastActionPerf) } : {}),
       };

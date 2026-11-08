@@ -87,6 +87,9 @@ export function advisorFallbackDriver(
       options.primary.onPageEnd?.(url);
       options.fallback.onPageEnd?.(url);
     },
+    stats() {
+      return [...(options.primary.stats?.() ?? []), ...(options.fallback.stats?.() ?? [])];
+    },
   };
 
   const signal: NoveltySignal = {

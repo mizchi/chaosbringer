@@ -21,138 +21,105 @@
  *   --output <path>       Output report path (default: chaos-report.json)
  *   --exclude <pattern>   Exclude URL patterns (can be repeated)
  *   --compact             Compact output format
- *   --strict              Exit with error on console errors
- *   --quiet               Minimal output
- *   --help                Show this help
+ *   --strict              Fail on console errors, JS exceptions and unhandled rejections
+ *   --quiet               Print only the verdict, why a run failed, and the paths written
+ *   --help, -h            Show this help
+ *   --version, -V         Print the version
  */
 
-import { parseArgs } from "node:util";
+import { attachHint } from "./browser-bind.js";
 import { ChaosCrawler } from "./crawler.js";
-import { COMMON_IGNORE_PATTERNS, IGNORE_PRESETS, resolveIgnorePresets } from "./ignore-presets.js";
-import { diffReports, loadBaseline } from "./diff.js";
+import {
+  baselineMissingFromCli,
+  crawlCliExtras,
+  crawlCliPeerNeeds,
+  crawlerOptionsFromCli,
+  exitOptionsFromCli,
+  crawlUrlFromArgs,
+  parseCrawlArgs,
+  readCrawlPerfBudgets,
+} from "./cli-crawl-options.js";
+import {
+  formatSubcommandList,
+  isUsageError,
+  packageVersion,
+  progressText,
+  SUBCOMMANDS,
+  type UsageError,
+  usageErrorMessage,
+} from "./cli-usage.js";
 import { printGithubAnnotations } from "./github.js";
-import { axe } from "./invariants.js";
-import { printReport, saveReport, getExitCode } from "./reporter.js";
+import { type ExitCodeOptions, formatQuietReport, printReport, saveReport, getExitCode } from "./reporter.js";
+import { applyBaseline } from "./run-warnings.js";
 import { buildActionHeatmap, formatHeatmap } from "./heatmap.js";
 import { buildJunitXml } from "./junit.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { perfOptionsFromCliFlags } from "./perf-options.js";
-import { parseSettleArg, resolveSettle } from "./settle.js";
-import { parseShardArg } from "./shard.js";
-import type { CrawlerOptions, Invariant } from "./types.js";
-import { visualRegression } from "./visual.js";
-import { HEADLESS_OPTIONS, resolveHeadless } from "./cli-headless.js";
+import type { CrawlerOptions } from "./types.js";
+import { isUnreachableTargetError, unreachableTarget, unreachableTargetMessage } from "./unreachable-target.js";
+import { checkInputFiles } from "./input-files.js";
+import { assertPeers, isMissingPeerError } from "./peers.js";
+import { validateOptions } from "./validate.js";
 
-// Subcommand dispatch. Intercept before parseArgs runs so subcommand-specific
-// flags (e.g. --match for `minimize`) don't trip the main options map.
+// Subcommand dispatch (the table is SUBCOMMANDS in cli-usage.ts). Intercept
+// before parseArgs runs so subcommand-specific flags (e.g. --match for
+// `minimize`) don't trip the main options map.
 //
-// Each entry lazy-imports its handler so a `chaosbringer --help` invocation
-// doesn't pay the cost of compiling every subcommand. The handler is
-// expected to set `process.exitCode` on a non-fatal failure; thrown errors
-// are surfaced with the subcommand name and an exit code of 1. Legacy
-// handlers (minimize / flake / shard) call `process.exit` directly inside
-// themselves and never return, so the final `process.exit` here is only
-// reached by the newer handlers that opt into exitCode-based signalling.
-const SUBCOMMANDS: Record<string, () => Promise<(argv: string[]) => Promise<void>>> = {
-  minimize: () => import("./minimize.js").then((m) => m.runMinimizeCli),
-  flake: () => import("./flake.js").then((m) => m.runFlakeCli),
-  shard: () => import("./shard.js").then((m) => m.runShardCli),
-  recipes: () => import("./recipes/cli.js").then((m) => m.runRecipesCli),
-  load: () => import("./recipes/load-cli.js").then((m) => m.runLoadCli),
-  diff: () => import("./diff-cli.js").then((m) => m.runDiffCli),
-  "cluster-artifacts": () =>
-    import("./cluster-artifacts-cli.js").then((m) => m.runClusterArtifactsCli),
-  parity: () => import("./parity-cli.js").then((m) => m.runParityCli),
-  journey: () => import("./journey-cli.js").then((m) => m.runJourneyCli),
-  model: () => import("./model/cli.js").then((m) => m.runModelCli),
-  perf: () => import("./perf-cli.js").then((m) => m.runPerfCli),
-  scan: () => import("./scan/cli.js").then((m) => m.runScanCli),
-};
-
+// The handler is expected to set `process.exitCode` on a non-fatal failure;
+// thrown errors are surfaced with the subcommand name and an exit code of 1.
+// A refused invocation — what `parseArgs` throws for an unknown flag, a
+// `UsageError` for a missing operand, a bad value or an input file that is
+// not there, or a `MissingPeerError` — is reported like the main command's
+// own (`exitWithUsageError`): one line, exit 2. It used to be
+// `<sub> failed: Unknown option …` and exit 1, which a CI step reads as "the
+// run found something". `flake` still calls `process.exit(1)` itself on a
+// flaky run, and `minimize` / `flake` `process.exit(0)` on --help.
 const rawSub = process.argv[2];
 const subcommand = rawSub && !rawSub.startsWith("-") ? rawSub : null;
 if (subcommand && Object.hasOwn(SUBCOMMANDS, subcommand)) {
   try {
-    const run = await SUBCOMMANDS[subcommand]();
+    const run = await SUBCOMMANDS[subcommand].load();
     await run(process.argv.slice(3));
     process.exit(process.exitCode ?? 0);
   } catch (err) {
+    if (isUsageError(err) || isMissingPeerError(err)) {
+      console.error(usageErrorMessage(err, `chaosbringer ${(err as UsageError).command ?? subcommand}`));
+      process.exit(2);
+    }
+    // `flake` and `scan` on a site nothing answers for: refused like a usage
+    // error, one line and exit 2, but not one the --help would fix.
+    if (isUnreachableTargetError(err)) {
+      console.error(`chaosbringer ${subcommand}: ${err.message}`);
+      process.exit(2);
+    }
     console.error(`${subcommand} failed:`, err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }
 
-const { values, positionals } = parseArgs({
-  options: {
-    url: { type: "string" },
-    "max-pages": { type: "string" },
-    "max-actions": { type: "string" },
-    // Alias to match the underlying CrawlerOptions field name (used by the
-    // chaos-pr-gate workflow and surfaced as a synonym in docs).
-    "max-actions-per-page": { type: "string" },
-    timeout: { type: "string" },
-    settle: { type: "string" },
-    ...HEADLESS_OPTIONS,
-    cdp: { type: "string" },
-    "cdp-target": { type: "string" },
-    "terminal-browser": { type: "boolean", default: false },
-    screenshots: { type: "boolean", default: false },
-    "screenshot-dir": { type: "string" },
-    output: { type: "string" },
-    exclude: { type: "string", multiple: true },
-    "ignore-error": { type: "string", multiple: true },
-    "ignore-analytics": { type: "boolean", default: false },
-    "ignore-preset": { type: "string", multiple: true },
-    spa: { type: "string", multiple: true },
-    "log-file": { type: "string" },
-    "log-level": { type: "string" },
-    "log-console": { type: "boolean", default: false },
-    seed: { type: "string" },
-    "har-record": { type: "string" },
-    "har-replay": { type: "string" },
-    "storage-state": { type: "string" },
-    budget: { type: "string", multiple: true },
-    axe: { type: "boolean", default: false },
-    "axe-tags": { type: "string" },
-    "visual-baseline": { type: "string" },
-    "visual-threshold": { type: "string" },
-    "visual-max-diff-pixels": { type: "string" },
-    "visual-max-diff-ratio": { type: "string" },
-    "visual-diff-dir": { type: "string" },
-    "visual-update": { type: "boolean", default: false },
-    "failure-artifacts": { type: "string" },
-    "cluster-artifacts": { type: "boolean", default: false },
-    "cluster-min-count": { type: "string" },
-    "failure-max": { type: "string" },
-    "trace-out": { type: "string" },
-    "no-http-cache": { type: "boolean", default: false },
-    "trace-replay": { type: "string" },
-    device: { type: "string" },
-    network: { type: "string" },
-    "seed-from-sitemap": { type: "string" },
-    baseline: { type: "string" },
-    "baseline-strict": { type: "boolean", default: false },
-    "github-annotations": { type: "boolean", default: false },
-    shard: { type: "string" },
-    heatmap: { type: "boolean", default: false },
-    "heatmap-top": { type: "string" },
-    "heatmap-out": { type: "string" },
-    junit: { type: "string" },
-    perf: { type: "boolean", default: false },
-    "perf-trace": { type: "boolean", default: false },
-    "perf-mem": { type: "boolean", default: false },
-    "perf-cov": { type: "boolean", default: false },
-    "perf-out": { type: "string" },
-    "perf-budgets": { type: "string" },
-    "allow-settle-mismatch": { type: "boolean", default: false },
-    compact: { type: "boolean", default: false },
-    strict: { type: "boolean", default: false },
-    quiet: { type: "boolean", default: false },
-    help: { type: "boolean", default: false },
-  },
-  allowPositionals: true,
-});
+/**
+ * Report a refused invocation in one line and exit 2, the code the CLI
+ * already used for a `--perf-budgets` file it refuses: nothing ran. An
+ * unknown flag or a malformed number used to escape as a Node stack trace
+ * with exit 1, the code of a crawl that found something.
+ */
+function exitWithUsageError(err: unknown): never {
+  console.error(usageErrorMessage(err));
+  process.exit(2);
+}
+
+let parsed: ReturnType<typeof parseCrawlArgs>;
+try {
+  parsed = parseCrawlArgs();
+} catch (err) {
+  exitWithUsageError(err);
+}
+const { values, positionals } = parsed;
+
+if (values.version) {
+  console.log(packageVersion());
+  process.exit(0);
+}
 
 if (values.help) {
   console.log(`
@@ -185,18 +152,40 @@ OPTIONS:
                         facebook.net, and net::ERR_FAILED)
   --ignore-preset <p>   Apply a named ignore-error preset (can be repeated; comma-separated).
                         Known: analytics, maps, media-embeds, pdf-orb, iframe-sandbox
+  --ignore-http <pattern>  Request URLs (regex) whose 4xx / 5xx answer is not an HTTP error:
+                        not counted, and its "Failed to load resource" line dropped (can be repeated)
   --spa <pattern>       Mark URLs as SPA (errors shown separately, can be repeated)
   --log-file <path>     Write execution log to file (JSON format)
-  --log-level <level>   Log level: debug, info, warn, error (default: info)
-  --log-console         Also output logs to console
+  --log-level <level>   Log level: debug, info, warn, error (default: info; warn for
+                        --log-console without --log-file)
+  --log-console         Also output logs to the console; without --log-file, to stderr
   --seed <n>            Seed for deterministic action selection (reproduces a run)
   --har-record <path>   Record network traffic to a HAR file (mutually exclusive with --har-replay)
   --har-replay <path>   Replay network traffic from a HAR file (missing URLs fall through to network)
   --storage-state <p>   Playwright storageState JSON (cookies + localStorage) for authenticated crawls
-  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable)
-  --axe                 Enable axe-core accessibility scan on every page (requires axe-core installed)
+  --budget <k=ms,...>   Per-metric performance budget, e.g. ttfb=200,fcp=1800,lcp=2500 (repeatable;
+                        keys: ttfb, fcp, lcp, tbt, domContentLoaded, load; each ms > 0)
+  --aria-targets        Also find targets through the accessibility snapshot (clickable divs the
+                        CSS scrape misses), and describe targets from the tree to drivers
+  --bind                Serve the crawl's browser to other Playwright clients while it runs:
+                        npx playwright cli attach <title> / npx playwright mcp --endpoint <ep>
+  --bind-title <title>  Name to attach by (default chaosbringer)
+  --axe                 Enable axe-core accessibility scan on every page (requires axe-core
+                        installed: without it the run is refused, exit 2)
   --axe-tags <list>     Comma-separated axe tags (default: wcag2a,wcag2aa,wcag21a,wcag21aa)
-  --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires pixelmatch + pngjs)
+  --invariants <list>   Run these checks on every page (comma-separated, repeatable): data-safety
+                        (xss-marker, injected-markup, prototype-pollution, rendered-garbage and
+                        no-offsite-redirect; not not-blank), any of those or not-blank by name,
+                        axe (= --axe). Each runs with its defaults: set options through the
+                        library (invariants.dataSafety({ ... })). A violation fails the run.
+                        no-offsite-redirect fails a page that sends the browser to another origin
+                        by a script, a meta refresh or a 3xx (a click to a URL the page wrote
+                        does not count)
+  --data-safety         Shorthand for --invariants data-safety
+  --offsite-redirect-allow <origins>  Origins no-offsite-redirect lets a page redirect to (an SSO
+                        provider): comma-separated, repeatable, scheme and host only
+  --visual-baseline <dir>  Enable visual regression against baseline PNGs in <dir> (requires
+                        pixelmatch + pngjs: without them the run is refused, exit 2)
   --visual-threshold <n>   pixelmatch color threshold 0..1 (default 0.1)
   --visual-max-diff-pixels <n>  Absolute pixel budget; fail when exceeded (default 0)
   --visual-max-diff-ratio <n>   Ratio pixel budget (0..1); evaluated alongside max-diff-pixels
@@ -226,16 +215,49 @@ OPTIONS:
                         \`perf emit-budgets\` file; a breach is a perf-budget.<metric> violation (implies --perf).
                         An emit-budgets file measured under another --settle mode is refused (exit 2)
   --allow-settle-mismatch  Enforce such --perf-budgets anyway, with a warning
-  --baseline <path>     Diff this run against a previous report (warns if missing)
+  --baseline <path>     Diff this run against a previous report (a missing one is a warning)
   --baseline-strict     Exit 1 when the diff shows new clusters or newly failing pages
-  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link
+  --baseline-missing <warn|fail>  A missing --baseline file: warn (default; the first run,
+                        whose report becomes the baseline) or fail (refused, exit 2)
+  --github-annotations  Emit GitHub Actions workflow commands for each cluster / dead link /
+                        warning: ::error for what fails the run under its rules (and every
+                        JS exception), ::warning otherwise; and for each off-site redirect
+                        no check failed: ::warning when its target was in the page's URL,
+                        ::notice otherwise
   --compact             Compact output format
-  --strict              Exit with error on any console errors
-  --quiet               Minimal output
-  --help                Show this help
+  --strict              Fail on console errors, JS exceptions and unhandled rejections
+                        (not on the browser's echo of a fault the run injected)
+  --fail-on-http <5xx|4xx>  Fail on a subresource or API response of 500 and up (5xx) or 400
+                        and up (4xx); the page's own document is a dead link instead
+  --fail-on-network     Fail on a request that failed at the transport level (net::ERR_…;
+                        not a 4xx / 5xx file's ERR_ABORTED, which is an HTTP error)
+  --fail-on-dead-links  Fail on a crawled link that answered 404 / 5xx
+  --fail-on-warnings    Fail on a run with warnings: what made it test less than it was set
+                        up to (a --seed-from-sitemap that could not be read or listed no
+                        URL, a --network profile or --no-http-cache that did not apply, a
+                        missing --baseline)
+  --quiet               Print only the verdict, why a run failed, and the paths written
+  --help, -h            Show this help
+  --version, -V         Print the version
+
+EXIT CODES:
+  0  nothing failed
+  1  the run found something: a page that failed or timed out, an invariant violation,
+     a renderer crash, --strict errors, --baseline-strict regressions, what a
+     --fail-on-http / --fail-on-network / --fail-on-dead-links / --fail-on-warnings rule
+     fails on
+  2  the run was refused before a browser started: an unknown flag or --invariants name, a
+     malformed value, an input file (--storage-state, --har-replay, --trace-replay,
+     --perf-budgets, a --seed-from-sitemap path, a --baseline under --baseline-missing fail)
+     that is missing or does not parse, a peer
+     --axe (or --invariants axe) / --visual-baseline needs that is not installed; or nothing
+     answered at --url
+
+SUBCOMMANDS (chaosbringer <subcommand> --help for its options):
+${formatSubcommandList()}
 
 PERF SUBCOMMANDS (read crawl reports written with --perf):
-  chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--out <file>]
+  chaosbringer perf emit-budgets <report.json...> [--headroom 1.25] [--floor <metric>=<n>]... [--out <file>]
   chaosbringer perf gate <report.json...> --budgets <file> [--json]
   chaosbringer perf regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15]
   chaosbringer perf drilldown <report.json> <perfKey> [--top N]
@@ -244,6 +266,10 @@ PERF SUBCOMMANDS (read crawl reports written with --perf):
 SCAN (bugs + slow spots of an unknown site, one command):
   chaosbringer scan --url <url> [--max-pages 20] [--out chaosbringer-scan] [--no-chaos]
   (chaosbringer scan --help for details)
+
+DRIVE (operate the browser towards a goal, with the checks running):
+  chaosbringer drive --url <url> --goal "<what to do>" [--until-text <text>] [--video run.webm]
+  (chaosbringer drive --help for details)
 
 EXAMPLES:
   # Basic crawl
@@ -267,272 +293,59 @@ EXAMPLES:
   process.exit(0);
 }
 
-// A positional that is not a URL used to be dropped on the floor, which made
-// every wrong invocation look like a working one: `chaosbringer crawl --url X`
-// ran the default crawl and ignored the word `crawl`, so documentation that
-// invented a subcommand never got caught by anyone running it. There is no
-// `crawl` subcommand — crawling is what this binary does with no subcommand at
-// all.
-const looksLikeUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
-const strays = positionals.filter((p) => !looksLikeUrl(p));
-if (strays.length > 0) {
-  const first = strays[0]!;
-  const known = Object.keys(SUBCOMMANDS).sort().join(", ");
-  console.error(`Error: unexpected argument "${first}"`);
-  if (first === "crawl") {
-    console.error(
-      "There is no `crawl` subcommand — crawling is the default, so drop the word: " +
-        "`chaosbringer --url <url>`.",
-    );
-  } else {
-    console.error(`Known subcommands: ${known}. Run with --help for usage information.`);
-  }
-  process.exit(1);
-}
-if (positionals.length > 1) {
-  console.error(`Error: expected one URL, got ${positionals.length}: ${positionals.join(" ")}`);
-  process.exit(1);
+let baseUrl: string;
+try {
+  baseUrl = crawlUrlFromArgs(values, positionals);
+} catch (err) {
+  exitWithUsageError(err);
 }
 
-// URL from --url or first positional
-const baseUrl = values.url || positionals[0];
-
-if (!baseUrl) {
-  console.error("Error: --url is required");
-  console.error("Run with --help for usage information");
-  process.exit(1);
+let options: CrawlerOptions;
+let heatmapTop: number;
+let clusterMinCount: number | undefined;
+let exitOptions: ExitCodeOptions;
+try {
+  options = crawlerOptionsFromCli(values, baseUrl);
+  ({ heatmapTop, clusterMinCount } = crawlCliExtras(values));
+  exitOptions = exitOptionsFromCli(values);
+} catch (err) {
+  exitWithUsageError(err);
 }
 
-// Build ignore patterns
-const ignoreErrorPatterns: string[] = [...(values["ignore-error"] || [])];
-if (values["ignore-analytics"]) {
-  ignoreErrorPatterns.push(...COMMON_IGNORE_PATTERNS);
-}
-for (const presetSpec of values["ignore-preset"] ?? []) {
-  try {
-    ignoreErrorPatterns.push(...resolveIgnorePresets(presetSpec));
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    console.error(`Tip: --ignore-preset accepts comma-separated names. Known: ${Object.keys(IGNORE_PRESETS).join(", ")}`);
-    process.exit(1);
-  }
-}
-
-// Validate log level
-const validLogLevels = ["debug", "info", "warn", "error"] as const;
-const logLevel = values["log-level"] as (typeof validLogLevels)[number] | undefined;
-if (logLevel && !validLogLevels.includes(logLevel)) {
-  console.error(`Error: Invalid log level "${logLevel}". Valid levels: ${validLogLevels.join(", ")}`);
-  process.exit(1);
-}
-
-let seed: number | undefined;
-if (values.seed !== undefined) {
-  const parsed = Number(values.seed);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
-    console.error(`Error: --seed must be a non-negative integer, got "${values.seed}"`);
-    process.exit(1);
-  }
-  seed = parsed;
-}
-
-let har: CrawlerOptions["har"];
-if (values["har-record"] && values["har-replay"]) {
-  console.error("Error: --har-record and --har-replay are mutually exclusive");
-  process.exit(1);
-}
-if (values["har-record"]) har = { path: values["har-record"], mode: "record" };
-if (values["har-replay"]) har = { path: values["har-replay"], mode: "replay" };
-
-let performanceBudget: CrawlerOptions["performanceBudget"];
-if (values.budget && values.budget.length > 0) {
-  performanceBudget = {};
-  for (const raw of values.budget) {
-    for (const entry of raw.split(",")) {
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq <= 0) {
-        console.error(`Error: --budget expects key=ms pairs (got "${trimmed}")`);
-        process.exit(1);
-      }
-      const key = trimmed.slice(0, eq).trim();
-      const ms = Number(trimmed.slice(eq + 1).trim());
-      (performanceBudget as Record<string, number>)[key] = ms;
+try {
+  const budgets = await readCrawlPerfBudgets(values, options.settle);
+  if (budgets) {
+    options.perfBudgets = budgets.rules;
+    if (budgets.warning) console.error(budgets.warning);
+    if (budgets.refusal) {
+      console.error(`chaosbringer: ${budgets.refusal.message}`);
+      process.exit(budgets.refusal.exitCode);
     }
   }
+} catch (err) {
+  exitWithUsageError(err);
 }
 
-let settle: CrawlerOptions["settle"];
-if (values.settle !== undefined) {
-  try {
-    settle = parseSettleArg(values.settle);
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
+// The crawler validates again; this is so a refused option is a usage error
+// (`--max-pages 0`, `--cdp-target` without `--cdp`), not a stack trace from
+// inside main() after "Starting chaos crawl" was already printed. So are the
+// files the crawl reads (a missing `--storage-state` failed once the browser
+// was up, with exit 1) and the packages `--axe` / `--visual-baseline` need.
+let baselineMissing: ReturnType<typeof baselineMissingFromCli>;
+try {
+  validateOptions(options);
+  checkInputFiles(options);
+  baselineMissing = baselineMissingFromCli(values);
+  assertPeers(crawlCliPeerNeeds(values));
+} catch (err) {
+  exitWithUsageError(err);
 }
-
-// Read here, not by the crawler, so a bad file fails before a browser starts
-// and the error names the flag. The rules' contents are validated by the
-// crawler (validatePerfBudgets), the same as for the programmatic option.
-let perfBudgets: CrawlerOptions["perfBudgets"];
-const perfBudgetsFile = values["perf-budgets"];
-if (perfBudgetsFile !== undefined) {
-  try {
-    // Imported on demand: perf-cli is otherwise only loaded for `chaosbringer perf`.
-    const { readPerfBudgetsForCrawl } = await import("./perf-cli.js");
-    const read = readPerfBudgetsForCrawl(perfBudgetsFile, resolveSettle(settle), `--perf-budgets ${perfBudgetsFile}`);
-    perfBudgets = read.rules;
-    // An emit-budgets file records the settle mode it was measured under;
-    // enforcing it on a crawl settled another way fails (or passes) every
-    // action budget on the settle, not the app — refused like `perf gate`.
-    if (read.settleMismatch) {
-      if (values["allow-settle-mismatch"]) {
-        console.error(`[perf-budgets] WARNING (--allow-settle-mismatch): ${read.settleMismatch}.`);
-      } else {
-        console.error(
-          `Error: --perf-budgets ${perfBudgetsFile}: refusing to enforce: ${read.settleMismatch}. ` +
-            `Crawl with the --settle the budgets were emitted under, re-run \`perf emit-budgets\`, ` +
-            `or pass --allow-settle-mismatch to enforce anyway.`,
-        );
-        process.exit(read.exitCode);
-      }
-    }
-  } catch (err) {
-    console.error(`Error: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  }
-}
-
-let shardIndex: number | undefined;
-let shardCount: number | undefined;
-if (values.shard) {
-  const parsed = parseShardArg(values.shard);
-  shardIndex = parsed.shardIndex;
-  shardCount = parsed.shardCount;
-}
-
-function parseNumberFlag(
-  flag: string,
-  raw: string | undefined,
-  opts: { min?: number; max?: number; integer?: boolean }
-): number | undefined {
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    console.error(`Error: ${flag} must be a finite number (got ${JSON.stringify(raw)})`);
-    process.exit(1);
-  }
-  if (opts.integer && !Number.isInteger(n)) {
-    console.error(`Error: ${flag} must be an integer (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.min !== undefined && n < opts.min) {
-    console.error(`Error: ${flag} must be >= ${opts.min} (got ${n})`);
-    process.exit(1);
-  }
-  if (opts.max !== undefined && n > opts.max) {
-    console.error(`Error: ${flag} must be <= ${opts.max} (got ${n})`);
-    process.exit(1);
-  }
-  return n;
-}
-
-function buildInvariants(): Invariant[] | undefined {
-  const list: Invariant[] = [];
-  if (values.axe) {
-    list.push(
-      axe({
-        tags: values["axe-tags"]
-          ? values["axe-tags"]
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : undefined,
-      })
-    );
-  }
-  if (values["visual-baseline"]) {
-    list.push(
-      visualRegression({
-        baselineDir: values["visual-baseline"],
-        threshold: parseNumberFlag("--visual-threshold", values["visual-threshold"], {
-          min: 0,
-          max: 1,
-        }),
-        maxDiffPixels: parseNumberFlag(
-          "--visual-max-diff-pixels",
-          values["visual-max-diff-pixels"],
-          { min: 0, integer: true }
-        ),
-        maxDiffRatio: parseNumberFlag(
-          "--visual-max-diff-ratio",
-          values["visual-max-diff-ratio"],
-          { min: 0, max: 1 }
-        ),
-        diffDir: values["visual-diff-dir"],
-        updateBaseline: values["visual-update"],
-      })
-    );
-  }
-  return list.length > 0 ? list : undefined;
-}
-
-const options: CrawlerOptions = {
-  baseUrl,
-  maxPages: values["max-pages"] ? parseInt(values["max-pages"], 10) : undefined,
-  maxActionsPerPage: (() => {
-    const raw = values["max-actions"] ?? values["max-actions-per-page"];
-    return raw ? parseInt(raw, 10) : undefined;
-  })(),
-  timeout: values.timeout ? parseInt(values.timeout, 10) : undefined,
-  settle,
-  headless: resolveHeadless(values),
-  cdpEndpoint: values.cdp,
-  cdpTargetId: values["cdp-target"],
-  terminalBrowser: values["terminal-browser"],
-  screenshots: values.screenshots,
-  screenshotDir: values["screenshot-dir"],
-  excludePatterns: values.exclude,
-  ignoreErrorPatterns: ignoreErrorPatterns.length > 0 ? ignoreErrorPatterns : undefined,
-  spaPatterns: values.spa,
-  logFile: values["log-file"],
-  logLevel: logLevel,
-  logToConsole: values["log-console"],
-  seed,
-  har,
-  storageState: values["storage-state"],
-  performanceBudget,
-  traceOut: values["trace-out"],
-  httpCache: values["no-http-cache"] ? false : undefined,
-  traceReplay: values["trace-replay"],
-  device: values.device,
-  network: values.network as CrawlerOptions["network"],
-  seedFromSitemap: values["seed-from-sitemap"],
-  shardIndex,
-  shardCount,
-  failureArtifacts: values["failure-artifacts"]
-    ? {
-        dir: values["failure-artifacts"],
-        maxArtifacts: parseNumberFlag("--failure-max", values["failure-max"], {
-          min: 0,
-          integer: true,
-        }),
-      }
-    : undefined,
-  invariants: buildInvariants(),
-  perf: perfOptionsFromCliFlags(values),
-  perfBudgets,
-  perfBudgetsFile,
-};
 
 const outputPath = values.output || "chaos-report.json";
 const isQuiet = values.quiet;
 const isCompact = values.compact;
-const isStrict = values.strict;
+const isTTY = process.stdout.isTTY === true;
 const baselinePath = values.baseline;
-const isBaselineStrict = values["baseline-strict"];
 const emitGithub = values["github-annotations"];
 
 async function main() {
@@ -542,7 +355,12 @@ async function main() {
     console.log("");
   }
 
+  let failureBundles = 0;
   const crawler = new ChaosCrawler(options, {
+    onBind: (b) => console.log(attachHint(b)),
+    onFailureBundle: () => {
+      failureBundles++;
+    },
     onPageStart: (url) => {
       if (!isQuiet && !isCompact) {
         process.stdout.write(`Crawling: ${url}...`);
@@ -560,7 +378,7 @@ async function main() {
     },
     onProgress: (visited, total) => {
       if (!isQuiet && isCompact) {
-        process.stdout.write(`\rProgress: ${visited}/${total} pages`);
+        process.stdout.write(progressText(visited, total, isTTY));
       }
     },
   });
@@ -568,80 +386,89 @@ async function main() {
   try {
     const report = await crawler.start();
 
-    if (isCompact && !isQuiet) {
+    if (isCompact && !isQuiet && isTTY) {
       console.log(""); // New line after progress
     }
 
-    if (baselinePath) {
-      const prev = loadBaseline(baselinePath);
-      if (prev) {
-        report.diff = diffReports(prev, report, { baselinePath });
-      } else if (!isQuiet) {
-        // First CI run won't have a baseline yet. Warn, but keep going — the
-        // report we write here becomes the baseline for next time.
-        console.warn(`Baseline not found at ${baselinePath} — skipping diff.`);
-      }
+    // Nothing answered at the start URL: no run was made, so no report, no
+    // verdict, no baseline, perf or JUnit file a later step could take for
+    // one (a perf median over a crawl of nothing, a --baseline of it). What
+    // the crawl wrote as it went, its failure bundles and --trace-out, may
+    // already be on disk.
+    const unreachable = unreachableTarget(report, { network: options.network });
+    if (unreachable) {
+      console.error(`chaosbringer: ${unreachableTargetMessage(unreachable)}`);
+      process.exit(2);
+    }
+
+    // A missing baseline: the first CI run won't have one yet. A warning, and
+    // keep going (the report we write here becomes the baseline for next
+    // time); a `report.warnings` entry, so --quiet shows it too (the stderr
+    // line it was left out there) and --fail-on-warnings can refuse it.
+    if (applyBaseline(report, baselinePath, baselineMissing) === "refuse") {
+      // Checked before the browser started; gone since.
+      console.error(`chaosbringer: --baseline ${baselinePath}: not found, and --baseline-missing fail refuses a run without it`);
+      process.exit(2);
     }
 
     // Print report first, then save + announce the file. This way the main
     // textual output is one contiguous block and the "saved to" line is the
     // last thing on screen — friendlier for scrolling CI logs.
-    const exitOptions = { strict: isStrict, baselineStrict: isBaselineStrict };
-    printReport(report, isCompact, exitOptions);
+    // --quiet is the verdict, why it failed, and where the files went: what
+    // a script or a CI step shows, and the paths it reads next. It used to
+    // print the whole report, so the flag only dropped the per-page lines.
+    if (isQuiet) console.log(formatQuietReport(report, exitOptions));
+    else printReport(report, isCompact, exitOptions);
+    // A path line, set off from the report by a blank line unless --quiet.
+    const announce = (line: string) => console.log(isQuiet ? line : `\n${line}`);
     if (emitGithub) {
-      printGithubAnnotations(report, { strict: isStrict });
+      // At the level the exit rules give each one: `error` only for what fails the run.
+      printGithubAnnotations(report, exitOptions);
     }
 
     const wantsHeatmap = values.heatmap || Boolean(values["heatmap-out"]);
     if (wantsHeatmap) {
       const entries = buildActionHeatmap(report.actions);
       if (values.heatmap && !isQuiet) {
-        const top =
-          parseNumberFlag("--heatmap-top", values["heatmap-top"], {
-            min: 0,
-            integer: true,
-          }) ?? 20;
         console.log("");
-        console.log(formatHeatmap(entries, top));
+        console.log(formatHeatmap(entries, heatmapTop));
       }
       const heatmapOut = values["heatmap-out"];
       if (heatmapOut) {
         mkdirSync(dirname(heatmapOut), { recursive: true });
         writeFileSync(heatmapOut, JSON.stringify(entries, null, 2));
-        if (!isQuiet) console.log(`\nHeatmap saved to: ${heatmapOut}`);
+        announce(`Heatmap saved to: ${heatmapOut}`);
       }
     }
 
-    if (values["cluster-artifacts"]) {
-      const failureDir = values["failure-artifacts"];
-      if (!failureDir) {
-        console.error(
-          "--cluster-artifacts requires --failure-artifacts <dir> (it copies from the per-page bundles)",
-        );
-        process.exit(1);
-      }
+    // What reproduces a failure was written by the crawl, and no line said
+    // where: under --quiet, whose help promises the paths written, the
+    // verdict and `Report saved to:` were all a CI log showed. Only when
+    // there is one: a passing run named a directory it never made.
+    const failureDir = values["failure-artifacts"];
+    // `<dir>/`, also for a --failure-artifacts that ended in `/` (`<dir>//`).
+    const asDir = (path: string) => `${path.replace(/\/+$/, "")}/`;
+    if (failureDir && failureBundles > 0) announce(`Wrote ${failureBundles} failure bundle(s) to ${asDir(failureDir)}`);
+    if (values["trace-out"]) announce(`Trace saved to: ${values["trace-out"]}`);
+    if (values["log-file"]) announce(`Log saved to: ${values["log-file"]}`);
+
+    // Checked with the other flags: --cluster-artifacts has --failure-artifacts.
+    if (values["cluster-artifacts"] && failureDir) {
       const { writeClusterArtifacts } = await import("./cluster-artifacts.js");
-      const minCount = values["cluster-min-count"]
-        ? parseInt(values["cluster-min-count"], 10)
-        : undefined;
       const results = writeClusterArtifacts(report, {
         bundleDir: failureDir,
-        minCount,
+        minCount: clusterMinCount,
       });
-      if (!isQuiet) {
-        console.log(`\nWrote ${results.length} cluster bundle(s) to ${failureDir}/clusters/`);
-      }
+      announce(`Wrote ${results.length} cluster bundle(s) to ${asDir(failureDir)}clusters/`);
     }
 
     saveReport(report, outputPath);
-    if (!isQuiet) {
-      console.log(`\nReport saved to: ${outputPath}`);
-    }
+    announce(`Report saved to: ${outputPath}`);
 
     if (values.junit) {
       mkdirSync(dirname(values.junit), { recursive: true });
       writeFileSync(values.junit, buildJunitXml(report));
-      if (!isQuiet) console.log(`JUnit XML saved to: ${values.junit}`);
+      console.log(`JUnit XML saved to: ${values.junit}`);
     }
 
     const exitCode = getExitCode(report, exitOptions);

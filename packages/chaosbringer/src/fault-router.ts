@@ -115,6 +115,21 @@ export function compileFaultRules(rules: FaultRule[] | undefined): CompiledFault
 }
 
 /**
+ * Whether `pattern` can only match WebSocket URLs: it names a `ws:` or
+ * `wss:` scheme, and no `http`. Such a rule can never match, because
+ * network faults are Playwright routes and those see HTTP requests only; a
+ * rule meant for a WebSocket endpoint was a green run that tested nothing.
+ * A heuristic over the source, like `findFaultRuleShadows`: a pattern that
+ * reaches a WebSocket URL some other way is caught by the connections the
+ * pages opened instead (`CrawlFaultInjectionStats.webSocket`).
+ */
+export function isWebSocketOnlyPattern(pattern: RegExp): boolean {
+  const source = pattern.source.replace(/\\\//g, "/");
+  if (/https?/i.test(source)) return false;
+  return /(?:^|[^a-z0-9+.-])wss?\??:/i.test(source);
+}
+
+/**
  * Realise one `Fault` on a matched route.
  *
  * `hold` is the crawler's held-route registry, used only by an *unbounded*
@@ -485,7 +500,7 @@ export async function applyFaults(
       faultFirings({
         faultInjections: faultStatsOf(compiled),
         runtimeFaults: await readRuntime(),
-      } as never),
+      }),
     heldRequests: () => heldCount,
     release: drain,
     dispose: async () => {

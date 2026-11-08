@@ -4,7 +4,7 @@ name: chaos-flake
 # then open or close GitHub issues for each persistent flaky cluster.
 on:
   schedule:
-    - cron: "33 19 * * 1"  # Mon 04:33 JST
+    - cron: "33 19 * * 1"  # Mon 19:33 UTC = Tue 04:33 JST
   workflow_dispatch:
     inputs:
       runs:
@@ -18,7 +18,8 @@ permissions:
 jobs:
   flake:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 60 plus the install step's 25-minute bound.
+    timeout-minutes: 85
     defaults:
       run:
         working-directory: packages/chaosbringer
@@ -43,13 +44,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Install Playwright Chromium
-        if: steps.pw-cache.outputs.cache-hit != 'true'
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Install Playwright system deps (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
-        run: pnpm exec playwright install-deps chromium
+      # Bounded for a stalled apt mirror, and long enough for a slow one on a
+      # run that misses the action's archive cache; see chaos-pr-gate.yml.
+      - name: Install Playwright Chromium and its system packages
+        timeout-minutes: 25
+        uses: ./.github/actions/install-playwright
+        with:
+          browser-cached: ${{ steps.pw-cache.outputs.cache-hit }}
 
       - name: Start fixture server
         run: |
@@ -67,15 +68,28 @@ jobs:
         run: |
           # Exit 1 means flakes were found and the next step should process
           # them. Anything else means the command did not run, and a bare
-          # `|| true` swallowed both alike: this step spent weeks dying on an
-          # unknown-option error while looking like a step with nothing to say.
+          # `|| true` swallowed both alike. What never ran was the binary: a
+          # package's own bin is not linked into its node_modules/.bin, so
+          # `pnpm exec chaosbringer` was "command not found" (exit 254) on
+          # every run since the workspace move. Run the build output directly,
+          # as chaos-baseline.yml and chaos-pr-gate.yml do.
+          #
+          # `--seed` because an unseeded run draws a fresh random seed and so
+          # picks different actions: a cluster that fires only when one action
+          # is picked would read as flaky and get an issue opened for it.
+          #
+          # The reconcile step puts this same command in each issue it opens,
+          # as the way to reproduce it, so the two cannot drift apart.
+          flake=(node dist/cli.js flake
+            --url http://127.0.0.1:4455
+            --runs ${{ github.event.inputs.runs || '10' }}
+            --seed 1
+            --max-pages 30
+            --max-actions 5
+            --output flake.json)
+          echo "FLAKE_COMMAND=${flake[*]}" >> "$GITHUB_ENV"
           set +e
-          pnpm exec chaosbringer flake \
-            --url http://127.0.0.1:4455 \
-            --runs ${{ github.event.inputs.runs || '10' }} \
-            --max-pages 30 \
-            --max-actions 5 \
-            --output flake.json
+          "${flake[@]}"
           status=$?
           set -e
           if [ "$status" -gt 1 ]; then

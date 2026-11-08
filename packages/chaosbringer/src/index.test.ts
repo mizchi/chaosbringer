@@ -28,7 +28,44 @@ describe("public package exports (this branch's additions)", () => {
     expect(api.SCAN_FAULT_KINDS).toEqual(["status", "abort", "hang"]);
   });
 
+  it("re-exports MissingPeerError, which an axe() / visualRegression() crawl throws without its package", () => {
+    expect(typeof api.MissingPeerError).toBe("function");
+    expect(api.isMissingPeerError(new api.MissingPeerError([{ by: "x", peers: ["y"] }]))).toBe(true);
+    expect(api.AXE_PEERS).toEqual(["axe-core"]);
+    expect(api.VISUAL_REGRESSION_PEERS).toEqual(["pixelmatch", "pngjs"]);
+  });
+
   it("re-exports parity surface", () => {
     expect(typeof api.runParity).toBe("function");
+  });
+
+  it("re-exports the data-safety invariant presets, also on the invariants namespace", () => {
+    expect(typeof api.invariants.xssMarker).toBe("function");
+    expect(typeof api.notBlank).toBe("function");
+    expect(api.invariants.dataSafety().map((i) => i.name)).toEqual([
+      "data.xss-marker",
+      "data.injected-markup",
+      "data.prototype-pollution",
+      "data.rendered-garbage",
+      "navigation.no-offsite-redirect",
+    ]);
+  });
+
+  it("re-exports noOffsiteRedirect and the off-site navigation helpers", () => {
+    expect(api.invariants.noOffsiteRedirect).toBe(api.noOffsiteRedirect);
+    expect(api.noOffsiteRedirect().when).toBe("afterVisit");
+    expect(api.reflectedIn("http://a.test/go?next=http://b.test/", "http://b.test/")).toEqual({ in: "query", param: "next" });
+    expect(api.isOffsiteRedirect({ trigger: "click" })).toBe(false);
+    expect(typeof api.offsiteRedirects).toBe("function");
+    expect(typeof api.describeOffsiteNavigation).toBe("function");
+  });
+
+  it("re-exports recipe templating and drive's secrets", () => {
+    expect(typeof api.recipeVariables).toBe("function");
+    expect(typeof api.substituteConditions).toBe("function");
+    expect(typeof api.UndefinedVariableError).toBe("function");
+    expect(api.VARIABLE_NAME_RE.test("user.email")).toBe(true);
+    expect(api.classifySecretField("password", null)).toBe("password");
+    expect(new api.DriveSecrets({ a: "b" }).names()).toEqual(["a"]);
   });
 });

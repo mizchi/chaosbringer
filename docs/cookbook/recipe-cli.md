@@ -76,8 +76,89 @@ Rules currently enforced:
 | `empty-preconditions` | warn | recipe is eligible everywhere |
 | `missing-expect-after` | warn | click/fill/select with no post-step assertion |
 | `long-raw-wait` | warn | `wait.ms` ≥ 2000ms (prefer `waitFor`) |
-| `hardcoded-credentials` | warn | password-looking field with a non-templated value |
+| `hardcoded-credentials` | warn | password-looking field with a non-templated value (`drive` templates the ones it types, so this is for recipes written by hand) |
 | `adjacent-duplicate-wait` | info | two `wait` steps in a row |
+
+## Replaying on another host
+
+A recipe keeps the absolute URLs it was recorded with: `chaosbringer
+drive` saves `{"kind":"navigate","url":"http://localhost:3000/login"}`.
+`recipes verify`, `recipes repair` and `chaosbringer load` replay it on
+`--base-url` instead. Each navigation to the origin the recipe was
+recorded on goes to `--base-url`'s origin, path and query kept, and so
+do a `urlContains` and a postcondition `urlPattern` that spell that
+origin out. That origin is its
+first step's, when the recipe starts with a navigate; a recipe that
+starts on the page it matched on (a click, a fill) has it only when its
+first precondition's `urlPattern` names a scheme and host
+(`^https://shop\.example\.test/cart`), and is otherwise not moved. A
+later navigation never decides it: navigations to another origin (SSO,
+payments) are left alone. The saved recipe is not rewritten; `repair`
+stores its repaired version with the URLs it ran on.
+
+```sh
+pnpm chaosbringer recipes verify auth/login --base-url https://staging.example.test
+# verify: auth/login was recorded on http://localhost:3000; replaying it on https://staging.example.test instead
+```
+
+The warning goes to stderr, so it never mixes into `--json` output, and
+`--quiet` drops it. `verify` and `repair` print their progress lines to
+stdout, though: pair `--json` with `--quiet` for output a parser reads.
+A `--base-url` that does not answer is reported as that, not as a broken
+recipe. A replay whose navigation to it fails to connect
+(`net::ERR_CONNECTION_REFUSED`, `ERR_NAME_NOT_RESOLVED`, …) stops
+`verify` at once: it exits 2 with `verify: base URL unreachable: …` and
+leaves the recipe's stats and status as they were. `load` stops once 3
+iterations in a row could not connect, writes its report, and exits 2
+with `load: base URL unreachable: …`. A replay that reached the site and
+failed there still counts against the recipe.
+
+## Recipes with variables
+
+A recipe can hold `{{name}}` placeholders (see [templating](./load-from-recipe-store.md#recipe-templating)):
+`chaosbringer drive` records a password it typed as `{{password}}`, and a
+hand-written recipe keeps its credentials out of the file the same way.
+`recipes verify`, `recipes repair` and `load` fill them in from
+`--var NAME=VALUE` (repeatable) and `--vars-file FILE`, a JSON object of
+names to strings, numbers or booleans (a number or boolean is typed as
+`String(value)`). A `--var` wins over the file.
+
+```sh
+pnpm chaosbringer recipes verify auth/login --base-url http://localhost:3000 \
+  --vars-file .secrets/login.json            # written by drive --save-secrets
+pnpm chaosbringer recipes verify auth/login --base-url http://localhost:3000 \
+  --var password="$QA_PASSWORD"
+pnpm chaosbringer load --base-url http://localhost:3000 --vars-file vars.json
+```
+
+A recipe that uses a placeholder neither flag defines, in a step or a
+postcondition, is refused before the browser starts, with exit 2 and the name
+of each variable it needs (these commands do not read preconditions, so a
+placeholder only a precondition uses is not asked for):
+
+```
+chaosbringer recipes verify: auth/login: variable "password" is not defined (pass --var password=VALUE, or --vars-file FILE) (see chaosbringer recipes verify --help)
+```
+
+So is a `--var` with no `=` or a name a placeholder cannot use (letters,
+digits, `_ . -`, starting with a letter or `_`), and a `--vars-file` that is
+missing, not JSON, or not an object of plain values. `load` checks every
+recipe it may replay (each of `--filter-status`, and what their `requires`
+chains run first), and gives every iteration the same values; for
+per-iteration values, use `scenarioLoadFromStore({ vars })`.
+
+> **Behaviour change:** replay used to fill placeholders in only when it was
+> given vars, and none of these commands could give them: a fill of
+> `{{password}}` typed the braces, the step reported ok, and `recipes verify`
+> could promote a recipe whose login never happened. Every replay now fills
+> them in. From code, a recipe that uses a variable its `vars` lack fails at
+> that step (`ok: false`, `failedAt.reason` `variable "password" is not
+> defined`) instead of typing the braces, and with `vars: {}` it fails the
+> same way instead of throwing. `repairRecipe` throws an
+> `UndefinedVariableError` before it launches a browser when its start URL or
+> a postcondition uses a variable `vars` lacks. `minimizeRecipeTrace` and
+> `recipeChaos` fill placeholders in too: pass them `vars` for a templated
+> recipe (or a trace whose typed text holds `{{name}}`).
 
 ## Auto-repair (CLI form)
 
@@ -118,7 +199,22 @@ pnpm chaosbringer load --global \
   --output load-report.json
 ```
 
+Each replay's outcome is recorded into the recipe's stats, as the
+crawler's recipe driver does, so the run promotes and demotes recipes. A
+replay that could not connect to `--base-url` is not recorded.
+`--no-record` leaves the store as it was.
+
+`--filter-status candidate` (or `demoted`) replays the recipes of that
+status instead of the verified ones. A candidate the recorded replays
+promote is no longer a candidate, so pass `--no-record` to load-test the
+candidates for the whole `--duration`.
+
 Exit code is 1 on any iteration / step failure — wire it straight into CI.
+It is 2 when the run could not do its job, with the reason as the last
+line on stderr: no recipe of `--filter-status` in the store (refused
+before a browser starts), a base URL that does not answer (above), or the
+recipes running out mid-run (the last candidate promoted, say). A run
+that started prints its report, and writes it to `--output`, either way.
 
 For fault injection or SLO assertions, drop to the programmatic
 `scenarioLoadFromStore()` API (see [`load-from-recipe-store.md`](./load-from-recipe-store.md)).

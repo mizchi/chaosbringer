@@ -162,8 +162,19 @@ pnpm dlx lightbringer run scenario.json --repeat 5 --gate           # fail if a 
 ```
 
 `--emit-budgets` derives `lightbringer.budgets.json` from the measured medians
-(×1.25 headroom) — **you never hand-write a number** — and `--gate` fails the run
-against it. Step fields: `goto`, `click`, `fill`+`text`, `press`, `drag`+`by`,
+— **you never hand-write a number** — and `--gate` fails the run against it.
+Each budget is the larger of `ceil(median × 1.25)` and `ceil(median + floor)`:
+the floor is an absolute minimum of room per metric (`DEFAULT_BUDGET_FLOORS`:
+`durationMs` 34, `scriptMs` 8, `blockingMs` 5, `layoutCount` 2, `recalcStyleMs`
+7, `encodedKB` 5, `requestCount` 1, `interactionMs` 16), so a 0 ms `blockingMs`
+median gets a budget of 5 ms, not 0, and the medians of a clean `--repeat 3`
+(or more) rerun stay within budget; a `--repeat 1` gate can still fail now and
+then on one outlier run. `--floor <metric>=<n>`
+(repeatable, `n` ≥ 0) sets one floor; `--floor <metric>=0` turns it off. A
+malformed `--floor` stops the CLI before anything runs, with exit 1 like its other
+usage errors. The file records `{ "headroom", "floors" }` under a `"$emit"` key
+next to the slugs; `--gate` reads only the slugs, so a file written before it
+gates as before. Step fields: `goto`, `click`, `fill`+`text`, `press`, `drag`+`by`,
 `waitFor`, `wait`, and a per-step `settle` (`networkidle` (default) / `load` /
 `raf` / a number of ms). Flags: `--repeat N`, `--out DIR`, `--gpu`, `--cpu N`,
 `--net slow-3g|fast-3g|4g`, `--cov`, `--mem`, `--css`, `--trace`, `--headed`.
@@ -197,7 +208,7 @@ auto-span: a span is one action's own cost, not "until the next assertion".
 pnpm add -D lightbringer @playwright/test
 ```
 
-`web-vitals` is pulled in automatically.
+`web-vitals` is pulled in automatically. `@playwright/test` must be 1.59 or later (`^1.59.0`), the floor of the `playwright` lightbringer depends on. Below it, npm refuses the install (`ERESOLVE`); pnpm and yarn only warn about the peer range and install lightbringer's own `playwright` beside yours. Even inside the range, the package manager can resolve the two to different versions, depending on install order. Only the `lightbringer` CLI runs its own `playwright` (the fixture uses yours), so a second copy matters when its browser build is one you have not installed. Check with `npm ls playwright` or `pnpm why playwright`, and pin one version with `overrides` (npm) or `pnpm.overrides` if they differ.
 
 ## Usage
 
@@ -540,10 +551,21 @@ regression, so it drops straight into CI alongside the budget gate.
 ## CI
 
 [`.github/workflows/lightbringer-perf.yml`](https://github.com/mizchi/chaosbringer/blob/main/.github/workflows/lightbringer-perf.yml) is a working perf gate —
-lightbringer measuring its own fixtures — that doubles as the copy-this template:
+lightbringer measuring its own fixtures — that doubles as the copy-this template.
+It installs Playwright through this repo's own
+[`.github/actions/install-playwright`](https://github.com/mizchi/chaosbringer/blob/main/.github/actions/install-playwright/action.yml),
+which caches apt's archives. Copy that action too (it runs `pnpm exec playwright`
+from the repo root; the
+[GitHub Actions cookbook](https://github.com/mizchi/chaosbringer/blob/main/docs/cookbook/github-actions.md)
+says how to adopt it), or install directly. Either way, keep
+`timeout-minutes: 25` on the install step and add 25 to the job's own
+`timeout-minutes`, if it sets one. apt's Ubuntu mirror has taken over 10
+minutes, and a job timeout that leaves no room for it cancels the job before
+the step bound fires.
 
 ```yaml
 - run: pnpm exec playwright install --with-deps chromium
+  timeout-minutes: 25   # fails a stalled apt mirror by name
 - run: pnpm exec playwright test <your-specs> --repeat-each=5   # median needs N runs
 - run: node node_modules/lightbringer/scripts/median.mjs        # exits 1 on budget violation
 ```
@@ -640,7 +662,8 @@ wait, not one per read.
 driver that has its own run reports: `stat` / `median` / `percentile`
 (median + p25..p75 band, `noisy` when the IQR exceeds 25% of a median above 5),
 `aggregateRuns` (→ the `<slug>.median.json` shape), `checkMedianBudgets`, `gate`,
-`spanMedians` + `emitBudgets` (ceil(median × 1.25)), `regress` + `formatRegress`
+`spanMedians` + `emitBudgets` (max(ceil(median × 1.25), ceil(median + floor)), with
+`DEFAULT_BUDGET_FLOORS` and `parseBudgetFloors` for `--floor` values), `regress` + `formatRegress`
 (threshold 0.15 plus per-metric absolute floors), `analyseDrilldown` +
 `formatDrilldown`, and `unionCoverage` + `formatCoverageUnion`.
 
@@ -675,7 +698,8 @@ the scenario DSL; anything else runs through `playwright test` with your config.
 | `--repeat N` | run N times (→ `--repeat-each=N` in spec mode) |
 | `--out DIR` | report output dir (default `perf-results`) |
 | `--config FILE` | Playwright config to reuse (spec mode) |
-| `--emit-budgets` | write `lightbringer.budgets.json` from the medians (×1.25 headroom) |
+| `--emit-budgets` | write `lightbringer.budgets.json` from the medians (×1.25 headroom, at least median + floor) |
+| `--floor metric=n` | with `--emit-budgets`: that metric's absolute floor (repeatable; `=0` turns it off) |
 | `--gate` | fail if a median exceeds the emitted budget |
 | `--gpu` | hardware GL (real GPU / paint numbers) |
 | `--cpu N` | throttle CPU N× |
@@ -913,7 +937,7 @@ instead of OOMing. Run it with `PERF_TRACE=1`.
 Some axes only produce real numbers against a **production build** — a dev server
 ships unbundled modules (no chunks), injects CSS via JS (no render-blocking
 `<link>`), and the bench fixtures use `data:` images (0 bytes). `fixtures/bundle`
-is a separate Vite project, built and `vite preview`-served by
+is a separate Vite project, built and served (`vp build` + `vp preview`) by
 `playwright.bundle.config.ts`, that makes them concrete:
 
 ```sh

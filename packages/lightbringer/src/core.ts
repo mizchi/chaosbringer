@@ -115,6 +115,9 @@ export {
   NOISY_IQR_RATIO,
   NOISY_MIN_MEDIAN,
   DEFAULT_BUDGET_HEADROOM,
+  DEFAULT_BUDGET_FLOORS,
+  parseBudgetFloors,
+  formatBudgetFloors,
 } from "./stats";
 export type {
   Stat,
@@ -126,6 +129,7 @@ export type {
   GateFinding,
   GateResult,
   SpanMedians,
+  BudgetFloors,
 } from "./stats";
 export {
   regress,

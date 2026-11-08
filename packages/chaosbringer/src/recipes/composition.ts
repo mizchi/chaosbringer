@@ -48,6 +48,12 @@ export interface RunWithRequiresOptions {
    */
   vars?: RecipeVars;
   /**
+   * Site to replay the chain against, forwarded to every replay
+   * (`RunRecipeOptions.baseUrl`). Each link is moved off the origin it
+   * was itself recorded on.
+   */
+  baseUrl?: string;
+  /**
    * Storage-state snapshot policy (issue #89). When enabled, recipes
    * marked as snapshotable have their storage state captured after
    * the first successful replay; subsequent replays in fresh
@@ -155,7 +161,7 @@ export async function runRecipeWithRequires(
     }
 
     opts.onProgress?.({ kind: "start", recipe: r.name, index: i, total: order.length });
-    const result = await runRecipe(opts.page, r, { vars: opts.vars });
+    const result = await runRecipe(opts.page, r, { vars: opts.vars, baseUrl: opts.baseUrl });
     results[r.name] = result;
     opts.onProgress?.({ kind: "complete", recipe: r.name, result });
     if (result.ok) {

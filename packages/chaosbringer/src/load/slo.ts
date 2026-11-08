@@ -16,10 +16,16 @@
  * - Missing scope target (e.g. step "shop/buy" not in report) is itself
  *   a violation. The whole point of an SLO file is to express
  *   expectations — a silently-missing target defeats that.
+ * - A run that stopped early (`report.stopped`) is a violation whatever
+ *   the thresholds say. Its numbers cover less than the run the SLO was
+ *   written for, and they can pass: a server that dies a few seconds in
+ *   stops the run after 3 refused iterations, which is an error rate no
+ *   threshold catches.
  */
 import type {
   EndpointReport,
   LoadReport,
+  LoadStop,
   ScenarioReport,
   StepReport,
 } from "./types.js";
@@ -105,8 +111,9 @@ export interface SloViolation {
   /** The threshold from the SLO definition. */
   threshold: number;
   /**
-   * The actual value from the report. `null` means the target was
-   * missing entirely (and so the metric couldn't be evaluated).
+   * The actual value from the report. `null` means the metric couldn't be
+   * evaluated: the target was missing entirely, or (metric `"stopped"`)
+   * the run stopped early.
    */
   actual: number | null;
   /** Human-readable single-line message. */
@@ -120,6 +127,8 @@ export interface SloResult {
 
 export function evaluateSlo(report: LoadReport, slo: SloDefinition): SloResult {
   const violations: SloViolation[] = [];
+
+  if (report.stopped) violations.push(stoppedEarly(report.stopped));
 
   // ---- steps ----
   if (slo.steps) {
@@ -236,6 +245,17 @@ function missingTarget(scope: SloScope, target: string): SloViolation {
     threshold: NaN,
     actual: null,
     message: `[${scope}] "${target}" not found in report (no samples)`,
+  };
+}
+
+function stoppedEarly(stop: LoadStop): SloViolation {
+  return {
+    scope: "totals",
+    target: "totals",
+    metric: "stopped",
+    threshold: NaN,
+    actual: null,
+    message: `[totals] run stopped early: ${stop.reason}`,
   };
 }
 

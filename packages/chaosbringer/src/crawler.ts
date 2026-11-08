@@ -27,10 +27,14 @@ import type {
   RecoveryInfo,
   QueueEntry,
   DiscoveryMetrics,
-  FaultInjectionStats,
+  CrawlFaultInjectionStats,
   Fault,
+  IframeFaultStats,
   LifecycleStage,
   NetworkProfile,
+  RuntimeFaultStats,
+  Invariant,
+  OffsiteNavigation,
 } from "./types.js";
 import {
   compileLifecycleFaults,
@@ -45,6 +49,7 @@ import { decideFault } from "./schedule.js";
 import {
   applyFault,
   compileFaultRules,
+  isWebSocketOnlyPattern,
   pickFaultRule,
   toRegExp,
   type CompiledFaultRule,
@@ -86,7 +91,8 @@ import {
 } from "./filters.js";
 import { createRng, randomSeed, weightedPick, randomInt, type Rng } from "./random.js";
 import { clusterErrors } from "./clusters.js";
-import { faultWarnings } from "./firings.js";
+import { faultRunWarnings, faultWarnings } from "./firings.js";
+import { addRunWarning, type RunWarning, type RunWarningInput } from "./run-warnings.js";
 import { collectRawLinks, resolvePageLinks } from "./links.js";
 import {
   collectRawTargets,
@@ -100,9 +106,11 @@ import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
 import { ServerFaultCollector } from "./server-fault-collector.js";
+import { copyRequestFields, isFaultEcho, ResourceLinePairing, resourceLineKind } from "./resource-outcomes.js";
 import { shouldSaveArtifacts, writeFailureBundle } from "./failure-artifacts.js";
 import {
   TRACE_FORMAT_VERSION,
+  traceSetupOf,
   actionToTraceEntry,
   groupTrace,
   readTrace,
@@ -128,18 +136,28 @@ import type {
 
 import { DEFAULT_ACTION_WEIGHTS, DEFAULT_OPTIONS } from "./defaults.js";
 import { parseTraceparent } from "./traceparent.js";
+import { assertPeers, invariantPeerNeeds } from "./peers.js";
 import { validateOptions } from "./validate.js";
 import { findFaultRuleShadows } from "./fault-shadow.js";
-import { buildReproCommand } from "./repro-command.js";
+import { buildReproCommand, reproFlags, unreplayedNote } from "./repro-command.js";
 import { coverageFingerprintOf } from "./coverage.js";
 import { pageCdp } from "./page-cdp.js";
-import { installNavigationGuard, type NavigationGuard } from "./navigation-guard.js";
+import {
+  type BlockedNavigationInfo,
+  installNavigationGuard,
+  type NavigationGuard,
+  type RequestedNavigations,
+  watchRequestedNavigations,
+} from "./navigation-guard.js";
+import { blockedTrigger, offsiteNavigation, offsiteRedirectAllowOf, reflectedIn } from "./offsite-navigation.js";
 import { CrawlPerf } from "./crawl-perf.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import { tagServerFaults } from "./perf-faults.js";
 import { attemptedActionType } from "./perf-key.js";
 import { resolvePerfOptions } from "./perf-options.js";
 import { errorMessage } from "./errors.js";
+import { CRASHED_PAGE_ERROR, crawlerErrorType, RENDERER_CRASHED, stripAnsi, withoutCallLog } from "./error-text.js";
+import { type DocumentRequest, watchDocumentRequests } from "./load/unreachable.js";
 import {
   ACTION_SETTLE_CAP_MS,
   pageSettleEnv,
@@ -149,7 +167,13 @@ import {
   type RequestTracker,
   type ResolvedSettle,
 } from "./settle.js";
-import { contextOptions } from "./browser-session.js";
+import { contextOptions, installKeepNamesHelper } from "./browser-session.js";
+import { bindBrowser, resolveBind } from "./browser-bind.js";
+import { ariaOutline, readAria } from "./aria-snapshot.js";
+import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
+
+/** Distinct WebSocket URLs a run remembers for `CrawlFaultInjectionStats.webSocket`. */
+const MAX_WEBSOCKET_URLS = 200;
 
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
@@ -162,6 +186,9 @@ function isDriver(v: unknown): v is Driver {
 }
 
 function describeTarget(t: ActionTarget): string {
+  // The accessibility tree's reading, when `ariaTargets` joined one: the
+  // accessible name, state, and where the control sits.
+  if (t.ariaDescription) return `${t.ariaDescription} (${t.type})`;
   const parts: string[] = [];
   if (t.role) parts.push(t.role);
   if (t.name) parts.push(`"${t.name}"`);
@@ -235,9 +262,13 @@ export class ChaosCrawler {
   private events: CrawlerEvents;
   private logger: Logger;
   private browser: Browser | null = null;
+  /** `browser.version()` of a launched browser, recorded in the perf summary. */
+  private browserVersion: string | null = null;
   private context: BrowserContext | null = null;
   private cdpPage: Page | null = null;
   private readonly initializedPages = new WeakSet<Page>();
+  /** Caller pages `installCallerPageFaultScripts` has given the fault init scripts. */
+  private readonly faultScriptPages = new WeakSet<Page>();
   private readonly routeHandlers = new Map<Page, (route: Route) => Promise<void>>();
   /** The CDP navigation guard on the CDP-attach page, disposed at teardown. */
   private readonly navigationGuards = new Map<Page, NavigationGuard>();
@@ -253,6 +284,24 @@ export class ChaosCrawler {
   private backedOutActions: ActionResult[] = [];
   /** External navigations blocked while the current page was crawled. */
   private pageBlockedNavigations: string[] = [];
+  /** `pageBlockedNavigations` with where each left from and what started it. */
+  private pageOffsiteNavigations: OffsiteNavigation[] = [];
+  /** The URL the current page was visited at: where a navigation left from when the page shows no URL of the site's. */
+  private visitUrl = "";
+  /**
+   * A crawler step (an action and its settle) is running: an off-site
+   * navigation that starts now is the step's (`trigger: "click"`), not
+   * the page leaving on its own.
+   */
+  private stepRunning = false;
+  /**
+   * The current page's last main-frame document request
+   * (`watchDocumentRequests`), with its redirect chain: what tells a step
+   * that landed off-site through a 3xx from one sent there directly.
+   */
+  private pageDocument: () => DocumentRequest | null = () => null;
+  /** The navigation watch the route path reads reasons from, on the CDP-attach page; disposed at teardown. */
+  private readonly routeNavigationWatches = new Map<Page, RequestedNavigations>();
   private startTime = 0;
   private baseOrigin: string;
   /** Actions performed on the page currently being crawled. Reset on
@@ -295,6 +344,53 @@ export class ChaosCrawler {
    */
   private heldRoutes: Route[] = [];
   private heldRequests = 0;
+  /**
+   * The setup problems raised during the run (`report.warnings`), in order,
+   * identical ones folded. The ones read off the run's end state (faults
+   * that never fired, an incomplete flow) are added by `collectWarnings`.
+   */
+  private runWarnings: RunWarning[] = [];
+  /**
+   * `fault_rule_shadowed` pairs, found once: the rules do not change. A
+   * warning on every run the crawler makes, `testPage()` included.
+   */
+  private readonly faultShadows: ReturnType<typeof findFaultRuleShadows>;
+  /**
+   * WebSocket URLs the pages opened, with how many times, while a network
+   * fault rule is configured: a rule that matched nothing and matches one of
+   * these was aimed at traffic no route sees. Capped, like any per-run list.
+   */
+  private webSocketUrls = new Map<string, number>();
+  /** Server fault events seen (`server: { mode: "remote" }`), for `server-faults-unseen`. */
+  private serverFaultEventsSeen = 0;
+  /**
+   * The requests a fault answered or aborted (or a `hang` holds), with the
+   * label `faultInjections[].rule` gives the rule and the outcome the fault
+   * gives the request: what the page's console line and `network` error
+   * about the request are the echo of. A `delay` passes the request on, and
+   * is not here.
+   */
+  private readonly faultedRequests = new WeakMap<Request, FaultFiring>();
+  /**
+   * Faults the service-worker route applied during the current page, by
+   * `METHOD url`, oldest first; null between pages. The page's own request
+   * is not the worker's, and Playwright reports it only once the worker has
+   * answered it, so each firing is bound to the next page outcome of that
+   * method and URL the worker served, whatever it was: one the worker's
+   * fallback absorbed spends the firing, which used to wait for the URL's
+   * next error and tag a real 500 on a request the rule let through.
+   */
+  private workerFaultFirings: Map<string, FaultFiring[]> | null = null;
+  /** Echoes per fault label, for `faultInjections[].echoes`. */
+  private readonly faultEchoCounts = new Map<string, number>();
+  /**
+   * The context `installServiceWorkerFaultRoute` routed, so that the network
+   * faults see the requests its service workers make. Null with no network
+   * faults, with an attached browser (its context is the user's), with
+   * PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set, and outside `start()`: a
+   * caller's context on the `testPage()` path never has the route.
+   */
+  private serviceWorkerRouted: BrowserContext | null = null;
   /** Page-lifecycle faults compiled once at construction time. */
   private compiledLifecycleFaults: CompiledLifecycleFault[] = [];
   /** Compiled runtime faults — installed once at context level via init script. */
@@ -352,8 +448,9 @@ export class ChaosCrawler {
   private replayFidelity: ReplayFidelity | null = null;
   /**
    * Buffers server-side fault events parsed from response headers when
-   * `options.server.mode === "remote"`. Null otherwise so the per-page
-   * `page.on("response")` listener can be skipped in the common case.
+   * `options.server.mode === "remote"`, and null otherwise. The per-page
+   * `page.on("response")` listener runs either way, for the HTTP status of
+   * every response >= 400; it forwards headers here only when there is one.
    */
   private readonly serverFaultCollector: ServerFaultCollector | null;
   /**
@@ -387,10 +484,14 @@ export class ChaosCrawler {
 
   constructor(options: CrawlerOptions, events: CrawlerEvents = {}) {
     validateOptions(options);
+    // Here rather than in start(): `chaos()` runs its setup hook, in a browser
+    // of its own, between the two, and the fixture's `testPage` never calls
+    // start(). An invariant whose package is missing failed every page.
+    assertPeers(invariantPeerNeeds(options.invariants));
 
     // Filter out undefined values to preserve defaults
     const filteredOptions = Object.fromEntries(
-      Object.entries(options).filter(([_, v]) => v !== undefined)
+      Object.entries(options).filter(([, v]) => v !== undefined)
     );
     this.options = { ...DEFAULT_OPTIONS, ...filteredOptions } as Required<CrawlerOptions>;
     this.serverFaultCollector = this.options.server?.mode === "remote"
@@ -405,6 +506,7 @@ export class ChaosCrawler {
     this.compiledLifecycleFaults = compileLifecycleFaults(options.lifecycleFaults);
     this.compiledRuntimeFaults = compileRuntimeFaults(options.runtimeFaults);
     this.compiledIframeFaults = compileIframeFaults(options.iframeFaults);
+    this.faultShadows = findFaultRuleShadows(this.compiledFaultRules);
     if (options.coverageFeedback?.enabled) {
       this.coverageFeedback = {
         enabled: true,
@@ -447,7 +549,8 @@ export class ChaosCrawler {
       };
     }
 
-    // Initialize logger
+    // Initialize logger. `logToConsole` alone writes to stderr, from `warn`
+    // up: it used to need `logFile` too, and without one was a silent no-op.
     if (options.logFile) {
       this.logger = new Logger({
         logFile: options.logFile,
@@ -455,10 +558,12 @@ export class ChaosCrawler {
         console: options.logToConsole || false,
         jsonFormat: true,
       });
+    } else if (options.logToConsole) {
+      this.logger = new Logger({ level: options.logLevel || "warn", console: true, stderr: true, jsonFormat: true });
     } else {
       this.logger = createNullLogger();
     }
-    this.perf = new CrawlPerf(perfOptions, this.logger, this.options.perfBudgets);
+    this.perf = new CrawlPerf(perfOptions, (event, data, warning) => this.warn(event, data, warning), this.options.perfBudgets);
   }
 
   /** Seed used for this run (useful for reproducing failures). */
@@ -473,7 +578,7 @@ export class ChaosCrawler {
    */
   private reclassifyRejections(
     errors: PageError[],
-    rejections: Array<{ message: string; stack?: string }>,
+    rejections: Array<{ message: string; stack?: string; url?: string }>,
     url: string
   ): void {
     for (const rejection of rejections) {
@@ -489,7 +594,10 @@ export class ChaosCrawler {
         type: "unhandled-rejection",
         message: rejection.message,
         stack: rejection.stack,
-        url,
+        // Where it escaped, as the console and pageerror collectors record
+        // `page.url()` when they fire: after a click that navigated, that is
+        // not the page the crawl visited.
+        url: rejection.url ?? url,
         timestamp: Date.now(),
       };
       this.emitPageError(errors, error);
@@ -502,7 +610,7 @@ export class ChaosCrawler {
    * a PageError with type "invariant-violation".
    */
   private async runInvariants(
-    phase: "afterLoad" | "afterActions",
+    phase: NonNullable<Invariant["when"]>,
     page: Page,
     url: string,
     errors: PageError[]
@@ -519,14 +627,22 @@ export class ChaosCrawler {
 
       let failureReason: string | null = null;
       try {
-        const result = await inv.check({ page, url, errors, state: this.invariantState });
+        const result = await inv.check({
+          page,
+          url,
+          errors,
+          state: this.invariantState,
+          offsiteNavigations: [...this.pageOffsiteNavigations],
+        });
         if (result === false) {
           failureReason = `invariant "${inv.name}" returned false`;
         } else if (typeof result === "string") {
           failureReason = result;
         }
       } catch (err) {
-        failureReason = errorMessage(err);
+        // A Playwright call the check made (`locator.waitFor`) colours the
+        // call log it appends; the message reaches annotations and reports.
+        failureReason = stripAnsi(errorMessage(err));
       }
 
       if (failureReason !== null) {
@@ -534,12 +650,15 @@ export class ChaosCrawler {
           type: "invariant-violation",
           message: `[${inv.name}] ${failureReason}`,
           invariantName: inv.name,
+          ...(offsiteRedirectAllowOf(inv) ? { offsiteRedirect: true as const } : {}),
           url,
           timestamp: Date.now(),
         };
         this.emitPageError(errors, error);
         this.advisorRuntime?.stall.recordInvariantViolation();
-        if (this.driver !== null) {
+        // An `afterVisit` violation comes after the page's last step: no
+        // step of the driver's on the next page caused it.
+        if (this.driver !== null && phase !== "afterVisit") {
           this.driverPendingViolations.push({ name: inv.name, message: failureReason });
         }
       }
@@ -557,7 +676,7 @@ export class ChaosCrawler {
   }
 
   /** Pop and return any unhandled promise rejections captured since last call. */
-  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string }>> {
+  private async drainRejections(page: Page): Promise<Array<{ message: string; stack?: string; url?: string }>> {
     return drainRejections(page);
   }
 
@@ -608,6 +727,9 @@ export class ChaosCrawler {
     this.pageCoverageDeltas = [];
     this.targetNovelty = new Map();
     this.perf.reset();
+    this.runWarnings = [];
+    this.webSocketUrls = new Map();
+    this.serverFaultEventsSeen = 0;
     if (this.advisorRuntime) {
       this.advisorRuntime.budget = new AdvisorBudget();
       this.advisorRuntime.stall = new StallTracker();
@@ -621,12 +743,17 @@ export class ChaosCrawler {
       : null;
 
     if (this.isRecordingTrace()) {
+      const setup = traceSetupOf(this.options);
       this.trace.push({
         kind: "meta",
         v: TRACE_FORMAT_VERSION,
         seed: this.rng.seed,
         baseUrl: this.options.baseUrl,
         startTime: this.startTime,
+        // What a replay of this trace needs to load and judge its pages the
+        // way this run did: `minimize` replayed with the defaults, logged out
+        // of a crawl that ran with --storage-state.
+        ...(setup ? { setup } : {}),
       });
     }
 
@@ -662,7 +789,7 @@ export class ChaosCrawler {
     // evaluated top-to-bottom, first-match-wins, so a broad catch-all
     // placed before a specific override will silently swallow every
     // request the override expected.
-    for (const shadow of findFaultRuleShadows(this.compiledFaultRules)) {
+    for (const shadow of this.faultShadows) {
       this.logger.warn("fault_rule_shadowed", {
         earlierRule: shadow.earlierName,
         laterRule: shadow.laterName,
@@ -687,6 +814,13 @@ export class ChaosCrawler {
           ...this.options.launchOptions,
           headless: this.options.headless,
         });
+        this.browserVersion = this.browser.version();
+        const bind = resolveBind(this.options.bind);
+        if (bind) {
+          const bound = await bindBrowser(this.browser, bind);
+          this.logger.info("browser_bound", { ...bound });
+          this.events.onBind?.(bound);
+        }
         // Device descriptor overrides viewport / userAgent / device pixel ratio;
         // explicit options in CrawlerOptions still win because they come later.
         const deviceDesc =
@@ -729,34 +863,12 @@ export class ChaosCrawler {
         content: collectorInitScript({ frames: this.perf.enabled }),
       });
 
-      // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
-      // …) on every navigation. CDP runs scope it to the selected page.
-      if (this.compiledRuntimeFaults.length > 0) {
-        const script = buildRuntimeFaultsScript(
-          this.compiledRuntimeFaults.map((c) => c.fault),
-          this.rng.seed,
-        );
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
+      // Only when run from src/ through tsx; ahead of the init scripts that
+      // are functions (the SPA hook, the rejection capture).
+      await installKeepNamesHelper(this.cdpPage ?? this.context);
 
-      // Caller-supplied init scripts, after the fault layers so a script can
-      // observe the patched APIs. Installed even when empty-checked away, so a
-      // caller that passes `[]` costs nothing.
-      for (const script of this.options.initScripts ?? []) {
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
-
-      // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
-      // (and setAttribute("src", …)) so faults fire when the host page assigns
-      // an iframe's URL. Independent of runtimeFaults so a page can configure
-      // either layer on its own.
-      if (this.compiledIframeFaults.length > 0) {
-        const script = buildIframeFaultsScript(
-          this.compiledIframeFaults.map((c) => c.fault),
-          this.rng.seed,
-        );
-        await (this.cdpPage ?? this.context).addInitScript({ content: script });
-      }
+      // CDP runs scope these to the selected page.
+      await this.addFaultInitScripts(this.cdpPage ?? this.context);
 
       // Replay mode: serve every matching request from the HAR before it hits
       // the network. Fault injection (installed per-page) still wins because
@@ -765,6 +877,13 @@ export class ChaosCrawler {
         await this.context.routeFromHAR(this.options.har.path, {
           notFound: this.options.har.notFound ?? "fallback",
         });
+      }
+
+      // After `routeFromHAR`: a context's routes run newest first, so a fault
+      // on a service worker's request wins over the HAR too. Not on an
+      // attached browser, whose context — every tab in it — is the user's.
+      if (!this.cdpPage && this.compiledFaultRules.length > 0) {
+        await this.installServiceWorkerFaultRoute(this.context);
       }
 
       if (this.options.traceReplay) {
@@ -789,6 +908,7 @@ export class ChaosCrawler {
           try {
             const result = await this.crawlPage(this.currentEntry);
             this.results.push(result);
+            if (this.cdpPageCrashed(result)) break;
           } finally {
             this.currentReplayActions = null;
           }
@@ -814,6 +934,7 @@ export class ChaosCrawler {
 
           const result = await this.crawlPage(entry);
           this.results.push(result);
+          if (this.cdpPageCrashed(result)) break;
 
           // Add discovered links to queue with source tracking
           for (const rawLink of result.links) {
@@ -833,6 +954,10 @@ export class ChaosCrawler {
         }
       }
     } finally {
+      this.serviceWorkerRouted = null;
+      // Each page drains its own on the way out, but a service worker can
+      // make a request between two pages, or after the last one.
+      await this.drainHeldRoutes();
       if (this.cdpPage) {
         await this.releaseCdpPageInterception(this.cdpPage);
         this.cdpPage = null;
@@ -860,6 +985,7 @@ export class ChaosCrawler {
     for (const { event, data } of faultWarnings(report)) {
       this.logger.warn(event, data);
     }
+    report.warnings = this.collectWarnings(report);
 
     // Log crawl end
     this.logger.logCrawlEnd({
@@ -877,11 +1003,27 @@ export class ChaosCrawler {
   }
 
   /**
+   * Whether `result` is a crash of the attached browser's tab (`--cdp`).
+   * The crawl's own pages are a new tab per visit, so a crash costs only
+   * that visit; the attached tab is the only one, and every call on it
+   * fails once it crashed, so the crawl stops there.
+   */
+  private cdpPageCrashed(result: PageResult): boolean {
+    if (!this.cdpPage || !result.errors.some((e) => e.type === "crash")) return false;
+    this.logger.warn("cdp_page_crashed", { url: result.url, reason: "the attached tab's renderer crashed; stopping the crawl" });
+    return true;
+  }
+
+  /**
    * Run chaos testing on a single page (for Playwright Test integration)
    */
   async testPage(page: Page, url: string): Promise<PageResult> {
     this.startTime = Date.now();
     this.baseOrigin = new URL(url).origin;
+    // As `crawlPage` does: the executor is bound to the page it was made
+    // for, so a second `testPage()` (or one after `crawl`) would apply its
+    // lifecycle faults to the previous page.
+    this.lifecycleExecutor = null;
 
     // Set up external navigation blocking and/or fault injection routing.
     await this.setupPageInterception(page);
@@ -895,6 +1037,11 @@ export class ChaosCrawler {
     // caller is least likely to release it themselves.
     try {
       const result = await this.crawlPageWithExistingPage(page, url);
+      // As `crawlPage` does. The faults have fired on this path since they
+      // were installed on the caller's page, but their counters were only
+      // ever read on the crawl's own, so every row said they had not.
+      await this.collectRuntimeFaultStats(page);
+      await this.collectIframeFaultStats(page);
       this.events.onPageComplete?.(result);
       this.logger.logPageComplete(result);
       this.results.push(result);
@@ -1038,8 +1185,11 @@ export class ChaosCrawler {
         screenshot,
         html,
         trace: (opts.saveTrace ?? true) ? this.trace : undefined,
+        reproFlags: reproFlags(this.options, this.rng.seed),
+        reproNote: unreplayedNote(this.options),
       });
       this.logger.info("failure_artifact_written", { url: result.url, bundleDir });
+      this.events.onFailureBundle?.(bundleDir, result);
     } catch (err) {
       this.logger.warn("failure_artifact_write_failed", {
         url: result.url,
@@ -1080,9 +1230,11 @@ export class ChaosCrawler {
     try {
       urls = await fetchSitemapUrls(source);
     } catch (err) {
-      this.logger.warn("sitemap_fetch_failed", {
+      const reason = errorMessage(err);
+      this.warn("sitemap_fetch_failed", { source, reason }, {
+        code: "sitemap-unreadable",
+        message: `sitemap ${source} could not be read (${reason}), so the crawl started from the base URL alone`,
         source,
-        reason: errorMessage(err),
       });
       return;
     }
@@ -1090,6 +1242,9 @@ export class ChaosCrawler {
     const queuedUrls = new Set(this.queue.map((q) => normalizeUrl(q.url)));
     let added = 0;
     let skippedExternal = 0;
+    // URLs on the crawl's origin, before this shard's share is taken: a
+    // shard that owns none of them is working as asked.
+    let onOrigin = 0;
     for (const raw of urls) {
       let normalized: string;
       try {
@@ -1105,6 +1260,7 @@ export class ChaosCrawler {
       } catch {
         continue;
       }
+      onOrigin++;
       if (queuedUrls.has(normalizeUrl(normalized))) continue;
       if (!this.ownsUrl(normalized)) continue;
       queuedUrls.add(normalizeUrl(normalized));
@@ -1112,6 +1268,87 @@ export class ChaosCrawler {
       added++;
     }
     this.logger.info("sitemap_seeded", { source, added, skippedExternal, total: urls.length });
+    if (onOrigin === 0) {
+      const listed =
+        urls.length === 0
+          ? "listed no URL"
+          : `listed ${urls.length} URL(s), none of them on ${baseOrigin}` +
+            (skippedExternal > 0 ? ` (${skippedExternal} on other origins)` : "");
+      this.warn("sitemap_empty", { source, total: urls.length, skippedExternal }, {
+        code: "sitemap-empty",
+        message: `sitemap ${source} ${listed}, so the crawl started from the base URL alone`,
+        source,
+      });
+    }
+  }
+
+  /**
+   * Log a setup problem as the logger event it always was, and record it as
+   * a `report.warnings` entry.
+   */
+  private warn(event: string, data: Record<string, unknown>, warning: RunWarningInput): void {
+    this.logger.warn(event, data);
+    addRunWarning(this.runWarnings, warning);
+  }
+
+  /**
+   * `report.warnings` for a run whose stats `stats` holds: the problems
+   * raised as it went, then the shadowed fault rules, the faults that did
+   * not take effect (`faultRunWarnings`, `unfiredFaults`' words), the
+   * driver's journeys that ended early, and a remote server that sent no
+   * fault header.
+   */
+  private collectWarnings(stats: Parameters<typeof faultRunWarnings>[0]): RunWarning[] {
+    const out: RunWarning[] = this.runWarnings.map((w) => ({ ...w }));
+    for (const shadow of this.faultShadows) {
+      addRunWarning(out, {
+        code: "fault-shadowed",
+        message:
+          `network fault "${shadow.laterName}" is shadowed by "${shadow.earlierName}" ahead of it: a request it ` +
+          `matches (e.g. ${shadow.sampleUrl}) matches "${shadow.earlierName}" first, and the first rule that matches decides`,
+        rule: shadow.laterName,
+        layer: "network",
+      });
+    }
+    for (const w of faultRunWarnings(stats)) addRunWarning(out, w);
+    for (const flow of this.driver?.stats?.() ?? []) {
+      const done = flow.laps > 0 && !flow.halted;
+      if (done) continue;
+      const at = `step ${flow.completed}/${flow.total}`;
+      addRunWarning(out, {
+        code: "flow-incomplete",
+        message: flow.halted
+          ? `flow "${flow.driver}" stopped at ${at}, "${flow.halted.step}", which threw: ${flow.halted.error}`
+          : `flow "${flow.driver}" ended at ${at}: "${flow.next ?? "?"}" never ran, its urlPattern / when never ` +
+            `matched a page the crawl reached`,
+        driver: flow.driver,
+      });
+    }
+    if (this.serverFaultCollector && this.results.length > 0 && this.serverFaultEventsSeen === 0) {
+      const prefix = this.options.server?.responseHeaderPrefix ?? "x-chaos-fault";
+      addRunWarning(out, {
+        code: "server-faults-unseen",
+        message:
+          `server: { mode: "remote" } saw no ${prefix}-* response header in the whole run: the server does not ` +
+          `send them (server-faults' metadataHeader option), sends another prefix (responseHeaderPrefix), or injected no fault`,
+        layer: "server",
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The run's `report.warnings` so far: after `testPage()`, which returns no
+   * report, the way to read them. A crawl's report carries its own.
+   */
+  getWarnings(): RunWarning[] {
+    return this.collectWarnings({
+      faultInjections: this.getFaultStats(),
+      lifecycleFaults: lifecycleStatsFrom(this.compiledLifecycleFaults),
+      runtimeFaults: this.getRuntimeFaultStats(),
+      iframeFaults: this.getIframeFaultStats(),
+      pages: this.results,
+    });
   }
 
   /**
@@ -1365,11 +1602,15 @@ export class ChaosCrawler {
         this.perf.noteFault(c.name, { persistent: true });
       } catch (err) {
         c.errored++;
-        this.logger.warn("lifecycle_fault_failed", {
-          name: c.name,
-          stage,
+        // A warning, so the reason is in the report: the stats row counts
+        // the throw and nothing more, and the logger writes nowhere by default.
+        const reason = errorMessage(err);
+        this.warn("lifecycle_fault_failed", { name: c.name, stage, url, reason }, {
+          code: "lifecycle-fault-failed",
+          message: `lifecycle fault "${c.name}" threw while firing (${reason}), so the page ran without it`,
+          rule: c.name,
+          layer: "lifecycle",
           url,
-          reason: errorMessage(err),
         });
       }
     }
@@ -1387,9 +1628,11 @@ export class ChaosCrawler {
       const client = await cdp.session();
       await client.send("Network.emulateNetworkConditions", networkConditionsFor(profile));
     } catch (err) {
-      this.logger.warn("network_profile_failed", {
-        profile,
-        reason: errorMessage(err),
+      const reason = errorMessage(err);
+      this.warn("network_profile_failed", { profile, reason }, {
+        code: "network-profile-failed",
+        message: `network profile "${profile}" could not be applied (${reason}), so the page ran unthrottled`,
+        url: page.url(),
       });
     }
   }
@@ -1431,7 +1674,7 @@ export class ChaosCrawler {
         try {
           const guard = await installNavigationGuard(page, {
             isExternal: (url) => this.isExternalUrl(url),
-            onBlocked: (url) => this.noteBlockedNavigation(url),
+            onBlocked: (url, info) => this.noteBlockedNavigation(this.blockedNavigation(page, url, info)),
           });
           this.interceptedPages.add(page);
           if (page === this.cdpPage) this.navigationGuards.set(page, guard);
@@ -1447,17 +1690,77 @@ export class ChaosCrawler {
         await cdp.enable("Network");
         await (await cdp.session()).send("Network.setCacheDisabled", { cacheDisabled: true });
       } catch (err) {
-        this.logger.warn("http_cache_disable_failed", { reason: errorMessage(err) });
+        const reason = errorMessage(err);
+        this.warn("http_cache_disable_failed", { reason }, {
+          code: "http-cache-disable-failed",
+          message: `httpCache: false could not turn the HTTP cache off (${reason}), so the page loaded with it on`,
+        });
       }
     }
   }
 
   /** Bookkeeping for one blocked external navigation, whichever layer blocked it. */
-  private noteBlockedNavigation(url: string): void {
+  private noteBlockedNavigation(nav: OffsiteNavigation): void {
     this.blockedExternalCount++;
-    this.pageBlockedNavigations.push(url);
-    this.events.onBlockedNavigation?.(url);
-    this.logger.logBlockedNavigation(url);
+    this.pageBlockedNavigations.push(nav.to);
+    this.pageOffsiteNavigations.push(nav);
+    this.events.onBlockedNavigation?.(nav.to);
+    this.logger.logBlockedNavigation(nav.to);
+  }
+
+  /** A navigation to `url` the guard or the route blocked on `page`, with what started it. */
+  private blockedNavigation(page: Page, url: string, info: BlockedNavigationInfo): OffsiteNavigation {
+    const from = this.navigationSource(page);
+    const trigger = blockedTrigger({
+      mainFrame: info.mainFrame,
+      stepRunning: this.stepRunning,
+      reason: info.reason,
+      reflected: reflectedIn(from, url) !== undefined,
+    });
+    return offsiteNavigation(from, url, trigger);
+  }
+
+  /**
+   * The site's URL that redirected the page's last navigation off-site to
+   * `landed`: the last of its redirect chain on the crawl's origin, when
+   * the page's last document request followed a redirect and ended at
+   * `landed`. Undefined for a page that got there without one.
+   */
+  private redirectSource(landed: string): string | undefined {
+    const sent = this.pageDocument();
+    if (!sent?.redirected || sent.to === undefined) return undefined;
+    const bare = (u: string) => u.split("#")[0];
+    if (bare(sent.to) !== bare(landed)) return undefined;
+    return [...(sent.hops ?? [sent.url])].reverse().find((u) => !this.isExternalUrl(u));
+  }
+
+  /**
+   * Where a navigation on `page` leaves from: the URL it shows, while that
+   * is one of the site's (a script redirects before its navigation
+   * commits, so the page still shows its own document), else the URL the
+   * page was visited at.
+   */
+  private navigationSource(page: Page): string {
+    let shown = "";
+    try {
+      shown = page.url();
+    } catch {
+      // A closed page has no URL; the visit's is the one to name.
+    }
+    return /^https?:/i.test(shown) && !this.isExternalUrl(shown) ? shown : this.visitUrl || shown;
+  }
+
+  /**
+   * The latest navigation of the page's own frame the guard blocked since
+   * `since` (an index into `pageOffsiteNavigations`): what a page showing
+   * the browser's error page (`chrome-error://chromewebdata/`) was sent to.
+   */
+  private lastBlockedPageNavigation(since: number): OffsiteNavigation | undefined {
+    for (let i = this.pageOffsiteNavigations.length - 1; i >= since; i--) {
+      const nav = this.pageOffsiteNavigations[i]!;
+      if (nav.trigger !== "frame" && nav.trigger !== "server-redirect") return nav;
+    }
+    return undefined;
   }
 
   /**
@@ -1467,6 +1770,8 @@ export class ChaosCrawler {
   private async releaseCdpPageInterception(page: Page): Promise<void> {
     const handler = this.routeHandlers.get(page);
     const guard = this.navigationGuards.get(page);
+    this.routeNavigationWatches.get(page)?.dispose();
+    this.routeNavigationWatches.delete(page);
     this.routeHandlers.delete(page);
     this.navigationGuards.delete(page);
     this.interceptedPages.delete(page);
@@ -1494,6 +1799,16 @@ export class ChaosCrawler {
     const traceparentEnabled = this.options.traceparent !== undefined && this.options.traceparent !== false;
     const traceparentHook =
       typeof this.options.traceparent === "object" ? this.options.traceparent.onInject : undefined;
+    // The browser's reason for each navigation a document asks for, so a
+    // blocked one is named a script redirect or a meta refresh, as the CDP
+    // guard names it. None for a page without CDP: a script, then.
+    const requested = blockExternal
+      ? await pageCdp(page)
+          .session()
+          .then(watchRequestedNavigations)
+          .catch(() => undefined)
+      : undefined;
+    if (requested && page === this.cdpPage) this.routeNavigationWatches.set(page, requested);
 
     // Install a single route handler that first considers fault injection,
     // then falls back to external-navigation blocking, then continues.
@@ -1555,7 +1870,10 @@ export class ChaosCrawler {
         // delay ends (or when this handler heard of the request: on a loaded
         // machine a click can close before that). The label is
         // `faultInjections[].rule`'s, so the two join by name.
-        this.perf.noteRequestFault(winner.rule.name ?? winner.pattern.toString(), url, seq);
+        const label = winner.rule.name ?? winner.pattern.toString();
+        this.perf.noteRequestFault(label, url, seq);
+        const firing = faultFiring(winner.rule.fault, label);
+        if (firing) this.faultedRequests.set(request, firing);
         await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
         return;
       }
@@ -1563,7 +1881,14 @@ export class ChaosCrawler {
       // 2. Block external navigation if requested.
       if (blockExternal && this.isExternalUrl(url)) {
         if (request.isNavigationRequest()) {
-          this.noteBlockedNavigation(url);
+          let mainFrame = false;
+          try {
+            mainFrame = request.frame() === page.mainFrame();
+          } catch {
+            // A service worker's request has no frame: not the page's.
+          }
+          const reason = requested?.takeReason(url);
+          this.noteBlockedNavigation(this.blockedNavigation(page, url, { mainFrame, ...(reason !== undefined ? { reason } : {}) }));
           await route.abort("blockedbyclient");
           return;
         }
@@ -1583,6 +1908,72 @@ export class ChaosCrawler {
     await page.route("**/*", handler);
     this.interceptedPages.add(page);
     if (page === this.cdpPage) this.routeHandlers.set(page, handler);
+  }
+
+  /**
+   * The network faults, on the requests a service worker makes.
+   *
+   * A request the page makes and a service worker's `fetch` handler takes
+   * never reaches the page's route. What goes to the network is the worker's
+   * own request, and Playwright hands that to the context's routes only. So
+   * on a PWA the rules saw nothing: a `faults.status(500)` on `/api/data`
+   * matched 0 behind a pass-through worker while the server answered every
+   * request, and the run-end warning blamed the pattern.
+   *
+   * The same rules decide here, through the same `pickFaultRule`, so the
+   * occurrence numbering, the stats and the held routes are the page route's.
+   * Any other request was the page route's to decide, and passes through. It
+   * stays out of `perf.routed`, whose numbers have to line up with the page's
+   * captured requests, and a worker's are not among them: its fault tags the
+   * spans open now, as one with no captured request to match does.
+   *
+   * Blocking service workers would make the faults land too, by taking the
+   * worker away: no cache, no offline path. This keeps it, so what it answers
+   * from its own cache still reaches no network fault; `serviceWorkerReach`
+   * records the pages where that can happen.
+   */
+  private async installServiceWorkerFaultRoute(context: BrowserContext): Promise<void> {
+    // Playwright's opt-out of service-worker network events: with it set, a
+    // worker's requests reach no route at all.
+    if (process.env.PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK) return;
+    const rules = this.compiledFaultRules;
+    await context.route("**/*", async (route) => {
+      const request = route.request();
+      if (!request.serviceWorker()) {
+        await route.fallback();
+        return;
+      }
+      const winner = pickFaultRule(rules, request.url(), request.method().toUpperCase(), this.rng, request.resourceType());
+      if (!winner) {
+        await route.fallback();
+        return;
+      }
+      const label = winner.rule.name ?? winner.pattern.toString();
+      this.perf.noteFault(label);
+      const firing = faultFiring(winner.rule.fault, label);
+      const firings = this.workerFaultFirings;
+      if (firing && firings) {
+        const key = requestKey(request);
+        firings.set(key, [...(firings.get(key) ?? []), firing]);
+      }
+      await applyFault(route, winner.rule.fault, (held) => this.holdRoute(held));
+    });
+    this.serviceWorkerRouted = context;
+  }
+
+  /**
+   * Whether a service worker controls the page, and if so whether the network
+   * faults see the requests it makes: `PageResult.serviceWorker`. Asked only
+   * when there are network faults for it to explain.
+   */
+  private async serviceWorkerReach(page: Page): Promise<PageResult["serviceWorker"]> {
+    if (this.compiledFaultRules.length === 0) return undefined;
+    try {
+      if (!(await page.evaluate(() => !!navigator.serviceWorker?.controller))) return undefined;
+    } catch {
+      return undefined;
+    }
+    return page.context() === this.serviceWorkerRouted ? "routed" : "unrouted";
   }
 
   /**
@@ -1663,9 +2054,11 @@ export class ChaosCrawler {
         this.coverageCollector = new CoverageCollector(cdp);
         await this.coverageCollector.start();
       } catch (err) {
-        this.logger.warn("coverage_attach_failed", {
+        const reason = errorMessage(err);
+        this.warn("coverage_attach_failed", { url, reason }, {
+          code: "coverage-attach-failed",
+          message: `coverageFeedback could not attach to a page (${reason}), so that page's actions earned no coverage credit`,
           url,
-          reason: errorMessage(err),
         });
         this.coverageCollector = null;
       }
@@ -1716,18 +2109,35 @@ export class ChaosCrawler {
    * Register the per-page error / warning / server-fault collectors. They
    * register in their original order: console, pageerror, response, then —
    * after `betweenRegistrations` (the page's init scripts) has run —
-   * requestfailed. `stop()` turns collection off and detaches every handler.
+   * requestfailed, then crash. `stop()` turns collection off and detaches
+   * every handler.
+   *
+   * `recordCrash()` records the page's renderer crash, once: the `crash`
+   * event calls it, and so does the crawl when a Playwright call fails with
+   * `Page crashed` before that event has arrived. `crashed()` says whether
+   * it did. `lastDocument()` is the page's last main-frame document request
+   * (`watchDocumentRequests`): whether a failed `page.goto` followed a
+   * redirect.
    */
   private async attachPageCollectors(
     page: Page,
     errors: PageError[],
     warnings: string[],
     betweenRegistrations: () => Promise<void>,
-  ): Promise<{ stop(): void }> {
+  ): Promise<{ stop(): void; recordCrash(): void; crashed(): boolean; lastDocument(): DocumentRequest | null }> {
     // Set to false once collection is done so spurious events fired during
     // page.close() (in-flight requests getting cancelled as ERR_ABORTED, etc.)
     // don't pollute the PageResult.
     let collecting = true;
+
+    // The browser's "Failed to load resource" lines, paired with the
+    // response or failure each is about: the line gets the request's status
+    // and method (a subresource's only: the page's own document is its
+    // status), and the fault that answered it. See resource-outcomes.ts.
+    const resources = new ResourceLinePairing((outcome, line) => {
+      copyRequestFields(outcome, line);
+      if (outcome.fault !== undefined) this.noteFaultEcho(line, outcome.fault);
+    });
 
     // Set up error listeners. Each error records `page.url()` at fire time
     // so that errors triggered after a chaos-action navigation are attributed
@@ -1738,12 +2148,22 @@ export class ChaosCrawler {
       const text = msg.text();
       if (type === "error") {
         if (this.shouldIgnoreError(text)) return;
+        const resourceUrl = failedResourceUrl(text, msg);
+        // The line names no URL, so this is the one way to drop it for one endpoint.
+        if (resourceUrl && this.isIgnoredHttp(resourceUrl)) {
+          const kind = resourceLineKind(text);
+          if (kind && "status" in kind) return;
+        }
         const error: PageError = {
           type: "console",
           message: text,
           url: page.url(),
           timestamp: Date.now(),
+          ...(resourceUrl ? { resourceUrl } : {}),
         };
+        // Before it is emitted, so the onError hook sees the status and the
+        // fault when the response came first (it nearly always does).
+        if (resourceUrl) resources.line(error);
         this.emitPageError(errors, error);
       } else if (type === "warning") {
         warnings.push(text);
@@ -1770,23 +2190,52 @@ export class ChaosCrawler {
     // response carries `x-chaos-fault-*` headers describing any fault the
     // server-side middleware injected. Forward each response's headers to
     // the collector so `generateReport` (Task 13) can drain them.
+    //
+    // Always on, for the HTTP status of every request that answered >= 400:
+    // it used to be registered only for the collector, and an API's 500 was
+    // known only by the console line, without its method.
     const collector = this.serverFaultCollector;
-    const onResponse = collector
-      ? (response: Response) => {
-          if (!collecting) return;
-          // Playwright's APIResponse / Response gives a plain object via headers().
-          // Wrap in Headers so the collector's parser sees a Web-Standard surface.
-          const h = new Headers();
-          for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
-          collector.observe({ headers: h, pageUrl: page.url() });
-        }
-      : null;
-    if (onResponse) page.on("response", onResponse);
+    // The requests that answered >= 400: a stylesheet or script that did
+    // also fails as net::ERR_ABORTED, which is the HTTP error again (and
+    // `ignoreHttpPatterns`'), not a transport failure.
+    const answeredWithError = new WeakSet<Request>();
+    const onResponse = (response: Response) => {
+      if (!collecting) return;
+      const request = response.request();
+      if (response.fromServiceWorker()) this.bindWorkerFiring(request);
+      if (response.status() >= 400) answeredWithError.add(request);
+      let serverFault: string | undefined;
+      if (collector) {
+        // Playwright's APIResponse / Response gives a plain object via headers().
+        // Wrap in Headers so the collector's parser sees a Web-Standard surface.
+        const h = new Headers();
+        for (const [k, v] of Object.entries(response.headers())) h.set(k, v);
+        const event = collector.observe({ headers: h, pageUrl: page.url() });
+        if (event) this.serverFaultEventsSeen++;
+        if (event?.attrs.kind === "5xx") serverFault = "server:5xx";
+      }
+      const status = response.status();
+      if (status < 400) return;
+      const url = response.url();
+      if (this.isIgnoredHttp(url)) return;
+      resources.outcome({
+        url,
+        method: request.method().toUpperCase(),
+        status,
+        document: isMainDocument(request, page),
+        fault: this.faultOf(request, status, serverFault),
+      });
+    };
+    page.on("response", onResponse);
+
+    // This page's service-worker firings, which no later page inherits.
+    const workerFirings = new Map<string, FaultFiring[]>();
+    this.workerFaultFirings = workerFirings;
 
     await betweenRegistrations();
 
     const onRequestFailed = (request: Request) => {
-      if (!collecting) return;
+      if (!collecting || answeredWithError.has(request)) return;
       const requestUrl = request.url();
       // Test the pattern against the *message* — `"<url> - <errorText>"` — not
       // the URL alone. The doc on `ignoreErrorPatterns` promised
@@ -1796,6 +2245,14 @@ export class ChaosCrawler {
       // superset: every pattern that matched the URL still matches.
       const failure = request.failure();
       const message = `${requestUrl} - ${failure?.errorText || "Unknown error"}`;
+      const method = request.method().toUpperCase();
+      // A failed request has no response to say the worker served it: the
+      // abort the worker's fetch met is the page's failure too.
+      this.bindWorkerFiring(request);
+      const fault = this.faultOf(request, undefined);
+      // Before the checks below, which drop the network error and not the
+      // console line about the same request.
+      resources.outcome({ url: requestUrl, method, document: isMainDocument(request, page), fault });
       if (this.shouldIgnoreError(message)) return;
 
       // Check if this is a SPA-related error
@@ -1816,19 +2273,62 @@ export class ChaosCrawler {
         message,
         url: page.url(),
         timestamp: Date.now(),
+        method,
       };
+      if (fault !== undefined) this.noteFaultEcho(error, fault);
       this.emitPageError(errors, error);
     };
     page.on("requestfailed", onRequestFailed);
+
+    // The renderer process died: out of memory, or a browser bug the page
+    // hit. Every Playwright call on the page fails from here on, and the
+    // first one used to be what the page was reported as: a timeout with a
+    // `page.waitForTimeout: Page crashed` exception, or a clean success when
+    // no call after the crash threw. Not subject to `ignoreErrorPatterns`:
+    // it is the page's status, not noise on it.
+    let crashed = false;
+    const recordCrash = () => {
+      if (crashed) return;
+      crashed = true;
+      this.emitPageError(errors, { type: "crash", message: RENDERER_CRASHED, url: page.url(), timestamp: Date.now() });
+    };
+    const onCrash = () => {
+      if (collecting) recordCrash();
+    };
+    page.on("crash", onCrash);
+
+    // WebSocket connections, for a network fault rule aimed at one: routes
+    // never see them, and the rule just matched nothing. Only while a rule is
+    // configured, and only the URL.
+    const onWebSocket = (ws: { url(): string }) => {
+      if (!collecting) return;
+      const wsUrl = ws.url();
+      if (this.webSocketUrls.has(wsUrl) || this.webSocketUrls.size < MAX_WEBSOCKET_URLS) {
+        this.webSocketUrls.set(wsUrl, (this.webSocketUrls.get(wsUrl) ?? 0) + 1);
+      }
+    };
+    if (this.compiledFaultRules.length > 0) page.on("websocket", onWebSocket);
+
+    // The goto error names the URL navigated to, not the host that failed:
+    // a start URL that redirects to a host that is down (an SSO not up yet)
+    // fails as `net::ERR_CONNECTION_REFUSED at <start URL>` too.
+    const lastDocument = watchDocumentRequests(page);
 
     return {
       stop: () => {
         collecting = false;
         page.off("console", onConsole);
         page.off("pageerror", onPageError);
-        if (onResponse) page.off("response", onResponse);
+        page.off("response", onResponse);
         page.off("requestfailed", onRequestFailed);
+        if (this.workerFaultFirings === workerFirings) this.workerFaultFirings = null;
+        page.off("crash", onCrash);
+        page.off("websocket", onWebSocket);
+        lastDocument.stop();
       },
+      recordCrash,
+      crashed: () => crashed,
+      lastDocument,
     };
   }
 
@@ -1836,6 +2336,57 @@ export class ChaosCrawler {
    * Install this page's once-per-page init scripts: the unhandled-rejection
    * watcher and the SPA History-API hook.
    */
+  /**
+   * The runtime-fault, caller and iframe-fault init scripts, in that order:
+   * on the crawl's context from `start()`, and on a caller's page from
+   * `installPageInitScripts`.
+   */
+  private async addFaultInitScripts(target: Page | BrowserContext): Promise<void> {
+    // Runtime fault init script: monkey-patches in-page JS APIs (fetch / Date /
+    // …) on every navigation.
+    if (this.compiledRuntimeFaults.length > 0) {
+      const script = buildRuntimeFaultsScript(
+        this.compiledRuntimeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await target.addInitScript({ content: script });
+    }
+
+    // Caller-supplied init scripts, after the fault layers so a script can
+    // observe the patched APIs. Installed even when empty-checked away, so a
+    // caller that passes `[]` costs nothing.
+    for (const script of this.options.initScripts ?? []) {
+      await target.addInitScript({ content: script });
+    }
+
+    // Iframe fault init script: monkey-patches HTMLIFrameElement.prototype.src
+    // (and setAttribute("src", …)) so faults fire when the host page assigns
+    // an iframe's URL. Independent of runtimeFaults so a page can configure
+    // either layer on its own.
+    if (this.compiledIframeFaults.length > 0) {
+      const script = buildIframeFaultsScript(
+        this.compiledIframeFaults.map((c) => c.fault),
+        this.rng.seed,
+      );
+      await target.addInitScript({ content: script });
+    }
+  }
+
+  /**
+   * A caller's page on the `testPage()` path is in a context `start()` never
+   * saw, so it has none of the init scripts `start()` put on the crawl's own:
+   * without these its runtime and iframe faults silently never ran. Added
+   * after `beginLoadSpan`, which installs the perf collector on such a page,
+   * so the collector still runs first and keeps the clock a `clock-skew`
+   * fault replaces, as on the crawl's own pages. Once per page: init scripts
+   * stay on it for every later navigation.
+   */
+  private async installCallerPageFaultScripts(page: Page): Promise<void> {
+    if (page === this.cdpPage || page.context() === this.context || this.faultScriptPages.has(page)) return;
+    this.faultScriptPages.add(page);
+    await this.addFaultInitScripts(page);
+  }
+
   private async installPageInitScripts(page: Page): Promise<void> {
     // Capture unhandled promise rejections. The install claims them via
     // `preventDefault` so they don't also fire as `pageerror` (which we'd
@@ -1862,16 +2413,24 @@ export class ChaosCrawler {
     const collectors = await this.attachPageCollectors(page, errors, warnings, () =>
       this.installPageInitScripts(page),
     );
+    this.pageDocument = collectors.lastDocument;
 
     this.backedOutActions = [];
     this.pageBlockedNavigations = [];
+    this.pageOffsiteNavigations = [];
+    this.visitUrl = url;
 
     let result: PageResult;
+    // The page loaded and the crawl stopped there (`NotCrawled`).
+    let stoppedAt = false;
     // Whether `page.goto` returned. Only a navigation that never did leaves a
     // load in flight for `finishPagePerf` to stop; a page that loaded and
     // then failed later (an action, an invariant, a screenshot) still has a
     // live document.
     let navigated = false;
+    // Whether the crawler's own `page.goto` (and the load's settle) is what
+    // threw: a `navigation` error, not one of the page's.
+    let navigating = false;
 
     // Adaptive settle counts this page's requests from before its `goto`, so
     // the load's own requests are in flight when the load settle begins.
@@ -1893,14 +2452,17 @@ export class ChaosCrawler {
       // measures the navigation under them rather than the faults' own
       // setup, and closes after `collectLoadMetrics` below.
       await this.beginLoadSpan(page, url);
+      await this.installCallerPageFaultScripts(page);
 
+      navigating = true;
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
+      navigating = false;
       navigated = true;
 
       // The page loaded, but is not the crawl's to act on: stop here.
       const notCrawled = this.notCrawledReason(page.url(), url, response);
       if (notCrawled) {
-        if (notCrawled.fields.redirectedTo) this.noteBlockedNavigation(notCrawled.fields.redirectedTo);
+        if (notCrawled.landed) this.noteBlockedNavigation(notCrawled.landed);
         // Close the load span as a normal load would, so the page's perf
         // session finishes cleanly; its report is dropped below.
         await this.perf.endLoad({ settleCapped: loadCapped });
@@ -1963,22 +2525,28 @@ export class ChaosCrawler {
         screenshot = filename;
       }
 
+      // At the end of the visit rather than at load: a worker that installs
+      // on this visit and claims the page controls it from then on.
+      const serviceWorker = await this.serviceWorkerReach(page);
+
       result = {
         url,
         status: "success",
         statusCode: response?.status(),
         loadTime,
         errors,
-        hasErrors: errors.length > 0,
+        hasErrors: hasCountedErrors(errors),
         warnings,
         metrics,
         links,
         screenshot,
+        ...(serviceWorker ? { serviceWorker } : {}),
         ...this.blockedNavigationsField(),
       };
     } catch (err) {
       const loadTime = Date.now() - startTime;
       if (err instanceof NotCrawled) {
+        stoppedAt = true;
         result = {
           url,
           status: "success",
@@ -1991,28 +2559,78 @@ export class ChaosCrawler {
           ...err.fields,
           ...this.blockedNavigationsField(),
         };
-      } else {
-        const isTimeout = err instanceof Error && err.message.includes("Timeout");
-        const combinedErrors: PageError[] = [
-          ...errors,
-          {
-            type: "exception",
-            message: errorMessage(err),
-            stack: err instanceof Error ? err.stack : undefined,
-            url,
-            timestamp: Date.now(),
-          },
-        ];
+      } else if (collectors.crashed() || CRASHED_PAGE_ERROR.test(stripAnsi(errorMessage(err)))) {
+        // What threw is only the first call that met the dead page: the
+        // crash is the page's error, not a timeout or a JS exception. The
+        // message test covers a call that failed before the `crash` event
+        // arrived; no test pins that order (renderer-crash.e2e.test.ts
+        // always awaits the event first), as no trigger makes it reliable.
+        collectors.recordCrash();
         result = {
           url,
-          status: isTimeout ? "timeout" : "error",
+          status: "error",
           loadTime,
-          errors: combinedErrors,
-          hasErrors: combinedErrors.length > 0,
+          errors: [...errors],
+          hasErrors: true,
           warnings,
           links: [],
           ...this.blockedNavigationsField(),
         };
+      } else {
+        const raw = stripAnsi(errorMessage(err));
+        const isTimeout = raw.includes("Timeout");
+        // The crawler's own call failing (`crawlerErrorType`) is a
+        // `navigation` error: the page threw nothing, and its status is the
+        // finding. The message stops before Playwright's call log, which
+        // names the `waitUntil` of the crawl's --settle and stays in the
+        // stack.
+        const type = crawlerErrorType(raw, navigating);
+        const stack = err instanceof Error && err.stack ? stripAnsi(err.stack) : undefined;
+        // The site answered the navigation with a redirect, and where it
+        // pointed is what failed: not a site that is down.
+        const redirected = type === "navigation" && collectors.lastDocument()?.redirected === true;
+        const offsiteTo = redirected ? collectors.lastDocument()?.to : undefined;
+        if (offsiteTo !== undefined && this.isExternalUrl(offsiteTo)) {
+          // A redirect to another origin, whose host then failed (a 302 to
+          // an SSO that is down): the page answered, and what failed is not
+          // the crawled site. Reported as the redirect it is, the way one
+          // whose host answered is, not as this URL failing to load.
+          const failed = /net::ERR_[A-Z0-9_]+/.exec(raw)?.[0] ?? withoutCallLog(raw).replace(/^page\.goto: /, "");
+          this.noteBlockedNavigation(offsiteNavigation(url, offsiteTo, "server-redirect", { failed }));
+          result = {
+            url,
+            status: "success",
+            loadTime,
+            errors: [],
+            hasErrors: false,
+            warnings: [...warnings, `redirected off-site to ${offsiteTo}, which failed to load (${failed}); not crawled`],
+            links: [],
+            redirectedTo: offsiteTo,
+            ...this.blockedNavigationsField(),
+          };
+        } else {
+          const combinedErrors: PageError[] = [
+            ...errors,
+            {
+              type,
+              message: withoutCallLog(raw),
+              ...(stack ? { stack } : {}),
+              ...(redirected ? { redirected: true as const } : {}),
+              url,
+              timestamp: Date.now(),
+            },
+          ];
+          result = {
+            url,
+            status: isTimeout ? "timeout" : "error",
+            loadTime,
+            errors: combinedErrors,
+            hasErrors: hasCountedErrors(combinedErrors),
+            warnings,
+            links: [],
+            ...this.blockedNavigationsField(),
+          };
+        }
       }
     }
 
@@ -2023,6 +2641,13 @@ export class ChaosCrawler {
     // the measurement itself causes must not reach the error stream, which
     // is what a crawl with perf off would report.
     collectors.stop();
+    this.pageDocument = () => null;
+    // A crash nothing after it threw on (the crawl's later calls on the page
+    // are best-effort reads): the page still did not survive its visit.
+    if (collectors.crashed() && result.status !== "error") {
+      result.status = "error";
+      result.hasErrors = true;
+    }
     requestTracking?.detach();
     this.pageRequests = null;
     if (this.settle.mode === "adaptive") result.settleCapped = this.pageSettleCapped;
@@ -2032,8 +2657,12 @@ export class ChaosCrawler {
     // the attempt cost.
     await this.finishPagePerf(result, url, { navigationFailed: !navigated });
     // A page the crawl stopped at: what was measured was another site's page,
-    // an excluded one, or the browser's viewer for a file.
-    if (result.redirectedTo || result.excludedTo || result.contentType) {
+    // an excluded one, the browser's viewer for a file or its error page, and
+    // the errors are the other site's (a failed redirect's error is in its
+    // `offsiteNavigations` entry, not here). Still right with the off-site
+    // redirect check: it runs `afterVisit`, below, so its violation is added
+    // after this and stays.
+    if (stoppedAt || result.redirectedTo || result.excludedTo || result.contentType) {
       delete result.perf;
       delete result.perfPage;
       result.errors = [];
@@ -2046,8 +2675,14 @@ export class ChaosCrawler {
     this.backedOutActions = [];
     if (result.errors.some((e) => e.url !== undefined && this.isForbiddenUrl(e.url))) {
       result.errors = result.errors.filter((e) => e.url === undefined || !this.isForbiddenUrl(e.url));
-      result.hasErrors = result.errors.length > 0;
+      result.hasErrors = hasCountedErrors(result.errors);
     }
+    // Last, after the other site's errors are dropped above: an `afterVisit`
+    // violation (an off-site redirect, `noOffsiteRedirect`) is this page's
+    // own, and is what a page the crawl stopped at can still be failed for.
+    const visitErrors = result.errors.length;
+    await this.runInvariants("afterVisit", page, url, result.errors);
+    if (result.errors.length !== visitErrors) result.hasErrors = hasCountedErrors(result.errors);
 
     // onPageComplete fires from the caller (crawlPage / testPage) after any
     // recovery reclassification so the callback sees the final status.
@@ -2066,7 +2701,8 @@ export class ChaosCrawler {
       // `testPage()` path belongs to a context the crawler never touched,
       // even when this same crawler ran `start()` before.
       installCollector: page.context() !== this.context,
-      // The runtime-fault script is on every page of the crawl.
+      // The runtime-fault script is on every page: the crawl's from its
+      // context, a caller's from `installCallerPageFaultScripts`.
       pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
     });
   }
@@ -2134,13 +2770,20 @@ export class ChaosCrawler {
     };
     this.currentAction = placeholder;
     const urlBefore = page.url();
+    const navigationsBefore = this.pageOffsiteNavigations.length;
     const span = await this.beginActionSpan();
-    const result = await perform();
-    await this.endActionSpan(page, span, result, urlBefore);
+    let result: ActionResult | null;
+    this.stepRunning = true;
+    try {
+      result = await perform();
+      await this.endActionSpan(page, span, result, urlBefore);
+    } finally {
+      this.stepRunning = false;
+    }
     if (result === null) return null;
     if (placeholder.traceIds) result.traceIds = placeholder.traceIds;
     this.currentAction = result;
-    await this.returnFromForbidden(page, urlBefore, result);
+    await this.returnFromForbidden(page, urlBefore, result, navigationsBefore);
     return result;
   }
 
@@ -2158,9 +2801,35 @@ export class ChaosCrawler {
     landed: string,
     url: string,
     response: Response | null,
-  ): { message: string; fields: NotCrawled["fields"] } | undefined {
+  ): { message: string; fields: NotCrawled["fields"]; landed?: OffsiteNavigation } | undefined {
+    if (landed.startsWith("chrome-error:")) {
+      // The browser's error page: the guard blocked a navigation of the
+      // page's (a script or a meta refresh sent it off-site), and that
+      // blocked URL is where it went. Already counted when it was blocked.
+      const blocked = this.lastBlockedPageNavigation(0);
+      if (blocked) return { message: `redirected off-site to ${blocked.to}; not crawled`, fields: { redirectedTo: blocked.to } };
+      return { message: `landed on the browser's error page (${landed}); not crawled`, fields: {} };
+    }
+    if (this.isExternalUrl(landed) && !/^https?:/i.test(landed)) {
+      // `about:blank`, a `data:` or `blob:` URL: no other site, and nothing
+      // left the browser. Not an off-site navigation, and not counted as one.
+      return { message: `navigated to ${landed}; not crawled`, fields: { redirectedTo: landed } };
+    }
     if (this.isExternalUrl(landed)) {
-      return { message: `redirected off-site to ${landed}; not crawled`, fields: { redirectedTo: landed } };
+      // The guard lets a redirect hop through, so a page that shows another
+      // site's got there by a 3xx: the goto's own (its response is the
+      // other site's), or one a later navigation of the page met (named by
+      // the site's URL that answered it). With `blockExternalNavigation` off
+      // nothing was blocked, and a page that shows another site without a
+      // redirect sent itself there.
+      const via = this.redirectSource(landed);
+      const viaRedirect = via !== undefined || (response !== null && this.isExternalUrl(response.url()));
+      const trigger = viaRedirect || this.options.blockExternalNavigation ? "server-redirect" : "script";
+      return {
+        message: `redirected off-site to ${landed}; not crawled`,
+        fields: { redirectedTo: landed },
+        landed: offsiteNavigation(via ?? url, landed, trigger),
+      };
     }
     if (this.shouldExclude(landed) && !this.shouldExclude(url)) {
       return { message: `redirected to excluded ${landed}; not crawled`, fields: { excludedTo: landed } };
@@ -2172,9 +2841,11 @@ export class ChaosCrawler {
     return undefined;
   }
 
-  /** `blockedNavigations` for the current page's result: absent when none was blocked. */
-  private blockedNavigationsField(): Pick<PageResult, "blockedNavigations"> {
-    return this.pageBlockedNavigations.length > 0 ? { blockedNavigations: [...this.pageBlockedNavigations] } : {};
+  /** `blockedNavigations` and `offsiteNavigations` for the current page's result: absent when none was blocked. */
+  private blockedNavigationsField(): Pick<PageResult, "blockedNavigations" | "offsiteNavigations"> {
+    return this.pageBlockedNavigations.length > 0
+      ? { blockedNavigations: [...this.pageBlockedNavigations], offsiteNavigations: [...this.pageOffsiteNavigations] }
+      : {};
   }
 
   /** A URL a step must not stay on: another site, or one `excludePatterns` keeps the crawl off. */
@@ -2195,15 +2866,39 @@ export class ChaosCrawler {
    * that page), and the crawler goes back so the remaining steps act on
    * this page again.
    */
-  private async returnFromForbidden(page: Page, urlBefore: string, result: ActionResult): Promise<void> {
+  private async returnFromForbidden(
+    page: Page,
+    urlBefore: string,
+    result: ActionResult,
+    navigationsBefore: number,
+  ): Promise<void> {
     const landed = page.url();
     if (!this.isForbiddenUrl(landed)) {
       // A link to a feed or a JSON file opens the browser's viewer for it;
       // the steps after it would measure and click the viewer.
       if (landed === urlBefore || (await isHtmlDocument(page))) return;
       result.openedFile = landed;
+    } else if (landed.startsWith("chrome-error:")) {
+      // The browser's error page: the guard blocked where the step sent
+      // the page (a button whose handler sets `location`), and counted it.
+      // Without one, a same-site navigation failed; go back all the same.
+      const blocked = this.lastBlockedPageNavigation(navigationsBefore);
+      if (blocked) result.leftSiteTo = blocked.to;
     } else if (this.isExternalUrl(landed)) {
-      this.noteBlockedNavigation(landed);
+      // Through a 3xx (a form posted to an endpoint that redirects): that
+      // endpoint's redirect, read against its own URL. Without one (no
+      // guard to block it), the step's, unless it went to the URL in the
+      // page's own address.
+      const via = /^https?:/i.test(landed) ? this.redirectSource(landed) : undefined;
+      this.noteBlockedNavigation(
+        via !== undefined
+          ? offsiteNavigation(via, landed, "server-redirect")
+          : offsiteNavigation(
+              urlBefore,
+              landed,
+              blockedTrigger({ mainFrame: true, stepRunning: true, reflected: reflectedIn(urlBefore, landed) !== undefined }),
+            ),
+      );
       // Not `blockedExternal`: replay reads that as "never clicked", and this
       // click did happen.
       result.leftSiteTo = landed;
@@ -2381,15 +3076,67 @@ export class ChaosCrawler {
     } catch {
       return scrollOnlyTargets();
     }
-    return weighActionTargets(raw, {
+    const ctx = {
       weights: this.actionWeights,
       baseOrigin: this.baseOrigin,
-      familiarity: (url) => {
-        if (this.visited.has(url)) return "visited";
-        return this.queue.some((e) => normalizeUrl(e.url) === url) ? "queued" : "new";
+      familiarity: (url: string) => {
+        if (this.visited.has(url)) return "visited" as const;
+        return this.queue.some((e) => normalizeUrl(e.url) === url) ? ("queued" as const) : ("new" as const);
       },
-      excluded: (url) => this.shouldExclude(url),
+      excluded: (url: string) => this.shouldExclude(url),
+    };
+    const targets = weighActionTargets(raw, ctx);
+    if (this.options.ariaTargets) await this.joinAria(page, targets, ctx);
+    return targets;
+  }
+
+  /**
+   * `ariaTargets`: describe `targets` from the accessibility snapshot and add
+   * the controls the CSS scrape missed, before the scroll target. A snapshot
+   * that fails leaves the scrape's targets as they are.
+   */
+  private async joinAria(page: Page, targets: ActionTarget[], ctx: Parameters<typeof weighActionTargets>[1]): Promise<void> {
+    let extras: ReturnType<typeof joinAriaTargets>;
+    try {
+      const view = await readAria(page);
+      extras = joinAriaTargets(targets, await matchAriaTargets(page, view));
+    } catch (err) {
+      this.logger.debug("aria_targets_failed", { error: errorMessage(err) });
+      return;
+    }
+    if (extras.length === 0) return;
+    const weighed = weighActionTargets(
+      extras.map((e) => e.raw),
+      ctx,
+    ).filter((t) => t.type !== "scroll");
+    // `weighActionTargets` drops links to excluded URLs, so join back by key.
+    const byKey = new Map(extras.map((e) => [`${e.raw.role === null ? `tag:${e.raw.tag}` : `role:${e.raw.role}`}:${e.raw.index}`, e]));
+    const added = weighed.map((t) => {
+      const e = byKey.get(t.peerKey ?? "");
+      return e ? { ...t, ...(e.selector ? { selector: e.selector } : {}), ariaDescription: e.candidate.description, ariaRef: e.candidate.ref } : t;
     });
+    const scrollAt = targets.findIndex((t) => t.type === "scroll");
+    targets.splice(scrollAt < 0 ? targets.length : scrollAt, 0, ...added);
+    this.logger.debug("aria_targets", { added: added.length });
+  }
+
+  /**
+   * The page as an accessibility outline, `[#N]` marking candidate N of
+   * `targets`. For drivers and models: the structure a flat candidate list
+   * cannot carry.
+   */
+  private async outlineFor(page: Page, targets: ReadonlyArray<ActionTarget>): Promise<string> {
+    const view = await readAria(page);
+    const matches = await matchAriaTargets(page, view);
+    const indexByKey = new Map<string, number>();
+    targets.forEach((t, i) => {
+      if (t.peerKey) indexByKey.set(t.peerKey, i);
+    });
+    const tagged = matches.flatMap((m) => {
+      const index = m.key === null ? undefined : indexByKey.get(m.key);
+      return index === undefined ? [] : [{ ref: m.candidate.ref, index }];
+    });
+    return ariaOutline(view.nodes, tagged);
   }
 
   /**
@@ -2533,6 +3280,8 @@ export class ChaosCrawler {
         // Closed or crashed page — the page-visit URL is the honest answer.
       }
 
+      const stepTargets = targets;
+      let outline: Promise<string> | undefined;
       const step: DriverStep = {
         url,
         currentUrl,
@@ -2542,7 +3291,10 @@ export class ChaosCrawler {
         stepIndex: actionsPerformed,
         rng: this.rng,
         screenshot: screenshotFn,
+        // Once per step, however many times a driver asks.
+        outline: () => (outline ??= this.outlineFor(page, stepTargets)),
         invariantViolations: pendingViolations,
+        ...(this.options.driverGoal !== undefined ? { goal: this.options.driverGoal } : {}),
       };
       // Set only when measured, so a driver can tell "unmeasured" from
       // "cost nothing" by the field's presence.
@@ -2553,9 +3305,12 @@ export class ChaosCrawler {
       try {
         pick = await driver.selectAction(step);
       } catch (err) {
-        this.logger.warn("driver_threw", {
+        const error = errorMessage(err);
+        this.warn("driver_threw", { driver: driver.name, error }, {
+          code: "driver-threw",
+          message: `driver "${driver.name}" threw in selectAction (${error}), so the step was skipped`,
           driver: driver.name,
-          error: errorMessage(err),
+          url,
         });
         pick = null;
       }
@@ -2588,7 +3343,14 @@ export class ChaosCrawler {
       } else {
         const selectedTarget = targets[pick.index];
         if (!selectedTarget) {
-          this.logger.warn("driver_out_of_range", { driver: driver.name, index: pick.index });
+          this.warn("driver_out_of_range", { driver: driver.name, index: pick.index }, {
+            code: "driver-out-of-range",
+            message:
+              `driver "${driver.name}" picked a candidate index that is not in the step's candidates, ` +
+              `so the pick was refused and the driver asked again`,
+            driver: driver.name,
+            url,
+          });
           continue;
         }
         if (pick.operation === "clear" && selectedTarget.type !== "input") {
@@ -2596,11 +3358,18 @@ export class ChaosCrawler {
           // and a thrown action is recorded against the page under test.
           // An unsupported operation is the driver's mistake, so it reads
           // like an out-of-range index — the step is not spent.
-          this.logger.warn("driver_operation_unsupported", {
-            driver: driver.name,
-            operation: pick.operation,
-            targetType: selectedTarget.type,
-          });
+          this.warn(
+            "driver_operation_unsupported",
+            { driver: driver.name, operation: pick.operation, targetType: selectedTarget.type },
+            {
+              code: "driver-operation-unsupported",
+              message:
+                `driver "${driver.name}" asked to ${pick.operation} a ${selectedTarget.type} candidate, which only an ` +
+                `input takes, so the pick was refused and the driver asked again`,
+              driver: driver.name,
+              url,
+            },
+          );
           continue;
         }
         selectorForCoverage = selectedTarget.selector;
@@ -2625,9 +3394,12 @@ export class ChaosCrawler {
       try {
         driver.onActionComplete?.(result, step);
       } catch (err) {
-        this.logger.warn("driver_onActionComplete_threw", {
+        const error = errorMessage(err);
+        this.warn("driver_onActionComplete_threw", { driver: driver.name, error }, {
+          code: "driver-threw",
+          message: `driver "${driver.name}" threw in onActionComplete (${error})`,
           driver: driver.name,
-          error: errorMessage(err),
+          url,
         });
       }
 
@@ -2666,6 +3438,7 @@ export class ChaosCrawler {
       let result: ActionResult;
       const urlBefore = page.url();
       const span = await this.beginActionSpan();
+      this.stepRunning = true;
       try {
         if (action.blockedExternal) {
           // The original run detected an external link and did not click it.
@@ -2734,7 +3507,11 @@ export class ChaosCrawler {
           timestamp,
         };
       }
-      await this.endActionSpan(page, span, result, urlBefore);
+      try {
+        await this.endActionSpan(page, span, result, urlBefore);
+      } finally {
+        this.stepRunning = false;
+      }
       this.recordAction(result, url, undefined);
       this.recordReplayOutcome(action, result);
       await this.pauseBetweenActions(page);
@@ -2966,24 +3743,8 @@ export class ChaosCrawler {
         this.compiledLifecycleFaults.length > 0
           ? lifecycleStatsFrom(this.compiledLifecycleFaults)
           : undefined,
-      runtimeFaults:
-        this.compiledRuntimeFaults.length > 0
-          ? this.compiledRuntimeFaults.map((c) => ({
-              rule: c.name,
-              matched: c.matched,
-              fired: c.fired,
-            }))
-          : undefined,
-      iframeFaults:
-        this.compiledIframeFaults.length > 0
-          ? this.compiledIframeFaults.map((c) => ({
-              rule: c.name,
-              selector: c.fault.selector,
-              action: c.fault.action.kind,
-              matched: c.matched,
-              fired: c.fired,
-            }))
-          : undefined,
+      runtimeFaults: this.compiledRuntimeFaults.length > 0 ? this.getRuntimeFaultStats() : undefined,
+      iframeFaults: this.compiledIframeFaults.length > 0 ? this.getIframeFaultStats() : undefined,
       coverage: this.coverageFeedback
         ? summarizeCoverage({
             globalCovered: this.globalCoverage,
@@ -3012,17 +3773,109 @@ export class ChaosCrawler {
       perf: buildCrawlPerfSummary(this.results, this.actions, {
         ...(this.perf.coverage ? { coverage: this.perf.coverage } : {}),
         settle: this.settle,
+        ...(this.browserVersion ? { browser: this.browserVersion } : {}),
       }),
     };
   }
 
   /** Per-rule fault injection stats (for reporting). */
-  getFaultStats(): FaultInjectionStats[] {
-    return this.compiledFaultRules.map((c) => ({
-      rule: c.rule.name ?? c.pattern.toString(),
+  getFaultStats(): CrawlFaultInjectionStats[] {
+    return this.compiledFaultRules.map((c) => {
+      const rule = c.rule.name ?? c.pattern.toString();
+      const echoes = this.faultEchoCounts.get(rule) ?? 0;
+      const webSocket = c.matched === 0 ? this.webSocketReach(c.pattern) : undefined;
+      return {
+        rule,
+        matched: c.matched,
+        injected: c.injected,
+        ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
+        ...(echoes > 0 ? { echoes } : {}),
+        ...(webSocket ? { webSocket } : {}),
+      };
+    });
+  }
+
+  /**
+   * The WebSocket connections the pages opened that `pattern` matches, for a
+   * rule that matched nothing: undefined unless there were some, or the
+   * pattern names only `ws:` / `wss:` URLs.
+   */
+  private webSocketReach(pattern: RegExp): CrawlFaultInjectionStats["webSocket"] {
+    let connections = 0;
+    let first: string | undefined;
+    for (const [url, n] of this.webSocketUrls) {
+      pattern.lastIndex = 0;
+      if (!pattern.test(url)) continue;
+      connections += n;
+      first ??= url;
+    }
+    const webSocketOnly = isWebSocketOnlyPattern(pattern);
+    if (connections === 0 && !webSocketOnly) return undefined;
+    return { connections, ...(first !== undefined ? { first } : {}), webSocketOnly };
+  }
+
+  /**
+   * The fault that answered `request` with `status` (undefined: the request
+   * failed), if one did: the page route's, the service-worker route's bound
+   * to it when it fired, or the server's (`server`, from its
+   * `x-chaos-fault-*` headers).
+   */
+  private faultOf(request: Request, status: number | undefined, server?: string): string | undefined {
+    if (server !== undefined) return server;
+    const firing = this.faultedRequests.get(request);
+    // Only an outcome the fault makes: a worker can answer its own fetch's
+    // failure with a fallback, and the page's request then ends as the app
+    // made it end.
+    return firing !== undefined && firing.status === status ? firing.label : undefined;
+  }
+
+  /**
+   * Bind the oldest service-worker firing of `request`'s method and URL to
+   * it, if one is waiting: a page outcome the worker served.
+   */
+  private bindWorkerFiring(request: Request): void {
+    const firings = this.workerFaultFirings;
+    if (!firings || this.faultedRequests.has(request)) return;
+    const key = requestKey(request);
+    const firing = firings.get(key)?.shift();
+    if (firings.get(key)?.length === 0) firings.delete(key);
+    if (firing) this.faultedRequests.set(request, firing);
+  }
+
+  /**
+   * Record `error` as the echo of `fault`: tagged, so the counts and exit
+   * rules leave it out, unless `strictCountsFaultEchoes`. Counted for the
+   * rule either way.
+   */
+  private noteFaultEcho(error: PageError, fault: string): void {
+    this.faultEchoCounts.set(fault, (this.faultEchoCounts.get(fault) ?? 0) + 1);
+    if (!this.options.strictCountsFaultEchoes) error.causedByFault = fault;
+  }
+
+  private isIgnoredHttp(url: string): boolean {
+    return matchesAnyPattern(url, this.options.ignoreHttpPatterns);
+  }
+
+  /**
+   * Per-fault runtime-fault stats, as `report.runtimeFaults` carries them.
+   * The way to read them after `testPage()`, which returns no report.
+   */
+  getRuntimeFaultStats(): RuntimeFaultStats[] {
+    return this.compiledRuntimeFaults.map((c) => ({
+      rule: c.name,
       matched: c.matched,
-      injected: c.injected,
-      ...(c.suppressed > 0 ? { suppressed: c.suppressed } : {}),
+      fired: c.fired,
+    }));
+  }
+
+  /** Per-fault iframe-fault stats, as `report.iframeFaults` carries them. */
+  getIframeFaultStats(): IframeFaultStats[] {
+    return this.compiledIframeFaults.map((c) => ({
+      rule: c.name,
+      selector: c.fault.selector,
+      action: c.fault.action.kind,
+      matched: c.matched,
+      fired: c.fired,
     }));
   }
 
@@ -3064,5 +3917,59 @@ function documentContentType(response: Response | null): string | undefined {
   const type = response.headers()["content-type"]?.split(";")[0]?.trim().toLowerCase();
   if (!type || type.includes("html")) return undefined;
   return type;
+}
+
+/**
+ * A fault that answered a request, and the outcome it gives it: `status`
+ * for a status fault's response, undefined for a request it fails.
+ */
+interface FaultFiring {
+  label: string;
+  status?: number;
+}
+
+/**
+ * The firing of `fault`, when it answers the request rather than passing it
+ * on: what makes the browser's error about the request the fault's echo. A
+ * `hang` counts: a released one aborts it. A `delay` does not.
+ */
+function faultFiring(fault: Fault, label: string): FaultFiring | undefined {
+  if (fault.kind === "status") return { label, status: fault.status };
+  return fault.kind === "abort" || fault.kind === "hang" ? { label } : undefined;
+}
+
+/**
+ * `PageResult.hasErrors`: an error other than the echo of a fault the run
+ * injected, as `summary.pagesWithErrors` counts.
+ */
+function hasCountedErrors(errors: readonly PageError[]): boolean {
+  return errors.some((e) => !isFaultEcho(e));
+}
+
+/** `METHOD url`: how a page request and the service worker's request for it match. */
+function requestKey(request: Request): string {
+  return `${request.method().toUpperCase()} ${request.url()}`;
+}
+
+/** Whether `request` is `page`'s own main-frame document. */
+function isMainDocument(request: Request, page: Page): boolean {
+  if (!request.isNavigationRequest()) return false;
+  try {
+    return request.frame() === page.mainFrame();
+  } catch {
+    // A service worker's request has no frame.
+    return false;
+  }
+}
+
+/**
+ * The file behind the browser's "Failed to load resource: …" console error,
+ * which names neither it nor the page element: that message's location is
+ * the resource. Undefined for any other message, whose location is the line
+ * of script that logged it.
+ */
+function failedResourceUrl(text: string, msg: ConsoleMessage): string | undefined {
+  if (!text.startsWith("Failed to load resource")) return undefined;
+  return msg.location().url || undefined;
 }
 

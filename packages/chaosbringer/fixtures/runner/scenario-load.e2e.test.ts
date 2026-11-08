@@ -117,7 +117,9 @@ describe("scenarioLoad against fixture site", () => {
     expect(faultStats.length).toBe(1);
     expect(faultStats[0]!.injected).toBeGreaterThan(0);
     // Network errors registered on the API endpoint.
-    const api = report.endpoints.find((e) => e.key.startsWith("/api"));
+    // Exactly the endpoint: `startsWith("/api")` also matches the page itself,
+    // `/api-consumer`, which comes first whenever it was requested as often.
+    const api = report.endpoints.find((e) => e.key === "/api/data");
     expect(api).toBeDefined();
     expect(api!.errorCount).toBeGreaterThan(0);
   }, 60000);

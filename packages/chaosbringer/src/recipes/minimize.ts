@@ -21,6 +21,7 @@
  */
 import type { Page } from "playwright";
 import { runRecipe } from "./replay.js";
+import type { RecipeVars } from "./templating.js";
 import type {
   ActionRecipe,
   ActionTrace,
@@ -50,6 +51,12 @@ export interface MinimizeRecipeOptions {
    * can synthesise their own.
    */
   successCheck?: (ctx: GoalContext) => Promise<boolean>;
+  /**
+   * Values for `{{var}}` placeholders in the trace's steps
+   * (`RunRecipeOptions.vars`). A trace a driver recorded holds what it
+   * typed, so it needs none, unless a value it typed reads as one.
+   */
+  vars?: RecipeVars;
   verbose?: boolean;
 }
 
@@ -147,7 +154,7 @@ async function tryReproduce(
       createdAt: 0,
       updatedAt: 0,
     };
-    const result = await runRecipe(page, ephemeral);
+    const result = await runRecipe(page, ephemeral, { vars: opts.vars });
     if (!result.ok) return false;
     return await goalFires(page, opts);
   } finally {

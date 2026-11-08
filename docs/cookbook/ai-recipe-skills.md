@@ -138,7 +138,10 @@ await browser.close();
 
 5/5 success → promoted to `verified`, immediately usable by `recipeDriver`.
 2/5 or fewer → demoted. In between → stays a candidate (probably needs more
-data or a tighter precondition).
+data or a tighter precondition). A run whose navigation cannot connect to
+the site (the host is down, the URL is wrong) is no verdict on the recipe:
+verification stops there, records nothing, and returns `unreachable` with
+the net error.
 
 ## Recipe step format
 
@@ -181,6 +184,23 @@ not become a remote-code-execution vector.
   selector that takes 2s to appear will never match. If your recipe needs
   to wait for an SPA bootstrap, put a `waitFor` as the first step
   *after* preconditions match.
+- **Postconditions are waited for, up to 5s each.** After the last step,
+  replay waits until every postcondition holds: `urlPattern` is a regex
+  source tested against the full `page.url()` (as preconditions read it),
+  `hasSelector` / `hidesSelector` a visible or hidden selector. A
+  `urlPattern` that is not a valid regex fails the replay
+  (`postcondition not satisfied: url~/…/ is not a valid regex`), and so
+  does one the URL never matches (`postcondition not satisfied:
+  url~/\/thanks/`). Before 0.16 a postcondition's `urlPattern` was not
+  checked at all, so a recipe promoted then can be demoted the next time
+  `recipes verify` runs it.
+- **A templated recipe needs its vars.** A recipe with `{{password}}` (as
+  `chaosbringer drive` records a password field) replays with the values
+  `recipeDriver({ store, vars: { password } })` gives; one whose
+  preconditions use a variable `vars` lacks never matches, and one whose
+  steps do fails at that step (`variable "password" is not defined`) and
+  is recorded as a failure. Before 0.16 a replay without `vars` typed the
+  braces and reported ok.
 - **Recipes don't compose automatically.** `requires: ["auth/login"]` is
   metadata — the driver does not chain. Either inline the prerequisite
   steps or run the prerequisite recipe explicitly before the dependent one.

@@ -10,8 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@playwright/test": "^1.52.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.4",
     "chaosbringer": "workspace:*",
-    "typescript": "^5.8.3"
+    "typescript": "^7.0.2"
   }
 }

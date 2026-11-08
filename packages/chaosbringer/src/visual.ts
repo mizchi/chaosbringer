@@ -5,8 +5,9 @@
  * the pixel diff exceeds the configured budget, fail with a one-line summary
  * and optionally write a diff PNG so CI artefacts can show what changed.
  *
- * `pixelmatch` and `pngjs` are optional peer deps — a clear install-hint
- * error is thrown if they're missing when the invariant actually runs.
+ * `pixelmatch` and `pngjs` are optional peer deps, declared in the
+ * invariant's `peers`: a crawl with this invariant and either missing throws
+ * `MissingPeerError` before its browser starts.
  *
  * The pure helpers (`screenshotFilename`, `compareScreenshotBuffers`) are
  * unit-testable without a browser.
@@ -15,6 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fnv1a } from "./shard.js";
+import { VISUAL_REGRESSION_PEERS } from "./peers.js";
 import type { Invariant, UrlMatcher } from "./types.js";
 
 export interface VisualRegressionOptions {
@@ -162,7 +164,7 @@ async function loadPixelmatch(): Promise<PixelmatchFn> {
     return (mod.default ?? mod) as PixelmatchFn;
   } catch {
     throw new Error(
-      "chaosbringer: invariants.visualRegression() requires the `pixelmatch` package. Install it with `pnpm add pixelmatch pngjs`."
+      "chaosbringer: invariants.visualRegression() requires the `pixelmatch` package. Install it with `pnpm add -D pixelmatch pngjs`."
     );
   }
 }
@@ -181,7 +183,7 @@ async function loadPngjs(): Promise<{ PNG: PngCtor }> {
     return { PNG: mod.PNG };
   } catch {
     throw new Error(
-      "chaosbringer: invariants.visualRegression() requires the `pngjs` package. Install it with `pnpm add pixelmatch pngjs`."
+      "chaosbringer: invariants.visualRegression() requires the `pngjs` package. Install it with `pnpm add -D pixelmatch pngjs`."
     );
   }
 }
@@ -220,6 +222,10 @@ export function visualRegression(options: VisualRegressionOptions): Invariant {
     name: options.name ?? "visual-regression",
     urlPattern: options.urlPattern,
     when: options.when ?? "afterLoad",
+    // Resolved before the browser starts, the first run's too: writing the
+    // baselines needs neither package, so a missing one only showed on the
+    // second run, as a violation on every page.
+    peers: VISUAL_REGRESSION_PEERS,
     async check({ page, url }) {
       const filename = screenshotFilename(url);
       const baselinePath = join(baselineDir, filename);

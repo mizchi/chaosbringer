@@ -393,7 +393,7 @@ export function solveTiming(
   request: TimingRequest,
 ): TimingResult {
   const p = resolve(profile, request);
-  const { delayFloorMs: floor, delayTailMs: tail, tightTailMs: tight, fixedPerPlanMs: fixed, marginMs: margin } = p;
+  const { delayFloorMs: floor, delayTailMs: tail, tightTailMs: tight, marginMs: margin } = p;
   const deadline = request.deadlineMs;
   const budget = request.budgetMs ?? 15000;
 

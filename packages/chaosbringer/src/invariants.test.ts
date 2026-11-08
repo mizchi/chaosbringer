@@ -61,6 +61,26 @@ describe("formatAxeViolations", () => {
     const out = formatAxeViolations([{ id: "region", nodes: [{}] }]);
     expect(out).toBe("1 a11y violations: region(×1)");
   });
+
+  it("counts nodes inside an iframe per frame, listed after the top document's", () => {
+    const out = formatAxeViolations(
+      [
+        { id: "button-name", impact: "critical", nodes: [{ html: "b" }] },
+        { id: "image-alt", impact: "critical", nodes: [{}, { html: "a" }, { html: "b" }, {}] },
+      ],
+      (node) => (node.html ? `http://x/${node.html}` : undefined)
+    );
+    expect(out).toBe(
+      "4 a11y violations: image-alt(×2, critical)" +
+        "; in frame http://x/b: button-name(×1, critical), image-alt(×1, critical)" +
+        "; in frame http://x/a: image-alt(×1, critical)"
+    );
+  });
+
+  it("has no top-document section when every node is in an iframe", () => {
+    const out = formatAxeViolations([{ id: "image-alt", impact: "critical", nodes: [{}] }], () => "http://x/a");
+    expect(out).toBe("1 a11y violations: in frame http://x/a: image-alt(×1, critical)");
+  });
 });
 
 describe("axe() invariant factory", () => {

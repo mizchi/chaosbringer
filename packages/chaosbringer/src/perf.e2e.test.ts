@@ -452,6 +452,10 @@ describe("per-step perf spans (perf option)", () => {
     // error, which the same crawl with perf off never reports.
     expect(errors.filter((e) => e.message.includes("ERR_ABORTED"))).toEqual([]);
     expect(page.errors.filter((e) => e.message.includes("ERR_ABORTED"))).toEqual([]);
+    // What escaped after the load is not the crawler's navigation failing:
+    // it stays an exception, counted as one.
+    expect(page.errors.at(-1)).toMatchObject({ type: "exception", message: "hook failed" });
+    expect(report.summary.jsExceptions).toBe(1);
   });
 
   it("installs the collector on a caller's page even after the crawler ran start()", async () => {

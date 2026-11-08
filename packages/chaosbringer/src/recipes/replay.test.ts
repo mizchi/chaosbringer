@@ -1,0 +1,403 @@
+/**
+ * `runRecipe`'s `baseUrl`: a recipe keeps the absolute URLs it was
+ * recorded with (`drive` saves `http://127.0.0.1:4791/login`), and
+ * replaying it "against" another host used to mean replaying it on the
+ * recording host — a verify or a load run that reported success for a
+ * server it never reached. The fake Page logs where `goto` went and
+ * follows a submit to `/done` on whatever origin it is on, so an
+ * expectation that names the recorded origin shows whether it moved too.
+ */
+import type { Page } from "playwright";
+import { describe, expect, it, vi } from "vitest";
+import { rebaseNotice, rebaseRecipe, recipeOrigin, runRecipe } from "./replay.js";
+import type { ActionRecipe, RecipeStep } from "./types.js";
+import { emptyStats } from "./types.js";
+
+const RECORDED = "http://127.0.0.1:4791";
+const BASE = "http://127.0.0.1:5802";
+
+function fakePage(): { page: Page; visits: string[] } {
+  const visits: string[] = [];
+  let current = "about:blank";
+  const page = {
+    url: () => current,
+    goto: async (url: string) => {
+      visits.push(url);
+      current = url;
+    },
+    fill: async () => {},
+    click: async () => {
+      current = `${new URL(current).origin}/done`;
+    },
+    keyboard: { press: async () => {} },
+    locator: () => ({ press: async () => {}, first: () => ({ isVisible: async () => true }) }),
+  } as unknown as Page;
+  return { page, visits };
+}
+
+function recipe(steps: RecipeStep[], preconditions: ActionRecipe["preconditions"] = []): ActionRecipe {
+  return {
+    name: "site/login",
+    description: "",
+    preconditions,
+    steps,
+    postconditions: [],
+    requires: [],
+    stats: emptyStats(),
+    origin: "ai-extracted",
+    status: "candidate",
+    version: 1,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+}
+
+describe("runRecipe with a baseUrl", () => {
+  it("navigates on the base URL's origin, the recorded path, query and hash kept", async () => {
+    const { page, visits } = fakePage();
+    const r = recipe([
+      { kind: "navigate", url: `${RECORDED}/login?next=%2Fcart#form` },
+      { kind: "fill", selector: "#user", value: "admin" },
+      { kind: "click", selector: "button", expectAfter: { urlContains: "/done", timeoutMs: 200 } },
+    ]);
+    const result = await runRecipe(page, r, { baseUrl: `${BASE}/` });
+    expect(result).toMatchObject({ ok: true });
+    expect(visits).toEqual([`${BASE}/login?next=%2Fcart#form`]);
+  });
+
+  it("moves an expectation that names the recorded origin along with the page", async () => {
+    const { page } = fakePage();
+    const r = recipe([
+      { kind: "navigate", url: `${RECORDED}/login` },
+      {
+        kind: "click",
+        selector: "button",
+        expectAfter: { urlContains: `${RECORDED}/done`, urlNotContains: `${RECORDED}/login`, timeoutMs: 200 },
+      },
+    ]);
+    expect(await runRecipe(page, r, { baseUrl: BASE })).toMatchObject({ ok: true });
+    expect(page.url()).toBe(`${BASE}/done`);
+  });
+
+  it("leaves a navigate to another origin alone", async () => {
+    const { page, visits } = fakePage();
+    const r = recipe([
+      { kind: "navigate", url: `${RECORDED}/login` },
+      { kind: "navigate", url: "https://sso.example.test/authorize?client=app" },
+      { kind: "navigate", url: `${RECORDED}/callback` },
+    ]);
+    await runRecipe(page, r, { baseUrl: BASE });
+    expect(visits).toEqual([`${BASE}/login`, "https://sso.example.test/authorize?client=app", `${BASE}/callback`]);
+  });
+
+  it("leaves a recipe that starts on the matched page, then goes to another site, where it goes", async () => {
+    // Fired on a cart page by `recipeDriver`: the payment provider is the
+    // only absolute URL in it, and is not where it was recorded.
+    const { page, visits } = fakePage();
+    const pay = "https://pay.example.test/checkout?session=abc";
+    const r = recipe(
+      [
+        { kind: "click", selector: "#checkout" },
+        { kind: "navigate", url: pay, expectAfter: { urlContains: "https://pay.example.test/checkout", timeoutMs: 200 } },
+      ],
+      [{ urlPattern: "/cart$" }],
+    );
+    expect(rebaseRecipe(r, BASE)).toBe(r);
+    expect(await runRecipe(page, r, { baseUrl: BASE })).toMatchObject({ ok: true });
+    expect(visits).toEqual([pay]);
+  });
+
+  it("keeps a {{var}} in the path, and substitutes it after the move", async () => {
+    const { page, visits } = fakePage();
+    const r = recipe([{ kind: "navigate", url: `${RECORDED}/users/{{id}}` }]);
+    await runRecipe(page, r, { baseUrl: BASE, vars: { id: 7 } });
+    expect(visits).toEqual([`${BASE}/users/7`]);
+  });
+
+  it("does not move a recipe whose vars name the site", async () => {
+    const { page, visits } = fakePage();
+    const r = recipe([{ kind: "navigate", url: "{{base}}/about" }]);
+    await runRecipe(page, r, { baseUrl: BASE, vars: { base: RECORDED } });
+    expect(visits).toEqual([`${RECORDED}/about`]);
+  });
+
+  it("replays where it was recorded without one", async () => {
+    const { page, visits } = fakePage();
+    await runRecipe(page, recipe([{ kind: "navigate", url: `${RECORDED}/login` }]));
+    expect(visits).toEqual([`${RECORDED}/login`]);
+  });
+
+  it("moves a postcondition pattern that names the recorded origin along with the page", async () => {
+    // Checked since postconditions are, it failed every replay on another
+    // host while the expectation on the same URL moved and passed.
+    const { page } = fakePage();
+    const r: ActionRecipe = {
+      ...recipe([
+        { kind: "navigate", url: `${RECORDED}/login` },
+        { kind: "click", selector: "button", expectAfter: { urlContains: `${RECORDED}/done`, timeoutMs: 200 } },
+      ]),
+      postconditions: [{ urlPattern: "^http://127\\.0\\.0\\.1:4791/done" }],
+    };
+    expect(await runRecipe(page, r, { baseUrl: BASE })).toMatchObject({ ok: true });
+  });
+
+  it("refuses a base URL with no origin to move to", async () => {
+    const { page, visits } = fakePage();
+    const r = recipe([{ kind: "navigate", url: `${RECORDED}/login` }]);
+    await expect(runRecipe(page, r, { baseUrl: "staging.example.test" })).rejects.toThrow(/not an absolute http\(s\) URL/);
+    expect(visits).toEqual([]);
+  });
+});
+
+describe("recipeOrigin / rebaseRecipe / rebaseNotice", () => {
+  it("takes the origin of a leading navigate, normalised", () => {
+    expect(recipeOrigin(recipe([{ kind: "navigate", url: "HTTP://Shop.Example.TEST:80/x" }]))).toBe("http://shop.example.test");
+    expect(recipeOrigin(recipe([{ kind: "click", selector: "a" }]))).toBeNull();
+    expect(recipeOrigin(recipe([{ kind: "navigate", url: "http://{{host}}/x" }]))).toBeNull();
+  });
+
+  it("never takes it from a later navigate", () => {
+    const steps: RecipeStep[] = [
+      { kind: "click", selector: "#checkout" },
+      { kind: "navigate", url: "https://pay.example.test/checkout" },
+    ];
+    expect(recipeOrigin(recipe(steps))).toBeNull();
+    expect(recipeOrigin(recipe(steps, [{ urlPattern: "/cart$" }]))).toBeNull();
+  });
+
+  it("falls back to a first precondition that spells out the scheme and host", () => {
+    const click: RecipeStep[] = [{ kind: "click", selector: "a" }];
+    const origin = (urlPattern: string) => recipeOrigin(recipe(click, [{ urlPattern }]));
+    expect(origin("^https://shop\\.example\\.test/cart$")).toBe("https://shop.example.test");
+    expect(origin("^http:\\/\\/127\\.0\\.0\\.1:4791\\/cart")).toBe("http://127.0.0.1:4791");
+    expect(origin("^http://localhost:4791$")).toBe("http://localhost:4791");
+    // Not a host the pattern names: it matches more than one.
+    expect(origin("^https?://shop\\.example\\.test/")).toBeNull();
+    expect(origin("^http://localhost:\\d+/")).toBeNull();
+    expect(origin("^https://[a-z]+\\.example\\.test/")).toBeNull();
+    expect(origin("^https://shop\\.example\\.tests?/")).toBeNull();
+    expect(origin("shop\\.example\\.test/cart")).toBeNull();
+    // A leading navigate says it first.
+    expect(
+      recipeOrigin(recipe([{ kind: "navigate", url: `${RECORDED}/login` }], [{ urlPattern: "^https://shop\\.example\\.test/" }])),
+    ).toBe(RECORDED);
+  });
+
+  it("moves a later navigate when the precondition names its origin", () => {
+    const r = recipe(
+      [
+        { kind: "click", selector: "#checkout" },
+        { kind: "navigate", url: `${RECORDED}/thanks` },
+        { kind: "navigate", url: "https://pay.example.test/checkout" },
+      ],
+      [{ urlPattern: "^http://127\\.0\\.0\\.1:4791/cart$" }],
+    );
+    expect(rebaseRecipe(r, BASE).steps.slice(1)).toEqual([
+      { kind: "navigate", url: `${BASE}/thanks` },
+      { kind: "navigate", url: "https://pay.example.test/checkout" },
+    ]);
+  });
+
+  it("returns the recipe itself when there is nothing to move", () => {
+    const r = recipe([{ kind: "navigate", url: `${RECORDED}/login` }]);
+    expect(rebaseRecipe(r, `${RECORDED}/somewhere-else`)).toBe(r);
+  });
+
+  it("moves an origin that is written with its default port", () => {
+    const r = recipe([{ kind: "navigate", url: "http://shop.example.test:80/cart" }]);
+    expect(rebaseRecipe(r, "https://staging.example.test").steps[0]).toEqual({
+      kind: "navigate",
+      url: "https://staging.example.test/cart",
+    });
+  });
+
+  it("does not take a longer port for the recorded one", () => {
+    const r = recipe([
+      { kind: "navigate", url: `${RECORDED}/login` },
+      { kind: "click", selector: "a", expectAfter: { urlContains: `${RECORDED}0/x` } },
+    ]);
+    expect(rebaseRecipe(r, BASE).steps[1]).toEqual(r.steps[1]);
+  });
+
+  it("moves only the origin a postcondition pattern spells out, as it is written", () => {
+    const r: ActionRecipe = {
+      ...recipe([{ kind: "navigate", url: `${RECORDED}/login` }]),
+      postconditions: [
+        { urlPattern: "^http:\\/\\/127\\.0\\.0\\.1:4791\\/done$", hasSelector: "#ok" },
+        { urlPattern: "http://127\\.0\\.0\\.1:4791$" },
+        // Path-only, another origin, a longer port, or no single host: left alone.
+        { urlPattern: "/done$" },
+        { urlPattern: "^https://pay\\.example\\.test/" },
+        { urlPattern: "^http://127\\.0\\.0\\.1:47910/" },
+        { urlPattern: "^http://127\\.0\\.0\\.1:\\d+/" },
+        { hidesSelector: "#spinner" },
+      ],
+    };
+    const moved = rebaseRecipe(r, "https://staging.example.test/login").postconditions;
+    expect(moved.slice(0, 2)).toEqual([
+      { urlPattern: "^https://staging\\.example\\.test\\/done$", hasSelector: "#ok" },
+      { urlPattern: "https://staging\\.example\\.test$" },
+    ]);
+    expect(moved.slice(2)).toEqual(r.postconditions.slice(2));
+    expect(rebaseRecipe(r, `${RECORDED}/`).postconditions).toBe(r.postconditions);
+  });
+
+  it("says when the base URL moves a recipe, and only then", () => {
+    const r = recipe([{ kind: "navigate", url: `${RECORDED}/login` }]);
+    expect(rebaseNotice(r, `${BASE}/`)).toBe(`site/login was recorded on ${RECORDED}; replaying it on ${BASE} instead`);
+    expect(rebaseNotice(r, `${RECORDED}/`)).toBeNull();
+    expect(rebaseNotice(recipe([{ kind: "navigate", url: "{{base}}/" }]), BASE)).toBeNull();
+  });
+});
+
+// A postcondition's `urlPattern` was never checked (`urlContains: p.urlPattern
+// ? undefined : undefined`): the postcondition `recipes harvest` and `drive`
+// write passed at once, and `recipes verify` promoted a recipe whose flow no
+// longer reached its end page.
+describe("runRecipe postconditions", () => {
+  const withPost = (postconditions: ActionRecipe["postconditions"]): ActionRecipe => ({
+    ...recipe([{ kind: "navigate", url: `${RECORDED}/login` }, { kind: "click", selector: "button" }]),
+    postconditions,
+  });
+
+  it("holds when the URL matches the pattern, as a regex", async () => {
+    const { page } = fakePage();
+    expect(await runRecipe(page, withPost([{ urlPattern: "/done(?:[/?#]|$)" }]))).toMatchObject({ ok: true });
+  });
+
+  it("fails, naming the pattern, when the URL does not match within the expect timeout", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fakePage();
+      const pending = runRecipe(page, withPost([{ urlPattern: "/thank-you" }, { hasSelector: "#ok" }]));
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await pending).toMatchObject({ ok: false, failedAt: { index: 2, reason: "postcondition not satisfied: url~/\\/thank-you/" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for a URL that changes after the last step", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fakePage();
+      const pending = runRecipe(page, withPost([{ urlPattern: "/thank-you$", hasSelector: "#ok" }]));
+      await vi.advanceTimersByTimeAsync(1000);
+      await page.goto(`${RECORDED}/thank-you`);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a pattern that is not a regex as not satisfied, not as a throw", async () => {
+    const { page } = fakePage();
+    const result = await runRecipe(page, withPost([{ urlPattern: "/done(" }]));
+    expect(result.ok).toBe(false);
+    expect(result.failedAt?.reason).toMatch(/^postcondition not satisfied: url~\/\/done\(\/ is not a valid regex \(/);
+  });
+});
+
+// `runRecipe` substituted only when `vars` was given: without them a fill of
+// `{{password}}` typed the braces and reported ok, so `recipes verify` (which
+// could not pass vars) promoted a recipe that never logged in. With `vars: {}`
+// the missing variable threw out of runRecipe, past its try, and crashed
+// verify instead of failing the run.
+describe("runRecipe vars", () => {
+  function fillingPage(): { page: Page; fills: string[]; visits: string[] } {
+    const fills: string[] = [];
+    const { page, visits } = fakePage();
+    (page as unknown as { fill: (s: string, v: string) => Promise<void> }).fill = async (_s, v) => {
+      fills.push(v);
+    };
+    return { page, fills, visits };
+  }
+  const login = (postconditions: ActionRecipe["postconditions"] = []): ActionRecipe => ({
+    ...recipe([
+      { kind: "navigate", url: `${RECORDED}/login` },
+      { kind: "fill", selector: "#user", value: "{{user}}" },
+      { kind: "fill", selector: "#password", value: "{{password}}" },
+      { kind: "click", selector: "button" },
+    ]),
+    postconditions,
+  });
+
+  it("fails at the step that uses a variable no vars give, before typing anything", async () => {
+    const { page, fills, visits } = fillingPage();
+    expect(await runRecipe(page, login())).toMatchObject({
+      ok: false,
+      failedAt: { index: 1, reason: 'variable "user" is not defined' },
+    });
+    expect(await runRecipe(page, login(), { vars: { user: "ada" } })).toMatchObject({
+      ok: false,
+      failedAt: { index: 2, reason: 'variable "password" is not defined' },
+    });
+    expect(fills).toEqual([]);
+    expect(visits).toEqual([]);
+  });
+
+  it("types the substituted values", async () => {
+    const { page, fills } = fillingPage();
+    expect(await runRecipe(page, login(), { vars: { user: "ada", password: "pw" } })).toMatchObject({ ok: true });
+    expect(fills).toEqual(["ada", "pw"]);
+  });
+
+  it("fails a postcondition whose substituted URL pattern does not match", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { page } = fillingPage();
+      const pending = runRecipe(page, login([{ urlPattern: "/welcome/{{user}}$" }]), { vars: { user: "ada", password: "pw" } });
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await pending).toMatchObject({
+        ok: false,
+        failedAt: { index: 4, reason: "postcondition not satisfied: url~/\\/welcome\\/ada$/" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("matches a substituted value in a URL pattern literally, regex characters and all", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const r = login([{ urlPattern: "/{{page}}$" }]);
+      const run = async (page: string) => {
+        const pending = runRecipe(fillingPage().page, r, { vars: { user: "ada", password: "pw", page } });
+        await vi.advanceTimersByTimeAsync(6000);
+        return pending;
+      };
+      expect(await run("done")).toMatchObject({ ok: true });
+      // As a regex, `.` would match the "n" of /done.
+      expect(await run("do.e")).toMatchObject({ ok: false, failedAt: { reason: "postcondition not satisfied: url~/\\/do\\.e$/" } });
+      // And `(` alone would not be one.
+      expect(await run("d(")).toMatchObject({ ok: false, failedAt: { reason: "postcondition not satisfied: url~/\\/d\\($/" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("substitutes a postcondition's selector, and names a variable it lacks at the postcondition", async () => {
+    const r = login([{ hasSelector: "text=Welcome {{user}}" }]);
+    const { page } = fillingPage();
+    const seen: string[] = [];
+    (page as unknown as { locator: (s: string) => unknown }).locator = (s: string) => {
+      seen.push(s);
+      return { first: () => ({ isVisible: async () => true }) };
+    };
+    expect(await runRecipe(page, r, { vars: { user: "ada", password: "pw" } })).toMatchObject({ ok: true });
+    expect(seen).toEqual(["text=Welcome ada"]);
+    const noUser = { ...r, steps: r.steps.filter((s) => s.kind !== "fill" || s.value !== "{{user}}") };
+    expect(await runRecipe(fillingPage().page, noUser, { vars: { password: "pw" } })).toMatchObject({
+      ok: false,
+      failedAt: { index: 3, reason: 'variable "user" is not defined' },
+    });
+  });
+
+  it("leaves `{{` text that is not a placeholder as it is", async () => {
+    const { page, fills } = fillingPage();
+    const r = recipe([{ kind: "fill", selector: "#q", value: "{{ }} {x} {{7*7}}" }]);
+    expect(await runRecipe(page, r)).toMatchObject({ ok: true });
+    expect(fills).toEqual(["{{ }} {x} {{7*7}}"]);
+  });
+});

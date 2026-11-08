@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { buildJunitXml } from "./junit.js";
 import type { CrawlReport, CrawlSummary, PageError, PageResult } from "./types.js";
@@ -53,6 +54,32 @@ function report(pages: PageResult[], overrides: Partial<CrawlReport> = {}): Craw
   };
 }
 
+/**
+ * The testcases flaker 0.14's `--adapter junit` import reads from `xml`, with
+ * the status it gives each. @mizchi/flaker does not export its adapter (it is
+ * bundled into the CLI, node_modules/@mizchi/flaker/dist/cli/main.js, region
+ * `src/cli/adapters/junit.ts`, and importing that file runs the CLI), so its
+ * regexes are copied here verbatim; only the fields flaker derives from
+ * timing and file/line are left out.
+ */
+function flakerJunitParse(xml: string): { name: string; status: string; errorMessage?: string }[] {
+  const getAttr = (tag: string, attr: string) => tag.match(new RegExp(`${attr}="([^"]*)"`, "i"))?.[1];
+  const out: { name: string; status: string; errorMessage?: string }[] = [];
+  for (const suiteBlock of xml.match(/<testsuite\s[^>]*>[\s\S]*?<\/testsuite>/g) ?? []) {
+    for (const tcBlock of suiteBlock.match(/<testcase\s[^>]*(?:\/>|>[\s\S]*?<\/testcase>)/g) ?? []) {
+      const tcTag = tcBlock.match(/<testcase\s[^>]*/)?.[0] ?? "";
+      let status = "passed";
+      let errorMessage: string | undefined;
+      if (/<failure\s/.test(tcBlock)) {
+        status = "failed";
+        errorMessage = getAttr(tcBlock.match(/<failure\s[^>]*/)?.[0] ?? "", "message");
+      } else if (/<skipped/.test(tcBlock)) status = "skipped";
+      out.push({ name: getAttr(tcTag, "name") ?? "unknown", status, ...(errorMessage !== undefined ? { errorMessage } : {}) });
+    }
+  }
+  return out;
+}
+
 describe("buildJunitXml", () => {
   it("emits a Surefire-style header with totals", () => {
     const xml = buildJunitXml(
@@ -66,9 +93,34 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('time="1.500"');
   });
 
-  it("renders a passing page as a self-closed testcase", () => {
+  it("renders a passing page as a testcase with an explicit close tag", () => {
     const xml = buildJunitXml(report([page("http://localhost:3000/")]));
-    expect(xml).toContain('<testcase name="/" classname="chaosbringer" time="0.250"/>');
+    expect(xml).toContain('<testcase name="/" classname="chaosbringer" time="0.250"></testcase>');
+    expect(xml).not.toContain("/>");
+  });
+
+  // The baseline workflow imports this XML into flaker. A self-closed passing
+  // page followed by a failing one was read as a single failed testcase: on
+  // the fixture crawl, 10 pages became 8 results and the passing /form was
+  // recorded as failed with /broken-link's failure.
+  it("reads as one testcase per page through flaker's JUnit parser", () => {
+    const err: PageError = { type: "console", message: "boom", timestamp: 0 };
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/form"),
+        page("http://localhost:3000/broken-link", { errors: [err], hasErrors: true }),
+        page("http://localhost:3000/about"),
+      ])
+    );
+    expect(flakerJunitParse(xml)).toEqual([
+      { name: "/form", status: "passed" },
+      {
+        name: "/broken-link",
+        status: "failed",
+        errorMessage: "1 error(s) on http://localhost:3000/broken-link: console",
+      },
+      { name: "/about", status: "passed" },
+    ]);
   });
 
   it("strips the baseUrl prefix from the testcase name", () => {
@@ -132,23 +184,65 @@ describe("buildJunitXml", () => {
     expect(xml).toContain('name="https://site.example.com/other"');
   });
 
-  it("emits <error> for status=timeout", () => {
+  it("emits <failure type=\"timeout\"> for status=timeout", () => {
     const xml = buildJunitXml(
       report([page("http://localhost:3000/slow", { status: "timeout" })])
     );
-    expect(xml).toContain("<error");
-    expect(xml).toContain('type="timeout"');
-    expect(xml).toContain('errors="1"');
-    expect(xml).not.toContain("<failure");
+    expect(xml).toContain(
+      '<testcase name="/slow" classname="chaosbringer" time="0.250"><failure message="navigation timeout @ http://localhost:3000/slow" type="timeout"></failure></testcase>'
+    );
+    expect(xml).toContain('failures="1"');
+    expect(xml).toContain('errors="0"');
+    expect(xml).not.toContain("<error");
   });
 
-  it("emits <error> for status=error with the HTTP code in the message", () => {
+  it("emits <failure type=\"error\"> for status=error with the HTTP code in the message", () => {
     const xml = buildJunitXml(
       report([page("http://localhost:3000/missing", { status: "error", statusCode: 500 })])
     );
-    expect(xml).toContain("<error");
-    expect(xml).toContain('errors="1"');
-    expect(xml).toContain("HTTP 500");
+    expect(xml).toContain('<failure message="HTTP 500 @ http://localhost:3000/missing" type="error">');
+    expect(xml).toContain('failures="1"');
+    expect(xml).toContain('errors="0"');
+    expect(xml).not.toContain("<error");
+  });
+
+  it("says navigation error when an errored page has no HTTP code", () => {
+    const xml = buildJunitXml(report([page("http://localhost:3000/gone", { status: "error" })]));
+    expect(xml).toContain('<failure message="navigation error @ http://localhost:3000/gone" type="error">');
+  });
+
+  it("counts every kind of failing page once in the suite totals", () => {
+    const err: PageError = { type: "console", message: "boom", timestamp: 0 };
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/"),
+        page("http://localhost:3000/slow", { status: "timeout" }),
+        page("http://localhost:3000/missing", { status: "error", statusCode: 404, errors: [err], hasErrors: true }),
+        page("http://localhost:3000/noisy", { errors: [err], hasErrors: true }),
+      ])
+    );
+    expect(xml).toContain('tests="4" failures="3" errors="0"');
+    expect(xml.match(/<failure /g)).toHaveLength(3);
+  });
+
+  // flaker 0.14 checks a testcase for <failure> and <skipped> only, so an
+  // <error> page (a navigation that timed out, or one that failed such as
+  // net::ERR_EMPTY_RESPONSE) was imported as passed.
+  it("reads timed-out and errored pages as failed through flaker's JUnit parser", () => {
+    const xml = buildJunitXml(
+      report([
+        page("http://localhost:3000/"),
+        page("http://localhost:3000/slow", { status: "timeout" }),
+        page("http://localhost:3000/about"),
+        page("http://localhost:3000/missing", { status: "error", statusCode: 500 }),
+      ])
+    );
+    expect(flakerJunitParse(xml)).toEqual([
+      { name: "/", status: "passed" },
+      { name: "/slow", status: "failed", errorMessage: "navigation timeout @ http://localhost:3000/slow" },
+      { name: "/about", status: "passed" },
+      { name: "/missing", status: "failed", errorMessage: "HTTP 500 @ http://localhost:3000/missing" },
+    ]);
   });
 
   it("emits <failure> for a successful page with console errors", () => {
@@ -192,6 +286,57 @@ describe("buildJunitXml", () => {
     expect(xml).toContain("&quot;tag&quot;");
     expect(xml).toContain("&amp;");
     expect(xml).toContain("&apos;quotes&apos;");
+  });
+
+  // A timed-out page's error carries Playwright's call log, coloured with
+  // ANSI escapes. One ESC byte made the file malformed XML (xmllint: "PCDATA
+  // invalid Char value 27").
+  it("drops ANSI colour codes and control characters XML cannot carry", () => {
+    const esc = String.fromCharCode(27);
+    const err: PageError = {
+      type: "exception",
+      message: `page.goto: Timeout 30000ms exceeded.\nCall log:\n${esc}[2m  - navigating to "http://localhost:3000/slow"${esc}[22m\n`,
+      timestamp: 0,
+      stack: `at a${String.fromCharCode(0)}\tb${String.fromCharCode(8)}\r\n`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/slow", { status: "timeout", errors: [err], hasErrors: true })]));
+    expect(xml).toContain('Call log:\n  - navigating to &quot;http://localhost:3000/slow&quot;\n');
+    expect(xml).toContain("at a\tb\r\n");
+    expect(Array.from(xml).filter((ch) => ch.charCodeAt(0) < 0x20 && !"\t\n\r".includes(ch))).toEqual([]);
+  });
+
+  it("prints a message once, and only the page's own stack frames", () => {
+    // Where this module runs from: the package's own code, which says
+    // nothing about the page. In dist/ when installed, src/ under the tests.
+    const own = fileURLToPath(new URL(".", import.meta.url));
+    const thrown: PageError = {
+      type: "exception",
+      message: "x is not a function",
+      timestamp: 0,
+      stack: `TypeError: x is not a function\n    at render (http://localhost:3000/app.js:10:5)\n    at ChaosCrawler.run (${own}crawler.js:2155:41)\n    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/", { errors: [thrown], hasErrors: true })]));
+    const body = /<failure [^>]*>([\s\S]*?)<\/failure>/.exec(xml)![1]!;
+    expect(body).toBe("[exception] x is not a function\n    at render (http://localhost:3000/app.js:10:5)");
+  });
+
+  it("gives a navigation failure no stack: it is the crawler's own call, not the page's", () => {
+    const own = fileURLToPath(new URL(".", import.meta.url));
+    const goto: PageError = {
+      type: "navigation",
+      message: "page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset",
+      timestamp: 0,
+      stack: `page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset\nCall log:\n  - navigating to "http://localhost:3000/reset", waiting until "load"\n\n    at ChaosCrawler.gotoAndSettle (${own}crawler.js:2155:41)`,
+    };
+    const xml = buildJunitXml(report([page("http://localhost:3000/reset", { status: "error", errors: [goto], hasErrors: true })]));
+    const body = /<failure [^>]*>([\s\S]*?)<\/failure>/.exec(xml)![1]!;
+    expect(body).toBe("[navigation] page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset");
+  });
+
+  it("names a crashed page's failure a renderer crash", () => {
+    const crash: PageError = { type: "crash", message: "renderer crashed", timestamp: 0 };
+    const xml = buildJunitXml(report([page("http://localhost:3000/oom", { status: "error", errors: [crash], hasErrors: true })]));
+    expect(xml).toContain('<failure message="renderer crash @ http://localhost:3000/oom" type="error">[crash] renderer crashed</failure>');
   });
 
   it("annotates invariant-violation entries with the invariant name", () => {

@@ -25,8 +25,9 @@ import { chromium } from "playwright";
 import { createRng } from "../random.js";
 import type { Driver, DriverStep } from "../drivers/types.js";
 import { discoverCandidates } from "./investigate.js";
-import { runRecipe } from "./replay.js";
+import { rebaseRecipe, runRecipe } from "./replay.js";
 import type { RecipeStore } from "./store.js";
+import { hasTemplates, type RecipeVars, substituteConditions, substituteString } from "./templating.js";
 import { tracingDriver, type TracingDriver } from "./tracing-driver.js";
 import type {
   ActionRecipe,
@@ -51,8 +52,22 @@ export interface RepairOptions {
    * navigate.
    */
   startUrl?: string;
-  /** Same shape `investigate()` accepts. */
+  /**
+   * Same shape `investigate()` accepts. The recipe replays on this
+   * origin (`rebaseRecipe`), and the steps the repaired version keeps
+   * are the rebased ones: the version repaired here is the one proven
+   * here.
+   */
   baseUrl?: string;
+  /**
+   * Values for the recipe's `{{var}}` placeholders (`RunRecipeOptions.vars`):
+   * the replay that finds the failing step types them, and the goal the
+   * driver works towards is the postconditions they fill in. The repaired
+   * version keeps the placeholders of the steps it kept. Throws, before the
+   * browser launches, when the start URL or a postcondition uses one these
+   * do not define; a step that does fails the replay there.
+   */
+  vars?: RecipeVars;
   /** Headless. Default: true. */
   headless?: boolean;
   /** Caller-supplied browser to amortise launches. */
@@ -82,6 +97,12 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
   const log = opts.verbose
     ? (m: string) => console.log(`[repair ${opts.recipe.name}] ${m}`)
     : () => {};
+  // Before the browser launches: a bad base URL throws here, not mid-run.
+  const recipe = opts.baseUrl ? rebaseRecipe(opts.recipe, opts.baseUrl) : opts.recipe;
+  const vars = opts.vars ?? {};
+  // Also before it: a missing variable in either throws here.
+  const startUrl = opts.startUrl ?? deriveStartUrl(recipe, opts.baseUrl, vars);
+  const goal = postconditionGoal({ ...recipe, postconditions: substituteConditions(recipe.postconditions, vars) });
   const ownsBrowser = opts.browser === undefined;
   const browser = opts.browser ?? (await chromium.launch({ headless: opts.headless ?? true }));
   let isolated: IsolatedPage;
@@ -92,16 +113,14 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     throw err;
   }
   const { context, page } = isolated;
-  const startUrl = opts.startUrl ?? deriveStartUrl(opts.recipe, opts.baseUrl);
 
-  // Build a Goal whose successCheck = original postconditions held.
-  const goal = postconditionGoal(opts.recipe);
+  // The Goal (built above) is: the original postconditions hold.
   const tracing = tracingDriver({ inner: opts.driver, goal });
 
   // Tracing trace will start fresh — we'll splice the AI-discovered
   // tail onto the OLD prefix manually so the AI's steps are clearly
   // distinguished from the kept ones.
-  let failedAt = opts.recipe.steps.length; // assume all good unless replay says otherwise
+  let failedAt = recipe.steps.length; // assume all good unless replay says otherwise
   let prefix: RecipeStep[] = [];
   let aiTail: RecipeStep[] = [];
 
@@ -116,27 +135,30 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     // Phase 1: identify where the recipe currently breaks. We don't
     // need to call runRecipe end-to-end — we replay step-by-step so
     // we can stop exactly at the failing step.
-    for (let i = 0; i < opts.recipe.steps.length; i++) {
+    for (let i = 0; i < recipe.steps.length; i++) {
+      // Probes are cut from the already-rebased recipe. Rebasing each
+      // one-step probe instead would take a lone navigate to another
+      // origin (an SSO page) for the recipe's own and move it.
       const partial: ActionRecipe = {
-        ...opts.recipe,
-        steps: [opts.recipe.steps[i]!],
+        ...recipe,
+        steps: [recipe.steps[i]!],
         // Strip postconditions while probing — they are the END check.
         postconditions: [],
       };
-      const result = await runRecipe(page, partial);
+      const result = await runRecipe(page, partial, { vars });
       if (!result.ok) {
         failedAt = i;
-        log(`step ${i} (${opts.recipe.steps[i]!.kind}) failed: ${result.failedAt?.reason}`);
+        log(`step ${i} (${recipe.steps[i]!.kind}) failed: ${result.failedAt?.reason}`);
         break;
       }
-      prefix.push(opts.recipe.steps[i]!);
+      prefix.push(recipe.steps[i]!);
     }
 
-    if (failedAt >= opts.recipe.steps.length) {
+    if (failedAt >= recipe.steps.length) {
       log("no failure detected — recipe is fine, nothing to repair");
       return {
         repaired: false,
-        failedAt: opts.recipe.steps.length,
+        failedAt: recipe.steps.length,
         newTailSteps: 0,
         recipe: null,
         trace: tracing.getTrace(),
@@ -208,7 +230,7 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
     // Phase 3: splice + upsert. Preserve stats (the historical wins
     // are still informative) but bump version.
     const repaired: ActionRecipe = {
-      ...opts.recipe,
+      ...recipe,
       steps: [...prefix, ...aiTail],
       version: opts.recipe.version + 1,
       updatedAt: Date.now(),
@@ -234,9 +256,11 @@ export async function repairRecipe(opts: RepairOptions): Promise<RepairResult> {
   }
 }
 
-function deriveStartUrl(recipe: ActionRecipe, baseUrl?: string): string {
+function deriveStartUrl(recipe: ActionRecipe, baseUrl: string | undefined, vars: RecipeVars): string {
   const firstNav = recipe.steps.find((s) => s.kind === "navigate");
-  if (firstNav && firstNav.kind === "navigate") return firstNav.url;
+  if (firstNav && firstNav.kind === "navigate") {
+    return hasTemplates(firstNav.url) ? substituteString(firstNav.url, vars) : firstNav.url;
+  }
   if (baseUrl) return baseUrl;
   // Last resort — pull the host from the first urlPattern.
   const pattern = recipe.preconditions[0]?.urlPattern;

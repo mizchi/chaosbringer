@@ -58,3 +58,14 @@ describe("chaos() setup hook", () => {
     expect(setup).not.toHaveBeenCalled();
   });
 });
+
+describe("chaos() exit options", () => {
+  it("refuses a failOnHttp level that is not 4xx or 5xx before anything runs", async () => {
+    // A level like "500" would match no floor and fail nothing.
+    const setup = vi.fn(async () => {});
+    await expect(chaos({ baseUrl: "http://127.0.0.1:1/", failOnHttp: "500" as never, setup })).rejects.toThrow(
+      /"failOnHttp" must be one of 4xx, 5xx \(got "500"\)/,
+    );
+    expect(setup).not.toHaveBeenCalled();
+  });
+});

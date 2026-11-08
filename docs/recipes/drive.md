@@ -1,0 +1,327 @@
+# Drive a browser towards a goal
+
+`chaosbringer drive` operates a browser the way a user would, one action at a
+time, until a goal holds. The crawl's checks keep running while it does, so a
+run that reaches its goal with a broken page on the way says so.
+
+```sh
+ANTHROPIC_API_KEY=… chaosbringer drive \
+  --url https://shop.example.test/ \
+  --goal "add the cheapest T-shirt in size M to the cart" \
+  --until-text "1 item in your cart" \
+  --exclude /checkout --exclude /logout \
+  --video run.webm --out drive-out --save-recipe shop/add-tshirt
+```
+
+## What the model sees
+
+Each step, the page goes through Playwright's accessibility snapshot
+(`page.ariaSnapshot({ mode: "ai" })`, Playwright 1.59+), not the DOM. That
+gives `drive` two things to send the model:
+
+- an **outline** of the page: its landmarks, headings and text, with every
+  control it can operate tagged `[#N]`;
+- a **candidate list** that repeats those controls with their state and
+  where they sit:
+  `#3 combobox "Size" options: S, M*, L — in form, under "Classic T-shirt"`.
+
+From these the model answers with one JSON action: `click`, `fill` (with the
+text it chose, optionally pressing Enter), `select` an option, `press` a key,
+`done`, or `give_up`. Text only by default. `--vision` also sends a
+screenshot, for pages whose meaning is in pixels.
+
+Compared with the crawler's CSS scrape, the snapshot also finds every role a
+user can operate (checkboxes, tabs, menu items, comboboxes) and elements with
+`cursor: pointer` and no role (a `<div onclick>`). Controls inside a dialog
+come first. Disabled controls and the inside of iframes are left out.
+
+## What it checks
+
+Every step records the problems it caused:
+
+- uncaught exceptions;
+- unhandled rejections;
+- console errors;
+- failed requests (except those cancelled by navigating on);
+- 5xx responses;
+- a 4xx on a page load.
+
+The model is shown them as they happen, and the summary lists them by step.
+
+With `--until-url`, `--until-url-matches` or `--until-text`, the model's "done"
+is accepted only while that condition holds. If it does not, the model is told
+so and keeps going. Without one, "done" ends the run unverified (status
+`done`, not `reached`).
+
+An answer that leads to no action (a refused "done", an index that is not on
+the page, no usable answer at all) uses no step, and three in a row with no
+action in between end the run as `stuck` (exit 1). Only an action that ran
+resets that count, so a model that keeps answering "done" is asked three
+times, not until something kills the run. However the answers mix, the
+decider is asked at most `max-steps × 3` times.
+
+`--exclude` URLs are never reached. A link to one is refused, and a step that
+lands on one is undone with a history back.
+
+## The crawl's flags
+
+`drive` takes these flags of the main crawl, parsed and checked as the crawl
+checks them (`DRIVE_CRAWL_FLAGS`; `drive --help` prints the same list): an
+invalid regex, an unknown device or a missing file is refused before the
+browser starts, exit 2.
+
+`--timeout`, `--settle`, `--headless`, `--no-headless`, `--exclude`,
+`--ignore-error`, `--ignore-analytics`, `--ignore-preset`, `--storage-state`,
+`--har-replay`, `--device`, `--network`, `--bind`, `--bind-title`
+
+Where they fit a drive, they mean what they mean in a crawl:
+
+- `--timeout <ms>` is a navigation's: the start page's load, and one a step
+  starts.
+- `--settle adaptive` or `--settle <ms>` sets the quiet window of the adaptive
+  settle drive runs after every step (no request in flight, no long task).
+  `--settle networkidle` is refused: drive never settles that way.
+- `--ignore-error`, `--ignore-analytics` and `--ignore-preset` drop the
+  problems whose message they match, from the summary, the report and what
+  the model is shown.
+- `--device` emulates a Playwright device, `--network` throttles with a CDP
+  preset, and `--har-replay` answers requests from a HAR (what it has no entry
+  for goes to the network).
+
+With `--chaos`, the replays take `--storage-state`, `--device`, `--timeout`
+and the ignore flags too, but not `--har-replay` or `--network`: they would
+answer or slow the very API calls the faults are aimed at.
+
+Left out, because a drive has no use for them: `--seed`, `--max-pages` and
+`--max-actions` (a decider picks each action, up to `--max-steps`, not a
+random driver), `--spa`, `--ignore-http`, `--no-http-cache` and the
+`--invariants`, `--axe`, `--strict` and `--fail-on-*` flags (drive's verdict
+is its goal; it collects problems but judges no page), `--trace-out` /
+`--trace-replay` (a drive is recorded as a recipe, and replayed by
+`recipes verify`), and the output and perf flags.
+
+## What it produces
+
+- **A recipe** for a run that reached its goal. Each control is recorded by a
+  role selector (`role=button[name="Pay"s] >> nth=1`), which finds it again on
+  a later load. The snapshot's refs only last until the next snapshot. A step
+  that changed the path waits on replay until it has. Use `--save-recipe
+  <name>` to put it in the recipe store; `drive` then prints the command
+  that verifies it, with the origin it ran on as `--base-url` (and the
+  `--dir` it saved to). Point `--base-url` at another host to verify it
+  there:
+
+  ```sh
+  chaosbringer recipes verify shop/add-tshirt --base-url https://shop.example.test/ --runs 3
+  ```
+
+  This replays it and promotes it to verified, after which `recipeDriver`,
+  `chaosbringer load` and the rest of the recipe tooling can use it. The
+  recipe keeps the absolute URLs of the run. `verify`, `repair` and `load`
+  move its navigations to that origin onto `--base-url`'s, path and query
+  kept, and warn that they did. Navigations to another origin are left
+  alone. A host that does not answer is not held against the recipe:
+  `verify` exits 2 with `base URL unreachable` and leaves its stats and
+  status as they were, and `load` records none of those replays. A run
+  that acted on a control with no role and no name cannot be replayed, so
+  it produces no recipe, and the summary says which step.
+  A password the run typed is in the recipe as `{{password}}` (see
+  [Secrets](#secrets)), and `verify` refuses to run it until it has the
+  value: the command `drive` prints passes the `--vars-file` it saved with
+  `--save-secrets`, or a `--var password=VALUE` for you to fill in.
+- **A video** with `--video`, recorded with Playwright's `page.screencast`.
+  It shows each action annotated on screen and opens with the goal as a
+  title card.
+- **`drive-report.json`** in `--out`, containing every step, each step's
+  problems, the final URL and the model's reasoning.
+
+## Secrets
+
+What `drive` types into a password field (`type=password`, or an
+`autocomplete` token ending in `-password`, such as `current-password`) or a
+one-time-code field (`autocomplete="one-time-code"`) is a secret, and so is
+each `--secret`. A secret is recorded as a placeholder, never as its value:
+
+| Typed into | Recorded as |
+| --- | --- |
+| a password field | `{{password}}`; a second, different value `{{password_2}}`, then `{{password_3}}`. The same value again (a "confirm password" field) reuses its name |
+| a one-time-code field | `{{one_time_code}}` (`{{one_time_code_2}}`, …) |
+| any field, as `{{name}}` with `--secret name=ENV_VAR` | `{{name}}`; the value typed is `$ENV_VAR`'s |
+
+The value is replaced by its placeholder in the recipe, the recipe store,
+`recipe.json`, `drive-report.json`, the progress lines, the video's action
+titles (Playwright annotates a fill as `Fill "<value>"`, so drive hides the
+title of a secret one) and everything the model is shown: the history, and
+the accessibility outline, which shows a filled field's value
+(`textbox "Password": {{password}}`). The model still sees that the field
+was filled. Every other text drive writes (problems, URLs, the model's
+reasoning) has each secret value replaced too, as written and as a URL
+encodes it.
+
+`--secret` keeps a secret out of the plan and out of the model's view
+entirely: the plan (or the goal you give the model) says `{{pw}}`, and the
+value comes from the environment at run time. A `--secret` whose variable
+is unset or empty, and a plan value with a `{{name}}` no `--secret` names,
+are refused before the browser starts (exit 2).
+
+```sh
+# plan.json: [{"fill": "textbox \"Email\"", "value": "qa@example.test"},
+#             {"fill": "textbox \"Password\"", "value": "{{pw}}"},
+#             {"click": "button \"Sign in\""}]
+QA_PASSWORD=… chaosbringer drive --url http://localhost:3000/login --goal "log in" \
+  --plan plan.json --secret pw=QA_PASSWORD --until-url /dashboard \
+  --save-recipe auth/login --save-secrets .secrets/login.json
+# recipe saved: auth/login (verify with: chaosbringer recipes verify auth/login --base-url http://localhost:3000 --vars-file .secrets/login.json)
+```
+
+The real values are written only with `--save-secrets <file>`: a JSON object
+of the recipe's placeholders and their values, created (or overwritten) with
+mode 0600, which `recipes verify`, `recipes repair` and `load` read as
+`--vars-file <file>`. drive refuses, before the browser starts, a path that
+is a directory, a symlink, a file it cannot write, or a new file in a
+directory it cannot create or write (a directory that is missing is created
+then, before the run). Keep the file out of version control. Without
+`--save-secrets`, the `verify with:` hint names each variable for you to
+supply (`--var password=VALUE`). `--chaos` replays the recipe with the
+values the run had, and scrubs them from `chaos-report.json` and the
+findings it prints (what the app echoes back: a URL, a log line, an error)
+as it does from drive's own report.
+
+From code, `drive({ secrets: { pw: process.env.QA_PASSWORD! } })` does what
+`--secret` does, `result.variables` names the placeholders the recipe uses,
+and `result.secretValues()` returns the values: a function, so that
+`JSON.stringify(result)` leaves them out. Replay the recipe with
+`runRecipe(page, result.recipe, { vars: result.secretValues() })`.
+
+What drive cannot take a secret out of:
+
+- what the app does with it: the requests it sends (a login `POST` body, a
+  `GET` form that puts it in the URL the server logs), its own logs and
+  storage. A Playwright trace or HAR you record yourself holds those too;
+- pixels: a `--vision` screenshot and the video's frames show a field the page
+  does not mask (a one-time code is shown as typed; a password field shows
+  dots);
+- a secret it does not know is one: a value typed into a plain text field
+  without `--secret`. A value typed into a plain field first and into a
+  password field later is scrubbed from then on, and from the report and
+  the recipe, but the progress line printed for the earlier step keeps it. `recipes lint` still warns about a credential-looking
+  fill whose value is not templated (`hardcoded-credentials`), for recipes
+  written by hand.
+
+A very short secret is replaced wherever its text appears, so a one- or
+two-character one makes the report hard to read: use test credentials of a
+realistic length.
+
+> **Behaviour change:** drive used to record what it typed into a password
+> field as it was, in the recipe and every output. Such a recipe now holds
+> `{{password}}`, and replaying it needs the value (`recipes verify
+> --vars-file`, `runRecipe(…, { vars: result.secretValues() })`). A plan or
+> model value with a `{{name}}` in it is a secret's placeholder now, not text
+> to type: a plan that typed literal `{{…}}` text needs a `--secret` for it.
+
+## Then break it: `--chaos`
+
+A journey `drive` found is a journey worth breaking. `--chaos` replays the
+recipe of a run that reached its goal, first clean, then once per fault with
+every call the journey made to the app's own API failing. The faults are
+`--faults 500,abort,hang`, the same ones the scan's chaos crawls use, and the
+endpoints follow the scan's rules: same-origin `fetch`/`xhr`, no static files,
+no pages. Each faulted replay is compared with the clean one:
+
+- 🔴 **the app let the failure escape**: an uncaught exception or unhandled
+  rejection the clean replay did not have;
+- 🟠 **the goal still showed as reached**: with every API call failing, the
+  page claims a success the server never confirmed (unless the goal needs no
+  API);
+- 🟡 **the journey stops at step N**: expected while the API is down. It tells
+  you which step depends on which call.
+
+A fault that never fired is reported as such. A journey that calls no API of
+its own (a localStorage TodoMVC) is skipped with that reason. `recipeChaos()`
+does the same from code, for any recipe. For one drive recorded with a
+secret, pass `vars: result.secretValues()` (without them the clean replay
+fails on the placeholder and no fault runs) and, to keep the values out of
+the result as `--chaos` does, `scrub: (text) => new DriveSecrets(result.secretValues()).scrub(text)`.
+
+```sh
+chaosbringer drive --url http://localhost:3000/ --goal "add a T-shirt to the cart" \
+  --until-text "Added to cart" --chaos --hang-ms 3000
+```
+
+Errors this machine causes rather than the site (a proxy that refuses an
+analytics host, media the bundled Chromium cannot decode) are kept apart
+throughout, using the scan's environment rules. They are neither shown to the
+model nor counted as problems.
+
+## Hand the browser to an agent: `--bind`
+
+`--bind` serves the browser `drive` is driving to other Playwright clients
+(`browser.bind`, Playwright 1.59+). The attach commands are printed at the
+start:
+
+```sh
+chaosbringer drive --url … --goal "…" --bind --bind-title shop --keep-open
+# in another terminal, or from an agent:
+npx playwright cli attach shop
+npx playwright cli -s=shop snapshot
+# or point an MCP client at it:
+npx playwright mcp --endpoint <the printed endpoint>
+```
+
+`--keep-open` leaves the browser on the final page until Ctrl-C. An attached
+agent can then look at the state a run ended in, or take over where `drive`
+stopped. The crawl (`chaosbringer --bind`) and the scan (`chaosbringer scan
+--bind`) take the same flag, to watch a crawl's pages live. From code, it is
+`bind` on `drive()` and on `CrawlerOptions`.
+
+## Without a model: plans
+
+`--plan plan.json` follows a fixed list of steps against the same snapshot,
+with the same checks running. Each step names its control by a substring of
+its description, or by a regex written as `"/…/"`:
+
+```json
+[
+  { "fill": "textbox \"What needs to be done?\"", "value": "Buy milk", "submit": true },
+  { "click": "/checkbox \"Toggle Todo\"/" },
+  { "click": "link \"Completed\"" }
+]
+```
+
+A step whose control is not on the page ends the run (`gave-up`, naming the
+step). The plan no longer matches the site. A plan file that is not there,
+is not JSON, or has a step drive cannot read (`--plan plan.json: step 2 is
+not click / fill+value / select+value / press`) is refused before the
+browser starts, with exit 2; so is a `--storage-state` file that is not
+there or not storageState JSON. Both used to be `drive failed: …` and exit
+1, the code for a goal that was not reached.
+
+When every step has run, the plan answers "done". With an `--until-*` that
+does not hold then (wrong credentials, a flow that changed), the run ends at
+once as `stuck` (exit 1), with the reason `the plan is complete, but the
+success condition does not hold (…)`. A plan has nothing else to try, so it
+is not asked again. From code, a decider says the same with
+`{ action: "done", final: true }`.
+
+## From code
+
+```ts
+import { anthropicDecider, drive, planDecider } from "chaosbringer";
+
+const result = await drive({
+  url: "http://localhost:3000/",
+  goal: "sign in as the demo user",
+  decider: anthropicDecider({ apiKey: process.env.ANTHROPIC_API_KEY! }),
+  until: { urlIncludes: "/dashboard" },
+  excludePatterns: ["/logout"],
+});
+if (result.status !== "reached") throw new Error(result.reason);
+expect(result.problems).toEqual([]);
+```
+
+A `DriveDecider` is one method, `decide(input) => DriveDecision | null`. Write
+your own to mix rules and a model. `readAria(page)` gives the same
+outline and candidates for use outside `drive`.
+
+Only drive sites you own or are allowed to test. A model fills forms and
+presses buttons, so `--exclude` anything destructive.

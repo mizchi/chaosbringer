@@ -52,6 +52,15 @@ describe("aiDriver", () => {
     expect(provider.selectAction).not.toHaveBeenCalled();
   });
 
+  it("forwards the step's goal (the crawl's driverGoal), its own goal first", async () => {
+    const provider = fixedProvider({ index: 0, reasoning: "x" });
+    await aiDriver({ provider }).selectAction(makeStep({ goal: "find form bugs" }));
+    await aiDriver({ provider, goal: "its own" }).selectAction(makeStep({ goal: "find form bugs" }));
+    await aiDriver({ provider }).selectAction(makeStep());
+    const goals = vi.mocked(provider.selectAction).mock.calls.map(([input]) => input.goal);
+    expect(goals).toEqual(["find form bugs", "its own", undefined]);
+  });
+
   it("respects a budget cap on calls", async () => {
     const provider = fixedProvider({ index: 0, reasoning: "x" });
     const budget = new DriverBudget({ maxCalls: 2 });

@@ -8,6 +8,8 @@
  * collapse to the same cluster but don't swallow unrelated errors.
  */
 
+import { stripAnsi, withoutCallLog } from "./error-text.js";
+import { isFaultEcho } from "./resource-outcomes.js";
 import type { PageError } from "./types.js";
 
 export interface ErrorCluster {
@@ -23,11 +25,21 @@ export interface ErrorCluster {
   urls: string[];
   /** Distinct invariant names (only meaningful for type=invariant-violation). */
   invariantNames?: string[];
+  /**
+   * Distinct `PageError.resourceUrl`s: the files behind a "Failed to load
+   * resource" cluster, whose message (and so its fingerprint) names none.
+   * Absent when no error in the cluster carries one.
+   */
+  resourceUrls?: string[];
 }
 
 /** Normalise an error message to its fingerprint. */
 export function fingerprintError(err: PageError): string {
-  let msg = err.message ?? "";
+  // Before anything else: Playwright's call log names the call's options
+  // (`waiting until "networkidle"` vs `"load"`, i.e. the crawl's --settle),
+  // and colours them with ANSI escapes. With them in, one failure was a
+  // different cluster per settle mode, and --baseline-strict failed on it.
+  let msg = withoutCallLog(stripAnsi(err.message ?? ""));
   // A perf-budget breach is one failure however much it went over by: the
   // measured value ("requestCount=23 > budget 20") changes run to run, and
   // the generic 3+-digit fold below leaves 10–99 and decimals literal, so
@@ -58,10 +70,15 @@ export function fingerprintError(err: PageError): string {
   return msg.slice(0, 160);
 }
 
-/** Collapse a list of errors into stable clusters. */
+/**
+ * Collapse a list of errors into stable clusters. The browser's echoes of a
+ * fault the run injected (`PageError.causedByFault`) are left out: they are
+ * the fault, and a cluster of them is what a strict fault test failed on.
+ */
 export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
   const bucket = new Map<string, ErrorCluster>();
   for (const err of errors) {
+    if (isFaultEcho(err)) continue;
     const fp = fingerprintError(err);
     const key = `${err.type}|${fp}`;
     const existing = bucket.get(key);
@@ -70,6 +87,11 @@ export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
       if (err.url && !existing.urls.includes(err.url)) existing.urls.push(err.url);
       if (err.invariantName && existing.invariantNames && !existing.invariantNames.includes(err.invariantName)) {
         existing.invariantNames.push(err.invariantName);
+      }
+      if (err.resourceUrl) {
+        // Not only on the first error: a cluster can mix errors with and without one.
+        existing.resourceUrls ??= [];
+        if (!existing.resourceUrls.includes(err.resourceUrl)) existing.resourceUrls.push(err.resourceUrl);
       }
     } else {
       bucket.set(key, {
@@ -80,6 +102,7 @@ export function clusterErrors(errors: readonly PageError[]): ErrorCluster[] {
         count: 1,
         urls: err.url ? [err.url] : [],
         invariantNames: err.invariantName ? [err.invariantName] : undefined,
+        ...(err.resourceUrl ? { resourceUrls: [err.resourceUrl] } : {}),
       });
     }
   }

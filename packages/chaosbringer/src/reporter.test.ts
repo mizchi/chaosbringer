@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, existsSync, unlinkSync, rmSync } from "node:fs";
-import { formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
+import { exitReasons, formatCompactReport, formatReport, getExitCode, saveReport } from "./reporter.js";
 import { fakeAction, fakePage, fakeSpan } from "./perf-fixtures.test-helpers.js";
 import { buildCrawlPerfSummary } from "./perf-summary.js";
 import type { CrawlReport, CrawlSummary } from "./types.js";
@@ -85,6 +85,134 @@ describe("getExitCode", () => {
   });
 });
 
+describe("exitReasons", () => {
+  it("counts a failed navigation in the verdict line's errors, though not as a JS exception", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/reset", undefined, {
+          status: "error",
+          errors: [{ type: "navigation", message: "page.goto: net::ERR_EMPTY_RESPONSE at http://localhost:3000/reset", timestamp: 0 }],
+        }),
+      ],
+      summary: makeSummary({ errorPages: 1 }),
+    });
+    expect(formatCompactReport(report, true).split("\n").slice(0, 2)).toEqual([
+      "[FAIL] 1 pages, 1 errors, 1.0s (seed=42)",
+      "  Failed: 1 page failed to load (first: http://localhost:3000/reset)",
+    ]);
+  });
+
+  it("names a renderer crash as one, not as a page that failed to load", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/down", undefined, { status: "error" }),
+        fakePage("http://localhost:3000/oom", undefined, {
+          status: "error",
+          errors: [{ type: "crash", message: "renderer crashed", timestamp: 0 }],
+        }),
+      ],
+      summary: makeSummary({ errorPages: 2, crashes: 1 }),
+    });
+    expect(exitReasons(report)).toEqual([
+      "1 page failed to load (first: http://localhost:3000/down)",
+      "1 renderer crash (first: http://localhost:3000/oom)",
+    ]);
+    // A crash alone fails the run, in every mode.
+    const alone = makeReport({ summary: makeSummary({ errorPages: 1, crashes: 1 }) });
+    expect(exitReasons(alone)).toEqual(["1 renderer crash"]);
+    expect(getExitCode(alone)).toBe(1);
+  });
+
+  it("names every rule that fails the run, and nothing for a passing one", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://localhost:3000/ok"),
+        fakePage("http://localhost:3000/down", undefined, { status: "error" }),
+        fakePage("http://localhost:3000/slow", undefined, { status: "timeout" }),
+      ],
+      summary: makeSummary({
+        errorPages: 1,
+        timeoutPages: 1,
+        invariantViolations: 2,
+        consoleErrors: 1,
+        jsExceptions: 3,
+        unhandledRejections: 1,
+      }),
+      diff: {
+        newClusters: [{ key: "console|x", type: "console", fingerprint: "x", before: 0, after: 1 }],
+        resolvedClusters: [],
+        unchangedClusters: [],
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(exitReasons(report, { strict: true, baselineStrict: true })).toEqual([
+      "1 page failed to load (first: http://localhost:3000/down)",
+      "1 page timed out (first: http://localhost:3000/slow)",
+      "2 invariant violations",
+      "--strict: 1 console error, 3 JS exceptions, 1 unhandled rejection",
+      "--baseline-strict: 1 new cluster vs the baseline",
+    ]);
+    // Without the flags, only the rules that always apply.
+    expect(exitReasons(report)).toHaveLength(3);
+    expect(exitReasons(makeReport({ summary: makeSummary({ consoleErrors: 5 }) }))).toEqual([]);
+  });
+
+  it("fails on HTTP errors, network errors and dead links only under the rule that asks, each named", () => {
+    const report = makeReport({
+      pages: [
+        fakePage("http://x/p", undefined, {
+          errors: [
+            // A fault's echo is never the first one named.
+            { type: "console", message: "Failed to load resource: the server responded with a status of 503 (Service Unavailable)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/api/a", status: 503, method: "GET", causedByFault: "a-503" },
+            { type: "console", message: "Failed to load resource: the server responded with a status of 404 (Not Found)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/i.png", status: 404, method: "GET" },
+            { type: "console", message: "Failed to load resource: the server responded with a status of 502 (Bad Gateway)", url: "http://x/p", timestamp: 0, resourceUrl: "http://x/api/b", status: 502, method: "PUT" },
+            { type: "network", message: "http://x/api/c - net::ERR_CONNECTION_RESET", url: "http://x/p", timestamp: 0, method: "POST" },
+          ],
+        }),
+      ],
+      summary: makeSummary({
+        consoleErrors: 2,
+        networkErrors: 1,
+        httpErrors: { total: 2, "4xx": 1, "5xx": 1, byStatus: { "404": 1, "502": 1 } },
+        faultEchoes: 1,
+        discovery: {
+          extractedLinks: 1,
+          clickedLinks: 0,
+          uniquePages: 2,
+          deadLinks: [{ url: "http://x/gone", statusCode: 404, sourceUrl: "", method: "extracted" }],
+          spaIssues: [],
+        },
+      }),
+    });
+    expect(exitReasons(report)).toEqual([]);
+    expect(exitReasons(report, { http: "5xx", network: true, deadLinks: true })).toEqual([
+      "--fail-on-http 5xx: 1 HTTP response >= 500 (first: PUT http://x/api/b 502 on http://x/p)",
+      "--fail-on-network: 1 network error (first: POST http://x/api/c net::ERR_CONNECTION_RESET on http://x/p)",
+      "--fail-on-dead-links: 1 dead link (first: http://x/gone <- (initial))",
+    ]);
+    expect(exitReasons(report, { http: "4xx" })).toEqual([
+      "--fail-on-http 4xx: 2 HTTP responses >= 400 (first: GET http://x/i.png 404 on http://x/p)",
+    ]);
+    // No HTTP error of its level: nothing, and a report an older version wrote has no httpErrors at all.
+    expect(exitReasons({ summary: makeSummary({ httpErrors: { total: 1, "4xx": 1, "5xx": 0, byStatus: { "404": 1 } } }) }, { http: "5xx" })).toEqual([]);
+    expect(exitReasons({ summary: makeSummary() }, { http: "4xx" })).toEqual([]);
+    // Without pages, the count alone.
+    expect(exitReasons({ summary: report.summary }, { http: "5xx", network: true })).toEqual([
+      "--fail-on-http 5xx: 1 HTTP response >= 500",
+      "--fail-on-network: 1 network error",
+    ]);
+  });
+
+  it("judges a report without pages, as the fixture's testPage() passes one", () => {
+    // The Playwright fixture's strict check hands over a summary alone; the
+    // verdict is the same, only the first failing URL goes unnamed.
+    const run = { summary: makeSummary({ errorPages: 1 }) };
+    expect(exitReasons(run)).toEqual(["1 page failed to load"]);
+    expect(getExitCode(run)).toBe(1);
+  });
+});
+
 describe("formatCompactReport", () => {
   it("shows PASS for clean report", () => {
     const out = formatCompactReport(makeReport({ pagesVisited: 10 }));
@@ -106,6 +234,82 @@ describe("formatCompactReport", () => {
     });
     const out = formatCompactReport(report);
     expect(out).toContain("6 errors");
+  });
+
+  it("counts the rejections and invariant violations a run fails on", () => {
+    // The dogfood case: `--strict --compact` on a page whose only finding is
+    // an unhandled rejection printed `[FAIL] 1 pages, 0 errors`.
+    const rejection = makeReport({ summary: makeSummary({ unhandledRejections: 1 }) });
+    expect(formatCompactReport(rejection, true)).toMatch(/^\[FAIL\] 1 pages, 1 errors,/);
+    const violations = makeReport({ summary: makeSummary({ consoleErrors: 1, invariantViolations: 2 }) });
+    expect(formatCompactReport(violations)).toMatch(/^\[FAIL\] 1 pages, 3 errors,/);
+  });
+
+  it("on FAIL says which rule failed, the top three clusters and the repro command", () => {
+    const clusters = ["a", "b", "c", "d"].map((name, i) => ({
+      key: `unhandled-rejection|boom ${name}`,
+      type: "unhandled-rejection" as const,
+      fingerprint: `boom ${name}`,
+      sample: { type: "unhandled-rejection" as const, message: `boom ${name}`, timestamp: 0 },
+      count: 4 - i,
+      urls: ["http://localhost:3000/"],
+    }));
+    const report = makeReport({
+      summary: makeSummary({ unhandledRejections: 10 }),
+      errorClusters: clusters,
+      reproCommand: "chaosbringer --url http://localhost:3000 --seed 42 --strict",
+    });
+    expect(formatCompactReport(report, true).split("\n")).toEqual([
+      "[FAIL] 1 pages, 10 errors, 1.0s (seed=42)",
+      "  Failed: --strict: 10 unhandled rejections",
+      "  Top clusters:",
+      "    [unhandled-rejection]×4 boom a",
+      "    [unhandled-rejection]×3 boom b",
+      "    [unhandled-rejection]×2 boom c",
+      "    … and 1 more",
+      "  Repro: chaosbringer --url http://localhost:3000 --seed 42 --strict",
+    ]);
+    // A passing run stays one line: nothing failed, so nothing to explain.
+    expect(formatCompactReport(report).split("\n")).toEqual(["[PASS] 1 pages, 10 errors, 1.0s (seed=42)"]);
+  });
+
+  it("on FAIL lists the clusters that failed the run before larger ones that did not", () => {
+    const cluster = (type: "console" | "network" | "exception", fingerprint: string, count: number) => ({
+      key: `${type}|${fingerprint}`,
+      type,
+      fingerprint,
+      sample: { type, message: fingerprint, timestamp: 0 },
+      count,
+      urls: ["http://localhost:3000/"],
+    });
+    const unchanged = [cluster("console", "old a", 9), cluster("console", "old b", 8), cluster("console", "old c", 7)];
+    const boom = cluster("exception", "fixture: boom", 1);
+    const entry = (c: ReturnType<typeof cluster>) => ({ ...c, before: c.count, after: c.count });
+    // The PR gate's case: only the small new cluster fails --baseline-strict.
+    const gated = makeReport({
+      summary: makeSummary({ consoleErrors: 24, jsExceptions: 1 }),
+      errorClusters: [...unchanged, boom],
+      diff: {
+        baselineSeed: 1,
+        newClusters: [{ ...entry(boom), before: 0 }],
+        resolvedClusters: [],
+        unchangedClusters: unchanged.map(entry),
+        newFailedPages: [],
+        resolvedFailedPages: [],
+      },
+    });
+    expect(formatCompactReport(gated, { baselineStrict: true }).split("\n").slice(1, 5)).toEqual([
+      "  Failed: --baseline-strict: 1 new cluster vs the baseline",
+      "  Top clusters:",
+      "    [exception] fixture: boom (new)",
+      "    [console]×9 old a",
+    ]);
+    // --strict does not fail on network errors, however many there are.
+    const strict = makeReport({
+      summary: makeSummary({ networkErrors: 27, jsExceptions: 1 }),
+      errorClusters: [cluster("network", "net a", 9), cluster("network", "net b", 9), cluster("network", "net c", 9), boom],
+    });
+    expect(formatCompactReport(strict, true).split("\n")[3]).toBe("    [exception] fixture: boom");
   });
 
   it("includes metrics when present", () => {
@@ -186,6 +390,12 @@ describe("formatReport", () => {
     expect(out).toContain("invariant_violation=1");
   });
 
+  it("counts renderer crashes in the summary when there were any", () => {
+    const lines = (report: CrawlReport) => formatReport(report).split("\n");
+    expect(lines(makeReport({ summary: makeSummary({ errorPages: 1, crashes: 1 }) }))).toContain("Renderer Crashes: 1");
+    expect(formatReport(makeReport())).not.toContain("Renderer Crashes");
+  });
+
   it("omits the advisor section when advisor was never consulted", () => {
     const out = formatReport(makeReport());
     expect(out).not.toContain("VLM ADVISOR");
@@ -228,6 +438,42 @@ describe("formatReport", () => {
   it("omits the replay-fidelity section when traceReplay was not used", () => {
     const out = formatReport(makeReport());
     expect(out).not.toContain("REPLAY FIDELITY");
+  });
+});
+
+describe("off-site navigations in the reports", () => {
+  const U = "http://localhost:3000";
+  const nav = (from: string, to: string, trigger: "script" | "click" | "server-redirect") => ({ from, to, trigger });
+
+  it("places the compact line after the dead links and before the warnings, and counts redirects only", () => {
+    const report = makeReport({
+      pages: [
+        { ...fakePage(`${U}/a`), offsiteNavigations: [nav(`${U}/a`, "http://x.test/1", "click")] },
+        { ...fakePage(`${U}/b`), offsiteNavigations: [nav(`${U}/b`, "http://x.test/2", "server-redirect")] },
+      ],
+      summary: makeSummary({ discovery: { extractedLinks: 1, clickedLinks: 0, uniquePages: 1, deadLinks: [{ url: `${U}/gone`, statusCode: 404, sourceUrl: `${U}/`, method: "extracted" }], spaIssues: [] } }),
+      warnings: [{ code: "sitemap-unreadable", message: "sitemap gone", count: 1 }],
+    } as Partial<CrawlReport>);
+    const lines = formatCompactReport(report).split("\n");
+    expect(lines.slice(1, 4)).toEqual([
+      `  Dead links: 1 (first: ${U}/gone <- ${U}/)`,
+      `  Off-site redirects: 1 (first: ${U}/b -> http://x.test/2)`,
+      "  Warnings: 1 (first: sitemap gone)",
+    ]);
+    // No redirect, no line.
+    expect(formatCompactReport(makeReport({ pages: [report.pages[0]!] }))).not.toContain("Off-site redirects");
+  });
+
+  it("lists a report an older version wrote by its blockedNavigations, and caps the list", () => {
+    const old = makeReport({ pages: [{ ...fakePage(`${U}/chat`), blockedNavigations: ["http://x.test/invite"] }] });
+    expect(formatReport(old)).toContain(`OFF-SITE NAVIGATIONS\n${"-".repeat(40)}\n  ${U}/chat -> http://x.test/invite`);
+    const many = makeReport({
+      pages: [{ ...fakePage(`${U}/`), offsiteNavigations: Array.from({ length: 25 }, (_, i) => nav(`${U}/`, `http://x.test/${i}`, "script")) }],
+    });
+    const text = formatReport(many);
+    expect(text).toContain(`  ${U}/ -> http://x.test/19 (script redirect)`);
+    expect(text).not.toContain("http://x.test/20 ");
+    expect(text).toContain("  … and 5 more");
   });
 });
 
@@ -278,6 +524,30 @@ describe("formatReport: fault injection block", () => {
     expect(text).not.toContain("first: matched=3 injected=2 suppressed=0");
   });
 
+  it("names a rule's fault echoes, and the request and fault behind a failed load", () => {
+    const echo = {
+      type: "console" as const,
+      message: "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+      url: "http://x/",
+      timestamp: 0,
+      resourceUrl: "http://x/api",
+      status: 503,
+      method: "POST",
+      causedByFault: "api-503",
+    };
+    const text = formatReport(
+      makeReport({
+        pages: [fakePage("http://x/", undefined, { errors: [echo] })],
+        summary: makeSummary({ faultEchoes: 1, httpErrors: { total: 0, "4xx": 0, "5xx": 0, byStatus: {} } }),
+        faultInjections: [{ rule: "api-503", matched: 1, injected: 1, echoes: 1 }],
+      }),
+    );
+    expect(text).toContain("api-503: matched=1 injected=1 echoes=1");
+    expect(text).toContain("Fault echoes (not counted above): 1");
+    expect(text).not.toContain("HTTP Errors");
+    expect(text).toContain(`  [console] ${echo.message.slice(0, 77)}... (echo of fault api-503)\n    resource: http://x/api (POST 503)\n`);
+  });
+
   it("shows held requests, which used to be JSON-only", () => {
     // The parked request is the point of an unbounded hang *and* the reason
     // for whatever navigation timeout is printed above it.
@@ -292,6 +562,30 @@ describe("formatReport: fault injection block", () => {
       makeReport({ faultInjections: [{ rule: "x", matched: 1, injected: 1 }] }),
     );
     expect(none).not.toMatch(/requests held open/);
+  });
+});
+
+describe("formatReport: failed resources", () => {
+  it("names the file under a failed load, on its page and under its cluster", () => {
+    const message = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+    const files = [1, 2, 3, 4, 5, 6, 7].map((i) => `http://x/img/${i}.png`);
+    const error = { type: "console" as const, message, url: "http://x/", timestamp: 0, resourceUrl: files[0] };
+    const text = formatReport(
+      makeReport({
+        pages: [fakePage("http://x/", undefined, { errors: [error, { type: "console", message: "app log", url: "http://x/", timestamp: 0 }] })],
+        errorClusters: [
+          { key: `console|${message}`, type: "console", fingerprint: message, sample: error, count: 7, urls: ["http://x/"], resourceUrls: files },
+        ],
+      }),
+    );
+    // Under the page's error line: the message alone does not say which file.
+    expect(text).toContain(`  [console] ${message}\n    resource: ${files[0]}\n  [console] app log\n`);
+    // Under the cluster: the first five, then how many more the JSON has.
+    const listed = files
+      .slice(0, 5)
+      .map((u) => `    resource: ${u}\n`)
+      .join("");
+    expect(text).toContain(`  [console]×7 ${message}\n${listed}    … and 2 more\n`);
   });
 });
 

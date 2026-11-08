@@ -44,7 +44,18 @@ export function formatCandidates(candidates: ReadonlyArray<{ index: number; desc
   return candidates.map((c) => `${c.index}. ${c.description}`).join("\n");
 }
 
-export function renderUserPrompt(template: string, input: DriverProviderInput): string {
+/**
+ * The outline for a template that has an `{{outline}}` slot, read from the
+ * input's lazy thunk. `"(not available)"` when the runner offers none or the
+ * snapshot fails: a missing outline is not a reason to skip the step.
+ */
+export async function outlineFor(template: string, input: DriverProviderInput): Promise<string | undefined> {
+  if (!template.includes("{{outline}}")) return undefined;
+  if (!input.outline) return "(not available)";
+  return input.outline().catch(() => "(not available)");
+}
+
+export function renderUserPrompt(template: string, input: DriverProviderInput, outline?: string): string {
   const goalLine = input.goal ? `Goal: ${input.goal}\n` : "";
   // Appended under the history it describes rather than given a template
   // slot, so a prompt without perf renders byte-for-byte as it always did.
@@ -57,7 +68,8 @@ export function renderUserPrompt(template: string, input: DriverProviderInput): 
     .replace(/\{\{goalLine\}\}/g, goalLine)
     .replace(/\{\{history\}\}/g, historyBlock)
     .replace(/\{\{violations\}\}/g, formatViolations(input.invariantViolations))
-    .replace(/\{\{candidates\}\}/g, formatCandidates(input.candidates));
+    .replace(/\{\{candidates\}\}/g, formatCandidates(input.candidates))
+    .replace(/\{\{outline\}\}/g, outline ?? "(not available)");
 }
 
 export function stripCodeFence(s: string): string {

@@ -9,7 +9,7 @@ import { BUDGET_METRIC } from "lightbringer/core";
 import { devices } from "playwright";
 import { validateFaultSchedule } from "./schedule.js";
 import { NETWORK_PROFILES, PERF_BUDGET_KEYS } from "./types.js";
-import type { CrawlerOptions, UrlMatcher } from "./types.js";
+import type { ChaosTestOptions, CrawlerOptions, UrlMatcher } from "./types.js";
 import { cdpEndpointUrl } from "./cdp.js";
 import { validateSettle } from "./settle.js";
 import { validatePerf } from "./perf-options.js";
@@ -36,15 +36,16 @@ import { validatePerf } from "./perf-options.js";
  */
 export const KNOWN_OPTION_NAMES = [
   "baseUrl", "maxPages", "maxActionsPerPage", "timeout", "headless", "screenshots",
-  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "spaPatterns", "viewport",
-  "userAgent", "traceparent", "actionWeights", "logFile", "logLevel", "logToConsole",
+  "screenshotDir", "excludePatterns", "ignoreErrorPatterns", "ignoreHttpPatterns", "strictCountsFaultEchoes",
+  "spaPatterns", "viewport",
+  "userAgent", "traceparent", "actionWeights", "ariaTargets", "bind", "logFile", "logLevel", "logToConsole",
   "enableRecovery", "recoveryHistorySize", "seed", "invariants", "faultInjection",
   "lifecycleFaults", "runtimeFaults", "iframeFaults", "launchOptions", "har",
   "storageState", "performanceBudget", "traceOut", "traceReplay", "device", "network",
   "seedFromSitemap", "advisor", "driver", "driverGoal", "coverageFeedback",
   "shardIndex", "shardCount", "blockExternalNavigation", "failureArtifacts", "server",
   "initScripts", "perf", "perfBudgets", "perfBudgetsFile", "cdpEndpoint", "cdpTargetId",
-  "terminalBrowser", "settle", "httpCache",
+  "terminalBrowser", "settle", "httpCache", "cliReproFlags",
 ] as const;
 
 /**
@@ -58,6 +59,21 @@ export const KNOWN_OPTION_NAMES = [
 type UnlistedOptionNames = Exclude<keyof CrawlerOptions, (typeof KNOWN_OPTION_NAMES)[number]>;
 const _allOptionsListed: UnlistedOptionNames extends never ? true : UnlistedOptionNames = true;
 void _allOptionsListed;
+
+/**
+ * The Playwright Test fixture's option names (`ChaosTestOptions`), guarded the
+ * same way. The fixture builds its crawler from these keys alone, so a
+ * misspelled one never reaches `validateOptions` to be refused there.
+ */
+export const CHAOS_TEST_OPTION_NAMES = [
+  "baseUrl", "maxPages", "maxActionsPerPage", "ignoreErrorPatterns", "blockExternalNavigation",
+  "strict", "strictCountsFaultEchoes", "failOnWarnings", "actionWeights", "perf", "settle", "seed", "invariants", "faultInjection",
+  "lifecycleFaults", "runtimeFaults",
+] as const;
+
+type UnlistedTestOptionNames = Exclude<keyof ChaosTestOptions, (typeof CHAOS_TEST_OPTION_NAMES)[number]>;
+const _allTestOptionsListed: UnlistedTestOptionNames extends never ? true : UnlistedTestOptionNames = true;
+void _allTestOptionsListed;
 
 /** Levenshtein distance, capped: we only care whether it is 1 or 2. */
 function editDistance(a: string, b: string, cap = 3): number {
@@ -77,37 +93,92 @@ function editDistance(a: string, b: string, cap = 3): number {
   return prev[b.length]!;
 }
 
-function rejectNearMissOptions(options: object): void {
-  const known: ReadonlySet<string> = new Set<string>(KNOWN_OPTION_NAMES);
+/**
+ * The keys `chaos()` takes beside `CrawlerOptions` and destructures out:
+ * no typo, though `strict` is a prefix of `strictCountsFaultEchoes`, and a
+ * caller may hand the same object straight to `ChaosCrawler`.
+ */
+const CHAOS_RUN_OPTION_NAMES = [
+  "strict", "baseline", "baselineStrict", "baselineMissing", "setup", "failOnHttp", "failOnNetwork", "failOnDeadLinks",
+  "failOnWarnings",
+];
+
+/**
+ * The name in `candidates` that `key` most likely misspells, or undefined
+ * when none is close: a prefix of a real name either way round
+ * (`maxActions` for `maxActionsPerPage`, a plural/singular slip), else one
+ * at most two edits away. Case is ignored. The options check below and the
+ * CLI's unknown-flag message (`--exlude`: did you mean `--exclude`?) both
+ * use it.
+ */
+export function nearestName(key: string, candidates: readonly string[]): string | undefined {
+  const lower = key.toLowerCase();
+  // Rank rather than take the first hit: in list order, `shard` matched
+  // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
+  // makes no sense is worse than none. Prefix relationships win, then the
+  // smaller edit distance.
+  let suggestion: string | undefined;
+  let best = Number.POSITIVE_INFINITY;
+  for (const name of candidates) {
+    const n = name.toLowerCase();
+    if (n === lower) return name;
+    const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
+    const distance = editDistance(lower, n, 2);
+    // Between two prefixes, the closer: `baselineStric` is `baselineStrict`, not `baseline`.
+    const score = prefix ? distance / 10 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
+    if (score < best) {
+      best = score;
+      suggestion = name;
+    }
+  }
+  return suggestion;
+}
+
+function rejectNearMissOptions(
+  options: object,
+  names: readonly string[] = KNOWN_OPTION_NAMES,
+  what = "option",
+): void {
+  // The chaos() keys are suggested too: a typo'd `failOnHtp` reached the
+  // crawler, which ignored it, and the run passed without the gate.
+  const candidates = names === KNOWN_OPTION_NAMES ? [...names, ...CHAOS_RUN_OPTION_NAMES] : names;
+  const known: ReadonlySet<string> = new Set<string>(candidates);
   for (const key of Object.keys(options)) {
     if (known.has(key)) continue;
-    const lower = key.toLowerCase();
-    // Rank rather than take the first hit: in list order, `shard` matched
-    // `har` (two edits) before `shardIndex` (a prefix), and a suggestion that
-    // makes no sense is worse than none. Prefix relationships win, then the
-    // smaller edit distance.
-    let suggestion: string | undefined;
-    let best = Number.POSITIVE_INFINITY;
-    for (const name of KNOWN_OPTION_NAMES as readonly string[]) {
-      const n = name.toLowerCase();
-      // A prefix of a real name (`maxActions` for `maxActionsPerPage`), or a
-      // plural/singular slip (`faultInjections` for `faultInjection`).
-      const prefix = (n.startsWith(lower) || lower.startsWith(n)) && Math.min(n.length, lower.length) >= 4;
-      const distance = editDistance(lower, n, 2);
-      const score = prefix ? 0 : distance <= 2 ? distance : Number.POSITIVE_INFINITY;
-      if (score < best) {
-        best = score;
-        suggestion = name;
-      }
-    }
+    const suggestion = nearestName(key, candidates);
     if (suggestion !== undefined) {
       throw new Error(
-        `chaosbringer: unknown option "${key}" — did you mean "${suggestion}"? ` +
+        `chaosbringer: unknown ${what} "${key}" — did you mean "${suggestion}"? ` +
           `A misspelled option is accepted and ignored by JavaScript, so it fails as ` +
           `"my fault never fired" rather than as an error.`,
       );
     }
   }
+}
+
+/**
+ * The near-miss check, over the fixture's `chaosOptions` (merged with
+ * `withChaos()` defaults) or `runChaosTest`'s options. The fixture copies
+ * the keys it knows into the crawler's options, so `maxActionPerPage: 0` ran
+ * with the default 5 actions and `stirct: true` failed nothing, silently.
+ *
+ * A key that is a crawler option the fixture does not take (`timeout`,
+ * `iframeFaults`) is refused too, by its own message: it was dropped all the
+ * same, and it is no typo, so the near-miss check would have offered a wrong
+ * fixture name for it (`seed` for `seedFromSitemap`).
+ */
+export function validateChaosTestOptions(options: ChaosTestOptions): void {
+  const taken: ReadonlySet<string> = new Set<string>(CHAOS_TEST_OPTION_NAMES);
+  const crawlerOnly = Object.keys(options).find(
+    (key) => !taken.has(key) && (KNOWN_OPTION_NAMES as readonly string[]).includes(key),
+  );
+  if (crawlerOnly !== undefined) {
+    throw new Error(
+      `chaosbringer: chaosOptions "${crawlerOnly}" is a ChaosCrawler option the fixture does not ` +
+        `take, so it would be ignored. The fixture takes: ${CHAOS_TEST_OPTION_NAMES.join(", ")}.`,
+    );
+  }
+  rejectNearMissOptions(options, CHAOS_TEST_OPTION_NAMES, "chaosOptions key");
 }
 
 export function validateOptions(options: CrawlerOptions): void {
@@ -210,6 +281,13 @@ export function validateOptions(options: CrawlerOptions): void {
 
   for (const p of options.excludePatterns ?? []) assertRegexString(`excludePatterns entry`, p);
   for (const p of options.ignoreErrorPatterns ?? []) assertRegexString(`ignoreErrorPatterns entry`, p);
+  for (const p of options.ignoreHttpPatterns ?? []) assertRegexString(`ignoreHttpPatterns entry`, p);
+  // A string "false" would turn it on.
+  if (options.strictCountsFaultEchoes !== undefined && typeof options.strictCountsFaultEchoes !== "boolean") {
+    throw new Error(
+      `chaosbringer: "strictCountsFaultEchoes" must be a boolean (got ${JSON.stringify(options.strictCountsFaultEchoes)})`,
+    );
+  }
   for (const p of options.spaPatterns ?? []) assertRegexString(`spaPatterns entry`, p);
 
   for (const [ruleIndex, rule] of (options.faultInjection ?? []).entries()) {
@@ -441,6 +519,17 @@ export function validateOptions(options: CrawlerOptions): void {
   }
 
   for (const inv of options.invariants ?? []) {
+    if (typeof inv.check !== "function") {
+      throw new Error(`chaosbringer: invariant "${inv.name}" check must be a function`);
+    }
+    // The crawler runs an invariant only in the phase its `when` names, so any
+    // other value (`"afterAction"`, say) never runs it: the check cannot fail
+    // and the crawl exits 0.
+    if (inv.when !== undefined && inv.when !== "afterLoad" && inv.when !== "afterActions" && inv.when !== "afterVisit") {
+      throw new Error(
+        `chaosbringer: invariant "${inv.name}" when must be "afterLoad", "afterActions" or "afterVisit" (got ${JSON.stringify(inv.when)})`
+      );
+    }
     assertMatcher(`invariant "${inv.name}" urlPattern`, inv.urlPattern);
   }
 
@@ -587,8 +676,9 @@ const PERF_BUDGET_RULE_KEYS = new Set(["match", "budget", "exact"]);
  * lightbringer's `BUDGET_METRIC` keys — read from there, not copied, so a
  * metric lightbringer adds is accepted here the day it lands. Unknown keys
  * are refused outright: a misspelt `blockingMS` would otherwise be a budget
- * that never fires. A limit of 0 is allowed (`perf emit-budgets` writes 0
- * for a metric whose median was 0, e.g. no requests on a click).
+ * that never fires. A limit of 0 is allowed: a hand-set "no requests on this
+ * click" rule, and `perf emit-budgets --floor requestCount=0` writes 0 for a
+ * click that made none, as every emit did before floors existed.
  */
 export function validatePerfBudgets(rules: unknown): void {
   if (!Array.isArray(rules)) {

@@ -50,6 +50,44 @@ describe("parseServerFaultHeaders", () => {
     expect(r?.traceId).toBeUndefined();
   });
 
+  it("parses a partial event, keeping an after-bytes of 0", () => {
+    const h = make({
+      "x-chaos-fault-kind": "partial",
+      "x-chaos-fault-path": "/api/feed",
+      "x-chaos-fault-method": "GET",
+      "x-chaos-fault-after-bytes": "0",
+    });
+    expect(parseServerFaultHeaders(h, "x-chaos-fault")?.attrs).toEqual({
+      kind: "partial",
+      path: "/api/feed",
+      method: "GET",
+      afterBytes: 0,
+    });
+  });
+
+  it("parses a slowStream event with and without chunk-size", () => {
+    const base = {
+      "x-chaos-fault-kind": "slowStream",
+      "x-chaos-fault-path": "/api/feed",
+      "x-chaos-fault-method": "GET",
+      "x-chaos-fault-chunk-delay-ms": "12.5",
+    };
+    const rechunked = make({ ...base, "x-chaos-fault-chunk-size": "64" });
+    expect(parseServerFaultHeaders(rechunked, "x-chaos-fault")?.attrs).toEqual({
+      kind: "slowStream",
+      path: "/api/feed",
+      method: "GET",
+      chunkDelayMs: 12.5,
+      chunkSize: 64,
+    });
+    expect(parseServerFaultHeaders(make(base), "x-chaos-fault")?.attrs).toEqual({
+      kind: "slowStream",
+      path: "/api/feed",
+      method: "GET",
+      chunkDelayMs: 12.5,
+    });
+  });
+
   it("returns null for unknown kind", () => {
     const h = make({
       "x-chaos-fault-kind": "abort",

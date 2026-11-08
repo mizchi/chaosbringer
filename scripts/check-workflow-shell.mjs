@@ -22,45 +22,88 @@
  * thing reported, and the `run:` blocks are read off the parsed tree rather
  * than guessed at from indentation.
  *
+ * A block can also parse and still not run. `chaos-flake.yml` called
+ * `pnpm exec chaosbringer` from `packages/chaosbringer`, and a package's own
+ * bin is not linked into its node_modules/.bin, so every weekly run since the
+ * workspace move died on "Command not found". `pnpm exec` looks in the
+ * step's working directory's node_modules/.bin and then the root's, so each
+ * `pnpm exec <bin>` is checked against those two. That reads the installed
+ * tree, which the `yaml` import below already needs, so this runs after
+ * `pnpm install`.
+ *
  * Usage: `pnpm check:workflow-shell` (from the repo root).
  */
-import { readFileSync, readdirSync, writeFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 
+const root = new URL("../", import.meta.url).pathname;
 const dir = new URL("../.github/workflows/", import.meta.url).pathname;
-const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
-if (files.length === 0) {
+const workflows = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+if (workflows.length === 0) {
   // A checker that finds nothing to check is the defect it is here to prevent.
   console.error("no workflow files under .github/workflows — this check ran on nothing");
   process.exit(2);
 }
+// The repo's own composite actions run shell for the workflows that use them,
+// so their `run:` blocks are read the same way. Paths are relative to the
+// repo root from here on.
+const actionsDir = join(root, ".github/actions");
+const actions = existsSync(actionsDir)
+  ? readdirSync(actionsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .flatMap((d) =>
+        ["action.yml", "action.yaml"]
+          .map((f) => `.github/actions/${d.name}/${f}`)
+          .filter((p) => existsSync(join(root, p))),
+      )
+  : [];
+const files = [...workflows.map((f) => `.github/workflows/${f}`), ...actions];
 
 const scratch = mkdtempSync(join(tmpdir(), "wf-shell-"));
 const problems = [];
 let blocks = 0;
 let parsed = 0;
+let execs = 0;
+/** `pnpm exec` commands in blocks whose working directory is only known at run time. */
+let unchecked = 0;
 
-/** Every `run:` string anywhere in the tree, with a path for the message. */
-function collectRuns(node, path, out) {
+/** Whether `pnpm exec <bin>` run in `cwd` (relative to the repo root) finds `bin`. */
+function execResolves(bin, cwd) {
+  return [cwd, "."].some((d) => existsSync(join(root, d, "node_modules/.bin", bin)));
+}
+
+/**
+ * Every `run:` string anywhere in the tree, with a path for the message and
+ * the directory it runs in: the step's own `working-directory`, else the
+ * nearest `defaults.run.working-directory` above it (job, then workflow),
+ * which is GitHub's precedence and falls out of carrying the nearest one down.
+ */
+function collectRuns(node, path, out, cwd = ".") {
   if (Array.isArray(node)) {
-    node.forEach((v, i) => collectRuns(v, `${path}[${i}]`, out));
+    node.forEach((v, i) => collectRuns(v, `${path}[${i}]`, out, cwd));
     return;
   }
   if (node === null || typeof node !== "object") return;
+  const inherited = node.defaults?.run?.["working-directory"] ?? cwd;
   for (const [key, value] of Object.entries(node)) {
     if (key === "run" && typeof value === "string") {
-      out.push({ path: `${path}.run`, script: value, name: node.name });
+      out.push({
+        path: `${path}.run`,
+        script: value,
+        name: node.name,
+        cwd: node["working-directory"] ?? inherited,
+      });
     } else {
-      collectRuns(value, `${path}.${key}`, out);
+      collectRuns(value, `${path}.${key}`, out, inherited);
     }
   }
 }
 
 for (const file of files) {
-  const text = readFileSync(join(dir, file), "utf8");
+  const text = readFileSync(join(root, file), "utf8");
   let doc;
   try {
     doc = parse(text);
@@ -76,7 +119,7 @@ for (const file of files) {
   parsed++;
   const runs = [];
   collectRuns(doc, "", runs);
-  for (const { path, script, name } of runs) {
+  for (const { path, script, name, cwd } of runs) {
     // GitHub expands `${{ … }}` before the shell sees it, and `${{` is not
     // valid bash. A quoted expression becomes a quoted word, so quoting is
     // preserved by the substitution.
@@ -92,12 +135,40 @@ for (const file of files) {
         `${file}: \`run:\` at ${path}${name ? ` ("${name}")` : ""} is not valid shell\n    ${msg}`,
       );
     }
+    for (const line of shell.split("\n")) {
+      // Comments may name the command they replaced.
+      if (line.trimStart().startsWith("#")) continue;
+      for (const [, bin] of line.matchAll(/(?:^|[\s;&|(])pnpm\s+exec\s+([^\s;&|()]+)/g)) {
+        if (bin.startsWith("-") || bin.includes("$") || bin.includes("GHEXPR")) continue;
+        // A working-directory built from an expression is only known at run
+        // time: counted, so the summary does not claim to have checked it.
+        if (cwd.includes("${{")) {
+          unchecked++;
+          continue;
+        }
+        execs++;
+        if (execResolves(bin, cwd)) continue;
+        problems.push(
+          `${file}: \`run:\` at ${path}${name ? ` ("${name}")` : ""} runs \`pnpm exec ${bin}\` in ${cwd}, ` +
+            `but neither ${cwd}/node_modules/.bin nor node_modules/.bin has ${bin}, so it fails with ` +
+            `"Command not found"\n    (a workspace package's own bin is never linked into its own ` +
+            `node_modules/.bin; run its build output, e.g. \`node dist/cli.js\`, instead)`,
+        );
+      }
+    }
   }
 }
 
-console.log(`parsed ${parsed}/${files.length} workflow files, checked ${blocks} run: blocks`);
+console.log(
+  `parsed ${parsed}/${files.length} workflow and composite action files, checked ${blocks} run: blocks and ${execs} \`pnpm exec\` commands` +
+    (unchecked > 0 ? ` (${unchecked} more not checked: their working directory is an expression)` : ""),
+);
 if (problems.length > 0) {
   for (const p of problems) console.log("  FAIL " + p);
   process.exit(1);
 }
-console.log("every workflow parses as YAML and every run: block parses as shell");
+console.log(
+  "every workflow and composite action parses as YAML, every run: block parses as shell, and every " +
+    (unchecked > 0 ? "checked " : "") +
+    "`pnpm exec` finds its bin",
+);

@@ -11,6 +11,7 @@ import type {
 } from "lightbringer/core";
 import type { AdvisorConfig } from "./advisor/types.js";
 import type { ServerFaultEventAttrs } from "./server-fault-events.js";
+import type { RunWarning } from "./run-warnings.js";
 
 export type { AdvisorConfig } from "./advisor/types.js";
 
@@ -55,8 +56,10 @@ export interface CrawlerOptions {
    * Error message patterns to ignore (regex strings).
    *
    * Matched (case-insensitively) against `PageError.message` for **every**
-   * error type — `console`, `network`, `js-exception`, `unhandled-rejection`,
-   * and `invariant-violation`. There is no separate
+   * error the page raised — `console`, `network`, `exception`,
+   * `unhandled-rejection`, and `invariant-violation` — but not the crawler's
+   * own `navigation` failing or a renderer `crash`: those are the page's
+   * status, which a pattern cannot make a success. There is no separate
    * `ignoreNetworkErrorPatterns`; use this single allowlist for both
    * console noise and network noise.
    *
@@ -68,6 +71,38 @@ export interface CrawlerOptions {
    * copy standing.)
    */
   ignoreErrorPatterns?: string[];
+  /**
+   * Request URL patterns (regex strings) whose 4xx / 5xx responses are not
+   * HTTP errors: not in `summary.httpErrors`, not under `--fail-on-http`, and
+   * the browser's "Failed to load resource: the server responded with a
+   * status of …" line about the file is dropped like an `ignoreErrorPatterns`
+   * match. That line names no URL, so `ignoreErrorPatterns` cannot single
+   * out one endpoint (a session check's 401, a missing favicon); this does.
+   * A transport failure of the same URL (`net::ERR_…`) is still recorded.
+   * (The `net::ERR_ABORTED` a stylesheet or script also fails with after a
+   * 4xx / 5xx is not a transport failure: it is never a `network` error.)
+   */
+  ignoreHttpPatterns?: string[];
+  /**
+   * Count the browser's echo of a fault this run injected as an ordinary
+   * error, as versions before this option did. By default a console
+   * "Failed to load resource" line or a `network` error about a request one
+   * of the run's own fault rules answered (a `faults.status` / `abort` /
+   * released `hang`, on the page or its service worker, or a server-side
+   * `5xx` from `@mizchi/server-faults` in `server: { mode: "remote" }`) is
+   * tagged `causedByFault` and left out of the summary counts, the error
+   * clusters, `--strict`, `--fail-on-http` and `--fail-on-network`: it is
+   * the fault, not something the app did. It is counted as
+   * `summary.faultEchoes` and the rule's `faultInjections[].echoes`, and
+   * left out of `PageResult.hasErrors`, flake's page status, the failure
+   * bundles and the Playwright fixture's `expectNoErrors` /
+   * `chaosExpect.toHaveNoErrors`. It stays in `page.errors`, in
+   * `totalErrors` (the raw count) and in the JUnit output, whose
+   * `<failure>` per error flaker reads. `true` records it untagged and
+   * counts it everywhere, so a strict test of a status fault fails on it
+   * again (the rule's `echoes` still counts it).
+   */
+  strictCountsFaultEchoes?: boolean;
   /** URL patterns to treat as SPA (regex strings) - errors from these are categorized separately */
   spaPatterns?: string[];
   /** Viewport size */
@@ -114,11 +149,37 @@ export interface CrawlerOptions {
   traceparent?: boolean | TraceparentInjectionOptions;
   /** Action weighting configuration */
   actionWeights?: ActionWeights;
+  /**
+   * Also find targets through Playwright's accessibility snapshot
+   * (`aria-targets.ts`): controls the CSS scrape misses (a `<div onclick>`
+   * with a pointer cursor) become targets, and every target the snapshot
+   * also sees is described from the tree (`button "Pay" — in dialog
+   * "Checkout"`) to drivers and models. Costs a snapshot per page and per
+   * driver step. Default false.
+   */
+  ariaTargets?: boolean;
+  /**
+   * Serve the browser the crawl launches to other Playwright clients while it
+   * runs (`browser.bind`, Playwright 1.59+): `npx playwright cli attach
+   * <title>` or `npx playwright mcp --endpoint <endpoint>` then see and act on
+   * the crawl's pages. `true` binds as "chaosbringer". Ignored when attaching
+   * over CDP. The endpoint is reported through `onBind` and the log.
+   */
+  bind?: import("./browser-bind.js").BindSpec;
   /** Log file path (enables file logging) */
   logFile?: string;
-  /** Log level */
+  /**
+   * Log level. Default `info` with `logFile`; `warn` with `logToConsole`
+   * alone.
+   */
   logLevel?: "debug" | "info" | "warn" | "error";
-  /** Also log to console */
+  /**
+   * Also log to the console. With `logFile`, each line goes to the console
+   * by level (`console.log` / `warn` / `error`), as well as to the file.
+   * Alone, every line goes to stderr, from `warn` up unless `logLevel` says
+   * otherwise. The setup problems among them are in `report.warnings`
+   * either way.
+   */
   logToConsole?: boolean;
   /** Enable recovery from 404/dead links */
   enableRecovery?: boolean;
@@ -272,9 +333,10 @@ export interface CrawlerOptions {
    */
   driver?: unknown;
   /**
-   * Optional goal hint forwarded to AI-backed drivers. Surfaces in the
-   * prompt as a `Goal: ...` line. Example: "find form validation bugs".
-   * Default: undefined.
+   * Optional goal hint for the driver, on every `DriverStep` as `goal`.
+   * `aiDriver` surfaces it in the prompt as a `Goal: ...` line, unless it
+   * was built with a `goal` of its own; the other built-in drivers do not
+   * read it. Example: "find form validation bugs". Default: undefined.
    */
   driverGoal?: string;
   /**
@@ -310,6 +372,13 @@ export interface CrawlerOptions {
    * from, so `reproCommand` can point back at it.
    */
   perfBudgetsFile?: string;
+  /**
+   * @internal Set by the CLI: the flags it acts on itself rather than through
+   * these options (`--strict`, the `--axe` / `--visual-*` invariants it
+   * builds, `--allow-settle-mismatch`), so `reproCommand` and each failure
+   * bundle's `repro.sh` carry them too.
+   */
+  cliReproFlags?: ReproFlag[];
   /**
    * How the crawler waits for the page to settle after `page.goto` and after
    * each chaos action. Default `"networkidle"`: exactly the waits the crawler
@@ -497,6 +566,15 @@ export interface CrawlPerfSummary {
    */
   keyVersion?: number;
   /**
+   * The browser the crawl measured with (`browser.version()`, e.g.
+   * `153.0.8010.12`). A browser upgrade moves the numbers (Chromium 153 resets
+   * CDP's cumulative counters on a cross-document navigation, and its heap
+   * starts larger), so `perf regress` refuses to compare reports from
+   * different major versions. Absent in reports written before it was
+   * recorded.
+   */
+  browser?: string;
+  /**
    * LCP / INP / CLS / TTFB / FCP over the documents that reported each one.
    * A page visit an action navigated away from counts each of its documents
    * (`PagePerfSummary.documents`), under that document's own URL, so `worst.url`
@@ -683,6 +761,21 @@ export interface FailureArtifactsOptions {
   maxArtifacts?: number;
 }
 
+/**
+ * One flag of a repro command (`reproCommand`, a bundle's `repro.sh`), with
+ * its value unquoted.
+ */
+export interface ReproFlag {
+  flag: string;
+  value?: string;
+  /**
+   * The value names a file or directory the run reads, relative to the
+   * directory the crawl ran in. `repro.sh` runs from its bundle, so it writes
+   * these as absolute paths.
+   */
+  path?: true;
+}
+
 /** `record` captures responses to a HAR file; `replay` serves them back. */
 export type HarMode = "record" | "replay";
 
@@ -819,19 +912,87 @@ export interface ActionWeights {
 }
 
 export interface PageError {
+  /**
+   * - `console`: a `console.error`, or the browser logging a failed resource.
+   * - `network`: a request that failed at the transport level.
+   * - `exception`: an error the page's own code threw and nothing caught.
+   * - `unhandled-rejection`: a promise the page's code left rejected.
+   * - `invariant-violation`: a declared invariant failed.
+   * - `navigation`: the crawler's own navigation of the page failed
+   *   (`page.goto: net::ERR_EMPTY_RESPONSE at …`, a load timeout). The page
+   *   threw nothing: its status (`error` / `timeout`) is the finding, and
+   *   this is why. Not a JS exception: not in `summary.jsExceptions` nor
+   *   under `--strict`. An older version recorded it as `exception`.
+   * - `crash`: the page's renderer process died (`page.on("crash")`); the
+   *   page's status is `error`, and the run always fails on it.
+   */
   type:
     | "console"
     | "network"
     | "exception"
+    | "navigation"
     | "crash"
     | "unhandled-rejection"
     | "invariant-violation";
+  /**
+   * The error's text. Free of the ANSI colour codes Playwright puts in its
+   * own errors (a `navigation`, an `invariant-violation` whose check threw
+   * on a Playwright call); what the page itself logged or threw is kept as
+   * it wrote it. A `navigation` error's stops before Playwright's call log,
+   * which stays in `stack`.
+   */
   message: string;
   url?: string;
   stack?: string;
   timestamp: number;
   /** Name of the invariant that failed (only for invariant-violation errors). */
   invariantName?: string;
+  /**
+   * The file a console error's "Failed to load resource: …" is about (only
+   * for that browser message, which names no URL itself). `message` stays as
+   * the browser wrote it, so the error's cluster is the same with or without.
+   */
+  resourceUrl?: string;
+  /**
+   * The HTTP status of the response a console "Failed to load resource:
+   * the server responded with a status of …" line is about, when that is a
+   * subresource or API request (not the page's own document, which is the
+   * page's `statusCode` and, at 404 / 5xx, a dead link). With `method`, what
+   * `summary.httpErrors` and `--fail-on-http` count. `message` is untouched,
+   * so the error's cluster key is the same as before this field.
+   */
+  status?: number;
+  /** The request's method (`GET`, `POST`, …), with `status`, and on a `network` error. */
+  method?: string;
+  /**
+   * The fault this error is the browser's echo of: the name of the fault
+   * rule (as `faultInjections[].rule` names it) that answered or aborted the
+   * request, or `server:5xx` for a server-side fault. Such an error is left
+   * out of the summary counts, the clusters and the exit rules (see
+   * `CrawlerOptions.strictCountsFaultEchoes`). Matched by request: a real
+   * 500 from the same endpoint is not tagged. Set on a console line when the
+   * response it is about arrives, which is almost always before the line; an
+   * `onError` hook can see one without it when it is not.
+   */
+  causedByFault?: string;
+  /**
+   * Only on a `navigation` error, when the navigation followed a redirect
+   * inside the crawl (same origin) and where it pointed is what failed. The
+   * message names the URL navigated to, not the target that failed, so this
+   * is what tells a start URL whose redirect target is down from a site
+   * that is not there. A redirect to another origin whose host failed (an
+   * SSO that is not up) is no error at all: it is an off-site redirect,
+   * recorded in `PageResult.offsiteNavigations[].failed`, and the page a
+   * success.
+   */
+  redirected?: true;
+  /**
+   * Only on an `invariant-violation` that `invariants.noOffsiteRedirect()`
+   * raised, whatever it is named: the violation is about the page's
+   * off-site redirects, which `--github-annotations` and scan's
+   * `open-redirect` otherwise report from the navigations themselves.
+   */
+  offsiteRedirect?: true;
 }
 
 /**
@@ -846,10 +1007,29 @@ export interface Invariant {
   name: string;
   /** Check the invariant. Return false / throw / return a string to fail. */
   check: (ctx: InvariantContext) => boolean | string | void | Promise<boolean | string | void>;
-  /** When to evaluate. Default: "afterActions". */
-  when?: "afterLoad" | "afterActions";
+  /**
+   * When to evaluate. Default: "afterActions".
+   *
+   * `afterVisit` runs once at the end of every visit, also on a page the
+   * crawler stopped at (it redirected off-site, its load failed) where the
+   * other two never run. `ctx.page` may show another site or an error page
+   * there: check what the crawl recorded (`ctx.offsiteNavigations`,
+   * `ctx.errors`), not the DOM.
+   */
+  when?: "afterLoad" | "afterActions" | "afterVisit";
   /** Restrict to URLs matching this matcher (regex literal or regex string). Omit to run on every page. */
   urlPattern?: UrlMatcher;
+  /**
+   * Optional peer dependencies of chaosbringer the check imports when it runs,
+   * as `axe()` does axe-core and `visualRegression()` pixelmatch and pngjs.
+   * The crawler (when it is constructed) and `scenarioLoad` (when it is
+   * called) resolve each from where chaosbringer is installed, before any
+   * browser starts, and throw `MissingPeerError` naming the ones that do not
+   * resolve: without it, every page failed this invariant on the missing
+   * package. A dependency the check imports from the caller's own code needs
+   * no entry.
+   */
+  peers?: readonly string[];
 }
 
 export interface InvariantContext {
@@ -859,6 +1039,11 @@ export interface InvariantContext {
   url: string;
   /** Errors collected on this page so far. */
   errors: readonly PageError[];
+  /**
+   * This page's off-site navigations so far (`PageResult.offsiteNavigations`).
+   * Set by the crawler; absent where no crawl recorded any (`scenarioLoad`).
+   */
+  offsiteNavigations?: readonly OffsiteNavigation[];
   /**
    * Mutable, run-scoped key/value bag shared between invariants. The same
    * `Map` instance is passed to every invariant on every page during a run,
@@ -934,7 +1119,11 @@ export interface PageResult {
   statusCode?: number;
   loadTime: number;
   errors: PageError[];
-  /** True when `errors.length > 0`. Computed once when the result is built. */
+  /**
+   * True when `errors` holds an error other than a fault echo
+   * (`PageError.causedByFault`), as `summary.pagesWithErrors` counts.
+   * Computed once when the result is built.
+   */
   hasErrors: boolean;
   warnings: string[];
   metrics?: PerformanceMetrics;
@@ -944,16 +1133,29 @@ export interface PageResult {
    * The external URLs the crawler kept this page from navigating to: links
    * and redirects to another origin, including a step it backed out of
    * (`ActionResult.leftSiteTo`) and the page's own `redirectedTo`. Absent
-   * when none was blocked.
+   * when none was blocked. `offsiteNavigations` holds the same entries, in
+   * the same order, with what started each.
    */
   blockedNavigations?: string[];
+  /**
+   * Each of `blockedNavigations`, with where it left from, what started it
+   * and whether the target came from the page's own URL: what
+   * `invariants.noOffsiteRedirect()`, the report's off-site navigation list
+   * and scan's `open-redirect` finding read. Absent when none was blocked.
+   */
+  offsiteNavigations?: OffsiteNavigation[];
   /** Recovery info if page was recovered from error */
   recovery?: RecoveryInfo;
   /**
-   * Where the page's URL redirected to when that was another origin. The
-   * crawler stops there: the page showing is another site's, so the result
-   * carries no errors, links, actions or perf, and the redirect counts as a
-   * blocked external navigation.
+   * Where the page went when it left for another origin on its own: its URL
+   * redirected there (a server 3xx, followed even when the other host then
+   * failed to load), or a script or `<meta http-equiv="refresh">` sent it
+   * there (the crawler blocked that navigation, so it names the URL that was
+   * blocked, never the browser's error page). The crawler stops there: the
+   * result carries no links, actions or perf, none of the other site's
+   * errors, and the redirect counts as a blocked external navigation. An
+   * `afterVisit` invariant still runs, and can fail the page
+   * (`invariants.noOffsiteRedirect()`).
    */
   redirectedTo?: string;
   /**
@@ -1002,6 +1204,79 @@ export interface PageResult {
    * measurement; under `networkidle` there is nothing to count.
    */
   settleCapped?: number;
+  /**
+   * A service worker controlled the page when its visit ended. Recorded only
+   * when `faultInjection` rules are configured, because it is what decides
+   * whether they could see the page's requests. A request the worker takes
+   * never reaches the page's route; what reaches the network is the worker's
+   * own request (`resourceType` `"fetch"`).
+   *
+   * - `"routed"` — the crawl's own context, where the rules see the worker's
+   *   requests too. Only what it answers from its own cache, without a
+   *   request, escapes them.
+   * - `"unrouted"` — the rules see none of the requests the worker takes:
+   *   `testPage()` on a page in your context, which the crawler does not
+   *   route, an attached browser, or a crawl run with
+   *   `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` set (Playwright then hands
+   *   a worker's requests to no route at all).
+   *
+   * `unfiredFaults` and the run-end warning name it for a network rule that
+   * matched nothing, rather than blaming the pattern. `runtimeFaults` patch
+   * `fetch` in the page, ahead of the worker, and fire either way.
+   */
+  serviceWorker?: "routed" | "unrouted";
+}
+
+/**
+ * What started an off-site navigation (`OffsiteNavigation.trigger`):
+ * - `click`: a crawler step went to a URL the page wrote: a link or a form
+ *   to another origin, a button whose handler sets `location` to a fixed
+ *   URL (a share button). The user asked to go there. A link straight to
+ *   another origin is never clicked at all (`ActionResult.blockedExternal`);
+ * - `script`: a script navigated the page (`location.href = …`,
+ *   `location.replace()`, a form it submitted) when no step was running,
+ *   or while one ran, to a target taken from the page's own URL (a
+ *   "Continue" button that follows `?next=`: `reflected` is set);
+ * - `meta-refresh`: a `<meta http-equiv="refresh">` or a `Refresh` header;
+ * - `server-redirect`: a URL of the site answered with a redirect (3xx) to
+ *   another origin: the page's own, or one a step went to (a form posted to
+ *   an endpoint that redirects);
+ * - `frame`: an iframe navigating off-site, not the page itself.
+ *
+ * `click`, `script` and `meta-refresh` are told apart by the browser's own
+ * reason for the navigation (CDP `Page.frameRequestedNavigation`); a page
+ * without CDP (a non-Chromium page handed to `testPage()`) reports both
+ * of the last as `script`, and a step's navigation by its target alone.
+ * A navigation that starts while a step runs is the step's, even when a
+ * timer the page set earlier started it.
+ */
+export type OffsiteNavigationTrigger = "click" | "script" | "meta-refresh" | "server-redirect" | "frame";
+
+/** One off-site navigation of a page (`PageResult.offsiteNavigations`). */
+export interface OffsiteNavigation {
+  /**
+   * The URL the navigation left: the page's, or the one it showed when a
+   * step ran. For a `server-redirect`, the site's URL that answered with
+   * the redirect (a step's form posted to `/login?next=…`), which is what
+   * `reflected` is read from.
+   */
+  from: string;
+  /** The off-site URL it went to. */
+  to: string;
+  trigger: OffsiteNavigationTrigger;
+  /**
+   * Where `to` appears in `from`, when it does: a query parameter (`param`
+   * names it) or the fragment, as written or URL-decoded. A redirect to a
+   * URL its own address carries is an open redirect: whoever writes the
+   * link picks where it sends the user.
+   */
+  reflected?: { in: "query"; param: string } | { in: "fragment" };
+  /**
+   * The error the off-site target failed with (`net::ERR_CONNECTION_REFUSED`),
+   * when a redirect to it did not load. The page is not failed for it: the
+   * host that failed is not the crawled site.
+   */
+  failed?: string;
 }
 
 export interface RecoveryInfo {
@@ -1097,6 +1372,18 @@ export interface ActionTarget {
   selectValue?: string;
   /** Where it is and whether a click reaches it. See `TargetGeometry`. */
   geometry?: TargetGeometry;
+  /**
+   * How the scrape numbered it (`tag:a:3`, `role:tab:0`): the key the
+   * accessibility snapshot is joined to the scrape by (`aria-targets.ts`).
+   */
+  peerKey?: string;
+  /**
+   * The accessibility snapshot's description of it, with state and where it
+   * sits: `button "Pay" — in dialog "Checkout"`. Set with `ariaTargets`.
+   */
+  ariaDescription?: string;
+  /** The snapshot's ref for it, valid until the next snapshot. */
+  ariaRef?: string;
 }
 
 export interface ActionResult {
@@ -1242,15 +1529,21 @@ export interface CrawlReport {
   seed: number;
   /**
    * Copy-pasteable CLI invocation that reproduces this run. Only includes
-   * CLI-expressible options; programmatic-only options (invariants,
-   * faultInjection) cannot be encoded in a shell command and are omitted.
+   * CLI-expressible options. Fault rules (network, lifecycle, runtime,
+   * iframe) and invariants set in code have no flag; the command then ends
+   * in a comment that counts and names them (`# + 1 fault rule not
+   * expressible on the CLI: api-500`), since the command alone reruns
+   * without them. A `chaosbringer scan` chaos crawl's report holds the
+   * `chaosbringer scan … --faults <fault>` command that reruns it instead.
    */
   reproCommand: string;
   startTime: number;
   endTime: number;
   duration: number;
   pagesVisited: number;
+  /** Every `PageError` of `pages`, fault echoes (`PageError.causedByFault`) included. */
   totalErrors: number;
+  /** The pages' console warnings (`PageResult.warnings`); not `warnings`. */
   totalWarnings: number;
   blockedExternalNavigations: number;
   recoveryCount: number;
@@ -1258,7 +1551,7 @@ export interface CrawlReport {
   actions: ActionResult[];
   summary: CrawlSummary;
   /** Per-rule fault injection stats (present only when rules were configured). */
-  faultInjections?: FaultInjectionStats[];
+  faultInjections?: CrawlFaultInjectionStats[];
   /**
    * Requests parked by a `hang` fault — the ones with no `releaseAfterMs`.
    * The crawler aborts them when it tears down a page it owns, and before
@@ -1318,6 +1611,16 @@ export interface CrawlReport {
   /** Diff against a baseline report, present only when a baseline was supplied. */
   diff?: ReportDiff;
   /**
+   * What was set up wrong for the run, not what it found: a fault rule that
+   * never fired, a sitemap that could not be read, a network profile that did
+   * not apply, a driver that threw, a missing baseline (`RunWarning.code`).
+   * Always set on a crawl's report, empty when there is nothing to say;
+   * absent from one an older version wrote. The run passes with warnings
+   * unless `--fail-on-warnings` (`ExitCodeOptions.warnings`) is set. Not the
+   * pages' console warnings, which `totalWarnings` counts.
+   */
+  warnings?: RunWarning[];
+  /**
    * Drift signal for `--trace-replay` runs. Present only when traceReplay
    * was set. Reports how many of the recorded trace actions resolved
    * cleanly against the current UI vs. drifted (selector missing, threw,
@@ -1371,13 +1674,40 @@ export interface CrawlSummary {
   errorPages: number;
   timeoutPages: number;
   recoveredPages: number;
-  /** Pages where `errors.length > 0`, independent of navigation status. */
+  /**
+   * Pages with an error other than a fault echo (`PageError.causedByFault`),
+   * independent of navigation status: `PageResult.hasErrors`.
+   */
   pagesWithErrors: number;
   consoleErrors: number;
   networkErrors: number;
+  /**
+   * Errors the page's own code threw (`PageError.type: "exception"`). Not
+   * the crawler's own navigation failing (`navigation`), which is counted
+   * as the page's `errorPages` / `timeoutPages`.
+   */
   jsExceptions: number;
+  /**
+   * Renderer crashes (`PageError.type: "crash"`), one per crashed page. A
+   * crashed page's status is `error`, so it is in `errorPages` too.
+   * Absent from a report an older version wrote.
+   */
+  crashes: number;
   unhandledRejections: number;
   invariantViolations: number;
+  /**
+   * Subresource and API responses that answered 4xx / 5xx (`PageError.status`),
+   * a subset of `consoleErrors`. Not the pages' own documents: those are
+   * `recoveredPages` and `discovery.deadLinks`. Absent from a report an older
+   * version wrote.
+   */
+  httpErrors?: HttpErrorSummary;
+  /**
+   * Errors that were the browser's echo of a fault the run injected
+   * (`PageError.causedByFault`), and are not in the counts above. Absent
+   * from a report an older version wrote.
+   */
+  faultEchoes?: number;
   avgLoadTime: number;
   avgMetrics?: {
     ttfb: number;
@@ -1386,6 +1716,18 @@ export interface CrawlSummary {
   };
   /** Discovery metrics - how links were found */
   discovery?: DiscoveryMetrics;
+}
+
+/** `CrawlSummary.httpErrors`. */
+export interface HttpErrorSummary {
+  /** Every 4xx / 5xx response counted. */
+  total: number;
+  /** Status 400–499. */
+  "4xx": number;
+  /** Status 500 and up. */
+  "5xx": number;
+  /** Count per status code, e.g. `{ "404": 2, "500": 1 }`. */
+  byStatus: Record<string, number>;
 }
 
 /** How a URL was discovered */
@@ -1449,6 +1791,10 @@ export interface CrawlerEvents {
   onAction?: (action: ActionResult) => void;
   onProgress?: (visited: number, total: number) => void;
   onBlockedNavigation?: (url: string) => void;
+  /** The browser was bound (`bind`): where clients can attach. */
+  onBind?: (bound: import("./browser-bind.js").BoundBrowser) => void;
+  /** A `failureArtifacts` bundle was written for `result`, at `bundleDir`. */
+  onFailureBundle?: (bundleDir: string, result: PageResult) => void;
 }
 
 /**
@@ -1479,9 +1825,41 @@ export interface ServerFaultEvent {
   pageUrl: string;
 }
 
+/** A rule's `FaultInjectionStats` in a crawl's report. */
+export interface CrawlFaultInjectionStats extends FaultInjectionStats {
+  /**
+   * The browser's echoes of this rule's faults: console "Failed to load
+   * resource" lines and `network` errors about a request it answered
+   * (`PageError.causedByFault`). Present only when non-zero.
+   */
+  echoes?: number;
+  /**
+   * Set on a rule that matched nothing when its pattern names WebSocket URLs:
+   * only `ws:` / `wss:` ones, or ones the run's pages opened. Network faults
+   * route HTTP requests, and Playwright's routes do not see WebSocket
+   * traffic, so the rule could not have matched them; `report.warnings` says
+   * so (`fault-websocket`).
+   */
+  webSocket?: FaultWebSocketReach;
+}
+
+/** `CrawlFaultInjectionStats.webSocket`. */
+export interface FaultWebSocketReach {
+  /** WebSocket connections the run's pages opened whose URL the pattern matches. */
+  connections: number;
+  /** The first of them. */
+  first?: string;
+  /** The pattern can only match `ws:` / `wss:` URLs. */
+  webSocketOnly: boolean;
+}
+
 /** Configuration for Playwright Test integration */
 export interface ChaosTestOptions {
-  /** Base URL (uses baseURL from Playwright config if not set) */
+  /**
+   * What a relative URL given to `chaos.crawl()` / `chaos.testPage()`
+   * resolves against. Unset, the Playwright config's `baseURL` is used — the
+   * one `page.goto` resolves against. An absolute URL is used as given.
+   */
   baseUrl?: string;
   /** Maximum pages to visit per test */
   maxPages?: number;
@@ -1491,12 +1869,52 @@ export interface ChaosTestOptions {
   ignoreErrorPatterns?: string[];
   /** Block external navigation */
   blockExternalNavigation?: boolean;
-  /** Fail test on any error */
+  /**
+   * Fail the test on a run `chaosbringer --strict` would exit 1 on, by the
+   * same `getExitCode(report, { strict: true })`: an error or timed-out page,
+   * an invariant violation, a console error, a JS exception, an unhandled
+   * rejection. `chaos.crawl()` and `chaos.testPage()` throw once the run is
+   * over, after `crawl()` has attached its report. Without it the fixture
+   * fails nothing on its own; assert on the result.
+   */
   strict?: boolean;
+  /**
+   * Count the browser's echo of an injected fault under `strict` too; see
+   * `CrawlerOptions.strictCountsFaultEchoes`.
+   */
+  strictCountsFaultEchoes?: boolean;
+  /**
+   * Fail the test when the run has warnings (`CrawlReport.warnings`, or
+   * `chaos.warnings()` after `testPage()`): a fault that never fired, a
+   * driver that threw. `strict` alone does not fail on them.
+   */
+  failOnWarnings?: boolean;
   /** Action weights */
   actionWeights?: ActionWeights;
   /** Per-step performance measurement; see `CrawlerOptions.perf`. */
   perf?: boolean | PerfOptions;
   /** How each step settles; see `CrawlerOptions.settle`. */
   settle?: SettleMode;
+  /**
+   * Seed for action selection and fault probabilities; see
+   * `CrawlerOptions.seed`. One crawler serves the whole test, so its
+   * `crawl()` and `testPage()` calls draw from one sequence.
+   */
+  seed?: number;
+  /** Assertions run on every page; see `CrawlerOptions.invariants`. */
+  invariants?: Invariant[];
+  /**
+   * Network faults (`faults.status(503, …)`, …); see
+   * `CrawlerOptions.faultInjection`. On `testPage()` they are routed on your
+   * page, and stay routed for the rest of the test.
+   */
+  faultInjection?: FaultRule[];
+  /** Page-lifecycle faults; see `CrawlerOptions.lifecycleFaults`. */
+  lifecycleFaults?: LifecycleFault[];
+  /**
+   * JS-runtime faults; see `CrawlerOptions.runtimeFaults`. On `testPage()`
+   * they are an init script installed on your page before it navigates, and
+   * stay on it for the rest of the test.
+   */
+  runtimeFaults?: RuntimeFault[];
 }

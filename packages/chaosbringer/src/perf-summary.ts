@@ -258,7 +258,7 @@ export function buildCoverageSummary(artifact: Partial<CoverageArtifact>): {
 export function buildCrawlPerfSummary(
   pages: readonly PageResult[],
   actions: readonly ActionResult[],
-  { coverage, settle }: { coverage?: Partial<CoverageArtifact>; settle?: PerfSettleRecord } = {},
+  { coverage, settle, browser }: { coverage?: Partial<CoverageArtifact>; settle?: PerfSettleRecord; browser?: string } = {},
 ): CrawlPerfSummary | undefined {
   const spans = reportSpans({ pages, actions });
   const measuredPages = pages.filter((p) => p.perf || p.perfPage).length;
@@ -298,6 +298,7 @@ export function buildCrawlPerfSummary(
     // First, so a reader of the report sees what the numbers below were measured under.
     ...(settle ? { settle: { ...settle } } : {}),
     keyVersion: PERF_KEY_VERSION,
+    ...(browser ? { browser } : {}),
     vitals: vitalSummaries(pages),
     slowestActions: slowestActions(actions, PERF_SUMMARY_TOP_N),
     hotInitiators,

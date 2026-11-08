@@ -53,6 +53,11 @@ Error: SLO failed: 2 violation(s)
 
 ## Gotchas
 
+- **A run that stopped early fails the gate.** When the base URL stops
+  answering mid-run, `scenarioLoad` stops after 3 iterations in a row
+  could not connect (`report.stopped`), and the few failures before the
+  stop could pass an error-rate threshold. `assertSlo` reports the stop
+  itself as `[totals] run stopped early: base URL unreachable: …`.
 - **Missing targets are themselves violations.** If `report.scenarios` doesn't
   contain `"checkout"` (typo, or that scenario produced zero iterations) the
   SLO will fail with `[scenario] "checkout" not found in report`. This is on

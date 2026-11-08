@@ -7,15 +7,27 @@
  * parsing.
  *
  * The mapping is one testcase per page:
- *   - status="error" / "timeout"            -> <error>
- *   - status="success" with errors[].length -> <failure>
+ *   - status="timeout"                      -> <failure type="timeout">
+ *   - status="error"                        -> <failure type="error">
+ *   - status="success" with errors[].length -> <failure type="<error types>">
  *   - everything else                       -> passing testcase, no children
+ *                                              (`<testcase ...></testcase>`)
+ *
+ * A page that failed to load is a `<failure>`, not an `<error>`: flaker's
+ * JUnit import (the baseline workflow's) checks only for `<failure>` and
+ * `<skipped>`, so an `<error>` testcase was recorded as passed. The suite's
+ * `errors` count is always 0. `type` still tells a load failure from a page
+ * with errors in the XML, but dashboards that classify by element do not
+ * read it: Allure shows these pages as Failed rather than Broken, GitLab
+ * counts them as failed rather than error.
  *
  * Multiple PageError entries are concatenated into one element so the XML
  * stays a flat list (most readers display only the first failure per
  * testcase anyway).
  */
 
+import { fileURLToPath } from "node:url";
+import { ANSI_ESCAPE } from "./error-text.js";
 import type { CrawlReport, PageError, PageResult } from "./types.js";
 
 export interface JunitOptions {
@@ -31,14 +43,12 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
 
   let totalTests = 0;
   let totalFailures = 0;
-  let totalErrors = 0;
   const cases: string[] = [];
 
   for (const page of report.pages) {
     totalTests++;
     cases.push(renderTestcase(page, classname, report.baseUrl));
-    if (page.status === "error" || page.status === "timeout") totalErrors++;
-    else if (page.errors.length > 0) totalFailures++;
+    if (page.status === "error" || page.status === "timeout" || page.errors.length > 0) totalFailures++;
   }
 
   const time = (report.duration / 1000).toFixed(3);
@@ -46,7 +56,7 @@ export function buildJunitXml(report: CrawlReport, opts: JunitOptions = {}): str
     `name="${esc(suiteName)}"`,
     `tests="${totalTests}"`,
     `failures="${totalFailures}"`,
-    `errors="${totalErrors}"`,
+    `errors="0"`,
     `time="${time}"`,
   ].join(" ");
 
@@ -67,18 +77,29 @@ function renderTestcase(page: PageResult, classname: string, baseUrl: string): s
   const head = `<testcase name="${esc(name)}" classname="${esc(classname)}" time="${time}"`;
 
   if (page.status === "timeout") {
-    return `${head}><error message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</error></testcase>`;
+    return `${head}><failure message="${esc(`navigation timeout @ ${page.url}`)}" type="timeout">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.status === "error") {
-    const code = typeof page.statusCode === "number" ? `HTTP ${page.statusCode}` : "navigation error";
-    return `${head}><error message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</error></testcase>`;
+    const code = page.errors.some((e) => e.type === "crash")
+      ? "renderer crash"
+      : typeof page.statusCode === "number"
+        ? `HTTP ${page.statusCode}`
+        : "navigation error";
+    return `${head}><failure message="${esc(`${code} @ ${page.url}`)}" type="error">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
   if (page.errors.length > 0) {
     const types = uniqueTypes(page.errors);
     const summary = `${page.errors.length} error(s) on ${page.url}: ${types.join(", ")}`;
     return `${head}><failure message="${esc(summary)}" type="${esc(types.join(","))}">${esc(formatErrorBody(page))}</failure></testcase>`;
   }
-  return `${head}/>`;
+  // An explicit close, not `<testcase .../>`: flaker's JUnit parser (the
+  // baseline workflow's import) matches a testcase with
+  // `<testcase\s[^>]*(?:\/>|>[\s\S]*?<\/testcase>)`, whose greedy `[^>]*`
+  // eats the `/` of a self-closed tag and runs on to the next
+  // `</testcase>`. A passing page followed by a failing one was imported as
+  // one failed test under the passing page's name, and the failing page was
+  // dropped.
+  return `${head}></testcase>`;
 }
 
 /**
@@ -139,15 +160,53 @@ function formatErrorBody(page: PageResult): string {
   return page.errors
     .map((e) => {
       const head = e.invariantName ? `[${e.type}:${e.invariantName}] ` : `[${e.type}] `;
-      const stack = e.stack ? `\n${e.stack}` : "";
-      return `${head}${e.message}${stack}`;
+      const frames = pageFrames(e);
+      return `${head}${e.message}${frames ? `\n${frames}` : ""}`;
     })
     .join("\n\n");
 }
 
+/** A stack frame line: V8's `    at …`, or SpiderMonkey / JSC's `fn@url:line:col`. */
+const FRAME = /^\s*at |^[^\s@]*@\S+:\d+(?::\d+)?$/;
+
+/**
+ * This package's own directory (its `dist/` when installed). A frame in it
+ * is the crawler's code that made the call, which says nothing about the
+ * page; so is a frame of Node's own (`node:internal/…`).
+ */
+const OWN_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * The frames of `e.stack` that are the page's, one per line. Not the lines
+ * before the first frame: V8 starts a stack with the message (`TypeError:
+ * x is not a function`), which the body has just printed. None for a
+ * `navigation` error: the stack is the crawler's own `page.goto` call.
+ */
+function pageFrames(e: PageError): string {
+  if (!e.stack || e.type === "navigation") return "";
+  const lines = e.stack.split("\n");
+  const first = lines.findIndex((l) => FRAME.test(l));
+  if (first === -1) return "";
+  return lines
+    .slice(first)
+    .filter((l) => !l.includes(OWN_DIR) && !l.includes("(node:") && !/^\s*at node:/.test(l))
+    .join("\n");
+}
+
+/**
+ * ANSI colour sequences (Playwright colours the call log it appends to an
+ * error message) and the other C0 controls XML 1.0 forbids (all but tab, LF
+ * and CR). One ESC byte makes the whole file malformed for a strict parser
+ * (xmllint, and the readers Jenkins, GitLab and Allure use), so they are
+ * dropped rather than escaped: XML 1.0 has no escape for them.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+const NOT_XML = new RegExp(`${ANSI_ESCAPE.source}|[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\ufffe\\uffff]`, "g"); // oxlint-disable-line no-control-regex
+
 /** XML attribute / text escape. */
 function esc(s: string): string {
   return s
+    .replace(NOT_XML, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

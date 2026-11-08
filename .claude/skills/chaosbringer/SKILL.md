@@ -71,7 +71,8 @@ The alternatives, and when they beat it:
 
 - **`chaos({ baseUrl, faultInjection, strict: true })`** — chaosbringer drives,
   breaking things across the app. Reach for it to explore an unfamiliar app.
-  Exit codes and `strict` only exist on this path. If you need it to follow a
+  Exit codes only exist on this path (`strict` also exists on the fixture
+  below, where it fails the test instead). If you need it to follow a
   *known* path, pass `driver: flowDriver({ steps })` — the default driver picks
   actions at random, and a test that can't name the button pressed can't make a
   claim. `flowDriver` is one-shot and stateful: reusing an instance across two
@@ -83,8 +84,9 @@ The alternatives, and when they beat it:
   weighted-random, five per page by default — so it may or may not press the
   button your fault is about, which makes it the wrong entry point for a
   targeted regression. `maxActionsPerPage: 0` makes it load-only. (Watch the
-  name: `maxActions` is not an option, and a misspelled option is silently
-  ignored — measured, 4 clicks with the default, 0 with
+  name: `maxActions` is not an option. A misspelled `chaosOptions` key is
+  refused with a "did you mean" error as the fixture is set up; it used to be
+  dropped silently — measured, 4 clicks with the default, 0 with
   `maxActionsPerPage: 0`, 3 with `maxActions: 0`.)
 - **Model-driven** — when the question is "which failure states did we cover",
   a temporal model enumerates them and each state becomes a replayable plan
@@ -100,7 +102,16 @@ runtime fault is `undefined`, and `undefined > 0` is a silent no-op. Use
 `session.firings()`, or `faultFirings(report)` / `unfiredFaults(report)` for a
 crawl, and never write the field name yourself. `matched: 0` means the pattern
 never saw the request; `matched: 3, injected: 0` on a scheduled rule means
-something answered first (that's what `suppressed` counts).
+something answered first (that's what `suppressed` counts). On a site with a
+service worker, `matched: 0` on a network rule can also mean the worker took
+the request where no route sees it — `testPage()` on your own context, or a
+response from the worker's cache; `unfiredFaults` says so when the page's
+`serviceWorker` is set, and a runtime fault fires ahead of the worker either way.
+A finished crawl says it without being asked: every fault that did not take
+effect is a `report.warnings` entry (`fault-unmatched`, `fault-unfired`, …,
+the `unfiredFaults` words), shown in the compact and `--quiet` output, and
+`chaos({ failOnWarnings: true })` / `--fail-on-warnings` fails the run on it.
+A network rule cannot reach a WebSocket (`fault-websocket`).
 
 ## Which layer
 
@@ -109,7 +120,7 @@ something answered first (that's what `suppressed` counts).
 | an HTTP response the app never asked for (500, 429, a delay) | **network** (`faultInjection`) | intercepts at Playwright's route layer, so the app sees a real, wrong response |
 | the `fetch()` call itself to fail — `TypeError`, `AbortError`, a body that won't parse | **runtime** (`runtimeFaults`) | a client-side rejection issues no request, so no route can produce it |
 | a page that never gets a response | network `hang` **or** runtime `never-settle-fetch` | either works; they differ in what reaches your server |
-| the app's own lifecycle to misbehave (visibility, offline, storage) | **lifecycle** (`lifecycleFaults`) | not a request at all |
+| the browser under the page to misbehave (storage wiped or tampered, Service Worker cache evicted, CPU throttled) | **lifecycle** (`lifecycleFaults`) | not a request at all |
 
 The constructors differ in shape by layer: `faults.hang()` returns
 `{ urlPattern, fault }` for `faultInjection`, `faults.rejectBody()` returns
@@ -127,9 +138,9 @@ aborts the fetch and the browser cancels the request whether or not the route
 ever answers — so either tests whether a bound exists. What separates them:
 `hang` is a real HTTP request your server sees, held open; `never-settle-fetch`
 patches `fetch` in the page and **sends nothing**. A load-time `hang` also
-costs the crawler a whole navigation `timeout`, and that rejection is recorded
-as a page `exception`, so `summary.jsExceptions` reads 1 for a page that threw
-nothing. Expected, not a finding.
+costs the crawler a whole navigation `timeout`: the page is a `timeout` with a
+`navigation` error (`page.goto: Timeout …`). Expected, not a finding. It is no
+JS exception, so `summary.jsExceptions` and `strict` do not count it.
 
 ## Schedules, not probabilities
 
@@ -169,10 +180,20 @@ unhandled rejection). Two defects behind one status code; test both, with
 gives `AbortError`). A `catch` branching on the name will look broken when it
 isn't.
 
-**Exit codes** (`chaos()` only): a page that errors or times out, and any
-invariant violation, fail in every mode. Console errors, JS exceptions and
+**Exit codes** (`chaos()` only): a page that errors or times out, a renderer
+crash (`crash` error, `summary.crashes`), and any invariant violation, fail in
+every mode. Console errors, JS exceptions and
 unhandled rejections fail only under `strict: true` — so if your finding is
-"a rejection escaped", you need `strict`. `ignoreErrorPatterns` matches
+"a rejection escaped", you need `strict`. Chromium's console line about a
+request a fault answered ("Failed to load resource: … 500", or `net::ERR_FAILED`
+for an abort) is that fault's echo: tagged `causedByFault: "<rule>"`, counted
+as the rule's `echoes`, and left out of `strict` and the clusters, so a strict
+fault test needs no ignore pattern for it (`strictCountsFaultEchoes: true`
+counts it again). A real 500 on a request the rule let through still counts.
+An API's own 4xx / 5xx carries `status` and `method` on that console error;
+`failOnHttp: "5xx"` (or `"4xx"`) fails on them without `strict`, and
+`failOnDeadLinks` / `failOnNetwork` fail on dead links / transport failures.
+`ignoreErrorPatterns` matches
 `PageError.message`, which for a network error is `"<url> - <errorText>"`, so a
 pattern can name either half. Silencing a known unrelated defect with it is
 fine; say so out loud, because a silenced error and a fixed one look identical
@@ -229,17 +250,50 @@ same-site fetch / XHR failing. Findings are ranked in
 `chaosbringer-scan/scan-report.md`:
 
 - bugs: failed and 4xx/5xx pages, exceptions, rejections;
+- security: pages that send the browser to another origin on their own
+  (`open-redirect`: high when the target came from the page's own URL, low
+  otherwise; `--offsite-redirect-allow` for an SSO provider);
 - resilience: errors or broken pages that appear only when an API call
   fails, and steps with no request timeout;
 - perf: vitals, blocking, layout, DOM size, request fan-out, leaks, unused JS.
   Each perf finding links to perf-patterns catalog entries with the same
   signal.
 
+It runs no data-safety check unless asked: `--data-safety` (or
+`--invariants data-safety,not-blank`) adds them, and a reflected payload on
+`--url`'s query (one that only sets `window.__cb_xss_fired`) is then a high
+`invariant-violation` finding.
+
 Treat it as a map, not an oracle. Each resilience finding is a place to
 write a real test (the fault it names, plus an invariant for the error
-state). A perf finding is a threshold crossed once. `--exclude` destructive
-URLs, and scan only what you may test. Details:
-`docs/recipes/scan.md`.
+state); to see it again first, rerun the `chaosbringer scan … --faults
+<fault>` command in its chaos crawl's report (`reproCommand`). A plain
+crawl's `Repro:` line has no flag for a fault set in code: it names the
+rules in a trailing `# + …` comment and reruns without them. To tell a real
+failure from a race, paste that line (a plain crawl's; flake refuses a
+`scan` command) after `chaosbringer flake --runs 5 --`: every run gets the
+same flags and is judged by the crawl's own exit rules.
+To shrink one, record it with `--trace-out` and run `chaosbringer minimize
+--trace <file> --match <regex>`: the trace records the crawl's
+`--storage-state`, `--settle`, `--exclude` and the rest, and every replay
+uses them. A perf finding
+is a threshold crossed once. `--exclude` destructive URLs, and scan only
+what you may test. Details: `docs/recipes/scan.md`.
+
+## Getting a flow under test without writing it
+
+`chaosbringer drive --url <url> --goal "<task>" --until-text "<proof>"`
+operates the browser towards the goal. A model (or a `--plan` file of steps)
+reads the page's accessibility snapshot and picks one action at a time. The
+crawl's error checks run on every step. A run that reaches the goal writes a
+recipe with role selectors; `chaosbringer recipes verify` replays and
+promotes it. A password it types is recorded as `{{password}}` and kept out
+of every output; `--save-secrets <file>` writes the value for `recipes
+verify --vars-file <file>`, and `--secret name=ENV_VAR` lets a plan type
+`{{name}}` without the secret in the plan. `--video` records the run with
+each action annotated. Use it to
+get a first replayable journey, then put the journey under faults. Details:
+`docs/recipes/drive.md`.
 
 ## Verifying your work
 

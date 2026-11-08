@@ -16,6 +16,8 @@
  *    shipped source has not changed since the tag of that version
  *    (`<dir>-v<version>`). A change means the version on npm is not the code
  *    this package was built and tested with: release the dependency first.
+ *    When only its build config changed (tsdown.config.ts, vite.config.ts),
+ *    what it packs is compared with the tarball on npm instead.
  * 2. The package is packed the way `pnpm publish` packs it, installed into an
  *    empty directory from the registry, and every `exports` entry is
  *    imported. This is the consumer's `import "chaosbringer"`.
@@ -76,8 +78,18 @@ async function settle(fn, ok = () => true, attempts = SETTLE_ATTEMPTS) {
   }
 }
 
-/** Files under a package that do not end up in what it ships. */
-const NOT_SHIPPED = /(?:^|\/)(?:CHANGELOG\.md|README\.md|tests?\/.*|[^/]*\.(?:test|spec|e2e\.test)\.[cm]?[jt]sx?|vitest\.config\.[cm]?[jt]s|tsconfig[^/]*\.json)$/;
+/**
+ * Files under a package that do not end up in what it ships. Tool configs count
+ * only at the package root, where the tools read them: a `vite.config.ts` under
+ * `src/` or `scripts/` could ship.
+ */
+const NOT_SHIPPED = /(?:^|\/)(?:CHANGELOG\.md|README\.md|tests?\/.*|[^/]*\.(?:test|spec|e2e\.test)\.[cm]?[jt]sx?|tsconfig[^/]*\.json)$|^(?:(?:vitest|vite|tsdown|playwright)(?:\.[^/]+)?\.config\.[cm]?[jt]s|\.oxlintrc\.json)$/;
+/**
+ * Of those, the ones a build reads: lightbringer's `vp pack` takes
+ * tsdown.config.ts through the `pack` block of vite.config.ts. A change to one
+ * ships nothing itself, but can change what the build ships.
+ */
+const BUILD_CONFIG = /^(?:tsdown|vite)\.config\.[cm]?[jt]s$/;
 
 const deps = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies };
 for (const [name, range] of Object.entries(deps)) {
@@ -106,10 +118,19 @@ for (const [name, range] of Object.entries(deps)) {
     continue;
   }
   const rel = `packages/${dep.short}`;
-  const changed = run("git", ["diff", "--name-only", tag, "HEAD", "--", rel], { cwd: root })
+  const files = run("git", ["diff", "--name-only", tag, "HEAD", "--", rel], { cwd: root })
     .split("\n")
-    .filter((f) => f && f !== `${rel}/package.json` && !NOT_SHIPPED.test(f.slice(rel.length + 1)));
-  if (changed.length > 0) problems.push(staleMessage(name, dep, tag, changed));
+    .filter((f) => f && f !== `${rel}/package.json`);
+  const changed = files.filter((f) => !NOT_SHIPPED.test(f.slice(rel.length + 1)));
+  const buildConfigs = files.filter((f) => BUILD_CONFIG.test(f.slice(rel.length + 1)));
+  if (changed.length > 0) {
+    problems.push(staleMessage(name, dep, tag, changed));
+  } else if (buildConfigs.length > 0) {
+    // Only build configs changed: it is stale if what the build now packs is
+    // not what npm serves.
+    const packed = packedDifference(name, dep);
+    if (packed.length > 0) problems.push(staleMessage(name, dep, `${tag} (through ${buildConfigs.join(", ")}: what it packs differs from the tarball on npm)`, packed));
+  }
 }
 
 function staleMessage(name, dep, since, changed) {

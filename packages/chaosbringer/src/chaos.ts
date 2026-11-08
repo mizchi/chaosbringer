@@ -4,10 +4,17 @@
  * these from CrawlReport; this just makes the common case one call.
  */
 
+import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright";
 import { ChaosCrawler } from "./crawler.js";
 import { diffReports, hasRegressions, loadBaseline } from "./diff.js";
-import { getExitCode } from "./reporter.js";
+import { getExitCode, HTTP_FAIL_LEVELS, type HttpFailLevel } from "./reporter.js";
+import {
+  applyBaseline,
+  BASELINE_MISSING_MODES,
+  type BaselineMissingMode,
+  type RunWarning,
+} from "./run-warnings.js";
 import type {
   CrawlerEvents,
   CrawlerOptions,
@@ -20,6 +27,12 @@ export interface ChaosResult {
   report: CrawlReport;
   passed: boolean;
   exitCode: number;
+  /**
+   * `report.warnings`: what was set up wrong for the run (a fault that never
+   * fired, a sitemap that could not be read, a missing `baseline`, …). They
+   * fail it only under `failOnWarnings`; `passed` can be true with some.
+   */
+  warnings: RunWarning[];
 }
 
 /**
@@ -41,14 +54,37 @@ export interface ChaosRunOptions extends CrawlerOptions {
   /** Treat console errors / JS exceptions as failures when computing exitCode. */
   strict?: boolean;
   /**
-   * Path to a previous report to diff against. A missing file is treated as
-   * "first run" (no diff is produced, no warning raised in the library —
-   * the CLI handles the warning). When supplied and readable, `report.diff`
-   * is populated.
+   * Path to a previous report to diff against. When supplied and readable,
+   * `report.diff` is populated. A missing file is treated as "first run": no
+   * diff, and a `baseline-missing` entry in `report.warnings` (unless
+   * `baselineMissing: "fail"`).
    */
   baseline?: string;
   /** When true, new regressions vs the baseline force exitCode=1. */
   baselineStrict?: boolean;
+  /**
+   * What a missing `baseline` file does: `"warn"` (default) runs without a
+   * diff and warns, for the bootstrap run whose report becomes the first
+   * baseline; `"fail"` refuses the run, throwing before the browser starts
+   * (or the `setup` hook runs), so a CI cache miss or a typo'd path cannot
+   * turn a `baselineStrict` gate green. The CLI's `--baseline-missing`.
+   */
+  baselineMissing?: BaselineMissingMode;
+  /**
+   * Fail on a run that has warnings (`report.warnings`): the CLI's
+   * `--fail-on-warnings`.
+   */
+  failOnWarnings?: boolean;
+  /**
+   * Fail on a subresource or API response of 500 and up (`"5xx"`) or 400
+   * and up (`"4xx"`): the CLI's `--fail-on-http`. The browser's echo of a
+   * `faults.status` rule's answer does not count.
+   */
+  failOnHttp?: HttpFailLevel;
+  /** Fail on a request that failed at the transport level: the CLI's `--fail-on-network`. */
+  failOnNetwork?: boolean;
+  /** Fail on a crawled link that answered 404 / 5xx: the CLI's `--fail-on-dead-links`. */
+  failOnDeadLinks?: boolean;
   /**
    * Pre-run hook that fires before any chaos action or fault rolls. Receives
    * a Playwright page in a disposable browser context. Typical use is REST
@@ -84,7 +120,36 @@ export async function chaos(
   options: ChaosRunOptions,
   events: CrawlerEvents = {}
 ): Promise<ChaosResult> {
-  const { strict, baseline, baselineStrict, setup, server, ...crawlerOptions } = options;
+  const {
+    strict,
+    baseline,
+    baselineStrict,
+    baselineMissing,
+    failOnHttp,
+    failOnNetwork,
+    failOnDeadLinks,
+    failOnWarnings,
+    setup,
+    server,
+    ...crawlerOptions
+  } = options;
+  // Before anything runs, like the crawler's own options: a typo'd level
+  // would otherwise fail nothing.
+  if (failOnHttp !== undefined && !HTTP_FAIL_LEVELS.includes(failOnHttp)) {
+    throw new Error(`chaosbringer: "failOnHttp" must be one of ${HTTP_FAIL_LEVELS.join(", ")} (got ${JSON.stringify(failOnHttp)})`);
+  }
+  if (baselineMissing !== undefined && !BASELINE_MISSING_MODES.includes(baselineMissing)) {
+    throw new Error(
+      `chaosbringer: "baselineMissing" must be one of ${BASELINE_MISSING_MODES.join(", ")} (got ${JSON.stringify(baselineMissing)})`,
+    );
+  }
+  const refuseMissingBaseline = (path: string | undefined) =>
+    new Error(
+      `chaosbringer: baseline ${path === undefined ? "(none given)" : path.trim() === "" ? `${JSON.stringify(path)} (an empty path)` : path} ` +
+        `not found, and baselineMissing: "fail" refuses a run without one ` +
+        `(use "warn" for the first run, whose report becomes the baseline)`,
+    );
+  if (baselineMissing === "fail" && (!baseline || !existsSync(baseline))) throw refuseMissingBaseline(baseline);
 
   // Construct the crawler before invoking the setup hook so that
   // CrawlerOptions validation (bad maxPages, malformed fault regex,
@@ -100,16 +165,20 @@ export async function chaos(
   }
 
   const report = await crawler.start();
+  const warnings = (report.warnings ??= []);
 
-  if (baseline) {
-    const prev = loadBaseline(baseline);
-    if (prev) {
-      report.diff = diffReports(prev, report, { baselinePath: baseline });
-    }
-  }
+  // A missing one under "fail" was checked before the run; removed while it ran.
+  if (applyBaseline(report, baseline, baselineMissing) === "refuse") throw refuseMissingBaseline(baseline);
 
-  const exitCode = getExitCode(report, { strict, baselineStrict });
-  return { report, passed: exitCode === 0, exitCode };
+  const exitCode = getExitCode(report, {
+    strict,
+    baselineStrict,
+    http: failOnHttp,
+    network: failOnNetwork,
+    deadLinks: failOnDeadLinks,
+    warnings: failOnWarnings,
+  });
+  return { report, passed: exitCode === 0, exitCode, warnings };
 }
 
 export { diffReports, loadBaseline, hasRegressions };

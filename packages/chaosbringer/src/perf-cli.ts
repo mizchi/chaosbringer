@@ -15,7 +15,7 @@
  * them by `perfKey`, so each span is handed over with `name = key`.
  *
  * The pure steps are exported for tests; `runPerfCli` only reads files,
- * prints and sets `process.exitCode`.
+ * prints and sets `process.exitCode`, or throws a `UsageError`.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -26,18 +26,22 @@ import {
   analyseDrilldown,
   BUDGET_METRIC,
   median,
+  DEFAULT_BUDGET_FLOORS,
   DEFAULT_BUDGET_HEADROOM,
   DEFAULT_REGRESS_THRESHOLD,
   DRILLDOWN_TOP_N,
   EMIT_BUDGET_METRICS,
   emitBudgets,
+  formatBudgetFloors,
   formatDrilldown,
   formatRegress,
   gate,
   MEDIAN_BUDGET_STAT,
+  parseBudgetFloors,
   regress,
   spanMedians,
   type Budget,
+  type BudgetFloors,
   type BudgetMetric,
   type DrilldownTraceEvent,
   type GateFinding,
@@ -47,6 +51,7 @@ import {
   type Stat,
 } from "lightbringer/core";
 import { perfBudgetRulesFromJson, type PerfBudgetsFile } from "./budget.js";
+import { inSubcommand, UsageError } from "./cli-usage.js";
 import { PERF_KEY_VERSION, perfKeyVersionOf, perfRuleMatcher } from "./perf-key.js";
 import { DEFAULT_PERF_TRACE_DIR } from "./perf-options.js";
 import { reportSpans } from "./perf-summary.js";
@@ -125,16 +130,16 @@ export function readPerfBudgetRulesFile(path: string, source: string = path): Pe
 }
 
 /**
- * The crawler's `--perf-budgets` read: the rules, plus why the file cannot
- * be enforced on a crawl settling `crawl` (`crawlBudgetsSettleMismatch`) and
- * the exit code a refusal uses.
+ * The crawler's `--perf-budgets` rules, from the file's parsed JSON (the
+ * crawl reads the file itself, as it does its other input files), plus why
+ * they cannot be enforced on a crawl settling `crawl`
+ * (`crawlBudgetsSettleMismatch`) and the exit code a refusal uses.
  */
-export function readPerfBudgetsForCrawl(
-  path: string,
+export function perfBudgetsForCrawl(
+  json: unknown,
   crawl: PerfSettleRecord,
-  source: string = path,
+  source: string,
 ): { rules: PerfBudgetRule[]; settleMismatch?: string; exitCode: number } {
-  const json: unknown = JSON.parse(readFileSync(path, "utf-8"));
   const rules = perfBudgetRulesFromJson(json, source);
   const settleMismatch = crawlBudgetsSettleMismatch(json, crawl);
   return { rules, ...(settleMismatch ? { settleMismatch } : {}), exitCode: SETTLE_MISMATCH_EXIT_CODE };
@@ -163,15 +168,21 @@ export interface EmitResult {
 }
 
 /**
- * Budgets per perfKey: `ceil(median × headroom)` of the metrics lightbringer's
- * `--emit-budgets` writes (EMIT_BUDGET_METRICS). A key that appears in fewer
+ * Budgets per perfKey: `max(ceil(median × headroom), ceil(median + floor))` of
+ * the metrics lightbringer's `--emit-budgets` writes (EMIT_BUDGET_METRICS),
+ * with lightbringer's floors (DEFAULT_BUDGET_FLOORS) unless `floors` replaces
+ * them; the floors are recorded in the file. A key that appears in fewer
  * than half the reports is skipped — a budget from one run of five is a
  * single sample, and a key that comes and goes (a random action target) is
  * not one CI can hold to — and reported in `skipped`.
  */
 export function emitPerfBudgets(
   reports: readonly (Pick<CrawlReport, "pages" | "actions"> & { perf?: Pick<NonNullable<CrawlReport["perf"]>, "keyVersion"> })[],
-  { headroom = DEFAULT_BUDGET_HEADROOM, settle }: { headroom?: number; settle?: PerfSettleRecord } = {},
+  {
+    headroom = DEFAULT_BUDGET_HEADROOM,
+    floors = DEFAULT_BUDGET_FLOORS,
+    settle,
+  }: { headroom?: number; floors?: BudgetFloors; settle?: PerfSettleRecord } = {},
 ): EmitResult {
   const runs = reports.map(keyedRun);
   const seenIn = new Map<string, number>();
@@ -186,11 +197,14 @@ export function emitPerfBudgets(
       delete medians[key];
     }
   }
-  const budgets = emitBudgets(medians, { headroom, metrics: Object.keys(EMIT_BUDGET_METRICS) });
+  const budgets = emitBudgets(medians, { headroom, floors, metrics: Object.keys(EMIT_BUDGET_METRICS) });
   return {
     file: {
       version: 1,
       headroom,
+      // A record of how the budgets were made, for the reader of the file:
+      // gate reads only `budgets`, so files without it gate the same way.
+      floors: { ...floors } as PerfBudgetsFile["floors"],
       budgets: budgets as PerfBudgetsFile["budgets"],
       // Recorded so `perf gate` can refuse reports settled another way.
       ...(settle ? { settle: { ...settle } } : {}),
@@ -367,6 +381,46 @@ function keyVersionGate(cmd: string, sources: readonly KeyVersionSource[], allow
   );
   process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
   return false;
+}
+
+// ── browser version ─────────────────────────────────────────────────────────
+
+/** One input of a comparison and the browser it measured with. */
+export interface BrowserSource {
+  side: string;
+  source: string;
+  /** `browser.version()` as recorded; absent in reports written before it was. */
+  browser: string | undefined;
+}
+
+/**
+ * Why the baseline and the current reports measured with browsers too
+ * different to compare, or undefined. A major Chromium version moves the
+ * numbers on its own (153 resets CDP's cumulative counters on a
+ * cross-document navigation and starts with a larger heap), so a "regression"
+ * across one is the browser's. A side that recorded no version is refused
+ * when the other did: it predates recording it, and the version is unknown.
+ */
+export function checkBrowserVersions(sources: readonly BrowserSource[]): string | undefined {
+  const bySide = new Map<string, Set<string>>();
+  for (const s of sources) {
+    const set = bySide.get(s.side) ?? new Set<string>();
+    bySide.set(s.side, set);
+    set.add(browserMajor(s.browser));
+  }
+  const all = new Set([...bySide.values()].flatMap((s) => [...s]));
+  if (all.size <= 1) return undefined;
+  const sides = [...bySide].map(([side, set]) => `${side}: ${[...set].join(", ")}`).join("; ");
+  return `the inputs were measured with different browsers (${sides}), whose numbers differ on their own`;
+}
+
+/** A recorded `browser.version()` as the major it is compared by: "Chromium 153", or "unrecorded". */
+function browserMajor(version: string | undefined): string {
+  return version === undefined ? "unrecorded" : `Chromium ${version.split(".")[0]!}`;
+}
+
+function reportBrowserSources(side: string, paths: readonly string[], reports: readonly CrawlReport[]): BrowserSource[] {
+  return reports.map((r, i) => ({ side, source: paths[i]!, browser: r.perf?.browser }));
 }
 
 /** The key-version sources of a set of report files. */
@@ -601,22 +655,66 @@ export function regressNothingMeasured(
   return undefined;
 }
 
+/** Every perfKey any of the reports measured. */
+function measuredKeys(reports: readonly Pick<CrawlReport, "pages" | "actions">[]): Set<string> {
+  return new Set(reports.flatMap((r) => reportSpans(r).map((s) => s.key)));
+}
+
 /** Keys measured in the baseline that no current report measured, sorted. */
 export function missingKeys(
   baseline: readonly Pick<CrawlReport, "pages" | "actions">[],
   current: readonly Pick<CrawlReport, "pages" | "actions">[],
 ): string[] {
-  const cur = new Set(current.flatMap((r) => reportSpans(r).map((s) => s.key)));
-  return [...new Set(baseline.flatMap((r) => reportSpans(r).map((s) => s.key)))]
-    .filter((k) => !cur.has(k))
-    .sort();
+  const cur = measuredKeys(current);
+  return [...measuredKeys(baseline)].filter((k) => !cur.has(k)).sort();
+}
+
+/** What a regress run compares: the perfKeys both sides measured, and with which browsers. */
+export interface RegressCoverage {
+  /** keys measured on both sides: the only ones whose medians are compared */
+  shared: number;
+  /** keys only the current side measured (reported as new), sorted */
+  onlyCurrent: string[];
+  /** keys only the baseline measured (reported as not measured in current), sorted */
+  onlyBaseline: string[];
+  /** each side's browser majors as `checkBrowserVersions` reads them, e.g. "Chromium 141" */
+  browser: { baseline: string; current: string };
+}
+
+/**
+ * How much a regress run can compare. Only a key on both sides is compared,
+ * so "no regressions" over three shared keys and over forty read the same
+ * unless the count is said; and with none shared there was no comparison at
+ * all, however many spans either side measured.
+ */
+export function regressCoverage(
+  baseline: readonly Pick<CrawlReport, "pages" | "actions" | "perf">[],
+  current: readonly Pick<CrawlReport, "pages" | "actions" | "perf">[],
+): RegressCoverage {
+  const onlyCurrent = missingKeys(current, baseline);
+  const browsers = (rs: typeof baseline) => [...new Set(rs.map((r) => browserMajor(r.perf?.browser)))].join(", ");
+  return {
+    shared: measuredKeys(current).size - onlyCurrent.length,
+    onlyCurrent,
+    onlyBaseline: missingKeys(baseline, current),
+    browser: { baseline: browsers(baseline), current: browsers(current) },
+  };
+}
+
+/** The line `perf regress` prints before its verdict. */
+export function formatRegressCoverage(c: RegressCoverage): string {
+  return (
+    `[regress] compared ${c.shared} perfKey(s) on both sides (${c.onlyCurrent.length} only in current, ` +
+    `${c.onlyBaseline.length} only in baseline); browser ${c.browser.baseline} vs ${c.browser.current}`
+  );
 }
 
 // ── drilldown ───────────────────────────────────────────────────────────────
 
 /** The `--perf-out` directory a report's `reproCommand` names, if any. */
 export function perfOutFromRepro(reproCommand: string | undefined): string | undefined {
-  const m = reproCommand?.match(/--perf-out ('(?:[^']|'\\'')*'|\S+)/);
+  // `=` joins a value that starts with `-` (formatReproFlags).
+  const m = reproCommand?.match(/--perf-out[ =]('(?:[^']|'\\'')*'|\S+)/);
   if (!m) return undefined;
   const raw = m[1]!;
   return raw.startsWith("'") ? raw.slice(1, -1).replace(/'\\''/g, "'") : raw;
@@ -781,11 +879,15 @@ grouped by perfKey ("<urlPattern> :: <kind>"); every number is a median over
 the reports given, with lightbringer's noise rules.
 
 Subcommands:
-  emit-budgets <report.json...> [--headroom 1.25] [--out ${DEFAULT_PERF_BUDGETS_PATH}]
-      Budgets per perfKey: ceil(median × headroom) of durationMs, scriptMs,
-      blockingMs, layoutCount, recalcStyleMs, encodedKB, requestCount and
-      interactionMs. Keys seen in fewer than half the reports are skipped
-      (and listed). The reports' settle mode is written into the file.
+  emit-budgets <report.json...> [--headroom 1.25] [--floor <metric>=<n>]... [--out ${DEFAULT_PERF_BUDGETS_PATH}]
+      Budgets per perfKey of durationMs, scriptMs, blockingMs, layoutCount,
+      recalcStyleMs, encodedKB, requestCount and interactionMs: the larger of
+      ceil(median × headroom) and ceil(median + floor), so a 0 or tiny median
+      still leaves room for a clean rerun's noise. Default floors:
+      ${formatBudgetFloors(DEFAULT_BUDGET_FLOORS)}
+      --floor <metric>=<n> (repeatable) sets one; <metric>=0 turns it off.
+      Keys seen in fewer than half the reports are skipped (and listed). The
+      reports' settle mode and the floors are written into the file.
 
   gate <report.json...> --budgets <file> [--json]
       Medians vs budgets (an emit-budgets file or a perfBudgets array of
@@ -796,7 +898,8 @@ Subcommands:
   regress <baselineDir|report.json...> --current <report.json...> [--threshold 0.15] [--json]
       Per-perfKey medians, current vs baseline. A regression needs both the
       relative threshold and the metric's absolute floor; noisy medians warn.
-      Exit 1 on a regression.
+      Says how many perfKeys both sides measured (only those are compared)
+      and refuses (exit 2) when there are none. Exit 1 on a regression.
 
   emit-budgets, gate and regress refuse (exit 2) inputs crawled under
   different --settle modes: the settle mode changes what a span measures.
@@ -806,6 +909,10 @@ Subcommands:
   (perf.keyVersion; absent means 1): version 2 keys an action after a
   navigating click by the page it ran on. --allow-key-mismatch compares
   anyway, with a warning.
+  regress also refuses (exit 2) a baseline and current measured with
+  different major browser versions (perf.browser; a baseline without one
+  predates recording it): a browser upgrade moves the numbers on its own.
+  --allow-browser-mismatch compares anyway, with a warning.
 
   drilldown <report.json> <perfKey> [--top 15] [--perf-dir <dir>]
       Where the span's time went, from its page's trace (crawl with
@@ -827,10 +934,27 @@ function fail(msg: string): void {
 function parseNumber(flag: string, raw: string | undefined, def: number, min: number): number {
   if (raw === undefined) return def;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < min) throw new Error(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
+  // `Number("")` is 0: `--threshold "$T"` with T unset compared at 0.
+  if (raw.trim() === "" || !Number.isFinite(n) || n < min) throw new UsageError(`${flag} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
   return n;
 }
 
+/** `--floor <metric>=<n>` flags over lightbringer's default floors; a malformed one is a usage error. */
+function parseFloors(raw: readonly string[]): BudgetFloors {
+  try {
+    return parseBudgetFloors(raw);
+  } catch (err) {
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * A refused invocation (a missing operand or flag, an unknown sub) is a
+ * `UsageError`: one `chaosbringer perf <sub>: …` line and exit 2, from
+ * cli.ts. `fail` (exit 1) is for inputs that were read and gate nothing.
+ * Exit 2 is also a refused comparison (`refusing to compare: …`), which
+ * prints its own line.
+ */
 export async function runPerfCli(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv;
   if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
@@ -839,19 +963,19 @@ export async function runPerfCli(argv: string[]): Promise<void> {
   }
   switch (sub) {
     case "emit-budgets":
-      runEmit(rest);
+      await inSubcommand("perf emit-budgets", () => runEmit(rest));
       return;
     case "gate":
-      runGate(rest);
+      await inSubcommand("perf gate", () => runGate(rest));
       return;
     case "regress":
-      runRegress(rest);
+      await inSubcommand("perf regress", () => runRegress(rest));
       return;
     case "drilldown":
-      runDrilldown(rest);
+      await inSubcommand("perf drilldown", () => runDrilldown(rest));
       return;
     default:
-      fail(`unknown subcommand "${sub}" (expected emit-budgets, gate, regress or drilldown)`);
+      throw new UsageError(`unknown subcommand "${sub}" (expected emit-budgets, gate, regress or drilldown)`);
   }
 }
 
@@ -861,6 +985,7 @@ function runEmit(argv: string[]): void {
     allowPositionals: true,
     options: {
       headroom: { type: "string" },
+      floor: { type: "string", multiple: true },
       out: { type: "string" },
       "allow-settle-mismatch": { type: "boolean", default: false },
       "allow-key-mismatch": { type: "boolean", default: false },
@@ -871,12 +996,10 @@ function runEmit(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("emit-budgets: expected at least one report path");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected at least one report path");
   // Below 1 a budget would sit under the median it was measured from.
   const headroom = parseNumber("--headroom", values.headroom, DEFAULT_BUDGET_HEADROOM, 1);
+  const floors = parseFloors(values.floor ?? []);
   const { paths, skipped: skippedFiles } = expandReportPaths(positionals);
   const reports = paths.map(loadCrawlReport);
   if (skippedFiles.length > 0) {
@@ -890,7 +1013,7 @@ function runEmit(argv: string[]): void {
   // Only a mode every report recorded is written: a file claiming one mode
   // for budgets measured partly under another would make gate's check lie.
   const recorded = settle.mismatch || settle.unrecorded.length > 0 ? undefined : settle.agreed;
-  const result = emitPerfBudgets(reports, { headroom, ...(recorded ? { settle: recorded } : {}) });
+  const result = emitPerfBudgets(reports, { headroom, floors, ...(recorded ? { settle: recorded } : {}) });
   const out = values.out ?? DEFAULT_PERF_BUDGETS_PATH;
   const n = Object.keys(result.file.budgets).length;
   if (result.skipped.length > 0) {
@@ -909,7 +1032,9 @@ function runEmit(argv: string[]): void {
     return;
   }
   writeFileSync(out, `${JSON.stringify(result.file, null, 2)}\n`);
-  console.log(`[perf emit-budgets] ${n} key(s) from ${reports.length} report(s), headroom ×${headroom} → ${out}`);
+  console.log(
+    `[perf emit-budgets] ${n} key(s) from ${reports.length} report(s), headroom ×${headroom}, floors ${formatBudgetFloors(floors)} → ${out}`,
+  );
 }
 
 function runGate(argv: string[]): void {
@@ -928,14 +1053,8 @@ function runGate(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("gate: expected at least one report path");
-    return;
-  }
-  if (!values.budgets) {
-    fail("gate: --budgets <file> is required");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected at least one report path");
+  if (!values.budgets) throw new UsageError("--budgets <file> is required");
   const budgetsJson: unknown = JSON.parse(readFileSync(values.budgets, "utf-8"));
   const rules = perfBudgetRulesFromJson(budgetsJson, values.budgets);
   // The crawler's check: a misspelt metric (`durationMS`) would otherwise be
@@ -1011,6 +1130,7 @@ function runRegress(argv: string[]): void {
       json: { type: "boolean", default: false },
       "allow-settle-mismatch": { type: "boolean", default: false },
       "allow-key-mismatch": { type: "boolean", default: false },
+      "allow-browser-mismatch": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -1018,14 +1138,8 @@ function runRegress(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length === 0) {
-    fail("regress: expected a baseline directory or report paths");
-    return;
-  }
-  if (split.current.length === 0) {
-    fail("regress: --current <report.json...> is required");
-    return;
-  }
+  if (positionals.length === 0) throw new UsageError("expected a baseline directory or report paths");
+  if (split.current.length === 0) throw new UsageError("--current <report.json...> is required");
   const threshold = parseNumber("--threshold", values.threshold, DEFAULT_REGRESS_THRESHOLD, 0);
   const base = expandReportPaths(positionals);
   const cur = expandReportPaths(split.current);
@@ -1051,13 +1165,43 @@ function runRegress(argv: string[]): void {
     ...reportKeySources("current", cur.paths, curReports),
   ];
   if (!keyVersionGate("regress", keySources, values["allow-key-mismatch"])) return;
+  const browserMismatch = checkBrowserVersions([
+    ...reportBrowserSources("baseline", base.paths, baseReports),
+    ...reportBrowserSources("current", cur.paths, curReports),
+  ]);
+  if (browserMismatch) {
+    if (values["allow-browser-mismatch"]) {
+      console.error(`[perf regress] WARNING (--allow-browser-mismatch): ${browserMismatch}.`);
+    } else {
+      console.error(
+        `perf: regress: refusing to compare: ${browserMismatch}. Record the baseline with the same browser ` +
+          `(the next baseline run replaces it), or pass --allow-browser-mismatch to compare anyway.`,
+      );
+      process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+      return;
+    }
+  }
   const empty = regressNothingMeasured(baseReports, curReports);
   if (empty) {
     fail(`regress: ${empty}`);
     return;
   }
+  // Both sides measured, but nothing in common: every key would be "new" or
+  // "missing" and the run would pass having compared no median. Refused like
+  // the gates above (exit 2, nothing was compared), with no --allow-*: there
+  // is nothing an override could compare.
+  const coverage = regressCoverage(baseReports, curReports);
+  if (coverage.shared === 0) {
+    console.error(
+      `perf: regress: refusing to compare: no perfKey appears on both sides ` +
+        `(${coverage.onlyBaseline.length} key(s) only in the baseline, ${coverage.onlyCurrent.length} only in current), ` +
+        `so there is no median to compare. Crawl both sides with the same --url, --seed and limits.`,
+    );
+    process.exitCode = SETTLE_MISMATCH_EXIT_CODE;
+    return;
+  }
   const result = regressPerf(baseReports, curReports, { threshold });
-  const missing = missingKeys(baseReports, curReports);
+  const missing = coverage.onlyBaseline;
   if (missing.length > 0 && !values.json) {
     // Not a failure: a random crawl reaches a different set of targets from
     // run to run. Listed so a key that vanished is seen, not ignored.
@@ -1067,12 +1211,15 @@ function runRegress(argv: string[]): void {
   }
   const skipped = [...base.skipped, ...cur.skipped];
   if (values.json) {
-    console.log(JSON.stringify({ ...result, missingKeys: missing, skippedFiles: skipped, failed: result.regressions.length > 0 }, null, 2));
+    console.log(JSON.stringify({ ...result, comparedKeys: coverage.shared, missingKeys: missing, skippedFiles: skipped, failed: result.regressions.length > 0 }, null, 2));
   } else {
     const { stdout, stderr } = formatRegress(result, {
       baselineLabel: `${positionals.join(" ")} (${base.paths.length} report(s))`,
       currentLabel: `${cur.paths.length} report(s)`,
     });
+    // Right under formatRegress's header (its first line), before any
+    // per-key line and the verdict.
+    stdout.splice(1, 0, formatRegressCoverage(coverage));
     if (skipped.length > 0) stdout.unshift(`[regress] skipped ${skipped.length} non-report JSON file(s): ${skipped.join(", ")}`);
     for (const l of stdout) console.log(l);
     for (const l of stderr) console.error(l);
@@ -1094,10 +1241,7 @@ function runDrilldown(argv: string[]): void {
     console.log(HELP);
     return;
   }
-  if (positionals.length !== 2) {
-    fail("drilldown: expected <report.json> <perfKey>");
-    return;
-  }
+  if (positionals.length !== 2) throw new UsageError("expected <report.json> <perfKey>");
   const [reportFile, key] = positionals as [string, string];
   const topN = Math.floor(parseNumber("--top", values.top, DRILLDOWN_TOP_N, 1));
   const report = loadCrawlReport(reportFile);

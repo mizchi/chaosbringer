@@ -4,17 +4,18 @@
   "type": "module",
   "description": "A catalog of improvable sample apps: each pattern is a tiny page with a known performance anti-pattern and its fix, and a --perf crawl must localise the problem to the right step and metric and show the fix improving it.",
   "scripts": {
-    "test": "vitest run",
+    "test": "vp test run",
     "report": "tsx scripts/report.ts",
     "typecheck": "tsc --noEmit",
     "scan-check": "tsx scripts/scan-check.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.4",
     "chaosbringer": "workspace:*",
-    "playwright": "^1.52.0",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "vitest": "^3.0.7"
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
   }
 }

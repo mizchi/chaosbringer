@@ -16,6 +16,7 @@
  * want strict caps).
  */
 import { chaos, type ChaosResult, type ChaosRunOptions } from "./chaos.js";
+import { getExitCode } from "./reporter.js";
 import { mergeReports } from "./shard.js";
 import type { CrawlerEvents, CrawlReport } from "./types.js";
 
@@ -44,6 +45,11 @@ export interface ParallelChaosOptions {
 
 export interface ParallelShardResult {
   name: string;
+  /**
+   * The shard's own `chaos()` result, judged without `failOnWarnings`: the
+   * run's warnings are judged on `merged` (see `ParallelChaosResult.passed`).
+   * `result.warnings` still lists the shard's own.
+   */
   result: ChaosResult;
 }
 
@@ -52,9 +58,19 @@ export interface ParallelChaosResult {
   shards: ParallelShardResult[];
   /** Merged report — page errors, actions, fault stats joined across shards. */
   merged: CrawlReport;
-  /** True iff every shard's `passed` is true. */
+  /**
+   * True iff every shard's `passed` is true and, under `failOnWarnings` (in
+   * `base` or any shard's options), `merged.warnings` is empty.
+   */
   passed: boolean;
-  /** `max(exitCode)` across shards — non-zero if any shard failed. */
+  /**
+   * `max(exitCode)` across shards — non-zero if any shard failed — and 1
+   * under `failOnWarnings` for a merged report with warnings. The warnings
+   * are judged on the merged report, not per shard: a fault rule aimed at
+   * the pages one shard crawled matched nothing on the others, and each of
+   * those would fail on its `fault-unmatched`, which the merge (that sums the
+   * fault stats and diagnoses them again) has not.
+   */
   exitCode: number;
 }
 
@@ -81,15 +97,18 @@ export async function parallelChaos(
     index: i,
   }));
 
-  const results: ParallelShardResult[] = new Array(namedShards.length);
+  const results = Array.from<ParallelShardResult>({ length: namedShards.length });
   let cursor = 0;
+  // Judged on the merged report (see `ParallelChaosResult.exitCode`).
+  let gateWarnings = false;
 
   async function worker(): Promise<void> {
     while (true) {
       const idx = cursor++;
       if (idx >= namedShards.length) return;
       const { name, spec } = namedShards[idx]!;
-      const merged: ChaosRunOptions = { ...options.base, ...spec.options };
+      const { failOnWarnings, ...merged }: ChaosRunOptions = { ...options.base, ...spec.options };
+      if (failOnWarnings) gateWarnings = true;
       const result = await chaos(merged, spec.events ?? {});
       results[idx] = { name, result };
     }
@@ -102,7 +121,10 @@ export async function parallelChaos(
   await Promise.all(workers);
 
   const merged = mergeReports(results.map((r) => r.result.report));
-  const exitCode = results.reduce((m, r) => Math.max(m, r.result.exitCode), 0);
+  const exitCode = results.reduce(
+    (m, r) => Math.max(m, r.result.exitCode),
+    gateWarnings ? getExitCode(merged, { warnings: true }) : 0,
+  );
   return {
     shards: results,
     merged,

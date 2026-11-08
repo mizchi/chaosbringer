@@ -38,6 +38,7 @@ export const DEFAULT_OPTIONS: Required<
     | "perf"
     | "perfBudgets"
     | "perfBudgetsFile"
+    | "cliReproFlags"
   >
 > = {
   maxPages: 50,
@@ -48,12 +49,16 @@ export const DEFAULT_OPTIONS: Required<
   screenshotDir: "./screenshots",
   excludePatterns: [],
   ignoreErrorPatterns: [],
+  ignoreHttpPatterns: [],
+  strictCountsFaultEchoes: false,
   spaPatterns: [],
   viewport: { width: 1280, height: 720 },
   userAgent: "",
   blockExternalNavigation: true,
   httpCache: true,
   actionWeights: {},
+  ariaTargets: false,
+  bind: false,
   logFile: "",
   logLevel: "info",
   logToConsole: false,

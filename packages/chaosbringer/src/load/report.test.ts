@@ -115,6 +115,55 @@ describe("buildLoadReport", () => {
     expect(report.workers[1]!.iterationFailures).toBe(1);
   });
 
+  it("builds a report from a few hundred thousand samples of a worker", () => {
+    // What a worker that fails at once records over a few seconds (a store
+    // with nothing to replay, a host that refuses connections). Spread into
+    // `push` as arguments, this many overflowed the call stack: `load`
+    // exited with "Maximum call stack size exceeded" and no report.
+    const n = 200_000;
+    const iterations = Array.from({ length: n }, (_, i) => ({
+      scenarioName: scenario.name,
+      durationMs: 1,
+      success: false,
+      iteration: i,
+      timestamp: 1000 + (i % 1000),
+    }));
+    const steps = iterations.map((it) => ({ ...it, stepName: "open" }));
+    const perf = steps.map((s) => ({ ...s, blockingMs: 0 }));
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: 1000,
+      endTime: 2000,
+      durationMs: 1000,
+      plannedDurationMs: 1000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec }],
+      samples: [{ steps, iterations, network: [], errors: [], runtimeFaultStats: {}, perf }],
+      perf: { level: "light", sampledWorkers: 1 },
+    });
+    expect(report.totals).toMatchObject({ iterations: n, iterationFailures: n, stepFailures: n });
+    const [open] = report.scenarios[0]?.steps ?? [];
+    expect(open).toMatchObject({ name: "open", invocations: n });
+    expect(open?.perf?.n).toBe(n);
+  });
+
+  it("carries why the run stopped early, and the summary says it", () => {
+    const stopped = { cause: "unreachable" as const, reason: "base URL unreachable: https://x (…)", at: 1500 };
+    const report = buildLoadReport({
+      baseUrl: "https://x",
+      startTime: 1000,
+      endTime: 2000,
+      durationMs: 1000,
+      plannedDurationMs: 10_000,
+      rampUpMs: 0,
+      planned: [{ workerIndex: 0, spec }],
+      samples: [sampleFor(0)],
+      stopped,
+    });
+    expect(report.stopped).toEqual(stopped);
+    expect(formatLoadReport(report)).toContain("stopped early: base URL unreachable: https://x (…)");
+  });
+
   it("reports the iterations the deadline cut short, per scenario and worker", () => {
     const report = buildLoadReport({
       baseUrl: "https://x",

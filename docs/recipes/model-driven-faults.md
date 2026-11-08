@@ -682,7 +682,8 @@ and names it.
 ### The exit code is about the search, not the app
 
 `model shrink` exits 0 only for `stop: "1-minimal"`. Three other outcomes exit 1
-and print which:
+and print which (a refused invocation, such as no `--plan` or a `--max-runs 0`,
+is exit 2 and one `chaosbringer model shrink: …` line, before anything runs):
 
 | `stop` | Means |
 |---|---|

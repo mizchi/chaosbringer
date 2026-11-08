@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   parsePromptFile,
   parseSuggestion,
+  outlineFor,
   renderUserPrompt,
   type ParsedPrompt,
 } from "../prompts/loader.js";
@@ -59,7 +60,7 @@ export function openRouterDriverProvider(opts: OpenRouterDriverProviderOptions):
       if (maxUsd !== undefined && costSoFarUsd >= maxUsd) return null;
 
       const prompt = loadPrompt(promptPath);
-      const userText = renderUserPrompt(prompt.userTemplate, input);
+      const userText = renderUserPrompt(prompt.userTemplate, input, await outlineFor(prompt.userTemplate, input));
 
       // This provider is a vision one, so it does pay the capture — but
       // it pays it here, where a failure is just another soft failure.

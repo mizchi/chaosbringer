@@ -93,6 +93,52 @@ describe("unfiredFaults", () => {
     ).toEqual([]);
   });
 
+  it("names a service worker the network faults could not see behind, instead of the pattern", () => {
+    // `testPage()` on a caller's context: a request the worker takes never
+    // reaches a route of the crawler's, so `matched: 0` says nothing about
+    // the pattern — and that is what the message used to blame.
+    const pages = [{ serviceWorker: "unrouted" }, { serviceWorker: "routed" }, {}] as CrawlReport["pages"];
+    const [problem, ...rest] = unfiredFaults(
+      report({
+        faultInjections: [{ rule: "api-down", matched: 0, injected: 0 }],
+        runtimeFaults: [{ rule: "rt", matched: 0, fired: 0 }],
+        pages,
+      }),
+    );
+    expect(problem).toContain('network fault "api-down" never matched anything');
+    expect(problem).toContain("a service worker controlled 1 page(s)");
+    expect(problem).toContain("runtimeFaults");
+    // A crawl's pages are "unrouted" too when Playwright's opt-out is set, and
+    // the context advice alone was nothing a crawl could act on.
+    expect(problem).toContain("a crawl with PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK set");
+    expect(problem).toContain("or unset that variable");
+    expect(problem).not.toContain("the pattern did not see");
+    // A runtime fault patches `fetch` ahead of the worker: its diagnosis stands.
+    expect(rest).toEqual([expect.stringContaining('runtime fault "rt" never matched anything — the pattern')]);
+  });
+
+  it("names a worker's own cache on a context whose worker requests were routed", () => {
+    const [problem] = unfiredFaults(
+      report({
+        faultInjections: [{ rule: "app-js", matched: 0, injected: 0 }],
+        pages: [{ serviceWorker: "routed" }, { serviceWorker: "routed" }] as CrawlReport["pages"],
+      }),
+    );
+    expect(problem).toContain("the pattern did not see the request you expected, or a service worker answered it");
+    expect(problem).toContain("one controlled 2 page(s)");
+  });
+
+  it("leaves a rule that matched alone, worker or not", () => {
+    expect(
+      unfiredFaults(
+        report({
+          faultInjections: [{ rule: "declined", matched: 2, injected: 0 }],
+          pages: [{ serviceWorker: "unrouted" }] as CrawlReport["pages"],
+        }),
+      ),
+    ).toEqual([expect.stringMatching(/matched 2x and never fired/)]);
+  });
+
   it("restricts to the names asked for, and flags one it never saw", () => {
     const r = report({
       faultInjections: [{ rule: "ignored", matched: 0, injected: 0 }],
@@ -186,5 +232,27 @@ describe("faultWarnings", () => {
 
   it("says nothing for a run that configured no faults", () => {
     expect(faultWarnings(report({}))).toEqual([]);
+  });
+
+  it("carries the service worker on a network rule that matched nothing, and only there", () => {
+    expect(
+      faultWarnings(
+        report({
+          faultInjections: [
+            { rule: "n", matched: 0, injected: 0 },
+            { rule: "declined", matched: 1, injected: 0 },
+          ],
+          runtimeFaults: [{ rule: "r", matched: 0, fired: 0 }],
+          pages: [{ serviceWorker: "routed" }] as CrawlReport["pages"],
+        }),
+      ),
+    ).toEqual([
+      {
+        event: "fault_rule_unmatched",
+        data: { rule: "n", layer: "network", matched: 0, serviceWorker: { reach: "routed", pages: 1 } },
+      },
+      { event: "fault_rule_unfired", data: { rule: "declined", layer: "network", matched: 1 } },
+      { event: "fault_rule_unmatched", data: { rule: "r", layer: "runtime", matched: 0 } },
+    ]);
   });
 });

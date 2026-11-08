@@ -19,6 +19,23 @@ from code only: `chaos({ faultInjection, runtimeFaults, … })`, `ChaosCrawler`,
 `applyFaults`, or `model run`. If you want breadth *with* faults, that is
 `chaos()` with `probability` rules and a seed, not this command.
 
+Without flags it exits 1 only on a page that failed to load or timed out, a
+renderer crash or an invariant violation. `--strict` adds console errors, JS
+exceptions and unhandled rejections; `--fail-on-http 5xx` (or `4xx`) an API's
+or a subresource's own error status (`summary.httpErrors`, with each one's
+`status` and `method` on its console error); `--fail-on-network` a request that
+failed at the transport level; `--fail-on-dead-links` a crawled link that
+answered 404 / 5xx; `--fail-on-warnings` a run with `report.warnings` (a
+setup that tested less than it said: a fault rule that never fired, a
+`--seed-from-sitemap` that could not be read, a `--network` profile that
+failed, a missing `--baseline`). `--github-annotations` prints `::error` for
+what one of those rules (or `--baseline-strict`) fails the run on, and for
+every JS exception even on a run that exits 0; `::warning` for the rest, and
+for an off-site redirect no check failed `::warning` (target from the page's
+URL) or `::notice`.
+`--baseline-missing fail` refuses (exit 2) a `--baseline` that is not there,
+which is otherwise a warning. `--log-console` alone logs to stderr.
+
 Working *inside* the chaosbringer repo, the CLI lives at
 `packages/chaosbringer/dist/cli.js` and `dist/` is gitignored — so
 `pnpm -F chaosbringer build` first. If you get type errors mentioning
@@ -57,7 +74,7 @@ const crawler = new ChaosCrawler({
   seed: 42,                         // reproducible; omit for random
   faultInjection: [ … ],            // network layer: FaultRule[]
   runtimeFaults: [ … ],             // in-page fetch patching: RuntimeFault[]
-  lifecycleFaults: [ … ],           // visibility, offline, CPU: LifecycleFault[]
+  lifecycleFaults: [ … ],           // storage, SW cache, CPU: LifecycleFault[]
   initScripts: [ "…js…" ],          // raw JS run before the page's own scripts
   invariants: [ … ],                // what must hold; see below
 });
@@ -94,6 +111,8 @@ wrong is silent:
 | `report.iframeFaults[]` | `matched` | **`fired`** |
 | `session.stats()` from `applyFaults` (network) | `matched` | **`injected`** |
 | `session.runtimeStats()` | `matched` | **`fired`** |
+| `crawler.getFaultStats()` after `testPage()` (network) | `matched` | **`injected`** |
+| `crawler.getRuntimeFaultStats()` / `getIframeFaultStats()` | `matched` | **`fired`** |
 
 `injected` and `fired` are the same question under two names — there is no
 object carrying both. So `stats.injected` on what turned out to be a runtime
@@ -103,10 +122,14 @@ Prefer the readers that normalise it — `session.firings()`, or
 yourself.
 
 A finished crawl also warns on its own, without being asked: one
-`fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` event
-per fault that did not take effect, on all four layers, each carrying `rule`
-and `layer`. `faultWarnings(report)` returns the same events for a report you
-already hold.
+`report.warnings` entry per fault that did not take effect, on all four
+layers (`code: "fault-unmatched" | "fault-unfired" | "fault-uncounted"`, or
+`"fault-websocket"` for a network rule aimed at a WebSocket, which no route
+sees), with `rule`, `layer` and the `unfiredFaults` message, and one
+`fault_rule_unmatched` / `fault_rule_unfired` / `fault_rule_uncounted` logger
+event. `faultWarnings(report)` returns the same events for a report you
+already hold. `chaos()` returns the warnings as `result.warnings` with
+`passed` still true; `failOnWarnings: true` fails the run on them.
 
 Note `session.stats` is a **function**: `JSON.stringify(session.stats)` is
 `undefined`, which looks exactly like "nothing fired".
@@ -160,6 +183,44 @@ An invariant is a function that inspects the page and returns a problem, or
 nothing. This is where your oracle lives, so it is worth more care than the
 faults themselves — see the main SKILL.md on the four ways an oracle passes
 without checking anything.
+
+`invariants.axe()` needs `axe-core`, and `visualRegression()` needs `pixelmatch`
+and `pngjs`: optional peers, so install them (`pnpm add -D axe-core`). Without
+one, `new ChaosCrawler()` / `chaos()` / the fixture / `scenarioLoad()` throw `MissingPeerError`
+(`packages`, `installCommand`) before a browser starts, and the CLI's `--axe` /
+`--visual-baseline` exit 2 with the install command. It used to be one
+invariant violation per page, which reads as an accessibility bug in the app.
+An invariant declares such packages in `peers`; the presets already do.
+
+The data-safety presets (`invariants.dataSafety()`: `xssMarker`,
+`injectedMarkup`, `prototypePollution`, `renderedGarbage`,
+`noOffsiteRedirect`; and `notBlank`, which `dataSafety()` leaves out) catch
+bad data that did damage without throwing: a payload that ran, `NaN` on
+screen, a polluted prototype, a `?next=` that sends the user to another
+site. From the shell, `--invariants data-safety,not-blank` (or
+`--data-safety`) turns them on for the crawl, `shard` and `scan`, each with
+its defaults; their options (`markers`, `tokens`, `ignore`, `urlPattern`)
+are code-only, but for `noOffsiteRedirect`'s `allow` (an SSO provider the
+site redirects to), which is `--offsite-redirect-allow <origins>`: for the
+crawl and `shard` only with the check on; `scan` takes it either way, and
+raises no `open-redirect` finding for those origins. The `Repro:` line
+carries the flags. Details: `docs/recipes/data-safety.md`.
+
+```ts
+import { chaos, invariants } from "chaosbringer";
+
+// An open redirect: a page that leaves for another origin by a script, a
+// meta refresh or a 3xx fails, and so does a click that follows the page's
+// own ?next= (a click to a URL the page wrote does not); `allow` lets the
+// SSO through.
+const { passed, report } = await chaos({
+  baseUrl: "http://localhost:3000/login?next=https%3A%2F%2Fevil.invalid%2F",
+  invariants: [invariants.noOffsiteRedirect({ allow: ["https://login.example.com"] })],
+});
+// Every page's off-site navigations, with what started them:
+// report.pages[0].offsiteNavigations
+//   → [{ from, to, trigger: "script", reflected: { in: "query", param: "next" } }]
+```
 
 ## Driving a known path instead of a random one
 
@@ -321,6 +382,43 @@ chaosTest("survives a failing cart", async ({ page, chaos }) => {
 `chaosbringer/fixture` is the only entry point that needs `@playwright/test`
 installed; the package root needs only `playwright`.
 
+A relative URL (`chaos.testPage(page, "/")`, `chaos.crawl("/")`) resolves
+against the config's `use.baseURL`, or `chaosOptions.baseUrl` when set.
+`chaosOptions` takes `seed`, `faultInjection`, `invariants`, `lifecycleFaults`
+and `runtimeFaults`; on `testPage()` the fault rules are routed on your page
+and the runtime faults installed on it before it navigates, and both stay on
+it for the rest of the test. `strict: true` fails the test by the CLI's `--strict` rule, and every
+`crawl()` attaches its report as `chaos-report.json`. That rule does not count
+the console error Chromium logs for an error status a `faults.status` rule
+answered ("Failed to load resource: … 503"): it is tagged as the rule's echo
+(`causedByFault`), so a strict fault test needs no ignore pattern for it.
+`strictCountsFaultEchoes: true` in `chaosOptions` counts it again. To add an
+ignore pattern of your own, spread the defaults, since the option replaces them:
+
+```ts
+ignoreErrorPatterns: [...COMMON_IGNORE_PATTERNS, "third-party-widget"],
+```
+
 `testPage` uses a page *you* own, and releases anything a `hang` parked before
 it returns. If you drive the page across several steps of your own, `release()`
-on the crawler drains on demand.
+on the crawler drains on demand. It returns no report, so read the counters
+off the crawler (`chaos.crawler.getFaultStats()`, `getRuntimeFaultStats()`),
+or hand them to `unfiredFaults` with the result:
+`unfiredFaults({ faultInjections: crawler.getFaultStats(), pages: [result] })`.
+`chaos.warnings()` (`crawler.getWarnings()`) has the run's warnings so far;
+`chaosOptions.failOnWarnings` fails the test on them, `strict` alone does not.
+On `testPage()` it fails only on what that call raised: a fault rule aimed at
+a later `testPage()` has not fired yet, so check `chaos.warnings()` at the end.
+The crawler leaves your context alone, so on a page a service worker controls
+the network rules see none of the requests the worker takes:
+`result.serviceWorker` is `"unrouted"` and `unfiredFaults` names the worker
+rather than the pattern. Use runtime faults there, or create the context with
+`serviceWorkers: "block"`. A `crawl()` routes its own context, so there the
+rules do see what the worker forwards — unless
+`PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK` is set, which hands a worker's
+requests to no route at all (its pages are `"unrouted"` too).
+
+A misspelled `chaosOptions` key (`maxActionPerPage`, `stirct`) is refused with
+a "did you mean" error as the fixture is set up, and so is a `ChaosCrawler`
+option the fixture does not take (`timeout`, `iframeFaults`). Both used to be
+dropped without a word.

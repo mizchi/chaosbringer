@@ -113,7 +113,7 @@ function diffFields(left: ActionRecipe, right: ActionRecipe): FieldDiffEntry[] {
 function lcs(left: ReadonlyArray<string>, right: ReadonlyArray<string>): DiffOp[] {
   const n = left.length;
   const m = right.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  const dp: number[][] = Array.from({ length: n + 1 }, () => Array.from({ length: m + 1 }, () => 0));
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
       if (left[i - 1] === right[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]! + 1;
@@ -194,7 +194,7 @@ export function formatRecipeDiff(diff: RecipeDiff, opts: FormatDiffOptions = {})
     // The previous implementation scanned every change index per step,
     // which was O(steps × changes) — fine for recipes today but
     // gratuitous when the fix is straightforward.
-    const nearChange = new Array<boolean>(diff.steps.length).fill(false);
+    const nearChange = Array.from({ length: diff.steps.length }, () => false);
     diff.steps.forEach((s, i) => {
       if (s.op === "equal") return;
       for (let j = Math.max(0, i - ctx); j <= Math.min(diff.steps.length - 1, i + ctx); j++) {

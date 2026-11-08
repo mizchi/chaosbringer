@@ -387,7 +387,7 @@ describe("runJourney", () => {
         if (url.endsWith("/login")) {
           return new Response(JSON.stringify({ token: "abc123" }), { status: 200 });
         }
-        const auth = (init?.headers as Headers).get("authorization") ?? "";
+        const auth = (init?.headers as Headers | undefined)?.get("authorization") ?? "";
         seen.push(auth);
         return new Response("{}", { status: 200 });
       }) as typeof fetch;
@@ -449,6 +449,42 @@ describe("runJourney", () => {
       expect(parsed.nested.also).toBe("ref-7");
     });
 
+    // An object capture was bound with String(), as the literal
+    // "[object Object]", which no later step could use. An array of
+    // primitives keeps its comma list.
+    it("binds an object capture as its JSON, an array of primitives as a comma list", async () => {
+      const seen: string[] = [];
+      const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/seed")) {
+          return new Response(JSON.stringify({ user: { id: 7, roles: ["a", "b"] }, items: [{ id: 1 }, { id: 2 }] }), { status: 200 });
+        }
+        seen.push(init?.body as string);
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      await runJourney({
+        left: "http://l",
+        right: "http://r",
+        steps: [
+          {
+            method: "POST",
+            path: "/seed",
+            body: {},
+            capture: [
+              { from: "body.user", as: "user" },
+              { from: "body.user.roles", as: "roles" },
+              { from: "body.user.id", as: "id" },
+              { from: "body.items", as: "items" },
+            ],
+          },
+          { method: "POST", path: "/use", body: { user: "{{user}}", roles: "{{roles}}", id: "{{id}}", items: "{{items}}" } },
+        ],
+        fetcher,
+      });
+      const parsed = JSON.parse(seen[0]);
+      expect(parsed).toEqual({ user: '{"id":7,"roles":["a","b"]}', roles: "a,b", id: "7", items: '[{"id":1},{"id":2}]' });
+    });
+
     it("captures from response headers (header.<name>)", async () => {
       const seen: string[] = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -459,7 +495,7 @@ describe("runJourney", () => {
             headers: { "x-trace-id": "trace-42" },
           });
         }
-        const traceHeader = (init?.headers as Headers).get("x-trace") ?? "";
+        const traceHeader = (init?.headers as Headers | undefined)?.get("x-trace") ?? "";
         seen.push(traceHeader);
         return new Response("{}", { status: 200 });
       }) as typeof fetch;
@@ -513,7 +549,7 @@ describe("runJourney", () => {
       const seenCookies: string[] = [];
       const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
-        const cookie = (init?.headers as Headers).get("cookie") ?? "";
+        const cookie = (init?.headers as Headers | undefined)?.get("cookie") ?? "";
         if (url.endsWith("/login/alice")) {
           return new Response("", { status: 200, headers: { "set-cookie": "u=alice; Path=/" } });
         }
@@ -575,7 +611,7 @@ describe("runJourney", () => {
         const byUser = new Map<string, Array<{ title: string }>>();
         return (url: string, init: RequestInit | undefined): Response => {
           const u = new URL(url);
-          const cookie = (init?.headers as Headers).get("cookie") ?? "";
+          const cookie = (init?.headers as Headers | undefined)?.get("cookie") ?? "";
           const userMatch = cookie.match(/u=(\w+)/);
           const user = userMatch ? userMatch[1] : "anon";
           const method = (init?.method ?? "GET").toUpperCase();

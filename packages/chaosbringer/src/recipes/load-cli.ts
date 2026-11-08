@@ -9,28 +9,46 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { UsageError } from "../cli-usage.js";
 import { formatLoadReport, parseDurationMs, type DurationInput } from "../load/index.js";
 import {
   isRecipeSelection,
   isRecipeStatus,
   openStore,
   RECIPE_SELECTIONS,
+  parseVarFlags,
   RECIPE_STATUSES,
+  requireBaseUrl,
+  requireVars,
+  VAR_OPTIONS,
+  varsHelp,
+  warnRebased,
 } from "./cli-common.js";
-import { scenarioLoadFromStore, type RecipeSelection } from "./load-bridge.js";
+import { scenarioLoadFromStore, storeScenarioRecipes, type RecipeSelection } from "./load-bridge.js";
+import type { RecipeVars } from "./templating.js";
 import type { RecipeStatus } from "./types.js";
 
 const HELP = `chaosbringer load --base-url URL [options]
 
 Options:
-  --base-url URL          (required) base URL the load run hits
+  --base-url URL          (required) base URL the load run hits: each recipe's
+                          navigations to the origin it was recorded on go
+                          to this origin instead (with a warning)
   --workers N             concurrent virtual users (default: 5)
   --duration D            run length, e.g. 30s, 2m (default: 60s)
   --ramp-up D             linear ramp-up window (default: 0)
   --think-time MIN-MAX    per-step think time range in ms (e.g. "100-500")
   --selection MODE        uniform | by-success-rate (default: uniform)
-  --filter-status STATUS  verified (default) | candidate | demoted
+  --filter-status STATUS  replay recipes of this status: verified (default) |
+                          candidate | demoted
   --max-iterations N      hard cap on iterations per worker (default: unbounded)
+${varsHelp("  ", 22)}
+                          (every iteration gets the same values; a recipe
+                          with a placeholder neither defines is refused)
+  --no-record             leave the store as it was (default: each replay's
+                          outcome is recorded into it, which promotes and
+                          demotes recipes; a replay that could not connect to
+                          --base-url is never recorded)
   --dir PATH              local store directory (default: ./chaosbringer-recipes)
   --global                use global store (~/.chaosbringer/recipes)
   --output PATH           write the JSON report here (default: stdout-only)
@@ -39,10 +57,17 @@ Options:
   --json                  print the full report as JSON instead of the summary
   --help
 
-The runner picks one verified recipe per iteration, replays it (with
-\`requires\` chain resolution), and aggregates step / iteration / network
-samples. For chaos faults or SLO gating, use scenarioLoadFromStore()
-programmatically.`;
+The runner picks one recipe per iteration, replays it (with \`requires\`
+chain resolution), and aggregates step / iteration / network samples. For
+chaos faults or SLO gating, use scenarioLoadFromStore() programmatically.
+
+Exit codes: 0 every iteration passed; 1 an iteration or step failed; 2 the
+run could not do its job — no recipe of --filter-status in the store, or one
+that uses a {{NAME}} no --var or --vars-file defines (both checked before the
+browser starts), or the run stopped early: 3 iterations
+in a row could not connect to --base-url ("base URL unreachable"), or the
+recipes ran out mid-run. A run that started prints its report, and writes it
+to --output, either way.`;
 
 interface ParsedArgs {
   baseUrl: string;
@@ -53,6 +78,8 @@ interface ParsedArgs {
   selection: RecipeSelection;
   filterStatus: RecipeStatus;
   maxIterations?: number;
+  vars: RecipeVars;
+  record: boolean;
   store: ReturnType<typeof openStore>;
   output?: string;
   headless: boolean;
@@ -67,6 +94,16 @@ export async function runLoadCli(argv: string[]): Promise<void> {
   }
   const parsed = parseFlags(argv);
   if (!parsed) return;
+  const recipes = storeScenarioRecipes({ store: parsed.store, status: parsed.filterStatus });
+  if (recipes.length === 0) {
+    // Before Chromium starts: every iteration would fail on nothing to replay.
+    console.error(
+      `load: no ${parsed.filterStatus} recipes in ${parsed.store.writeDir ?? "the store"} — nothing to replay`,
+    );
+    process.exit(2);
+  }
+  requireVars(recipes, parsed.vars);
+  if (!parsed.quiet) warnRebased("load", recipes, parsed.baseUrl);
   const result = await scenarioLoadFromStore({
     baseUrl: parsed.baseUrl,
     workers: parsed.workers,
@@ -75,7 +112,9 @@ export async function runLoadCli(argv: string[]): Promise<void> {
     headless: parsed.headless,
     maxIterationsPerWorker: parsed.maxIterations,
     selection: parsed.selection,
-    filter: (r) => r.status === parsed.filterStatus,
+    status: parsed.filterStatus,
+    record: parsed.record,
+    vars: parsed.vars,
     store: parsed.store,
     thinkTime: parsed.thinkTime,
   });
@@ -97,6 +136,13 @@ export async function runLoadCli(argv: string[]): Promise<void> {
       }
     }
   }
+  const { stopped } = result.report;
+  if (stopped) {
+    // Last and on stderr, so it is the line a reader sees whatever came before.
+    console.error(`load: ${stopped.reason}`);
+    process.exitCode = 2;
+    return;
+  }
   const failed =
     result.report.totals.iterationFailures > 0 || result.report.totals.stepFailures > 0;
   if (failed) process.exitCode = 1;
@@ -114,6 +160,8 @@ function parseFlags(argv: string[]): ParsedArgs | null {
       selection: { type: "string" },
       "filter-status": { type: "string" },
       "max-iterations": { type: "string" },
+      ...VAR_OPTIONS,
+      "no-record": { type: "boolean" },
       dir: { type: "string" },
       global: { type: "boolean" },
       output: { type: "string" },
@@ -130,11 +178,8 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     return null;
   }
   const baseUrl = values["base-url"];
-  if (!baseUrl) {
-    console.error("load: --base-url is required\n");
-    console.error(HELP);
-    process.exit(2);
-  }
+  if (!baseUrl) throw new UsageError("--base-url is required");
+  requireBaseUrl(baseUrl);
   const workers = parsePositiveInt("--workers", values.workers, 5);
   // Validate at the CLI boundary so a typo in --duration / --ramp-up
   // fails before launching Chromium, with the bad input echoed.
@@ -144,14 +189,13 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     : undefined;
   const filterStatusRaw = values["filter-status"] ?? "verified";
   if (!isRecipeStatus(filterStatusRaw)) {
-    console.error(`load: --filter-status must be ${RECIPE_STATUSES.join("|")}`);
-    process.exit(2);
+    throw new UsageError(`--filter-status must be ${RECIPE_STATUSES.join("|")}`);
   }
   const selectionStr = values.selection ?? "uniform";
   if (!isRecipeSelection(selectionStr)) {
-    console.error(`load: --selection must be ${RECIPE_SELECTIONS.join("|")}`);
-    process.exit(2);
+    throw new UsageError(`--selection must be ${RECIPE_SELECTIONS.join("|")}`);
   }
+  const vars = parseVarFlags(values);
   const store = openStore({
     dir: values.dir,
     global: values.global,
@@ -171,6 +215,8 @@ function parseFlags(argv: string[]): ParsedArgs | null {
     maxIterations: values["max-iterations"]
       ? parsePositiveInt("--max-iterations", values["max-iterations"])
       : undefined,
+    vars,
+    record: !values["no-record"],
     store,
     output: values.output,
     headless,
@@ -181,16 +227,12 @@ function parseFlags(argv: string[]): ParsedArgs | null {
 
 function parsePositiveInt(flag: string, raw: string | undefined, fallback?: number): number {
   if (raw === undefined) {
-    if (fallback === undefined) {
-      console.error(`load: ${flag} is required`);
-      process.exit(2);
-    }
+    if (fallback === undefined) throw new UsageError(`${flag} is required`);
     return fallback;
   }
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) {
-    console.error(`load: ${flag} must be a positive integer, got ${raw}`);
-    process.exit(2);
+    throw new UsageError(`${flag} must be a positive integer, got ${raw}`);
   }
   return n;
 }
@@ -200,8 +242,7 @@ function validateDuration(flag: string, raw: string): DurationInput {
     parseDurationMs(raw);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error(`load: ${flag} invalid (${detail})`);
-    process.exit(2);
+    throw new UsageError(`${flag} invalid (${detail})`);
   }
   return raw as DurationInput;
 }
@@ -214,21 +255,16 @@ function validateDuration(flag: string, raw: string): DurationInput {
 function parseThinkTime(raw: string | undefined): { minMs: number; maxMs: number } | undefined {
   if (!raw) return undefined;
   const idx = raw.indexOf("-");
-  if (idx <= 0) {
-    console.error(`load: --think-time must be MIN-MAX, got ${raw}`);
-    process.exit(2);
-  }
+  if (idx <= 0) throw new UsageError(`--think-time must be MIN-MAX, got ${raw}`);
+  let minMs: number;
+  let maxMs: number;
   try {
-    const minMs = parseDurationMs(raw.slice(0, idx));
-    const maxMs = parseDurationMs(raw.slice(idx + 1));
-    if (maxMs < minMs) {
-      console.error(`load: --think-time max (${maxMs}ms) is below min (${minMs}ms)`);
-      process.exit(2);
-    }
-    return { minMs, maxMs };
+    minMs = parseDurationMs(raw.slice(0, idx));
+    maxMs = parseDurationMs(raw.slice(idx + 1));
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error(`load: --think-time invalid (${detail})`);
-    process.exit(2);
+    throw new UsageError(`--think-time invalid (${detail})`);
   }
+  if (maxMs < minMs) throw new UsageError(`--think-time max (${maxMs}ms) is below min (${minMs}ms)`);
+  return { minMs, maxMs };
 }

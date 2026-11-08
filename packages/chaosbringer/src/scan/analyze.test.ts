@@ -4,11 +4,21 @@ import { fakeAction, fakePage, fakeReport, fakeRequest, fakeSpan } from "../perf
 import type { PagePerfSummary, PerfSpanReport } from "../types.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { analyzeScan, assetIdentity, RULE_PATTERNS, SCAN_FAULT_NAMES, SCAN_THRESHOLDS, SCAN_WHERE_CAP } from "./analyze.js";
+import {
+  analyzeScan,
+  assetIdentity,
+  RULE_PATTERNS,
+  SCAN_FAULT_NAMES,
+  SCAN_THRESHOLDS,
+  SCAN_WHERE_CAP,
+  type ScanAnalysis,
+  type ScanFinding,
+} from "./analyze.js";
 import { withSidecarRequests } from "./sidecars.js";
 import { deriveScanEndpoints, endpointsPattern } from "./endpoints.js";
 import { formatScanMarkdown, formatScanSummary } from "./format.js";
 import { parseFaults } from "./cli.js";
+import { offsiteNavigation } from "../offsite-navigation.js";
 
 const U = "http://localhost:3000";
 
@@ -94,10 +104,128 @@ describe("analyzeScan: bugs", () => {
     ]);
   });
 
+  it("lists the files a failed load is about, less the documents the page rules report", () => {
+    const message = "Failed to load resource: the server responded with a status of 404 (Not Found)";
+    const files = [1, 2, 3, 4, 5, 6, 7].map((i) => `${U}/img/${i}.png`);
+    const c: ErrorCluster = {
+      ...cluster("console", message, [`${U}/`, `${U}/gone`], 9),
+      sample: { type: "console", message, timestamp: 0, resourceUrl: files[0] },
+      resourceUrls: [`${U}/gone`, ...files],
+    };
+    const r = analyzeScan(fakeReport([fakePage(`${U}/`), fakePage(`${U}/gone`, undefined, { statusCode: 404 })], [], { errorClusters: [c] }));
+    const f = r.findings.find((x) => x.rule === "console-error")!;
+    // The message names no file, so before this the finding said only "9× on 2 pages".
+    expect(f.evidence).toEqual(["9× on 2 pages", ...files.slice(0, SCAN_WHERE_CAP).map((u) => `resource: ${u}`)]);
+    expect(f.unlisted).toBe(files.length - SCAN_WHERE_CAP);
+  });
+
   it("files axe violations under a11y", () => {
     const c = { ...cluster("invariant-violation", "color-contrast"), invariantNames: ["a11y-axe"] };
     const [f] = analyzeScan(fakeReport([], [], { errorClusters: [c] })).findings;
     expect([f!.rule, f!.category]).toEqual(["a11y-violation", "a11y"]);
+  });
+
+  // `scan --invariants data-safety`: a payload that ran was a medium finding,
+  // which `--fail-on high` let through, beside a `high` js-exception.
+  it("files the data-safety presets as bugs, high when hostile data ran or reached the DOM", () => {
+    const data = (name: string, message: string) => ({
+      ...cluster("invariant-violation", `[${name}] ${message}`),
+      invariantNames: [name],
+    });
+    const r = analyzeScan(
+      fakeReport([], [], {
+        errorClusters: [
+          data("data.rendered-garbage", 'rendered garbage: NaN in "Total: NaN EUR"'),
+          data("data.not-blank", "blank page: 0 characters of visible text in body, fewer than 1"),
+          data("data.xss-marker", "XSS marker set: window.__cb_xss_fired"),
+          data("data.injected-markup", "injected markup: <b data-cb-injected>"),
+          data("data.prototype-pollution", "Object.prototype polluted: cbPolluted"),
+          { ...cluster("invariant-violation", "[cart-total] total is wrong"), invariantNames: ["cart-total"] },
+        ],
+      }),
+    );
+    expect(r.findings.map((f) => [f.rule, f.severity, f.category, f.title.split(":")[1]?.trim()])).toEqual([
+      ["invariant-violation", "high", "bug", "[data.xss-marker] XSS marker set"],
+      ["invariant-violation", "high", "bug", "[data.injected-markup] injected markup"],
+      ["invariant-violation", "high", "bug", "[data.prototype-pollution] Object.prototype polluted"],
+      ["invariant-violation", "medium", "bug", '[data.rendered-garbage] rendered garbage'],
+      ["invariant-violation", "medium", "bug", "[data.not-blank] blank page"],
+      ["invariant-violation", "medium", "bug", "[cart-total] total is wrong"],
+    ]);
+    expect(r.findings[0]!.hint).toMatch(/as text/);
+  });
+});
+
+describe("analyzeScan: open redirects", () => {
+  const EVIL = "http://127.0.0.1:4401/phish";
+  const go = `${U}/go?next=${encodeURIComponent(EVIL)}`;
+  const reflected = offsiteNavigation(go, EVIL, "script");
+  const fixed = offsiteNavigation(`${U}/chat`, "http://127.0.0.1:4401/invite", "server-redirect");
+  const pages = [
+    fakePage(go, undefined, { redirectedTo: EVIL, blockedNavigations: [EVIL], offsiteNavigations: [reflected] }),
+    fakePage(`${U}/chat`, undefined, { blockedNavigations: [fixed.to], offsiteNavigations: [fixed] }),
+    // Not redirects: a click and an iframe.
+    fakePage(`${U}/links`, undefined, {
+      offsiteNavigations: [offsiteNavigation(`${U}/links?u=${EVIL}`, EVIL, "click"), offsiteNavigation(`${U}/links`, EVIL, "frame")],
+    }),
+  ];
+
+  it("raises open-redirect in the security category, high when the page's URL named the target", () => {
+    const r = analyzeScan(fakeReport(pages, []));
+    const found = r.findings.filter((f) => f.rule === "open-redirect");
+    expect(found.map((f) => [f.severity, f.category, f.where])).toEqual([
+      ["high", "security", [go]],
+      ["low", "security", [`${U}/chat`]],
+    ]);
+    expect(found[0]!.evidence).toEqual([`${go} -> ${EVIL} (script redirect; target from the "next" query parameter)`]);
+    expect(found[0]!.title).toMatch(/^Open redirect/);
+    expect(r.counts.high).toBe(1);
+  });
+
+  it("counts a redirect the chaos crawls saw again once, and adds one only they saw", () => {
+    const other = offsiteNavigation(`${U}/out?url=${EVIL}`, EVIL, "server-redirect");
+    const chaosReport = fakeReport([...pages, fakePage(other.from, undefined, { offsiteNavigations: [other] })], []);
+    const r = analyzeScan(fakeReport(pages, []), [{ fault: "status", report: chaosReport }]);
+    const high = r.findings.find((f) => f.rule === "open-redirect" && f.severity === "high")!;
+    expect(high.occurrences).toBe(2);
+    expect(high.where).toEqual([go, other.from]);
+  });
+
+  it("is the one finding for it when the scan ran the no-offsite-redirect check too, whatever its name", () => {
+    // The crawler marks the check's violations (`PageError.offsiteRedirect`).
+    const marked = (name: string) => {
+      const c = cluster("invariant-violation", `[${name}] open redirect: ${go} -> ${EVIL}`, [go]);
+      c.invariantNames = [name];
+      c.sample = { ...c.sample, invariantName: name, offsiteRedirect: true };
+      return c;
+    };
+    const r = analyzeScan(fakeReport(pages, [], { errorClusters: [marked("navigation.no-offsite-redirect"), marked("my.redirect-check")] }));
+    expect(rules(r).filter((rule) => rule === "invariant-violation")).toEqual([]);
+    expect(rules(r).filter((rule) => rule === "open-redirect")).toHaveLength(2);
+    // A check of the user's own that happens to say so is still reported.
+    const own = cluster("invariant-violation", "[cart] open redirect: wrong", [go]);
+    own.invariantNames = ["cart"];
+    expect(rules(analyzeScan(fakeReport(pages, [], { errorClusters: [own] }))).filter((rule) => rule === "invariant-violation")).toHaveLength(1);
+  });
+
+  it("leaves out a redirect to an allowed origin (an SSO provider)", () => {
+    const r = analyzeScan(fakeReport(pages, []), [], { offsiteRedirectAllowed: (url) => url.startsWith("http://127.0.0.1:4401/invite") });
+    expect(r.findings.filter((f) => f.rule === "open-redirect").map((f) => f.severity)).toEqual(["high"]);
+  });
+
+  it("is in the terminal summary and the Markdown", () => {
+    const r = analyzeScan(fakeReport(pages, []));
+    expect(formatScanSummary(r)).toContain("[security] Open redirect: a page sends the browser to the URL in its own address");
+    const md = formatScanMarkdown(r, {
+      url: U,
+      startedAt: "2026-09-30T00:00:00.000Z",
+      durationMs: 1_000,
+      pagesVisited: 3,
+      actions: 0,
+      files: { baseline: "out/clean-report.json", chaos: {}, perfDir: "out/perf" },
+    });
+    expect(md).toContain("| 🔴 | security | [Open redirect: a page sends the browser to the URL in its own address](#f1) |");
+    expect(md).toContain("`open-redirect` · security · high");
   });
 });
 
@@ -106,11 +234,12 @@ describe("analyzeScan: resilience", () => {
     errorClusters: [cluster("console", "already there")],
   });
 
-  it("reports errors that appear only under faults, minus the browser's echo of the fault", () => {
+  it("reports errors that appear only under faults; the browser's echo of the fault is in no cluster", () => {
+    // The echo itself is tagged `causedByFault` by the crawl and clustered
+    // nowhere, so it never reaches this: what a chaos report clusters is the app's.
     const chaos = fakeReport(clean.pages, [], {
       errorClusters: [
         cluster("console", "already there"),
-        cluster("console", "Failed to load resource: the server responded with a status of 500"),
         cluster("network", `${U}/api/items - net::ERR_FAILED`),
         cluster("unhandled-rejection", "SyntaxError: Unexpected token"),
         cluster("console", "render failed"),
@@ -131,6 +260,40 @@ describe("analyzeScan: resilience", () => {
     expect(merged.occurrences).toBe(3);
     expect(merged.where).toEqual([`${U}/`, `${U}/list`]);
     expect(merged.evidence[0]).toBe("3× under HTTP 500, network failure; never in the clean crawl");
+  });
+
+  // The regex that stood in for the tag dropped every "Failed to load
+  // resource" and "status of 5xx" cluster, the app's own included.
+  it("reports a real 5xx that only shows under a fault, which is no echo of it", () => {
+    const real = cluster("console", "Failed to load resource: the server responded with a status of 502 (Bad Gateway)");
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("console", "already there"), real] });
+    const r = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(r.findings.filter((f) => f.rule === "fault-new-error").map((f) => [f.severity, f.title])).toEqual([
+      ["low", "Only when an API request fails: console.error: Failed to load resource: the server responded with a status of 502 (Bad Gateway)"],
+    ]);
+  });
+
+  // The chaos crawls run the scan's invariants too, and a page that shows
+  // `undefined` once its API answers 500 was dropped with the other
+  // invariant violations.
+  it("reports a data-safety violation that appears only under a fault, but not an axe one", () => {
+    const data = { ...cluster("invariant-violation", '[data.rendered-garbage] rendered garbage: undefined in "Hello, undefined"'), invariantNames: ["data.rendered-garbage"] };
+    const axe = { ...cluster("invariant-violation", "[a11y-axe] color-contrast"), invariantNames: ["a11y-axe"] };
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("console", "already there"), data, axe] });
+    const r = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(r.findings.map((f) => [f.rule, f.severity, f.category])).toEqual([
+      ["console-error", "medium", "bug"],
+      ["fault-new-error", "medium", "resilience"],
+    ]);
+    expect(r.findings[1]!.title).toBe(
+      'Only when an API request fails: Invariant violated: [data.rendered-garbage] rendered garbage: undefined in "Hello, undefined"',
+    );
+    // Nothing threw: the hint is about what the page rendered, not a throw.
+    expect(r.findings[1]!.hint).toContain("renders what the failed response left");
+    expect(r.findings[1]!.hint).not.toContain("throwing");
+    // In the clean crawl too: the bug finding has it, not resilience.
+    const both = analyzeScan({ ...clean, errorClusters: [...clean.errorClusters, data] }, [{ fault: "status", report: chaos }]);
+    expect(both.findings.map((f) => f.rule)).not.toContain("fault-new-error");
   });
 
   it("reports pages that load clean but break under faults", () => {
@@ -456,11 +619,38 @@ describe("analyzeScan: false positives seen on real sites", () => {
   });
 
   it("leaves the crawler's own navigation errors to the page rules", () => {
-    const goto = cluster("exception", "page.goto: Timeout 30000ms exceeded.\nCall log: navigating to ...", [`${U}/slow`]);
+    const goto = cluster("navigation", "page.goto: Timeout 30000ms exceeded.", [`${U}/slow`]);
     const clean = fakeReport([fakePage(`${U}/slow`)], []);
     const chaos = fakeReport([fakePage(`${U}/slow`, undefined, { status: "timeout" })], [], { errorClusters: [goto] });
     expect(rules(analyzeScan(chaos))).toEqual(["page-load-failed"]);
     expect(rules(analyzeScan(clean, [{ fault: "hang", report: chaos }]))).toEqual(["fault-page-broken"]);
+  });
+
+  // `analyzeScan` reads reports already on disk, and an older version
+  // recorded the same failure as an `exception` with the call log in it.
+  it("leaves an older report's page.goto exceptions to the page rules too", () => {
+    const old = cluster(
+      "exception",
+      `page.goto: net::ERR_EMPTY_RESPONSE at ${U}/reset\nCall log:\n\x1b[2m  - navigating to "${U}/reset"\x1b[22m\n`,
+      [`${U}/reset`],
+    );
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/reset`, undefined, { status: "error" })], [], {
+      errorClusters: [old, cluster("exception", "boom 12345")],
+    });
+    expect(analyzeScan(report).findings.map((f) => [f.rule, f.title])).toEqual([
+      ["js-exception", "Uncaught exception: boom 12345"],
+      ["page-load-failed", "Pages that did not load"],
+    ]);
+  });
+
+  // A crashed page has status "error", but it loaded: it was listed as a
+  // page that did not load, with a navigation hint, beside its crash.
+  it("reports a crashed page as a crash only, not as a page that did not load", () => {
+    const crash = { type: "crash" as const, message: "renderer crashed", url: `${U}/a`, timestamp: 0 };
+    const report = fakeReport([fakePage(`${U}/`), fakePage(`${U}/a`, undefined, { status: "error", errors: [crash] })], [], {
+      errorClusters: [cluster("crash", "renderer crashed", [`${U}/a`])],
+    });
+    expect(rules(analyzeScan(report))).toEqual(["page-crash"]);
   });
 
   it("does not blame a fault for a page whose measured load it never touched", () => {
@@ -643,6 +833,43 @@ describe("analyzeScan: coverage warnings", () => {
     expect(analyzeScan(fakeReport([normal, fakePage(`${U}/a`)], [])).coverageWarnings).toEqual([]);
     expect(formatScanSummary(analyzeScan(fakeReport([tiny], [])))).toMatch(/⚠️ {2}The crawl reached only/);
   });
+
+  it("says the site could not be reached, and no SPA / bot-check hint, when the start page's connection failed", () => {
+    const message = `page.goto: net::ERR_CONNECTION_REFUSED at ${U}/`;
+    const down = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "navigation", message, url: `${U}/`, timestamp: 0 }],
+      perfPage: perfPage({ network: { totalRequests: 1, totalEncodedKB: 0, fromCacheCount: 0 } }),
+    });
+    expect(analyzeScan(fakeReport([down], [])).coverageWarnings).toEqual([
+      `Could not reach ${U}/: is the server running? (net::ERR_CONNECTION_REFUSED at ${U}/)`,
+    ]);
+    // A start page that failed to load for another reason: the page finding
+    // says so, and the hints about what the site served do not apply.
+    const slow = fakePage(`${U}/`, undefined, { status: "timeout" });
+    expect(analyzeScan(fakeReport([slow], [])).coverageWarnings).toEqual([
+      "The start page did not load (timeout), so the crawl had nothing to follow; see the page findings.",
+    ]);
+    // A crashed one did load: it is not called a page that did not load.
+    const crashed = fakePage(`${U}/`, undefined, {
+      status: "error",
+      errors: [{ type: "crash", message: "renderer crashed", url: `${U}/`, timestamp: 0 }],
+    });
+    expect(analyzeScan(fakeReport([crashed], [])).coverageWarnings).toEqual([
+      "The start page's renderer crashed; see the page-crash finding.",
+    ]);
+  });
+
+  it("does not call a light start page a bot check when the crawl went on past it", () => {
+    // A small static site: 3 requests and 2 KB on the start page, then nine
+    // more pages. It was told it had maybe been served a bot check.
+    const start = fakePage(`${U}/`, undefined, {
+      links: [`${U}/a`],
+      perfPage: perfPage({ network: { totalRequests: 3, totalEncodedKB: 2, fromCacheCount: 0 } }),
+    });
+    const rest = Array.from({ length: 9 }, (_, i) => fakePage(`${U}/p${i}`));
+    expect(analyzeScan(fakeReport([start, ...rest], [])).coverageWarnings).toEqual([]);
+  });
 });
 
 describe("RULE_PATTERNS", () => {
@@ -777,6 +1004,109 @@ describe("format", () => {
     });
     expect(md2).toContain("[long-task-click](https://github.com/mizchi/chaosbringer/blob/main/examples/perf-patterns/src/patterns/long-task-click.ts)");
     expect(md2).toContain("Chaos crawls: skipped");
+  });
+
+  it("counts the other places a finding was seen at in its where, not its other errors", () => {
+    const files = { baseline: "a", chaos: {}, perfDir: "b" };
+    const summary = { url: U, startedAt: "", durationMs: 0, pagesVisited: 1, actions: 0, files };
+    // Four throws on one page read "/multi (+3)", as if four pages had thrown.
+    const one = analyzeScan(fakeReport([fakePage(`${U}/multi`)], [], { errorClusters: [cluster("exception", "boom", [`${U}/multi`], 4)] }));
+    expect(one.findings[0]).toMatchObject({ where: [`${U}/multi`], places: 1, occurrences: 4 });
+    expect(formatScanSummary(one)).toMatch(new RegExp(`— ${U}/multi$`, "m"));
+    expect(formatScanMarkdown(one, summary)).toContain(`| ${U}/multi | 4 |`);
+
+    // Nine errors on seven pages: five listed, and the other six counted.
+    const pages = [1, 2, 3, 4, 5, 6, 7].map((i) => `${U}/p${i}`);
+    const seven = analyzeScan(fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom", pages, 9)] }));
+    expect(seven.findings[0]).toMatchObject({ where: pages.slice(0, SCAN_WHERE_CAP), places: 7, occurrences: 9 });
+    expect(formatScanSummary(seven)).toMatch(new RegExp(`— ${U}/p1 \\(\\+6\\)$`, "m"));
+
+    // The same for an error only a fault produced: three on two pages.
+    const clean = fakeReport([fakePage(`${U}/`), fakePage(`${U}/list`)], []);
+    const chaos = fakeReport(clean.pages, [], { errorClusters: [cluster("unhandled-rejection", "boom", [`${U}/`, `${U}/list`], 3)] });
+    const fragile = analyzeScan(clean, [{ fault: "status", report: chaos }]);
+    expect(fragile.findings[0]).toMatchObject({ rule: "fault-new-error", places: 2, occurrences: 3 });
+    expect(formatScanMarkdown(fragile, summary)).toContain(`| ${U}/ (+1) | 3 |`);
+  });
+
+  // `places` was required: a finding built by hand no longer typechecked, and
+  // one read from a 0.13.0 scan-report.json, which has no `places`, lost its (+N).
+  it("counts a finding without places by the places it lists", () => {
+    const files = { baseline: "a", chaos: {}, perfDir: "b" };
+    const summary = { url: U, startedAt: "", durationMs: 0, pagesVisited: 1, actions: 0, files };
+    const finding: ScanFinding = {
+      rule: "js-exception",
+      severity: "high",
+      category: "bug",
+      title: "boom",
+      where: [`${U}/a`, `${U}/b`, `${U}/c`],
+      occurrences: 5,
+      evidence: [],
+      hint: "",
+    };
+    const analysis: ScanAnalysis = { findings: [finding], counts: { high: 1, medium: 0, low: 0 }, environment: [], coverageWarnings: [] };
+    expect(formatScanSummary(analysis)).toMatch(new RegExp(`— ${U}/a \\(\\+2\\)$`, "m"));
+    expect(formatScanMarkdown(analysis, summary)).toContain(`| ${U}/a (+2) | 5 |`);
+  });
+
+  it("gives each chaos crawl's report the command that reruns it", () => {
+    const md = formatScanMarkdown(analyzeScan(fakeReport([fakePage(`${U}/`)], [])), {
+      url: U,
+      startedAt: "",
+      durationMs: 0,
+      pagesVisited: 1,
+      actions: 0,
+      chaos: {
+        runs: [{ fault: "status", pagesVisited: 1, faultsInjected: 4, reproCommand: `chaosbringer scan --url ${U} --seed 7 --faults 500` }],
+        endpoints: [],
+      },
+      files: { baseline: "out/clean-report.json", chaos: { status: "out/chaos-status-report.json" }, perfDir: "out/perf" },
+    });
+    expect(md).toContain(
+      `- chaos crawl report (HTTP 500): \`out/chaos-status-report.json\`, rerun with \`chaosbringer scan --url ${U} --seed 7 --faults 500\``,
+    );
+    expect(md).toContain("To reproduce a resilience finding, rerun the `chaosbringer scan … --faults <fault>` command above");
+  });
+
+  it("says '… and N more' for the items the evidence leaves out, not for errors it sums up", () => {
+    const md = (report: ReturnType<typeof fakeReport>) =>
+      formatScanMarkdown(analyzeScan(report), {
+        url: U,
+        startedAt: "",
+        durationMs: 0,
+        pagesVisited: 1,
+        actions: 0,
+        files: { baseline: "a", chaos: {}, perfDir: "b" },
+      });
+    const more = (text: string) => text.match(/^- … and \d+ more$/gm) ?? [];
+
+    // Seen 3×, summed up in one line: there is nothing more to list. It used
+    // to print "… and 1 more" under a list of nothing.
+    const errors = md(fakeReport([fakePage(`${U}/`)], [], { errorClusters: [cluster("exception", "boom", [`${U}/`, `${U}/a`], 3)] }));
+    expect(errors).toContain("- 3× on 2 pages");
+    expect(more(errors)).toEqual([]);
+
+    // Seven files under a summary line: five listed, two left out (it said 1,
+    // counting the summary line as a file).
+    const lowUsage = [1, 2, 3, 4, 5, 6, 7].map((i) => ({ url: `/chunk-${i}.js`, totalBytes: 100 * 1024, usedBytes: 1024, usedPct: 1 }));
+    const unused = md(
+      fakeReport([fakePage(`${U}/`)], [], {
+        perf: {
+          vitals: {},
+          slowestActions: [],
+          hotInitiators: [],
+          thirdParty: [],
+          totals: { spans: 0, pages: 0 },
+          coverage: {
+            js: { totalBytes: 700 * 1024, usedBytes: 7 * 1024, usedPct: 1, lowUsage },
+            css: { totalBytes: 0, usedBytes: 0, lowUsage: [] },
+          },
+        },
+      }),
+    );
+    expect(unused).toContain("- /chunk-5.js: 1% used of 100 KB");
+    expect(unused).not.toContain("/chunk-6.js");
+    expect(more(unused)).toEqual(["- … and 2 more"]);
   });
 });
 

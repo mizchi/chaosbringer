@@ -38,6 +38,8 @@ chaosbringer --url http://localhost:3000 --max-pages 20 --strict
 
 Pointing it at a site you know nothing about? `chaosbringer scan` sweeps it in one command: a clean crawl with perf measurement, the same crawl with the site's API calls failing (500 / network error / no response), and a ranked report of bugs, fragile error handling and slow spots, each perf finding linked to the [perf-patterns catalog](examples/perf-patterns/README.md) entries with the same signal. See [`docs/recipes/scan.md`](docs/recipes/scan.md).
 
+Want it to do something rather than look around? `chaosbringer drive --url … --goal "…"` operates the browser towards a goal, one action at a time, from the page's accessibility snapshot. The checks keep running on the way, the run can be recorded on video with every action annotated, and a run that reaches its goal is saved as a recipe you can verify and replay. See [`docs/recipes/drive.md`](docs/recipes/drive.md).
+
 ```bash
 chaosbringer scan --url https://staging.example.com --exclude /logout   # → chaosbringer-scan/scan-report.md
 ```
@@ -95,7 +97,9 @@ Task-oriented snippets, ~30-60 lines each, indexed by what you're trying to do:
 Longer-form "what does this feature do and why" docs:
 
 - [`docs/recipes/scan.md`](docs/recipes/scan.md) — `chaosbringer scan`: sweep an unknown site for bugs, missing API-failure handling and slow spots in one command, with a ranked, catalog-linked report.
+- [`docs/recipes/drive.md`](docs/recipes/drive.md) — `chaosbringer drive`: operate the browser towards a goal (a model or a plan) over the accessibility snapshot, with the checks running, a video of the run, and a replayable recipe that holds a typed password as `{{password}}`, kept out of every output.
 - [`docs/recipes/drivers.md`](docs/recipes/drivers.md) — Pluggable action-selection strategies (AI-per-step, form-aware, pentest payloads, scripted journeys, parallel shards).
+- [`docs/recipes/data-safety.md`](docs/recipes/data-safety.md) — Invariant presets for bad and hostile data that reached the page without making it throw: `undefined` or `NaN` on screen, a blank page, a polluted `Object.prototype`, injected markup or a script URL carrying a canary, a `?next=` that sends the user to another site. How to turn them on (in code, or `--invariants` / `--data-safety` on the crawl and `scan`), deliver the data (`faults.status(200, { body })`, `payloadDriver`, a query string) and which canaries to use.
 - [`docs/recipes/scenario-load.md`](docs/recipes/scenario-load.md) — Light load (10 workers × 5min) running scripted user journeys, optionally under chaos. Latency p50/p95/p99 per step + per endpoint + per-second timeline. See [`examples/load-with-chaos/`](examples/load-with-chaos/README.md) for a runnable demo.
 - [`docs/recipes/seeding-data.md`](docs/recipes/seeding-data.md) — How to seed backend state before a chaos run, including the gotcha where seed `POST`s get eaten by the chaos middleware itself.
 - [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md) — Wire chaosbringer + `@mizchi/server-faults` so server-side fault events join chaosbringer's report by W3C `traceparent`.
@@ -111,6 +115,7 @@ Runnable demos under [`examples/`](examples/), workspace-linked to the local pac
 - **[`examples/model-faults/patterns/`](examples/model-faults/patterns/)** — Real-world async patterns, one model each: retry idempotency (a retry that double-charges), token-refresh stampede (two 401s, two refreshes), timeout ladder (slow vs never). Each catches a bug class that is invisible on screen, and each asserts both directions — the buggy variant must fail, the fixed one must pass.
 - **[`examples/model-faults/`](examples/model-faults/)** — Model-driven fault coverage: a Quint model of a checkout page's load contract enumerates 16 failure states (2 more proved unreachable), each replays as a deterministic run with the model as oracle. The buggy variant fails 11 of 16 plans with 13 mismatches — an unbounded load and an eager-start/sequential-await whose second rejection escapes; `FIXED=1` passes all 16.
 - **[`examples/perf-patterns/`](examples/perf-patterns/)** — A catalog of improvable sample apps for `--perf`: each pattern is a tiny page with a known anti-pattern (layout thrashing, a retry storm that only a 503 fault reveals, …) and its fix. A crawl, with no hand-written scenario, must flag the expected perfKey and metric on the slow variant and show the fix improving it; `pnpm report` writes the results table.
+- **[`examples/data-patterns/`](examples/data-patterns/)** — The correctness and security counterpart of perf-patterns: 32 tiny apps, each with a buggy and a fixed variant, that mishandle data they didn't expect (17 bug-data entries: a `null` relation, a truncated body, `NaN` on screen; 11 malicious-data entries: a stored-XSS comment, a `__proto__` key, a `javascript:` URL, an open redirect; plus 4 oracle pages of near misses the checks must stay quiet on). chaosbringer delivers the data (a swapped API response, the query string, tampered storage, a form fill), and three `strict` crawls with the data-safety invariants prove each entry: the buggy variant is flagged on the bad data, the same page is clean on benign data, and the fix is clean on the bad data. `pnpm report` and `pnpm scan-check` write the results tables.
 - **[`examples/recipe-skills/`](examples/recipe-skills/)** — Recipe layer demo: hand-written `ActionRecipe` → `verifyAndPromote` across 3 fresh contexts → re-load store from disk → drive the verified recipe through `recipeDriver`. Self-contained, no API key.
 
 ## Internal design docs
@@ -153,9 +158,21 @@ chaosbringer/
 ```bash
 pnpm install
 pnpm -F chaosbringer test              # unit + fixture E2E (no API key needed)
+pnpm -F chaosbringer lint              # vp lint over src/ (Oxlint, config in packages/chaosbringer/vite.config.ts), correctness rules as errors (CI runs it)
 PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers pnpm -F chaosbringer test       # if you need to point at a shared cache
 ANTHROPIC_API_KEY=… pnpm -F chaosbringer test:ai      # opt-in real-AI smoke (issue #95). Costs a few haiku-tier calls per run.
 ```
+
+Tests, lint and lightbringer's build run through Vite+ (`vp`, pinned in
+`pnpm-workspace.yaml`'s catalog). `vp test` runs once; use
+`pnpm -F <pkg> exec vp test watch` for watch mode. `vp lint` reads only the
+`lint` block of the `vite.config.ts` in its own directory (`vp lint --lsp`: in
+the editor's workspace folder), and the repo root has none. So lint through the
+package scripts (`pnpm -F chaosbringer lint`, `pnpm -F lightbringer lint`), and
+for editor diagnostics run `vp lint --lsp` with packages/chaosbringer or
+packages/lightbringer as the workspace folder: at the repo root it falls back
+to Oxlint's defaults, as plain oxlint does everywhere, and correctness findings
+become warnings.
 
 The `test:ai` smoke exercises the live Anthropic pipeline — Phase A
 discovery + Phase D investigation — that no other test in the repo
