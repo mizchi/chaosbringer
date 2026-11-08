@@ -1,7 +1,42 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Browser } from "playwright";
 import { defineScenario } from "./scenario.js";
-import { ScenarioWorker, type WorkerOptions } from "./worker.js";
+import { cancellableSleep, ScenarioWorker, type WorkerOptions } from "./worker.js";
+
+describe("cancellableSleep", () => {
+  it("never asks for a negative delay when the clock ticks past a fractional deadline", async () => {
+    // A think time drawn from a range is fractional, so the deadline falls
+    // mid-millisecond: 1000 + 0.5. The clock reads 1000 for the first check
+    // and has ticked to 1001 by the next reading. Computing the delay from a
+    // second reading gave 1000.5 - 1001 = -0.5, which Node 24 reports as a
+    // TimeoutNegativeWarning on stderr.
+    const readings = [1000, 1000, 1001];
+    const now = vi.spyOn(Date, "now").mockImplementation(() => readings.shift() ?? 1001);
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    try {
+      await cancellableSleep(0.5, () => false);
+      const delays = timeout.mock.calls.map((call) => call[1]);
+      expect(delays).toContain(0.5);
+      expect(delays.filter((d) => typeof d === "number" && d < 0)).toEqual([]);
+    } finally {
+      now.mockRestore();
+      timeout.mockRestore();
+    }
+  });
+
+  it("returns at once when the run has stopped, or there is no time to wait", async () => {
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    try {
+      await cancellableSleep(10_000, () => true);
+      await cancellableSleep(0, () => false);
+      await cancellableSleep(-5, () => false);
+      await cancellableSleep(Number.NaN, () => false);
+      expect(timeout).not.toHaveBeenCalled();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+});
 
 // Just enough of Playwright for a worker to run: the scenarios below never
 // touch the page, and the sampler only subscribes to page events.
