@@ -39,8 +39,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 
-const root = new URL("../", import.meta.url).pathname;
-const dir = new URL("../.github/workflows/", import.meta.url).pathname;
+const root = join(import.meta.dirname, "..");
+const dir = join(root, ".github/workflows");
 const workflows = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 if (workflows.length === 0) {
   // A checker that finds nothing to check is the defect it is here to prevent.

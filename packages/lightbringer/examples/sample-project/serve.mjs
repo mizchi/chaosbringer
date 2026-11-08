@@ -6,10 +6,9 @@
 //   PORT=5050 node serve.mjs
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const PORT = Number(process.env.PORT ?? "4321");
 const PAGE_SIZE = 300;
 const LATENCY_MS = 120; // pretend the API is on a real network

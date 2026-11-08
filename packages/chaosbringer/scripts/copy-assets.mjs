@@ -13,9 +13,8 @@
 
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = join(import.meta.dirname, "..");
 const SRC = join(ROOT, "src");
 const DIST = join(ROOT, "dist");
 const ASSET_EXTENSIONS = [".md"];

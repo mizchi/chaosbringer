@@ -21,7 +21,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = join(import.meta.dirname, "..");
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const problems = [];
 

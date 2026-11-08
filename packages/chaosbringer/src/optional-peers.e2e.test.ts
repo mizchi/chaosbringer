@@ -20,10 +20,9 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
+const PACKAGE_DIR = join(import.meta.dirname, "..");
 const PEERS = ["axe-core", "pixelmatch", "pngjs"];
 /** Nothing listens here; a crawl that got this far would fail, not hang. */
 const URL_ARG = ["--url", "http://127.0.0.1:9/"];

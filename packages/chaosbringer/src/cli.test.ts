@@ -10,13 +10,12 @@ import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { crawlerOptionsFromCli, parseCrawlArgs } from "./cli-crawl-options.js";
 import { progressText, SUBCOMMANDS } from "./cli-usage.js";
 
-const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
-const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
+const PACKAGE_DIR = join(import.meta.dirname, "..");
+const CLI = join(import.meta.dirname, "cli.ts");
 /** Nothing listens here; a crawl that got this far would fail, not hang. */
 const URL_ARG = ["--url", "http://127.0.0.1:9/"];
 /** Where the spawned CLI looks for browsers: nowhere that has one. */

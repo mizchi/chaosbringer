@@ -18,13 +18,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { startApp, type StartedServer } from "../serve.js";
 import { Hono } from "hono";
 import { createApp as createShippedApp } from "../server.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const publicDir = join(here, "public");
 
 export type { StartedServer };

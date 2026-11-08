@@ -11,8 +11,7 @@
  * a page — so adding one needs no new runner.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   aggregateCoverage,
   fingerprintsOf,
@@ -26,7 +25,7 @@ import { startServer } from "../server.js";
 import { depthBoundOf, loadTargets } from "../targets.js";
 import { PATTERNS } from "./index.mjs";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const [name] = process.argv.slice(2);
 const pattern = PATTERNS.find((p) => p.name === name);
 if (!pattern) {

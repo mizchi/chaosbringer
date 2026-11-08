@@ -31,7 +31,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 const smoke = !args.includes("--no-smoke");
 const target = args.find((a) => !a.startsWith("--"));

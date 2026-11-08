@@ -33,7 +33,7 @@
 import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type CrawlerOptions, runScan, type ScanFinding, type ScanReportFile } from "chaosbringer";
 import { describeInjection, toCrawlOptions, toServedRoutes } from "../src/inject.js";
@@ -42,7 +42,7 @@ import { loadPatterns } from "../src/registry.js";
 import { servePattern } from "../src/server.js";
 import { catalogSuite } from "../src/suite.js";
 
-const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+const readme = join(import.meta.dirname, "..", "README.md");
 const START = "<!-- scan-check:start -->";
 const END = "<!-- scan-check:end -->";
 

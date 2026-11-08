@@ -12,12 +12,11 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { measurePattern, type PatternMeasurement } from "../src/measure.js";
 import { loadPatterns } from "../src/registry.js";
 
-const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+const readme = join(import.meta.dirname, "..", "README.md");
 const START = "<!-- results:start -->";
 const END = "<!-- results:end -->";
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);

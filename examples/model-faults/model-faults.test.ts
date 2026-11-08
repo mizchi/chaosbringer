@@ -9,8 +9,7 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   aggregateCoverage,
   formatModelCoverage,
@@ -26,7 +25,7 @@ import bridge from "./model/bridge.mjs";
 import { startServer, type StartedServer } from "./server.js";
 import { depthBoundOf, loadTargets } from "./targets.js";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const modelDir = join(here, "model");
 const plansDir = join(modelDir, "plans");
 

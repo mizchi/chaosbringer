@@ -3,7 +3,6 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { DEFAULT_BUDGET_FLOORS, emitBudgets, spanMedians } from "../src/stats";
 import type { PerfReport } from "../src/report-types";
 
@@ -11,7 +10,7 @@ import type { PerfReport } from "../src/report-types";
 // CLI: the --floor values must reach the emitted budgets and the file's
 // "$emit" record, and --gate must read that file back. A scenario on
 // about:blank needs no server and measures in a couple of seconds.
-const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const CLI = path.join(import.meta.dirname, "../dist/cli.js");
 
 test("--floor reaches the emitted budgets, and --gate reads them back", () => {
   test.setTimeout(60_000);

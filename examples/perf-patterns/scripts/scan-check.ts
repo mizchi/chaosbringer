@@ -19,14 +19,13 @@
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { runScan, type ScanFinding } from "chaosbringer";
 import type { Pattern, Variant } from "../src/pattern.js";
 import { loadPatterns } from "../src/registry.js";
 import { servePattern } from "../src/server.js";
 
-const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+const readme = join(import.meta.dirname, "..", "README.md");
 const START = "<!-- scan-check:start -->";
 const END = "<!-- scan-check:end -->";
 

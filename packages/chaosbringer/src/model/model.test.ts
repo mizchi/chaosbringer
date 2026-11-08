@@ -1,7 +1,6 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aggregateCoverage, findCollapsedPlans, formatModelCoverage, modelRunPassed } from "./coverage.js";
 import { decodeItfValue, finalState, parseItfTrace, readBool, readString } from "./itf.js";
@@ -35,7 +34,7 @@ import { solveTiming } from "../timing.js";
  * JSON — the parser has to survive what the tools actually emit.
  */
 function fixture(name: string): unknown {
-  const path = fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
+  const path = join(import.meta.dirname, "fixtures", name);
   return JSON.parse(readFileSync(path, "utf8"));
 }
 

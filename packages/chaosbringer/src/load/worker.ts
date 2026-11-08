@@ -380,12 +380,23 @@ function sleep(ms: number): Promise<void> {
  * 50ms chunk is fine-grained enough for any reasonable load run
  * (deadline detection latency ≤ 50ms) without burning CPU on small
  * thinkTimes.
+ *
+ * The time left is read once per chunk, and that one reading is both the
+ * check and the delay. Reading `Date.now()` twice let the clock tick between
+ * the two: a fractional `ms` (a think time drawn from a range) put the
+ * deadline mid-millisecond, the check passed just before it, and the delay
+ * came out between -1 and 0. Node 22 clamps that to 1ms silently, but Node 24
+ * also prints a `TimeoutNegativeWarning` on stderr, which a CLI run that
+ * should print nothing then printed.
  */
 export async function cancellableSleep(ms: number, shouldStop: () => boolean): Promise<void> {
   const CHUNK = 50;
   const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (shouldStop()) return;
-    await sleep(Math.min(CHUNK, deadline - Date.now()));
+  for (;;) {
+    const left = deadline - Date.now();
+    // `!(left > 0)` rather than `left <= 0`: a NaN `ms` returns at once, as
+    // the old `while (Date.now() < deadline)` did, instead of looping forever.
+    if (!(left > 0) || shouldStop()) return;
+    await sleep(Math.min(CHUNK, left));
   }
 }

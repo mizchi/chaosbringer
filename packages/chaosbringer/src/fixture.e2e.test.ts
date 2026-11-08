@@ -12,11 +12,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
-const CONFIG = fileURLToPath(new URL("../fixtures/playwright-test/playwright.config.ts", import.meta.url));
+const CONFIG = join(import.meta.dirname, "../fixtures/playwright-test/playwright.config.ts");
 const PLAYWRIGHT_CLI = createRequire(import.meta.url).resolve("@playwright/test/cli");
 
 const PAGES: Record<string, string> = {
