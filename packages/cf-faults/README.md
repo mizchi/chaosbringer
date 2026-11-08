@@ -13,7 +13,7 @@ The wrappers are drop-in (same shape as the underlying binding), so application 
 pnpm add @mizchi/cf-faults
 ```
 
-Requires Node 20+. The package is zero-dep; no `@cloudflare/workers-types` requirement on consumers — bindings are matched structurally.
+Requires Node 22+. The package is zero-dep; no `@cloudflare/workers-types` requirement on consumers — bindings are matched structurally.
 
 ## Usage
 

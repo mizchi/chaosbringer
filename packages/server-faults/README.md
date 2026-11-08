@@ -8,7 +8,7 @@ Framework-agnostic server-side fault injection (5xx + latency + abort + partial 
 pnpm add @mizchi/server-faults
 ```
 
-Requires Node 20+ (uses `Response.json` and the global `Request` constructor).
+Requires Node 22+.
 
 ## Usage
 

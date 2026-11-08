@@ -10,7 +10,7 @@ pnpm add @mizchi/playwright-v8-coverage
 pnpm add playwright
 ```
 
-Requires Node 20+.
+Requires Node 22+.
 
 ## Usage
 
