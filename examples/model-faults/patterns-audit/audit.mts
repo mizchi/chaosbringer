@@ -1133,7 +1133,7 @@ function run(url: URL, args: string[] = []): void {
   try {
     const out = execFileSync("npx", ["tsx", script, ...args], {
       encoding: "utf8",
-      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      cwd: join(import.meta.dirname, ".."),
     });
     console.log(out.trimEnd());
   } catch (err) {

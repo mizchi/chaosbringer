@@ -8,7 +8,7 @@
  * to `null`. The caller (`aiDriver`) treats `null` as "no opinion".
  */
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   parsePromptFile,
   parseSuggestion,
@@ -34,7 +34,7 @@ export interface OpenRouterDriverProviderOptions {
 
 const DEFAULT_MODEL = "google/gemini-2.5-flash";
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
-const DEFAULT_PROMPT_PATH = fileURLToPath(new URL("../prompts/driver-step.md", import.meta.url));
+const DEFAULT_PROMPT_PATH = join(import.meta.dirname, "../prompts/driver-step.md");
 
 const promptCache = new Map<string, ParsedPrompt>();
 function loadPrompt(path: string): ParsedPrompt {

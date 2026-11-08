@@ -42,10 +42,9 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const QUINT = process.env.QUINT_PKG ?? "@informalsystems/quint@0.32.0";
 const SAMPLES = process.env.SAMPLES ?? "400";
 

@@ -5,11 +5,10 @@
 import zlib from "node:zlib";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const W = 1600;
 const H = 1200;
-const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
+const dir = path.join(import.meta.dirname, "public");
 fs.mkdirSync(dir, { recursive: true });
 
 // CRC32 (PNG chunk checksum)

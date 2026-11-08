@@ -26,7 +26,7 @@
  * testcase anyway).
  */
 
-import { fileURLToPath } from "node:url";
+import { sep } from "node:path";
 import { ANSI_ESCAPE } from "./error-text.js";
 import type { CrawlReport, PageError, PageResult } from "./types.js";
 
@@ -172,9 +172,11 @@ const FRAME = /^\s*at |^[^\s@]*@\S+:\d+(?::\d+)?$/;
 /**
  * This package's own directory (its `dist/` when installed). A frame in it
  * is the crawler's code that made the call, which says nothing about the
- * page; so is a frame of Node's own (`node:internal/…`).
+ * page; so is a frame of Node's own (`node:internal/…`). With the trailing
+ * separator, so a sibling directory whose name starts with this one's is not
+ * mistaken for it.
  */
-const OWN_DIR = fileURLToPath(new URL(".", import.meta.url));
+const OWN_DIR = `${import.meta.dirname}${sep}`;
 
 /**
  * The frames of `e.stack` that are the page's, one per line. Not the lines

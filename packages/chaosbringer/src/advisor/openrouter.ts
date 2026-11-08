@@ -12,7 +12,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { formatLastActionPerf } from "../perf-trim.js";
 import { parsePromptFile, renderUserPrompt, type ParsedPrompt } from "./prompts/loader.js";
 import type {
@@ -37,7 +37,7 @@ export interface OpenRouterAdvisorOptions {
 const DEFAULT_MODEL = "google/gemini-2.5-flash";
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
-const PROMPT_PATH = fileURLToPath(new URL("./prompts/action-selection.md", import.meta.url));
+const PROMPT_PATH = join(import.meta.dirname, "prompts/action-selection.md");
 
 let cachedPrompt: ParsedPrompt | null = null;
 

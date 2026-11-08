@@ -16,11 +16,11 @@
  */
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { parsePromptFile, stripCodeFence, type ParsedPrompt } from "../drivers/prompts/loader.js";
 import type { DriveDecider, DriveDecision, DriveInput } from "./drive.js";
 
-const PROMPT_PATH = fileURLToPath(new URL("./prompts/drive-step.md", import.meta.url));
+const PROMPT_PATH = join(import.meta.dirname, "prompts/drive-step.md");
 let prompt: ParsedPrompt | null = null;
 function loadPrompt(path: string): ParsedPrompt {
   if (path !== PROMPT_PATH) return parsePromptFile(readFileSync(path, "utf8"));

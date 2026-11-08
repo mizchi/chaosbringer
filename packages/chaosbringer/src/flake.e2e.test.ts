@@ -8,15 +8,14 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startFixtureServer } from "../fixtures/site/server.js";
 import type { FlakeAnalysis } from "./flake.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 import type { TraceEntry, TraceMeta } from "./trace.js";
 
-const PACKAGE_DIR = fileURLToPath(new URL("..", import.meta.url));
-const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
+const PACKAGE_DIR = join(import.meta.dirname, "..");
+const CLI = join(import.meta.dirname, "cli.ts");
 
 /** Async, not spawnSync: the test servers answer from this process's event loop. */
 function cli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {

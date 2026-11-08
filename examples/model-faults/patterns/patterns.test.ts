@@ -8,8 +8,7 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   aggregateCoverage,
   fingerprintsOf,
@@ -31,7 +30,7 @@ function bridgeOf(name: string) {
   throw new Error(`no bridge wired for ${name}`);
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = import.meta.dirname;
 const servers: StartedServer[] = [];
 
 afterAll(async () => {
