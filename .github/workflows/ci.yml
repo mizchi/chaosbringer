@@ -9,7 +9,8 @@ jobs:
   build-and-test:
     # Node 24, which every other job runs, and Node 22, the packages'
     # `engines` floor (>=22; Node 20 reached its end of life in April 2026).
-    # A change that needs a newer Node fails the 22 leg.
+    # A change that needs a newer Node fails the 22 leg. `pnpm check:engines`
+    # keeps the floor and this matrix's lowest entry the same.
     name: build-and-test (node ${{ matrix.node }})
     strategy:
       fail-fast: false
@@ -56,6 +57,10 @@ jobs:
       - name: Check that workflow shell blocks parse
         if: matrix.node == 24
         run: pnpm check:workflow-shell
+
+      - name: Check every published package's engines floor against this matrix
+        if: matrix.node == 24
+        run: pnpm check:engines
 
       - name: Build
         run: pnpm -F chaosbringer build
