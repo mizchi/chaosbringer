@@ -1,11 +1,11 @@
-# ai-reviwer policy for this repository — https://github.com/mizchi/ai-reviewer
+# watchpoint policy for this repository — https://github.com/mizchi/watchpoint
 #
-# mode: observe — decisions are recorded in the ledger (branch `ai-reviwer-ledger`)
+# mode: observe — decisions are recorded in the ledger (branch `watchpoint-ledger`)
 # and nothing is posted on PRs. Move to `advise` (risk labels + a verdict comment,
 # still never blocking or merging) once enough decisions have been compared with
-# what reviewers actually did. There is no `enforce` merge step in the action.
+# what reviewers actually did. `enforce` (auto-merge) is a later step.
 #
-# The thresholds are the defaults validated across the ai-reviwer benchmark repos.
+# The thresholds are the defaults validated across the watchpoint benchmark repos.
 # This repo has no reverts in its history, so `bench run --sweep` has nothing to
 # tune them against yet; revisit once the ledger has real outcomes.
 version: 1
@@ -30,6 +30,8 @@ gate:
 # Vetoes evaluated before any axis: a change that can loosen the gate itself
 # never gets through the gate. This file is in here on purpose.
 authority:
+  - ".watchpoint/**"
+  # The pre-rename config dir is still read when .watchpoint/ is missing.
   - ".ai-review/**"
   - "**/.env*"
   - ".github/workflows/**"
@@ -87,6 +89,11 @@ surface_rules:
       - ".npmrc"
       - "justfile"
       - "**/tsconfig*.json"
+      - "**/.eslintrc*"
+      - "eslint.config.{js,mjs,cjs,ts}"
+      - "biome.json"
+      - ".github/actions/**"
+      - ".github/dependabot.yml"
       - "**/*.{sh,bash,zsh}"
     surface: S4
 
@@ -95,9 +102,9 @@ mechanical:
     verify: "pnpm install --frozen-lockfile"
 
 # Evidence comes from check runs recorded by GitHub, never from anything the PR
-# writes. Verified against the check runs of #180 (14 runs, all github-actions):
-#   build  <- build-and-test
-#   tests  <- build-and-test, example-tests (6 matrix jobs)
+# writes. Verified against the check runs of #211 (14 runs, all github-actions):
+#   build  <- build-and-test (node 22, node 24)
+#   tests  <- build-and-test (both legs), example-tests (7 matrix jobs)
 # A pattern that matches nothing does not error; the signal just becomes unknown
 # and every code change falls to HUMAN, so re-check with `signals inspect` when
 # CI job names change.
