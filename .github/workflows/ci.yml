@@ -7,10 +7,9 @@ on:
 
 jobs:
   build-and-test:
-    # Node 24, which every other job runs, and Node 22, the oldest release
-    # line still supported upstream that the packages' `engines` (>=20) admit
-    # (20 reached its end of life in April 2026). A change that needs a newer
-    # Node fails the 22 leg.
+    # Node 24, which every other job runs, and Node 22, the packages'
+    # `engines` floor (>=22; Node 20 reached its end of life in April 2026).
+    # A change that needs a newer Node fails the 22 leg.
     name: build-and-test (node ${{ matrix.node }})
     strategy:
       fail-fast: false

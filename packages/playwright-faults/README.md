@@ -15,7 +15,7 @@ pnpm add @mizchi/playwright-faults
 pnpm add playwright   # peer
 ```
 
-Requires Node 20+.
+Requires Node 22+.
 
 ## Network-level faults (FaultRule)
 

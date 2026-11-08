@@ -1,8 +1,9 @@
 /**
  * `--headless` / `--no-headless`, the same on every CLI.
  *
- * `parseArgs` has no negated booleans before Node 22.4 (`allowNegative`),
- * and the package supports Node 20, so `--no-headless` is its own flag. The
+ * `--no-headless` is its own flag rather than `parseArgs`' `allowNegative`:
+ * that option needs Node 22.4, above the package's `engines` floor (>=22),
+ * and it would accept `--no-<x>` for every boolean flag, not just this one. The
  * main CLI used to declare only `headless` and advertise `--no-headless`,
  * which then threw "Unknown option"; the recipe commands read
  * `values.headless !== false`, which nothing could make false. Both always
