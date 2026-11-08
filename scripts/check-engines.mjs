@@ -50,8 +50,18 @@ const matrix = ci?.jobs?.["build-and-test"]?.strategy?.matrix?.node;
 if (!Array.isArray(matrix) || matrix.length === 0) {
   problems.push(".github/workflows/ci.yml: build-and-test has no `strategy.matrix.node` list");
 } else {
-  const oldest = Math.min(...matrix.map(Number));
-  if (oldest !== Number(major)) {
+  // setup-node takes more than a bare major ("22.x", "22.4", "lts/*"), and one
+  // entry that is not a number would make Math.min NaN and report a floor
+  // mismatch that is not there. Read each entry's leading major, and name an
+  // entry that has none instead of comparing it.
+  const majors = [];
+  for (const entry of matrix) {
+    const m = /^(\d+)(?:\.|$)/.exec(String(entry))?.[1];
+    if (m) majors.push(Number(m));
+    else problems.push(`.github/workflows/ci.yml: build-and-test matrix entry ${JSON.stringify(entry)} is not a Node major`);
+  }
+  const oldest = Math.min(...majors);
+  if (majors.length > 0 && oldest !== Number(major)) {
     problems.push(
       `.github/workflows/ci.yml: build-and-test's oldest Node is ${oldest}, but engines.node is "${floor}": ` +
         `CI must run the floor it promises`,
