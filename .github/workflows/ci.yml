@@ -7,6 +7,15 @@ on:
 
 jobs:
   build-and-test:
+    # Node 24, which every other job runs, and Node 22, the oldest release
+    # line still supported upstream that the packages' `engines` (>=20) admit
+    # (20 reached its end of life in April 2026). A change that needs a newer
+    # Node fails the 22 leg.
+    name: build-and-test (node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
     runs-on: ubuntu-latest
     # The job's own 10 minutes plus the Playwright install step's 25-minute
     # bound (see that step): every job here that installs Playwright adds it.
@@ -18,19 +27,23 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The lint and docs checks below do not depend on the Node version, so
+      # they run on the Node 24 leg only.
       - name: Lint — no NUL bytes in source (all workspace packages)
+        if: matrix.node == 24
         run: pnpm -r lint:nul
 
       # `vp lint src` (Oxlint, configured in the package's vite.config.ts),
       # correctness rules as errors (as lightbringer's own leg below lints its
       # package). Reads `src/` only, so it does not depend on the build step.
       - name: Lint
+        if: matrix.node == 24
         run: pnpm -F chaosbringer lint
 
       # The skill's snippets are the first thing a new reader runs, and a
@@ -38,9 +51,11 @@ jobs:
       # friction across twelve evaluation runs. Reads `src/`, not `dist/`, so it
       # does not depend on the build step below.
       - name: Check the chaosbringer skill's docs against the real exports
+        if: matrix.node == 24
         run: pnpm check:skill-docs
 
       - name: Check that workflow shell blocks parse
+        if: matrix.node == 24
         run: pnpm check:workflow-shell
 
       - name: Build
@@ -78,6 +93,7 @@ jobs:
         run: pnpm -F chaosbringer test
 
       - name: Typecheck examples
+        if: matrix.node == 24
         run: |
           pnpm -F "@mizchi/chaosbringer-example-cloudflare-worker" typecheck
           pnpm -F "@mizchi/chaosbringer-example-playwright-test" typecheck
@@ -106,7 +122,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -188,7 +204,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -234,7 +250,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
