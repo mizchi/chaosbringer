@@ -256,8 +256,10 @@ export function startServer(port = 0, fixed = process.env.FIXED === "1"): Promis
   return startApp(createApp(fixed), port);
 }
 
-// `tsx server.ts` runs it standalone for manual poking.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `tsx server.ts` runs it standalone for manual poking. Compare paths, not
+// URLs: import.meta.url is percent-encoded and argv[1] is not, so a checkout
+// path with a space would never count as main.
+if (import.meta.filename === process.argv[1]) {
   const port = Number.parseInt(process.env.PORT ?? "5173", 10);
   const { url } = await startServer(port);
   console.log(`checkout app (${process.env.FIXED === "1" ? "fixed" : "buggy"}) on ${url}`);

@@ -233,7 +233,10 @@ export function startServer(port = 0, fixed = process.env.FIXED === "1"): Promis
   return startApp(createApp(fixed), port);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run standalone for manual poking. Compare paths, not URLs: import.meta.url
+// is percent-encoded and argv[1] is not, so a checkout path with a space would
+// never count as main.
+if (import.meta.filename === process.argv[1]) {
   const { url } = await startServer(Number.parseInt(process.env.PORT ?? "5199", 10));
   console.log(`redteam app (${process.env.FIXED === "1" ? "fixed" : "buggy"}) on ${url}`);
 }

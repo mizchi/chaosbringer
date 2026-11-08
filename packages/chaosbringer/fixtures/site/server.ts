@@ -474,8 +474,10 @@ export function startFixtureServer(port = 0): Promise<{ url: string; close: () =
   });
 }
 
-// Run standalone: `pnpm tsx fixtures/site/server.ts`
-const isMain = import.meta.url === `file://${process.argv[1]}`;
+// Run standalone: `pnpm tsx fixtures/site/server.ts`. Compare paths, not URLs:
+// import.meta.url is percent-encoded and argv[1] is not, so a checkout path
+// with a space would never count as main.
+const isMain = import.meta.filename === process.argv[1];
 if (isMain) {
   const port = Number(process.env.PORT || 4455);
   startFixtureServer(port).then(({ url }) => {
