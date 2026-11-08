@@ -48,7 +48,7 @@ jobs:
         with:
           fetch-depth: 0
       # Pinned by sha, not a tag: this runs with write permissions.
-      - uses: mizchi/watchpoint@0d53b2f20092786d7d08cc01dd59f25f6e36a23b # v0.1.5
+      - uses: mizchi/watchpoint@c99f38420943c59b7a9ad7a659ee6546cd75eb30 # v0.1.6
         # Optional: the quality lane (LLM, a second gate) and decision notifications.
         # Without them quality records "skipped" (never PASS) and nothing is sent.
         # with:
