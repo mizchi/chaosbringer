@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const script = new URL("./chaos-flake-issues.ts", import.meta.url).pathname;
+const script = join(import.meta.dirname, "chaos-flake-issues.ts");
 // Wherever pnpm put it: the workflow's `pnpm tsx` finds the hoisted one.
 const tsx = createRequire(import.meta.url).resolve("tsx/cli");
 

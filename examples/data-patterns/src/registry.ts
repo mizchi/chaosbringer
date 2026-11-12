@@ -8,11 +8,11 @@
  */
 
 import { readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { DataPattern } from "./pattern.js";
 
-const PATTERNS_DIR = join(dirname(fileURLToPath(import.meta.url)), "patterns");
+const PATTERNS_DIR = join(import.meta.dirname, "patterns");
 
 /**
  * `value` as a `DataPattern`, or an error naming `file` and what is wrong.

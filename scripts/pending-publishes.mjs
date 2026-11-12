@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = resolve(import.meta.dirname, "..");
 const packages = new Map();
 for (const d of readdirSync(join(root, "packages")).sort()) {
   const file = join(root, "packages", d, "package.json");

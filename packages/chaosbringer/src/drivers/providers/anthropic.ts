@@ -10,7 +10,7 @@
  */
 import { outlineFor, parsePromptFile, parseSuggestion, renderUserPrompt, type ParsedPrompt } from "../prompts/loader.js";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { DriverProvider, DriverProviderInput, DriverProviderResult } from "../types.js";
 
 export interface AnthropicDriverProviderOptions {
@@ -31,7 +31,7 @@ export interface AnthropicDriverProviderOptions {
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 const DEFAULT_BASE_URL = "https://api.anthropic.com/v1";
 const DEFAULT_VERSION = "2023-06-01";
-const DEFAULT_PROMPT_PATH = fileURLToPath(new URL("../prompts/driver-step.md", import.meta.url));
+const DEFAULT_PROMPT_PATH = join(import.meta.dirname, "../prompts/driver-step.md");
 
 const promptCache = new Map<string, ParsedPrompt>();
 function loadPrompt(path: string): ParsedPrompt {

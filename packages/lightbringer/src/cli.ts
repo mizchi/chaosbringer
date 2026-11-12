@@ -12,7 +12,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { chromium, type Page, type BrowserContextOptions } from "playwright";
 import {
   startSession,
@@ -237,7 +236,7 @@ function emitOrGate(bySlug: Map<string, PerfReport[]>) {
 
 /** Spec mode: run an existing Playwright spec with the auto loader + the repo's config. */
 function runSpecMode() {
-  const hookPath = fileURLToPath(new URL("../scripts/pw-hook.mjs", import.meta.url));
+  const hookPath = path.join(import.meta.dirname, "../scripts/pw-hook.mjs");
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     // Point at autowrap.js (type-only on @playwright/test), NOT auto.js (which

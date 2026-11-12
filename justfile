@@ -9,7 +9,7 @@ default:
     @just --list
 
 # The dogfood runner uses the patched sibling checkout until its next release.
-# These recipes require Node 24 even though the packages support Node 20.
+# These recipes require Node 24 even though the packages support Node 22.
 jev-plan:
     node --experimental-strip-types ../jev-lint/src/cli.ts check --dry-run --cache none
 

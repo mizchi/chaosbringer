@@ -9,12 +9,11 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestServer, type TestServer } from "../test-server.test-helpers.js";
 
-const PACKAGE_DIR = fileURLToPath(new URL("../..", import.meta.url));
-const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
+const PACKAGE_DIR = join(import.meta.dirname, "../..");
+const CLI = join(import.meta.dirname, "../cli.ts");
 /** Appears nowhere but in what the plan types. */
 const PASSWORD = "hunter2-cb-secret";
 

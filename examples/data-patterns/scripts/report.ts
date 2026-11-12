@@ -12,15 +12,14 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { runCase } from "../src/detect.js";
 import { describeInjection } from "../src/inject.js";
 import type { DataPattern } from "../src/pattern.js";
 import { loadPatterns } from "../src/registry.js";
 import { type CaseRun, describeObserved, judgeBuggy, judgeClean, judgeDelivered, judgeFixedText, type ObservedSignal } from "../src/verdict.js";
 
-const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+const readme = join(import.meta.dirname, "..", "README.md");
 const START = "<!-- results:start -->";
 const END = "<!-- results:end -->";
 

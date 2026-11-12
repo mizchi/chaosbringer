@@ -8,11 +8,11 @@
  */
 
 import { readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Pattern } from "./pattern.js";
 
-const dir = join(dirname(fileURLToPath(import.meta.url)), "patterns");
+const dir = join(import.meta.dirname, "patterns");
 
 export async function loadPatterns(filter = process.env.PATTERN): Promise<Pattern[]> {
   const wanted = filter ? new Set(filter.split(",").map((s) => s.trim()).filter(Boolean)) : undefined;

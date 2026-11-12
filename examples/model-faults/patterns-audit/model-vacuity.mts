@@ -35,10 +35,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { loadTargets } from "../targets.js";
 
-const here = fileURLToPath(new URL(".", import.meta.url));
+const here = import.meta.dirname;
 const exampleRoot = join(here, "..");
 const examplesRoot = join(exampleRoot, "..");
 const vacuity = join(exampleRoot, "patterns", "vacuity.mjs");

@@ -13,10 +13,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-const INDEX = fileURLToPath(new URL("./index.ts", import.meta.url));
+const INDEX = join(import.meta.dirname, "index.ts");
 const require = createRequire(import.meta.url);
 const TSC = join(dirname(require.resolve("typescript/package.json")), "bin", "tsc");
 const TYPE_ROOTS = join(dirname(require.resolve("@types/node/package.json")), "..");

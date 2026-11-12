@@ -12,12 +12,11 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { measurePattern, type PatternMeasurement } from "../src/measure.js";
+import { join } from "node:path";
+import { chromiumShm, measurePattern, type PatternMeasurement } from "../src/measure.js";
 import { loadPatterns } from "../src/registry.js";
 
-const readme = join(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+const readme = join(import.meta.dirname, "..", "README.md");
 const START = "<!-- results:start -->";
 const END = "<!-- results:end -->";
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
@@ -63,6 +62,7 @@ const start = text.indexOf(START);
 const end = text.indexOf(END);
 if (start < 0 || end < start) throw new Error(`README.md needs ${START} … ${END} markers`);
 
+console.log(chromiumShm.line);
 // Keep rows of patterns this run did not measure (PATTERN=…), replace the rest.
 const rows = parseRows(text.slice(start, end));
 for (const pattern of patterns) {

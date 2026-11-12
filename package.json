@@ -7,7 +7,7 @@
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -16,7 +16,8 @@
     "lint:nul": "pnpm -r lint:nul",
     "check:skill-docs": "pnpm -F chaosbringer exec tsx ../../scripts/check-skill-docs.mjs",
     "check:workflow-shell": "node scripts/check-workflow-shell.mjs",
-    "check:publish": "node scripts/check-publish-deps.mjs"
+    "check:publish": "node scripts/check-publish-deps.mjs",
+    "check:engines": "node scripts/check-engines.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
