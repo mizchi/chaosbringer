@@ -4,15 +4,19 @@
  * for a `page.` metric, off `perfPage` of the pages whose load key matches).
  */
 
+import { statfsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   chaos,
   compilePerfKeyGlob,
+  type ChaosRunOptions,
+  type CrawlerOptions,
   type CrawlPerfSummary,
   type CrawlReport,
   type PerfDegradationEntry,
   type PerfSpanReport,
 } from "chaosbringer";
-import type { MetricExpect, Pattern, Variant } from "./pattern.js";
+import type { MetricExpect, Pattern, PatternExpect, Variant } from "./pattern.js";
 import { servePattern } from "./server.js";
 
 export interface VariantMeasurement {
@@ -29,6 +33,10 @@ export interface VariantMeasurement {
   pagesPerRun: string[][];
   /** Error-cluster keys (URL-free), per run. */
   clustersPerRun: string[][];
+  /** Per run: why it gave no value (`missingValueReason`), or undefined when it gave some. */
+  missingPerRun: Array<string | undefined>;
+  /** `report.warnings` codes, per run. */
+  warningsPerRun: string[][];
   /** `expect.alsoExpect`, in order: each metric's median and values over the same runs. */
   also: Array<{ metric: string; median: number | null; values: number[] }>;
   /** From the last run, for the report. */
@@ -135,6 +143,223 @@ export function metricValues(
   return { values, keys: [...keys].sort() };
 }
 
+const dash = (v: number | undefined): string => (v === undefined ? "–" : String(v));
+
+/**
+ * Why `metricValues` gave nothing for this report, in one line, for the
+ * assertion text: CI keeps no report JSON, and "no value" has causes that
+ * want different fixes (a crawl that never reached the key, a perf session
+ * that failed, a collector that never ran, a browser that had not reported
+ * the vital yet). Matching pages or entries with different causes get one
+ * reason each, joined by " | ".
+ */
+export function missingValueReason(report: CrawlReport, keyGlob: string, metric: string): string {
+  const re = compilePerfKeyGlob(keyGlob);
+  const keyList = (keys: Iterable<string>) => [...new Set(keys)].sort().join(", ") || "none";
+  const reasons = new Set<string>();
+  if (metric.startsWith("page.")) {
+    const path = metric.slice("page.".length);
+    const pages = report.pages.filter((p) => p.perf?.key && re.test(p.perf.key));
+    if (pages.length === 0) {
+      return `no page with load key matching ${keyGlob} (keys: ${keyList(report.pages.flatMap((p) => (p.perf?.key ? [p.perf.key] : [])))})`;
+    }
+    for (const p of pages) {
+      if (!p.perfPage) {
+        const warnings = (report.warnings ?? []).map((w) => `${w.code}: ${w.message}`);
+        reasons.add(`no perfPage (${warnings.length ? `warnings: ${warnings.join("; ")}` : "no warnings"})`);
+      } else if (p.perfPage.collectorMissing) {
+        reasons.add("collectorMissing");
+      } else if (readPath(p.perfPage, path) === undefined) {
+        reasons.add(
+          `${path} absent; vitals has [${Object.keys(p.perfPage.vitals ?? {}).join(",")}]; ` +
+            `raw metrics fcp=${dash(p.metrics?.fcp)} lcp=${dash(p.metrics?.lcp)}; settleCapped=${dash(p.settleCapped)}`,
+        );
+      }
+    }
+  } else if (metric.startsWith("degradation.")) {
+    const path = metric.slice("degradation.".length);
+    const entries = report.perf?.degradation ?? [];
+    const matched = entries.filter((e) => re.test(e.key));
+    if (matched.length === 0) return `no degradation entry matched ${keyGlob} (keys: ${keyList(entries.map((e) => e.key))})`;
+    for (const e of matched) if (readPath(e, path) === undefined) reasons.add(`${path} absent on ${e.key} [${e.fault}]`);
+  } else {
+    const spans = spansOf(report);
+    const matched = spans.filter((s) => re.test(s.key));
+    if (matched.length === 0) return `no span matched ${keyGlob} (keys: ${keyList(spans.map((s) => s.key))})`;
+    for (const s of matched) if (readPath(s, metric) === undefined) reasons.add(`${metric} absent on ${s.key}`);
+  }
+  return [...reasons].join(" | ") || "every match has a value";
+}
+
+/**
+ * Where the harness's Chromium keeps its shared memory.
+ *
+ * Playwright launches Chromium with --disable-dev-shm-usage, so that it
+ * survives Docker's 64 MB /dev/shm. Chromium then creates every POSIX
+ * shared-memory region (the data pipe of each response body, shared bitmaps)
+ * as a file in $TMPDIR. Where $TMPDIR is on a journaled disk that background
+ * writeback keeps busy (very likely a CI runner's /tmp right after a cache
+ * restore; `line` shows which filesystem it is), each create, unlink,
+ * fallocate and mmap of those files on the network, IO, renderer and viz
+ * threads waits on the journal for 50-200 ms. In a reproduction that put
+ * +60..+500 ms on top of FCP, LCP and settledMs in bursts, enough for fixed
+ * variants to miss their thresholds as on CI. Desktop Chrome keeps shared
+ * memory in /dev/shm, so where /dev/shm is a tmpfs with room the harness
+ * drops the flag: the pages, servers, thresholds and runs stay the same, and
+ * the measurement stops depending on disk activity. `line` says which mode
+ * measured, and which filesystems /dev/shm and $TMPDIR are, for the CI log.
+ *
+ * `setting` is PERF_PATTERN_SHM: unset (or empty) chooses as above, `tmp`
+ * keeps Playwright's default (for A/B runs).
+ */
+export interface ChromiumShm {
+  devShm: boolean;
+  line: string;
+}
+
+interface StatFs {
+  type: number;
+  bavail: number;
+  bsize: number;
+}
+
+const TMPFS_MAGIC = 0x01021994;
+const FS_NAMES: Record<number, string> = {
+  [TMPFS_MAGIC]: "tmpfs",
+  0xef53: "ext4",
+  0x58465342: "xfs",
+  0x9123683e: "btrfs",
+  0x794c7630: "overlayfs",
+};
+const MIN_DEV_SHM_BYTES = 512 * 1024 ** 2;
+
+export function chooseChromiumShm({
+  platform,
+  setting,
+  tmpdir,
+  statfs,
+}: {
+  platform: NodeJS.Platform;
+  setting: string | undefined;
+  tmpdir: string;
+  statfs: (path: string) => StatFs;
+}): ChromiumShm {
+  if (setting !== undefined && setting !== "" && setting !== "tmp") {
+    throw new Error(`PERF_PATTERN_SHM must be unset or "tmp" (keep Playwright's shared memory in $TMPDIR), got ${JSON.stringify(setting)}`);
+  }
+  const probe = (path: string): StatFs | undefined => {
+    try {
+      return statfs(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const describe = (path: string, st: StatFs | undefined) =>
+    st
+      ? `${path} is ${FS_NAMES[st.type] ?? `fs 0x${st.type.toString(16)}`} (${((st.bavail * st.bsize) / 1024 ** 3).toFixed(1)} GiB free)`
+      : `${path} is unreadable`;
+  const shm = probe("/dev/shm");
+  const why =
+    setting === "tmp"
+      ? "PERF_PATTERN_SHM=tmp"
+      : platform !== "linux"
+        ? "not Linux"
+        : !shm
+          ? "/dev/shm unreadable"
+          : shm.type !== TMPFS_MAGIC
+            ? "/dev/shm is not tmpfs"
+            : shm.bavail * shm.bsize < MIN_DEV_SHM_BYTES
+              ? "/dev/shm under 512 MiB free"
+              : undefined;
+  const mode = why === undefined ? "/dev/shm" : `$TMPDIR (${why})`;
+  return {
+    devShm: why === undefined,
+    line: `chromium shared memory: ${mode}; ${describe("/dev/shm", shm)}; ${describe(`$TMPDIR=${tmpdir}`, probe(tmpdir))}`,
+  };
+}
+
+export const chromiumShm: ChromiumShm = chooseChromiumShm({
+  platform: process.platform,
+  setting: process.env.PERF_PATTERN_SHM,
+  tmpdir: tmpdir(),
+  statfs: (path) => statfsSync(path),
+});
+
+type LaunchOptions = NonNullable<CrawlerOptions["launchOptions"]>;
+
+/** `launchOptions` without Playwright's --disable-dev-shm-usage (see `ChromiumShm`). */
+export function withDevShm(launchOptions: LaunchOptions | undefined): LaunchOptions {
+  const ignored = launchOptions?.ignoreDefaultArgs;
+  return {
+    ...launchOptions,
+    ignoreDefaultArgs: ignored === true ? true : [...new Set([...(Array.isArray(ignored) ? ignored : []), "--disable-dev-shm-usage"])],
+  };
+}
+
+/**
+ * What `chaos()` gets for one crawl of a pattern's variant server. With
+ * `devShm` (see `ChromiumShm`) the launch options lose Playwright's
+ * --disable-dev-shm-usage; they are set after `crawl.options`, so a pattern's
+ * own launch args (eager-iframes' --site-per-process) are kept.
+ */
+export function crawlOptionsFor(
+  pattern: Pattern,
+  origin: string,
+  { headless, devShm }: { headless: boolean; devShm: boolean },
+): ChaosRunOptions {
+  const c = pattern.crawl;
+  return {
+    baseUrl: origin + (c.entry ?? "/"),
+    seed: c.seed,
+    maxPages: c.maxPages,
+    maxActionsPerPage: c.maxActionsPerPage,
+    settle: c.settle ?? "adaptive",
+    perf: c.perf ?? true,
+    headless,
+    ...(c.faults ? { faultInjection: c.faults } : {}),
+    ...(c.actionWeights ? { actionWeights: c.actionWeights } : {}),
+    ...(c.driver ? { driver: c.driver } : {}),
+    ...c.options,
+    ...(devShm ? { launchOptions: withDevShm(c.options?.launchOptions) } : {}),
+  };
+}
+
+/**
+ * One run's share of a `VariantMeasurement`: the metric's values and matched
+ * keys, each `alsoExpect` metric's values, why the run gave no value (or
+ * undefined when it gave some), and its `report.warnings` codes.
+ */
+export function runSummary(
+  report: CrawlReport,
+  expect: Pick<PatternExpect, "key" | "metric" | "absentAs" | "alsoExpect">,
+): { values: number[]; keys: string[]; also: number[][]; missing: string | undefined; warnings: string[] } {
+  const m = metricValues(report, expect.key, expect.metric, expect.absentAs);
+  return {
+    values: m.values,
+    keys: m.keys,
+    also: (expect.alsoExpect ?? []).map((e) => metricValues(report, expect.key, e.metric, e.absentAs).values),
+    missing: m.values.length ? undefined : missingValueReason(report, expect.key, expect.metric),
+    warnings: (report.warnings ?? []).map((w) => w.code),
+  };
+}
+
+/**
+ * Log lines for what a variant's assertions do not show: each run's
+ * `report.warnings` codes (a perf session that failed, say), and why a run
+ * gave no value for the metric. Only a slow run with no value fails; a fixed
+ * run with none is left out of the median, so this line is its only trace.
+ */
+export function runNotes(id: string, metric: string, v: Pick<VariantMeasurement, "variant" | "warningsPerRun" | "missingPerRun">): string[] {
+  const lines: string[] = [];
+  for (const [run, codes] of v.warningsPerRun.entries()) {
+    if (codes.length) lines.push(`[${id}]   ${v.variant} run ${run} warnings: ${codes.join(", ")}`);
+  }
+  for (const [run, why] of v.missingPerRun.entries()) {
+    if (why !== undefined) lines.push(`[${id}]   ${v.variant} run ${run}: no ${metric} (${why})`);
+  }
+  return lines;
+}
+
 function routeOf(url: string): string {
   try {
     return new URL(url).pathname;
@@ -149,37 +374,26 @@ export async function measureVariant(
   { runs = 3, headless = true }: MeasureOptions = {},
 ): Promise<VariantMeasurement> {
   const server = await servePattern(pattern, variant);
-  const c = pattern.crawl;
   const values: number[] = [];
   const also = (pattern.expect.alsoExpect ?? []).map((e) => ({ metric: e.metric, values: [] as number[] }));
   const matchedPerRun: number[] = [];
+  const missingPerRun: Array<string | undefined> = [];
+  const warningsPerRun: string[][] = [];
   const matchedKeys = new Set<string>();
   const pagesPerRun: string[][] = [];
   const clustersPerRun: string[][] = [];
   const reports: CrawlReport[] = [];
   try {
     for (let i = 0; i < runs; i++) {
-      const { report } = await chaos({
-        baseUrl: server.origin + (c.entry ?? "/"),
-        seed: c.seed,
-        maxPages: c.maxPages,
-        maxActionsPerPage: c.maxActionsPerPage,
-        settle: c.settle ?? "adaptive",
-        perf: c.perf ?? true,
-        headless,
-        ...(c.faults ? { faultInjection: c.faults } : {}),
-        ...(c.actionWeights ? { actionWeights: c.actionWeights } : {}),
-        ...(c.driver ? { driver: c.driver } : {}),
-        ...c.options,
-      });
+      const { report } = await chaos(crawlOptionsFor(pattern, server.origin, { headless, devShm: chromiumShm.devShm }));
       reports.push(report);
-      const m = metricValues(report, pattern.expect.key, pattern.expect.metric, pattern.expect.absentAs);
-      for (const [i, e] of (pattern.expect.alsoExpect ?? []).entries()) {
-        also[i]!.values.push(...metricValues(report, pattern.expect.key, e.metric, e.absentAs).values);
-      }
-      values.push(...m.values);
-      matchedPerRun.push(m.values.length);
-      for (const k of m.keys) matchedKeys.add(k);
+      const r = runSummary(report, pattern.expect);
+      for (const [i, v] of r.also.entries()) also[i]!.values.push(...v);
+      values.push(...r.values);
+      matchedPerRun.push(r.values.length);
+      missingPerRun.push(r.missing);
+      warningsPerRun.push(r.warnings);
+      for (const k of r.keys) matchedKeys.add(k);
       pagesPerRun.push([...new Set(report.pages.map((p) => routeOf(p.url)))].sort());
       clustersPerRun.push(report.errorClusters.map((cl) => cl.key).sort());
     }
@@ -192,6 +406,8 @@ export async function measureVariant(
     median: median(values),
     values,
     matchedPerRun,
+    missingPerRun,
+    warningsPerRun,
     matchedKeys: [...matchedKeys].sort(),
     pagesPerRun,
     clustersPerRun,
