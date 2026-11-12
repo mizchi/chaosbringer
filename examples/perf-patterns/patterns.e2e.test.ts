@@ -23,17 +23,15 @@ import {
   headroomSetAll,
   type GateFinding,
 } from "./src/budgets.js";
-import { chromiumShm, measurePattern, measureVariant, type PatternMeasurement, type VariantMeasurement } from "./src/measure.js";
+import { chromiumShm, measurePattern, measureVariant, runNotes, type PatternMeasurement, type VariantMeasurement } from "./src/measure.js";
 import { loadPatterns, shardPatterns } from "./src/registry.js";
 
 const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 
-/** A run's `report.warnings` codes (a perf session that failed, say), which the assertions do not show. */
-function logWarnings(id: string, v: VariantMeasurement): void {
-  for (const [run, codes] of v.warningsPerRun.entries()) {
-    if (codes.length) console.log(`[${id}]   ${v.variant} run ${run} warnings: ${codes.join(", ")}`);
-  }
+/** Each run's warnings and why it gave no value (see `runNotes`), which the assertions do not show for a fixed run. */
+function logRunNotes(pattern: { id: string; expect: { metric: string } }, v: VariantMeasurement): void {
+  for (const line of runNotes(pattern.id, pattern.expect.metric, v)) console.log(line);
 }
 
 // Tests in this file run in order (nothing is concurrent): each pattern's
@@ -60,7 +58,7 @@ describe("perf patterns", () => {
             `[${pattern.id}]   also ${a.expect.metric}: slow ${a.slow} (${m.slow.also[i]!.values.join(",")}) → fixed ${a.fixed} (${m.fixed.also[i]!.values.join(",")})`,
           );
         }
-        for (const v of [m.slow, m.fixed]) logWarnings(pattern.id, v);
+        for (const v of [m.slow, m.fixed]) logRunNotes(pattern, v);
       });
 
       it(`slow variant is measured on ${pattern.expect.key}`, () => {
@@ -119,7 +117,7 @@ describe("perf patterns", () => {
           try {
             const budgets = await emitBudgetsCli(work.dir, m.fixed.reports);
             let fresh = await measureVariant(pattern, "fixed", { runs });
-            logWarnings(pattern.id, fresh);
+            logRunNotes(pattern, fresh);
             let rerun = await gateCli(work.dir, "fresh", fresh.reports, budgets);
             // The floors are what this checks. Where a budget is ceil(median ×
             // 1.25) instead (intl-formatter-per-row's ~44 ms scriptMs click),
@@ -130,7 +128,7 @@ describe("perf patterns", () => {
             if (missed.length > 0 && (await headroomSetAll(work.dir, m.fixed.reports, missed))) {
               console.log(`[${pattern.id}] fresh fixed runs over a headroom-set budget, measuring once more: ${JSON.stringify(missed)}`);
               fresh = await measureVariant(pattern, "fixed", { runs });
-              logWarnings(pattern.id, fresh);
+              logRunNotes(pattern, fresh);
               rerun = await gateCli(work.dir, "fresh-again", fresh.reports, budgets);
             }
             const other = rerun.violations.filter((v) => !onPattern(v));

@@ -1,6 +1,17 @@
 import type { CrawlReport, PageResult } from "chaosbringer";
 import { describe, expect, it } from "vitest";
-import { chooseChromiumShm, improvementOf, metricValues, missingValueReason, withDevShm } from "./measure.js";
+import {
+  chooseChromiumShm,
+  crawlOptionsFor,
+  improvementOf,
+  metricValues,
+  missingValueReason,
+  runNotes,
+  runSummary,
+  withDevShm,
+} from "./measure.js";
+import cssImportChain from "./patterns/css-import-chain.js";
+import eagerIframes from "./patterns/eager-iframes.js";
 
 /** A crawl report with only what `metricValues` reads. */
 function report(pages: Array<Partial<PageResult>>): CrawlReport {
@@ -169,6 +180,7 @@ describe("chooseChromiumShm", () => {
       [{ setting: "tmp" }, "PERF_PATTERN_SHM=tmp"],
       [{ platform: "darwin" }, "not Linux"],
       [{ statfs: fs({ "/dev/shm": { type: TMPFS, freeBytes: 64 * 1024 ** 2 }, "/tmp": { type: EXT4, freeBytes: GiB } }) }, "/dev/shm under 512 MiB free"],
+      [{ statfs: fs({ "/dev/shm": { type: TMPFS, freeBytes: 512 * 1024 ** 2 - 4096 }, "/tmp": { type: EXT4, freeBytes: GiB } }) }, "/dev/shm under 512 MiB free"],
       [{ statfs: fs({ "/dev/shm": { type: EXT4, freeBytes: GiB }, "/tmp": { type: EXT4, freeBytes: GiB } }) }, "/dev/shm is not tmpfs"],
       [{ statfs: fs({ "/dev/shm": "throws", "/tmp": { type: TMPFS, freeBytes: GiB } }) }, "/dev/shm unreadable"],
     ];
@@ -185,8 +197,76 @@ describe("chooseChromiumShm", () => {
     expect(chooseChromiumShm({ ...base, tmpdir: "/gone" }).line).toMatch(/\$TMPDIR=\/gone is unreadable$/);
   });
 
+  it("takes /dev/shm with exactly 512 MiB free", () => {
+    // What an empty `docker run --shm-size=512m` /dev/shm reports.
+    const shm = chooseChromiumShm({ ...base, statfs: fs({ "/dev/shm": { type: TMPFS, freeBytes: 512 * 1024 ** 2 }, "/tmp": { type: EXT4, freeBytes: GiB } }) });
+    expect(shm.devShm).toBe(true);
+  });
+
   it("rejects an unknown PERF_PATTERN_SHM", () => {
     expect(() => chooseChromiumShm({ ...base, setting: "shm" })).toThrow(/PERF_PATTERN_SHM/);
     expect(chooseChromiumShm({ ...base, setting: "" }).devShm).toBe(true);
+  });
+});
+
+describe("crawlOptionsFor", () => {
+  const flag = "--disable-dev-shm-usage";
+  const origin = "http://127.0.0.1:4100";
+
+  it("drops --disable-dev-shm-usage with devShm and keeps a pattern's own launch args", () => {
+    const o = crawlOptionsFor(eagerIframes, origin, { headless: true, devShm: true });
+    expect(o.launchOptions).toEqual({ args: ["--site-per-process"], ignoreDefaultArgs: [flag] });
+    expect(o.blockExternalNavigation).toBe(false);
+    expect(crawlOptionsFor(cssImportChain, origin, { headless: true, devShm: true }).launchOptions).toEqual({ ignoreDefaultArgs: [flag] });
+  });
+
+  it("leaves launchOptions as the pattern has them without devShm (PERF_PATTERN_SHM=tmp)", () => {
+    expect(crawlOptionsFor(eagerIframes, origin, { headless: true, devShm: false }).launchOptions).toEqual({ args: ["--site-per-process"] });
+    expect(crawlOptionsFor(cssImportChain, origin, { headless: true, devShm: false })).not.toHaveProperty("launchOptions");
+  });
+
+  it("crawls the pattern's entry at its seed with perf and adaptive settle by default", () => {
+    expect(crawlOptionsFor(cssImportChain, origin, { headless: false, devShm: false })).toMatchObject({
+      baseUrl: `${origin}/`,
+      seed: cssImportChain.crawl.seed,
+      maxPages: cssImportChain.crawl.maxPages,
+      settle: "adaptive",
+      perf: true,
+      headless: false,
+    });
+  });
+});
+
+describe("runSummary", () => {
+  const expectFcp = { key: "/ :: load", metric: "page.vitals.FCP.value", alsoExpect: [{ metric: "page.vitals.LCP.value", direction: "lower" as const, minImprovement: {} }] };
+
+  it("gives the values, the also values and no reason for a run with a value", () => {
+    const r = report([{ perf: load("/", 10) as never, perfPage: { vitals: { FCP: { value: 280 }, LCP: { value: 300 } }, network: {} } as never }]);
+    expect(runSummary(r, expectFcp)).toEqual({ values: [280], keys: ["/ :: load"], also: [[300]], missing: undefined, warnings: [] });
+  });
+
+  it("names the reason, and the run's warning codes, for a run with no value", () => {
+    const r = {
+      ...report([{ perf: load("/", 10) as never, perfPage: { vitals: { TTFB: { value: 80 } }, network: {} } as never, metrics: {} }]),
+      warnings: [{ code: "network-profile-failed", message: "could not apply the network profile", count: 1 }],
+    } as unknown as CrawlReport;
+    expect(runSummary(r, expectFcp)).toEqual({
+      values: [],
+      keys: ["/ :: load"],
+      also: [[]],
+      missing: "vitals.FCP.value absent; vitals has [TTFB]; raw metrics fcp=– lcp=–; settleCapped=–",
+      warnings: ["network-profile-failed"],
+    });
+  });
+});
+
+describe("runNotes", () => {
+  it("prints each run's warnings and, for any variant, why a run gave no value", () => {
+    const fixed = { variant: "fixed" as const, warningsPerRun: [[], ["perf-session-failed"], []], missingPerRun: [undefined, "no perfPage (no warnings)", undefined] };
+    expect(runNotes("css-import-chain", "page.vitals.FCP.value", fixed)).toEqual([
+      "[css-import-chain]   fixed run 1 warnings: perf-session-failed",
+      "[css-import-chain]   fixed run 1: no page.vitals.FCP.value (no perfPage (no warnings))",
+    ]);
+    expect(runNotes("x", "durationMs", { variant: "slow", warningsPerRun: [[]], missingPerRun: [undefined] })).toEqual([]);
   });
 });

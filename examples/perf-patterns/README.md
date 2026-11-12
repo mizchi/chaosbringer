@@ -51,10 +51,12 @@ bursts. The test prints which mode measured, and which filesystems `/dev/shm`
 and `$TMPDIR` are, on its first line (`[perf-patterns] chromium shared
 memory: …`). `PERF_PATTERN_SHM=tmp` keeps Playwright's default, for A/B runs.
 
-A run that gives no value for the pattern's metric fails with the reason
-(no page reached the key, no `perfPage` and the run's warnings, the collector
-never ran, or which vitals and raw metrics the page did record), and the
-"also" lines print each run's values next to the medians.
+A slow-variant run that gives no value for the pattern's metric fails with
+the reason (no page reached the key, no `perfPage` and the run's warnings, the
+collector never ran, or which vitals and raw metrics the page did record). A
+fixed-variant run with no value is left out of its median, and the test
+prints the same reason for it. The "also" lines print each run's values next
+to the medians; an `alsoExpect` metric gets no reason.
 
 ## Results
 
