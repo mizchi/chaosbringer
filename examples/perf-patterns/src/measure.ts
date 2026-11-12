@@ -198,15 +198,16 @@ export function missingValueReason(report: CrawlReport, keyGlob: string, metric:
  * survives Docker's 64 MB /dev/shm. Chromium then creates every POSIX
  * shared-memory region (the data pipe of each response body, shared bitmaps)
  * as a file in $TMPDIR. Where $TMPDIR is on a journaled disk that background
- * writeback keeps busy (a CI runner's /tmp right after a cache restore), each
- * create, unlink, fallocate and mmap of those files on the network, IO,
- * renderer and viz threads waits on the journal for 50-200 ms. That put
- * +60..+500 ms on top of FCP, LCP and settledMs in bursts, which is how fixed
- * variants missed their thresholds. Desktop Chrome keeps shared memory in
- * /dev/shm, so where /dev/shm is a tmpfs with room the harness drops the flag:
- * the pages, servers, thresholds and runs stay the same, and the measurement
- * stops depending on disk activity. `line` says which mode measured, and
- * which filesystems /dev/shm and $TMPDIR are, for the CI log.
+ * writeback keeps busy (very likely a CI runner's /tmp right after a cache
+ * restore; `line` shows which filesystem it is), each create, unlink,
+ * fallocate and mmap of those files on the network, IO, renderer and viz
+ * threads waits on the journal for 50-200 ms. In a reproduction that put
+ * +60..+500 ms on top of FCP, LCP and settledMs in bursts, enough for fixed
+ * variants to miss their thresholds as on CI. Desktop Chrome keeps shared
+ * memory in /dev/shm, so where /dev/shm is a tmpfs with room the harness
+ * drops the flag: the pages, servers, thresholds and runs stay the same, and
+ * the measurement stops depending on disk activity. `line` says which mode
+ * measured, and which filesystems /dev/shm and $TMPDIR are, for the CI log.
  *
  * `setting` is PERF_PATTERN_SHM: unset (or empty) chooses as above, `tmp`
  * keeps Playwright's default (for A/B runs).

@@ -44,12 +44,13 @@ On Linux, where `/dev/shm` is a tmpfs with at least 512 MiB free, the harness
 launches Chromium without Playwright's `--disable-dev-shm-usage`, so its
 shared memory (the data pipe of every response body, shared bitmaps) lives in
 `/dev/shm` as in desktop Chrome, rather than as files in `$TMPDIR`. With
-`$TMPDIR` on a journaled disk that background writeback keeps busy (a CI
-runner's `/tmp` after a cache restore), each of those files' operations
-waited on the journal and put +60..+500 ms on FCP, LCP and `settledMs` in
-bursts. The test prints which mode measured, and which filesystems `/dev/shm`
-and `$TMPDIR` are, on its first line (`[perf-patterns] chromium shared
-memory: …`). `PERF_PATTERN_SHM=tmp` keeps Playwright's default, for A/B runs.
+`$TMPDIR` on a journaled disk that background writeback keeps busy (very
+likely a CI runner's `/tmp` after a cache restore), each of those files'
+operations waits on the journal; in a reproduction that put +60..+500 ms on
+FCP, LCP and `settledMs` in bursts. The test prints which mode measured, and
+which filesystems `/dev/shm` and `$TMPDIR` are, on its first line
+(`[perf-patterns] chromium shared memory: …`). `PERF_PATTERN_SHM=tmp` keeps
+Playwright's default, for A/B runs.
 
 A slow-variant run that gives no value for the pattern's metric fails with
 the reason (no page reached the key, no `perfPage` and the run's warnings, the
