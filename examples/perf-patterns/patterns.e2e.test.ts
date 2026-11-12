@@ -23,16 +23,26 @@ import {
   headroomSetAll,
   type GateFinding,
 } from "./src/budgets.js";
-import { measurePattern, measureVariant, type PatternMeasurement } from "./src/measure.js";
+import { chromiumShm, measurePattern, measureVariant, type PatternMeasurement, type VariantMeasurement } from "./src/measure.js";
 import { loadPatterns, shardPatterns } from "./src/registry.js";
 
 const patterns = shardPatterns(await loadPatterns(), process.env.PATTERN_SHARD);
 const runs = Number(process.env.PERF_PATTERN_RUNS ?? 3);
 
+/** A run's `report.warnings` codes (a perf session that failed, say), which the assertions do not show. */
+function logWarnings(id: string, v: VariantMeasurement): void {
+  for (const [run, codes] of v.warningsPerRun.entries()) {
+    if (codes.length) console.log(`[${id}]   ${v.variant} run ${run} warnings: ${codes.join(", ")}`);
+  }
+}
+
 // Tests in this file run in order (nothing is concurrent): each pattern's
 // assertions read the measurement its first test took.
 describe("perf patterns", () => {
   it("has patterns", () => {
+    // Which shared-memory mode measured, and whether $TMPDIR is on a disk
+    // (see ChromiumShm in src/measure.ts): the CI log is the only record.
+    console.log(`[perf-patterns] ${chromiumShm.line}`);
     expect(patterns.length).toBeGreaterThan(0);
   });
 
@@ -45,14 +55,19 @@ describe("perf patterns", () => {
         console.log(
           `[${pattern.id}] ${pattern.expect.key} ${pattern.expect.metric}: slow ${m.slow.median} (${m.slow.values.join(",")}) → fixed ${m.fixed.median} (${m.fixed.values.join(",")})`,
         );
-        for (const a of m.also) console.log(`[${pattern.id}]   also ${a.expect.metric}: slow ${a.slow} → fixed ${a.fixed}`);
+        for (const [i, a] of m.also.entries()) {
+          console.log(
+            `[${pattern.id}]   also ${a.expect.metric}: slow ${a.slow} (${m.slow.also[i]!.values.join(",")}) → fixed ${a.fixed} (${m.fixed.also[i]!.values.join(",")})`,
+          );
+        }
+        for (const v of [m.slow, m.fixed]) logWarnings(pattern.id, v);
       });
 
       it(`slow variant is measured on ${pattern.expect.key}`, () => {
         expect(m, "measurement failed").toBeDefined();
         expect(m.slow.matchedKeys.length, `no span matched ${pattern.expect.key}`).toBeGreaterThan(0);
         for (const [run, n] of m.slow.matchedPerRun.entries()) {
-          expect(n, `run ${run}: no ${pattern.expect.metric} on ${pattern.expect.key}`).toBeGreaterThan(0);
+          expect(n, `run ${run}: no ${pattern.expect.metric} on ${pattern.expect.key} (${m.slow.missingPerRun[run]})`).toBeGreaterThan(0);
         }
         expect(m.fixed.matchedKeys, "fixed variant must be measured on the same keys").toEqual(m.slow.matchedKeys);
       });
@@ -104,6 +119,7 @@ describe("perf patterns", () => {
           try {
             const budgets = await emitBudgetsCli(work.dir, m.fixed.reports);
             let fresh = await measureVariant(pattern, "fixed", { runs });
+            logWarnings(pattern.id, fresh);
             let rerun = await gateCli(work.dir, "fresh", fresh.reports, budgets);
             // The floors are what this checks. Where a budget is ceil(median ×
             // 1.25) instead (intl-formatter-per-row's ~44 ms scriptMs click),
@@ -114,6 +130,7 @@ describe("perf patterns", () => {
             if (missed.length > 0 && (await headroomSetAll(work.dir, m.fixed.reports, missed))) {
               console.log(`[${pattern.id}] fresh fixed runs over a headroom-set budget, measuring once more: ${JSON.stringify(missed)}`);
               fresh = await measureVariant(pattern, "fixed", { runs });
+              logWarnings(pattern.id, fresh);
               rerun = await gateCli(work.dir, "fresh-again", fresh.reports, budgets);
             }
             const other = rerun.violations.filter((v) => !onPattern(v));

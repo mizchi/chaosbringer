@@ -4,9 +4,12 @@
  * for a `page.` metric, off `perfPage` of the pages whose load key matches).
  */
 
+import { statfsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   chaos,
   compilePerfKeyGlob,
+  type CrawlerOptions,
   type CrawlPerfSummary,
   type CrawlReport,
   type PerfDegradationEntry,
@@ -29,6 +32,10 @@ export interface VariantMeasurement {
   pagesPerRun: string[][];
   /** Error-cluster keys (URL-free), per run. */
   clustersPerRun: string[][];
+  /** Per run: why it gave no value (`missingValueReason`), or undefined when it gave some. */
+  missingPerRun: Array<string | undefined>;
+  /** `report.warnings` codes, per run. */
+  warningsPerRun: string[][];
   /** `expect.alsoExpect`, in order: each metric's median and values over the same runs. */
   also: Array<{ metric: string; median: number | null; values: number[] }>;
   /** From the last run, for the report. */
@@ -135,6 +142,158 @@ export function metricValues(
   return { values, keys: [...keys].sort() };
 }
 
+const dash = (v: number | undefined): string => (v === undefined ? "–" : String(v));
+
+/**
+ * Why `metricValues` gave nothing for this report, in one line, for the
+ * assertion text: CI keeps no report JSON, and "no value" has causes that
+ * want different fixes (a crawl that never reached the key, a perf session
+ * that failed, a collector that never ran, a browser that had not reported
+ * the vital yet). Matching pages or entries with different causes get one
+ * reason each, joined by " | ".
+ */
+export function missingValueReason(report: CrawlReport, keyGlob: string, metric: string): string {
+  const re = compilePerfKeyGlob(keyGlob);
+  const keyList = (keys: Iterable<string>) => [...new Set(keys)].sort().join(", ") || "none";
+  const reasons = new Set<string>();
+  if (metric.startsWith("page.")) {
+    const path = metric.slice("page.".length);
+    const pages = report.pages.filter((p) => p.perf?.key && re.test(p.perf.key));
+    if (pages.length === 0) {
+      return `no page with load key matching ${keyGlob} (keys: ${keyList(report.pages.flatMap((p) => (p.perf?.key ? [p.perf.key] : [])))})`;
+    }
+    for (const p of pages) {
+      if (!p.perfPage) {
+        const warnings = (report.warnings ?? []).map((w) => `${w.code}: ${w.message}`);
+        reasons.add(`no perfPage (${warnings.length ? `warnings: ${warnings.join("; ")}` : "no warnings"})`);
+      } else if (p.perfPage.collectorMissing) {
+        reasons.add("collectorMissing");
+      } else if (readPath(p.perfPage, path) === undefined) {
+        reasons.add(
+          `${path} absent; vitals has [${Object.keys(p.perfPage.vitals ?? {}).join(",")}]; ` +
+            `raw metrics fcp=${dash(p.metrics?.fcp)} lcp=${dash(p.metrics?.lcp)}; settleCapped=${dash(p.settleCapped)}`,
+        );
+      }
+    }
+  } else if (metric.startsWith("degradation.")) {
+    const path = metric.slice("degradation.".length);
+    const entries = report.perf?.degradation ?? [];
+    const matched = entries.filter((e) => re.test(e.key));
+    if (matched.length === 0) return `no degradation entry matched ${keyGlob} (keys: ${keyList(entries.map((e) => e.key))})`;
+    for (const e of matched) if (readPath(e, path) === undefined) reasons.add(`${path} absent on ${e.key} [${e.fault}]`);
+  } else {
+    const spans = spansOf(report);
+    const matched = spans.filter((s) => re.test(s.key));
+    if (matched.length === 0) return `no span matched ${keyGlob} (keys: ${keyList(spans.map((s) => s.key))})`;
+    for (const s of matched) if (readPath(s, metric) === undefined) reasons.add(`${metric} absent on ${s.key}`);
+  }
+  return [...reasons].join(" | ") || "every match has a value";
+}
+
+/**
+ * Where the harness's Chromium keeps its shared memory.
+ *
+ * Playwright launches Chromium with --disable-dev-shm-usage, so that it
+ * survives Docker's 64 MB /dev/shm. Chromium then creates every POSIX
+ * shared-memory region (the data pipe of each response body, shared bitmaps)
+ * as a file in $TMPDIR. Where $TMPDIR is on a journaled disk that background
+ * writeback keeps busy (a CI runner's /tmp right after a cache restore), each
+ * create, unlink, fallocate and mmap of those files on the network, IO,
+ * renderer and viz threads waits on the journal for 50-200 ms. That put
+ * +60..+500 ms on top of FCP, LCP and settledMs in bursts, which is how fixed
+ * variants missed their thresholds. Desktop Chrome keeps shared memory in
+ * /dev/shm, so where /dev/shm is a tmpfs with room the harness drops the flag:
+ * the pages, servers, thresholds and runs stay the same, and the measurement
+ * stops depending on disk activity. `line` says which mode measured, and
+ * which filesystems /dev/shm and $TMPDIR are, for the CI log.
+ *
+ * `setting` is PERF_PATTERN_SHM: unset (or empty) chooses as above, `tmp`
+ * keeps Playwright's default (for A/B runs).
+ */
+export interface ChromiumShm {
+  devShm: boolean;
+  line: string;
+}
+
+interface StatFs {
+  type: number;
+  bavail: number;
+  bsize: number;
+}
+
+const TMPFS_MAGIC = 0x01021994;
+const FS_NAMES: Record<number, string> = {
+  [TMPFS_MAGIC]: "tmpfs",
+  0xef53: "ext4",
+  0x58465342: "xfs",
+  0x9123683e: "btrfs",
+  0x794c7630: "overlayfs",
+};
+const MIN_DEV_SHM_BYTES = 512 * 1024 ** 2;
+
+export function chooseChromiumShm({
+  platform,
+  setting,
+  tmpdir,
+  statfs,
+}: {
+  platform: NodeJS.Platform;
+  setting: string | undefined;
+  tmpdir: string;
+  statfs: (path: string) => StatFs;
+}): ChromiumShm {
+  if (setting !== undefined && setting !== "" && setting !== "tmp") {
+    throw new Error(`PERF_PATTERN_SHM must be unset or "tmp" (keep Playwright's shared memory in $TMPDIR), got ${JSON.stringify(setting)}`);
+  }
+  const probe = (path: string): StatFs | undefined => {
+    try {
+      return statfs(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const describe = (path: string, st: StatFs | undefined) =>
+    st
+      ? `${path} is ${FS_NAMES[st.type] ?? `fs 0x${st.type.toString(16)}`} (${((st.bavail * st.bsize) / 1024 ** 3).toFixed(1)} GiB free)`
+      : `${path} is unreadable`;
+  const shm = probe("/dev/shm");
+  const why =
+    setting === "tmp"
+      ? "PERF_PATTERN_SHM=tmp"
+      : platform !== "linux"
+        ? "not Linux"
+        : !shm
+          ? "/dev/shm unreadable"
+          : shm.type !== TMPFS_MAGIC
+            ? "/dev/shm is not tmpfs"
+            : shm.bavail * shm.bsize < MIN_DEV_SHM_BYTES
+              ? "/dev/shm under 512 MiB free"
+              : undefined;
+  const mode = why === undefined ? "/dev/shm" : `$TMPDIR (${why})`;
+  return {
+    devShm: why === undefined,
+    line: `chromium shared memory: ${mode}; ${describe("/dev/shm", shm)}; ${describe(`$TMPDIR=${tmpdir}`, probe(tmpdir))}`,
+  };
+}
+
+export const chromiumShm: ChromiumShm = chooseChromiumShm({
+  platform: process.platform,
+  setting: process.env.PERF_PATTERN_SHM,
+  tmpdir: tmpdir(),
+  statfs: (path) => statfsSync(path),
+});
+
+type LaunchOptions = NonNullable<CrawlerOptions["launchOptions"]>;
+
+/** `launchOptions` without Playwright's --disable-dev-shm-usage (see `ChromiumShm`). */
+export function withDevShm(launchOptions: LaunchOptions | undefined): LaunchOptions {
+  const ignored = launchOptions?.ignoreDefaultArgs;
+  return {
+    ...launchOptions,
+    ignoreDefaultArgs: ignored === true ? true : [...new Set([...(Array.isArray(ignored) ? ignored : []), "--disable-dev-shm-usage"])],
+  };
+}
+
 function routeOf(url: string): string {
   try {
     return new URL(url).pathname;
@@ -153,6 +312,8 @@ export async function measureVariant(
   const values: number[] = [];
   const also = (pattern.expect.alsoExpect ?? []).map((e) => ({ metric: e.metric, values: [] as number[] }));
   const matchedPerRun: number[] = [];
+  const missingPerRun: Array<string | undefined> = [];
+  const warningsPerRun: string[][] = [];
   const matchedKeys = new Set<string>();
   const pagesPerRun: string[][] = [];
   const clustersPerRun: string[][] = [];
@@ -171,6 +332,8 @@ export async function measureVariant(
         ...(c.actionWeights ? { actionWeights: c.actionWeights } : {}),
         ...(c.driver ? { driver: c.driver } : {}),
         ...c.options,
+        // After c.options, so a pattern's own launch args are kept.
+        ...(chromiumShm.devShm ? { launchOptions: withDevShm(c.options?.launchOptions) } : {}),
       });
       reports.push(report);
       const m = metricValues(report, pattern.expect.key, pattern.expect.metric, pattern.expect.absentAs);
@@ -179,6 +342,8 @@ export async function measureVariant(
       }
       values.push(...m.values);
       matchedPerRun.push(m.values.length);
+      missingPerRun.push(m.values.length ? undefined : missingValueReason(report, pattern.expect.key, pattern.expect.metric));
+      warningsPerRun.push((report.warnings ?? []).map((w) => w.code));
       for (const k of m.keys) matchedKeys.add(k);
       pagesPerRun.push([...new Set(report.pages.map((p) => routeOf(p.url)))].sort());
       clustersPerRun.push(report.errorClusters.map((cl) => cl.key).sort());
@@ -192,6 +357,8 @@ export async function measureVariant(
     median: median(values),
     values,
     matchedPerRun,
+    missingPerRun,
+    warningsPerRun,
     matchedKeys: [...matchedKeys].sort(),
     pagesPerRun,
     clustersPerRun,
