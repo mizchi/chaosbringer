@@ -368,13 +368,15 @@ export async function settleAdaptive(
 /**
  * The in-page probe on a real page.
  *
- * Long tasks come from the always-on collector's store, read without
- * draining it (`flush()` only moves pending observer records *into* the
- * store): a span that closes later still gets every task. The collector's
- * native clock is used rather than `performance.now()`, which page script or
- * a runtime fault may have replaced. Without the collector — a caller's page
- * on the `testPage()` path with perf off — long tasks are unknown, and the
- * probe itself is the check: it cannot run while the main thread is busy.
+ * Long tasks come from the always-on collector's `lastLongTaskEnd`, which no
+ * drain resets. `flush()` first moves pending observer records into the
+ * store, so a task the browser has not delivered yet counts. They do not come
+ * from `longTasks`: with perf on, the session's emit binding moves every task
+ * out of it as soon as it is observed. The collector's native clock is used
+ * rather than `performance.now()`, which page script or a runtime fault may
+ * have replaced. Without the collector — a caller's page on the `testPage()`
+ * path with perf off — long tasks are unknown, and the probe itself is the
+ * check: it cannot run while the main thread is busy.
  *
  * Frames are skipped on a hidden document, where the browser does not run
  * animation frames at all and waiting for them would cap every step.
@@ -397,9 +399,13 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
           const store = (window as unknown as PerfWindow).__perf;
           if (!store || store.__lb !== true) return null;
           store.flush?.();
-          let lastEnd = Number.NEGATIVE_INFINITY;
-          for (const t of store.longTasks) lastEnd = Math.max(lastEnd, t.start + t.duration);
-          if (lastEnd === Number.NEGATIVE_INFINITY) return null;
+          let lastEnd = store.lastLongTaskEnd;
+          if (lastEnd === undefined) {
+            // A collector older than `lastLongTaskEnd` has only the drained `longTasks`.
+            lastEnd = null;
+            for (const t of store.longTasks) lastEnd = Math.max(lastEnd ?? Number.NEGATIVE_INFINITY, t.start + t.duration);
+          }
+          if (lastEnd === null) return null;
           // Long-task times are on this document's native timeline;
           // `store.now()` is native epoch ms, so subtract the origin.
           const nowRel = store.now

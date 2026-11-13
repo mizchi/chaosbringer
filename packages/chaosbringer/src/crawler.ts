@@ -2495,9 +2495,9 @@ export class ChaosCrawler {
 
       const loadTime = Date.now() - startTime;
       const firstRead = await readLoadMetrics(page);
-      // Strictly after `readLoadMetrics`: it reads the collector's store
-      // without draining it, and closing a span drains the store. The other
-      // order would take LCP and TBT's long tasks away before they are read.
+      // After `readLoadMetrics`: TBT reads the collector's `longTaskLog`,
+      // which closing a span does not drain. A collector older than that
+      // field has only `longTasks`, which closing the span would empty first.
       await this.perf.endLoad({ settleCapped: loadCapped });
       const loadPaint = await this.awaitLoadPaint(page, url, firstRead, loadCapped);
       const metrics = loadPaint.metrics;
