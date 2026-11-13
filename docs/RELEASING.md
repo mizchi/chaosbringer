@@ -15,6 +15,11 @@ They are published by `.github/workflows/publish.yml` with npm OIDC
 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers): no npm token
 is stored anywhere, and every version carries provenance.
 
+`@mizchi/kitesurf-faults` (`packages/kitesurf-faults/`) is experimental and not on
+npm yet. Its package.json is not `private`, so `pending-publishes.mjs` lists it
+as soon as it reaches main: decide on its first release (or mark it `private`)
+before that merge.
+
 ## Cutting a release
 
 1. In a PR, raise `version` in the package.json of each package to release,

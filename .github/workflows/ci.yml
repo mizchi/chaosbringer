@@ -65,6 +65,20 @@ jobs:
       - name: Build
         run: pnpm -F chaosbringer build
 
+      # The Playwright-free fault packages: the rule decision behind
+      # `@mizchi/playwright-faults/network`, `@mizchi/kitesurf-faults` on top of
+      # it, and the Kitesurf example's pure modules (oracle, log gate, run
+      # registry, KITESURF_DIR checks). None of these unit tests needs a
+      # browser or a Kitesurf checkout, so they run before the Playwright
+      # install and fail fast. The real workerd + Kitesurf integration is the
+      # explicit `just kitesurf-faults-integration` (pinned revision), not CI.
+      - name: Build and unit-test the Playwright-free fault packages
+        run: |
+          pnpm -F "@mizchi/kitesurf-faults..." build
+          pnpm -F @mizchi/playwright-faults test
+          pnpm -F @mizchi/kitesurf-faults test
+          pnpm -F @mizchi/chaosbringer-example-kitesurf-faults test
+
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@v4

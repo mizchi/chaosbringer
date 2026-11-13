@@ -31,6 +31,9 @@ pnpm install --frozen-lockfile && pnpm run build   # = bazel run //packages/engi
 pnpm install
 pnpm -F @mizchi/playwright-faults build && pnpm -F @mizchi/kitesurf-faults build
 KITESURF_DIR=/path/to/kitesurf pnpm -F @mizchi/chaosbringer-example-kitesurf-faults test:integration
+
+# or both steps at once, from the repository root
+KITESURF_DIR=/path/to/kitesurf just kitesurf-faults-integration
 ```
 
 `pnpm test` here runs only the unit tests: the oracle, the log gate, the run
