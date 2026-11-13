@@ -364,13 +364,20 @@ export async function startSession(
   const memGc = opts.memGc ?? false;
 
   const accumulator = new PerfAccumulator();
+  // With excludeCurrentDocument, payloads are held until the startup
+  // document's timeOrigin is known: one that arrived before ignoreDocument()
+  // would otherwise be merged for good.
+  let held: DrainPayload[] | undefined =
+    opts.excludeCurrentDocument === true ? [] : undefined;
   // An unloading document pushes its undrained remainder through this binding
   // (pagehide / visibilitychange→hidden), so navigating mid-span loses nothing.
   const onBinding = (e: unknown) => {
     const ev = e as { name?: string; payload?: string };
     if (ev.name !== EMIT_BINDING || typeof ev.payload !== "string") return;
     try {
-      accumulator.add(JSON.parse(ev.payload) as DrainPayload);
+      const p = JSON.parse(ev.payload) as DrainPayload;
+      if (held) held.push(p);
+      else accumulator.add(p);
     } catch {
       /* malformed payload: ignore */
     }
@@ -404,9 +411,13 @@ export async function startSession(
   // enabled: the client may be the caller's, using it too. Both teardown
   // commands are answered on the renderer's main thread, so on a page whose
   // reads time out they wait as long as the page hangs: they are sent there
-  // without waiting, and elsewhere waited for one bounded read at most
-  // (commands on one client run in order, so a later session's addBinding
-  // still lands after the removal).
+  // without waiting, and elsewhere waited for one bounded read at most. The
+  // detach is queued on such a page too (evaluates on a page run in order, so
+  // it lands before a later session's attach()), or its collector would keep
+  // draining records into the removed binding once the page recovers. The
+  // client's ownership is checked again after the detach's await: a session
+  // started meanwhile counted itself before sending its addBinding, so it
+  // either keeps the binding or sends addBinding after the removal.
   let released = false;
   const release = async () => {
     if (released) return;
@@ -419,15 +430,14 @@ export async function startSession(
     if (lastOnPage) {
       if (pageSessions.get(page) === shared) pageSessions.delete(page);
       // The document's collector is the page's, whichever client reads it.
-      await evaluator.evaluate<null>(
-        () => {
-          (window as unknown as PerfWindow).__perf?.detach?.();
-          return null;
-        },
-        () => null,
-      );
+      const detach = () => {
+        (window as unknown as PerfWindow).__perf?.detach?.();
+        return null;
+      };
+      if (evaluator.stalled) void page.evaluate(detach).catch(() => {});
+      else await evaluator.evaluate<null>(detach, () => null);
     }
-    if (clientUsers <= 0)
+    if (clientUsers <= 0 && !bindingUsers.has(client))
       teardown.push(
         client.send("Runtime.removeBinding", { name: EMIT_BINDING }).catch(() => {}),
       );
@@ -473,6 +483,11 @@ export async function startSession(
       () => null,
     );
     if (exclude && currentOrigin !== null) accumulator.ignoreDocument(currentOrigin);
+    // add() now drops the startup document's held payloads; a read that timed
+    // out merges them all, as before.
+    const early = held ?? [];
+    held = undefined;
+    for (const p of early) accumulator.add(p);
 
     await client.send("Performance.enable");
     if (cpuRate > 1)

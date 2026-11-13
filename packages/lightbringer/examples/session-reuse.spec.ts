@@ -261,4 +261,57 @@ test.describe("session reuse on one page", () => {
     expect(new URL(excluded.url).pathname).toBe("/c");
     expect(excluded.vitals.TTFB).toBeDefined();
   });
+  test("a finish on a stalled page still detaches the collector once the page recovers", async ({ page }) => {
+    await servePages(page);
+    const client = await page.context().newCDPSession(page);
+    const s1 = await startSession(page, client, { awaitPaint: false, evaluateTimeoutMs: 500 });
+    await page.goto(`${ORIGIN}/a`);
+    const h = await s1.controller.begin("s1");
+    await page.evaluate(() => {
+      setTimeout(() => (window as unknown as { burn: (ms: number) => void }).burn(2500), 0);
+    });
+    // The read times out: the evaluator is stalled when finish() tears down.
+    await s1.controller.end(h, { settle: false });
+    await s1.finish("s1");
+
+    await page.waitForTimeout(3000);
+    await page.evaluate(() => (window as unknown as { work: (n: string) => void }).work("between"));
+    await page.waitForTimeout(300);
+    // The store kept the work instead of draining it into the removed binding.
+    expect(await page.evaluate(() => (window as unknown as { __perf: { measures: unknown[] } }).__perf.measures.length)).toBe(1);
+    const report = await oneSpan(page, client, "s2");
+    expect(report.appSpans.map((s) => s.name)).toContain("between");
+  });
+
+  test("excludeCurrentDocument drops an emit of the startup document that lands before its origin is read", async ({
+    page,
+  }) => {
+    await servePages(page);
+    const c0 = await page.context().newCDPSession(page);
+    // A concurrent session keeps /a's collector attached, so its records emit.
+    const s0 = await startSession(page, c0, { awaitPaint: false });
+    await page.goto(`${ORIGIN}/a`);
+
+    // Page activity right after addBinding is answered, before the
+    // performance.timeOrigin read.
+    const c2 = await page.context().newCDPSession(page);
+    const send = c2.send.bind(c2) as (m: string, p?: unknown) => Promise<unknown>;
+    (c2 as unknown as { send: typeof send }).send = async (method, params) => {
+      const r = await send(method, params);
+      if (method === "Runtime.addBinding") {
+        await page.evaluate(() => (window as unknown as { work: (n: string) => void }).work("pre"));
+        await page.evaluate(() => new Promise((r) => setTimeout(r, 200)));
+      }
+      return r;
+    };
+
+    const s2 = await startSession(page, c2, { awaitPaint: false, excludeCurrentDocument: true });
+    const h = await s2.controller.begin("load");
+    await page.goto(`${ORIGIN}/c`);
+    await s2.controller.end(h);
+    const report = (await s2.finish("s2")).report;
+    await s0.finish("s0");
+    expect(report.appSpans.map((s) => s.name)).not.toContain("pre");
+    expect(report.documents).toBeUndefined();
+  });
 });
