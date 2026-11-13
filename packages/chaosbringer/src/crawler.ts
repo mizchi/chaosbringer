@@ -184,6 +184,13 @@ import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
 /** Distinct WebSocket URLs a run remembers for `CrawlFaultInjectionStats.webSocket`. */
 const MAX_WEBSOCKET_URLS = 200;
 
+/**
+ * Longest a step waits for the browser's error page of a navigation the
+ * guard blocked during it (`urlAfterStep`). It commits within milliseconds;
+ * the cap is for a blocked navigation another one replaced.
+ */
+const BLOCKED_NAVIGATION_COMMIT_CAP_MS = 5000;
+
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
   return (
@@ -2875,6 +2882,31 @@ export class ChaosCrawler {
   }
 
   /**
+   * Where the step left the page. When the guard blocked a navigation of the
+   * page's own frame during the step and the page still shows `urlBefore`,
+   * the browser's error page for it has not committed yet: the step's wait
+   * does not cover it (a click returns once the navigation failed, or without
+   * waiting for one it saw requested only afterwards, and `networkidle` is the
+   * current document's, reached at load). Read then, the page looked like it
+   * stayed, the step lost its `leftSiteTo`, and the next steps acted on the
+   * error page once it committed. So wait for the commit, capped: a blocked
+   * navigation another one replaced commits nothing.
+   */
+  private async urlAfterStep(page: Page, urlBefore: string, navigationsBefore: number): Promise<string> {
+    if (page.url() !== urlBefore || this.lastBlockedPageNavigation(navigationsBefore) === undefined) return page.url();
+    // Not `waitForURL`: it gives up on the failed navigation's own event,
+    // which can still be on its way. The listener is in place before the
+    // next event is read, so the commit cannot slip past it.
+    await page
+      .waitForEvent("framenavigated", {
+        predicate: (frame) => frame === page.mainFrame() && page.url() !== urlBefore,
+        timeout: BLOCKED_NAVIGATION_COMMIT_CAP_MS,
+      })
+      .catch(() => this.logger.debug("blocked_navigation_no_commit", { url: urlBefore, capMs: BLOCKED_NAVIGATION_COMMIT_CAP_MS }));
+    return page.url();
+  }
+
+  /**
    * Back out of a step that left the page somewhere the crawl must not act:
    * - another site (`leftSiteTo`): a same-site link that redirected off-site
    *   (Wikipedia's "Create account" to auth.wikimedia.org), counted as a
@@ -2893,7 +2925,7 @@ export class ChaosCrawler {
     result: ActionResult,
     navigationsBefore: number,
   ): Promise<void> {
-    const landed = page.url();
+    const landed = await this.urlAfterStep(page, urlBefore, navigationsBefore);
     if (!this.isForbiddenUrl(landed)) {
       // A link to a feed or a JSON file opens the browser's viewer for it;
       // the steps after it would measure and click the viewer.

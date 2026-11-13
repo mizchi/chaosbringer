@@ -12,6 +12,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chaos } from "./chaos.js";
 import { ChaosCrawler } from "./crawler.js";
@@ -241,6 +242,48 @@ describe("pages that redirect off-site", () => {
     expect(link.actions.every((a) => a.blockedExternal)).toBe(true);
     expect(page(link, "/partner").offsiteNavigations).toBeUndefined();
     expect(getExitCode(link, { strict: true })).toBe(0);
+  }, 120_000);
+
+  it("names where a click sent the page when the click returns before the browser's error page commits", async () => {
+    // Playwright's click waits for a navigation the browser reported asking
+    // for before the click's input was acknowledged; one reported after (a
+    // loaded runner) is not waited for, and the click returns while the
+    // blocked navigation's error page is still to commit. Every click here
+    // returns that way: once the guard blocked its navigation, which is
+    // before the browser is told to fail it, so before the error page.
+    const browser = await chromium.launch({ headless: true });
+    const tab = await browser.newPage();
+    let blocked = () => {};
+    const crawler = new ChaosCrawler(
+      { baseUrl: `${base}/`, maxActionsPerPage: 2, actionWeights: { scroll: 0 }, headless: true, timeout: 10_000, invariants: [noOffsiteRedirect()] },
+      { onBlockedNavigation: () => blocked() },
+    );
+    const locator = Object.getPrototypeOf(tab.locator("body")) as { click(options?: object): Promise<void> };
+    const click = locator.click;
+    locator.click = async function (this: unknown, options?: object) {
+      const sent = new Promise<void>((resolve) => {
+        blocked = resolve;
+      });
+      await click.call(this, { ...options, noWaitAfter: true });
+      await sent;
+    };
+    try {
+      const p = await crawler.testPage(tab, `${base}/clicky`);
+      expect(p.offsiteNavigations?.map((n) => [n.trigger, n.to])).toEqual([
+        ["click", `${off}/clicked`],
+        ["click", `${off}/clicked`],
+      ]);
+      // Each step names where it was sent, and the next one clicked the page
+      // again rather than the error page.
+      expect(crawler.getRecentActions().map((a) => [a.success, a.leftSiteTo])).toEqual([
+        [true, `${off}/clicked`],
+        [true, `${off}/clicked`],
+      ]);
+      expect(tab.url()).toBe(`${base}/clicky`);
+    } finally {
+      locator.click = click;
+      await browser.close();
+    }
   }, 120_000);
 
   it("flags a click that follows the page's own ?next=, and a form whose endpoint redirects off-site", async () => {
