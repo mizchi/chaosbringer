@@ -125,14 +125,15 @@ Per **span** (one `perf.measure(name, action)` region):
 
 All times are unified to epoch ms so spans correlate with network / CPU even
 across navigations. The in-page collector is **drained at every span boundary**
-and, while a session is open, whenever one of its observers reports an entry,
-through the CDP binding that also carries what a document unloading mid-span
-recorded, so long tasks / LoAF / interactions / frames / app spans of documents
-you navigated away from stay in the report. In-page code that wants this
+and, once a session has installed its emit binding (it stays installed after
+`finish()`), whenever one of its observers reports an entry, through the CDP
+binding that also carries what a document unloading mid-span recorded, so long
+tasks / LoAF / interactions / frames / app spans of documents you navigated away
+from stay in the report. In-page code that wants this
 document's long tasks reads `window.__perf.longTaskLog` (the latest 10000, never
 drained) or `window.__perf.lastLongTaskEnd` (the latest end, never reset), not
-`longTasks`, which an open session keeps empty. `report.vitals` are the last
-document's; when a run visits more than one document, `report.documents[]`
+`longTasks`, which a session's emit binding keeps empty. `report.vitals` are the
+last document's; when a run visits more than one document, `report.documents[]`
 lists each one's `{ url, timeOrigin, vitals }`. A span that navigated carries
 `navigations`: how many of those documents started inside it (absent when none).
 Use it, not `memory.documentsDelta`, to tell a navigating step: under
