@@ -24,6 +24,18 @@
  * load, 2000 ms after an action. Hitting the cap is not an error. It is
  * reported (`capped`), because a step that never quiesces is itself a finding.
  *
+ * It also gives up early on a page that is never idle: when, for
+ * `neverIdleMs` on end, long tasks kept the quiet window from opening and
+ * nothing is in flight, the settle caps with reason `never-idle` instead of
+ * waiting out the rest of the cap. A page whose long tasks come less than a
+ * quiet window apart forever would otherwise hold every load for the whole
+ * navigation `timeout` (30 s by default) while measuring nothing the first
+ * seconds do not already show. It never gives up with a request in flight,
+ * so a hung or slow request is still waited on up to the cap; and the streak
+ * is longer than the 2 s action cap and drive's default 3 s cap, so in a
+ * crawl it only ever shortens a load (a drive given a `settleCapMs` above
+ * the streak stops there too).
+ *
  * Opt-in, permanently (§10): the default stays `networkidle`, so existing
  * crawls, recorded traces and calibrated `TimingProfile`s keep their timing.
  *
@@ -46,6 +58,21 @@ export const DEFAULT_SETTLE_QUIET_MS = 100;
  * `waitForLoadState("networkidle", { timeout: 2000 })`.
  */
 export const ACTION_SETTLE_CAP_MS = 2000;
+/**
+ * How long a settle waits on long tasks alone — nothing in flight, but a long
+ * task ending inside every quiet window — before it calls the page never idle
+ * and caps. Longer than `ACTION_SETTLE_CAP_MS`, so it only bounds a load;
+ * `neverIdleMs` stretches it for a long quiet window (`NEVER_IDLE_WINDOWS`
+ * windows at least), so a slow but finite burst of work is not cut short.
+ */
+export const NEVER_IDLE_MS = 5000;
+/** The never-idle streak spans at least this many quiet windows. */
+const NEVER_IDLE_WINDOWS = 10;
+
+/** The never-idle streak for a quiet window of `quietMs`. */
+export function neverIdleMs(quietMs: number): number {
+  return Math.max(NEVER_IDLE_MS, quietMs * NEVER_IDLE_WINDOWS);
+}
 /** Animation frames that must run after the step before it counts as settled. */
 export const SETTLE_MIN_FRAMES = 2;
 /**
@@ -263,8 +290,11 @@ export type SettleDecision =
   /** Probe again after `ms` (a network event may wake the loop sooner). */
   | { kind: "wait"; ms: number };
 
-/** What was still going on when a settle hit its cap. */
-export type SettleCapReason = "inflight" | "long-task" | "frames" | "busy";
+/**
+ * What was still going on when a settle hit its cap. `never-idle`: it stopped
+ * before the cap, after long tasks alone kept it open for `neverIdleMs`.
+ */
+export type SettleCapReason = "inflight" | "long-task" | "frames" | "busy" | "never-idle";
 
 /** The settle state machine: one decision from one snapshot. */
 export function decideSettle(s: SettleSnapshot): SettleDecision {
@@ -314,7 +344,14 @@ export async function settleAdaptive(
 ): Promise<SettleOutcome> {
   const start = env.now();
   const capAt = start + Math.max(0, capMs);
+  const neverIdleAfterMs = neverIdleMs(quietMs);
   let framesDone = false;
+  // Since when long tasks have kept the quiet window shut without a break;
+  // null once they leave one. Requests do not reset it — a beacon or a poll
+  // between long tasks leaves the page just as busy — but the settle only
+  // gives up on it with nothing in flight, so a request is always waited on
+  // up to the cap.
+  let longTaskOnlySince: number | null = null;
   let lastLongTaskEnd = Number.NEGATIVE_INFINITY;
   let lastNavigation = Number.NEGATIVE_INFINITY;
 
@@ -351,6 +388,14 @@ export async function settleAdaptive(
     });
     if (decision.kind === "settled") return { capped: false, elapsedMs: probedAt - start };
     if (decision.kind === "capped") return capped(decision.reason);
+    if (probedAt < lastLongTaskEnd + quietMs) {
+      longTaskOnlySince ??= probedAt;
+      if (net.count === 0 && probedAt - longTaskOnlySince >= neverIdleAfterMs) {
+        return capped("never-idle");
+      }
+    } else {
+      longTaskOnlySince = null;
+    }
     await env.wait(decision.ms);
   }
 
