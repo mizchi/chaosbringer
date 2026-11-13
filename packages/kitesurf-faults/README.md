@@ -94,3 +94,11 @@ just pkg @mizchi/kitesurf-faults build
 ```
 
 The unit tests use fake timers and do not need a Kitesurf checkout.
+
+The real workerd + Kitesurf run lives in [`examples/kitesurf-faults`](../../examples/kitesurf-faults). It needs a Kitesurf checkout at the pinned revision with its assets built, and it fails (never skips) without one:
+
+```sh
+KITESURF_DIR=/path/to/kitesurf just kitesurf-faults-integration
+```
+
+CI runs this package's build and unit tests only. The design, the connection checks and every place the implementation differs from the original issue (with the reason and the acceptance item it touches) are in [`docs/superpowers/specs/2026-11-13-kitesurf-faults-design.md`](../../docs/superpowers/specs/2026-11-13-kitesurf-faults-design.md).
