@@ -9,6 +9,8 @@
 // store — no longer loses the earlier documents' data. The remainder of an
 // unloading document is pushed to node on pagehide / visibilitychange→hidden
 // through the `__lbEmit` CDP binding (Runtime.addBinding), when installed.
+// Long tasks are also kept in a never-drained per-document log for in-page
+// readers (PerfStore.longTaskLog / lastLongTaskEnd).
 // ---------------------------------------------------------------------------
 
 export interface BrowserMetric {
@@ -68,7 +70,32 @@ export interface PerfStore {
   /** idempotency marker: set by this collector, so a second injection is a no-op */
   __lb?: true;
   vitals: Record<string, BrowserMetric>;
+  /**
+   * Long tasks observed since the previous drain(), which moves them out. In
+   * the top document of a page with a session's emit binding, that happens at
+   * every observer callback, so this is almost always empty there: in-page
+   * code reads `longTaskLog` / `lastLongTaskEnd` instead.
+   */
   longTasks: LongTaskEntry[];
+  /**
+   * This document's long tasks in the order they were observed (by the
+   * observer callback and by flush() alike): the same entry objects as
+   * `longTasks`, which drain() never moves. For in-page readers, such as
+   * chaosbringer's TBT read. Bounded: past 10000 entries the oldest is
+   * dropped. Main-thread long tasks each last over 50 ms and do not overlap,
+   * so back-to-back 51 ms tasks report about 18 a second: the cap is about
+   * 9 minutes of nothing but long tasks, at about 48 bytes an entry. A page
+   * load's read is bounded by its navigation timeout, about 550 entries at
+   * 30 s. Absent on collectors older than this field.
+   */
+  longTaskLog?: LongTaskEntry[];
+  /**
+   * start + duration (this document's timeline) of the latest-ending long
+   * task observed, null before the first. drain() never resets it, and it
+   * does not depend on `longTaskLog`'s cap: a settle probe's long-task gate
+   * reads it in O(1). Absent on collectors older than this field.
+   */
+  lastLongTaskEnd?: number | null;
   loaf: LoafEntry[];
   measures: MeasureEntry[];
   /** Event Timing entries for real interactions (interactionId > 0) */
@@ -134,10 +161,15 @@ export function browserCollector(opts?: CollectorOptions) {
     /* toString unavailable: assume native */
   }
 
+  // Inside the function, not at module scope: it is serialized into the page.
+  const LONG_TASK_LOG_MAX = 10000;
+  const longTaskLog: LongTaskEntry[] = [];
   const store: PerfStore = {
     __lb: true,
     vitals: {},
     longTasks: [],
+    longTaskLog,
+    lastLongTaskEnd: null,
     loaf: [],
     measures: [],
     events: [],
@@ -179,9 +211,18 @@ export function browserCollector(opts?: CollectorOptions) {
   // missed if we read the store before the callback runs. flush() drains takeRecords()
   // right before the node side reads, fixing per-span attribution retroactively
   // (spans are matched by time window, not by arrival order).
+  // A long task also goes to the never-drained log and raises the last end:
+  // both paths come through here, so a record a reader's flush() pulls in
+  // counts at once, and the next emit or drain still delivers it to node once.
   const drainLongTask = (entries: PerformanceEntryList) => {
-    for (const e of entries)
-      store.longTasks.push({ start: e.startTime, duration: e.duration });
+    for (const e of entries) {
+      const task = { start: e.startTime, duration: e.duration };
+      store.longTasks.push(task);
+      if (longTaskLog.push(task) > LONG_TASK_LOG_MAX) longTaskLog.shift();
+      const end = task.start + task.duration;
+      const last = store.lastLongTaskEnd;
+      if (last === null || last === undefined || end > last) store.lastLongTaskEnd = end;
+    }
   };
   const drainLoaf = (entries: PerformanceEntryList) => {
     for (const e of entries) {
@@ -350,7 +391,9 @@ export function browserCollector(opts?: CollectorOptions) {
   // unloading document makes: a long task followed by a navigation reached
   // node as nothing. So a long task, an animation frame, a span measure or an
   // interaction is also pushed as soon as its observer reports it, while the
-  // document is alive; pagehide still sends whatever came after.
+  // document is alive; pagehide still sends whatever came after. That leaves
+  // `longTasks` empty almost all the time, which is why in-page readers read
+  // `longTaskLog` / `lastLongTaskEnd`.
   onRecorded = emit;
   addEventListener("pagehide", emit, { capture: true });
   document.addEventListener(
