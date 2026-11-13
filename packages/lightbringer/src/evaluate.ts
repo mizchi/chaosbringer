@@ -42,16 +42,26 @@ export class BoundedEvaluator {
    * turns N reads on a hung page into one bounded wait instead of N. Cleared
    * as soon as it settles, i.e. when the page can answer again.
    */
-  private stalled: Promise<void> | undefined;
+  private pendingStall: Promise<void> | undefined;
 
   constructor(
     private readonly page: Page,
     readonly timeoutMs: number,
   ) {}
 
+  /**
+   * A read timed out and is still pending: the page cannot answer now, and
+   * every attempt() returns a timeout at once until it does. A caller about to
+   * issue its own evaluate outside this evaluator (finish()'s paint wait)
+   * checks this first.
+   */
+  get stalled(): boolean {
+    return this.pendingStall !== undefined;
+  }
+
   /** page.evaluate(fn) that resolves within timeoutMs and never rejects. */
   async attempt<R>(fn: () => R | Promise<R>): Promise<EvaluateOutcome<R>> {
-    if (this.stalled) return { kind: "timeout" };
+    if (this.pendingStall) return { kind: "timeout" };
     const pending = this.page.evaluate(fn) as Promise<R>;
     const result = await raceTimeout(
       pending.then(
@@ -68,9 +78,9 @@ export class BoundedEvaluator {
       () => {},
       () => {},
     );
-    this.stalled = stalled;
+    this.pendingStall = stalled;
     void stalled.then(() => {
-      if (this.stalled === stalled) this.stalled = undefined;
+      if (this.pendingStall === stalled) this.pendingStall = undefined;
     });
     return { kind: "timeout" };
   }

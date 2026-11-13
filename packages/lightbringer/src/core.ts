@@ -19,6 +19,7 @@
 //   - targets.ts ........ auto-attach to out-of-process iframes' CDP targets
 //   - report.ts ......... buildReport + logSummary (report assembly / output)
 //   - session.ts ........ startSession (orchestration) + the browser readers
+//   - paint-wait.ts ..... awaitPendingPaint (finish()'s wait for a late paint)
 export {
   startSession,
   collectorInitScript,
@@ -54,6 +55,24 @@ export {
   DEFAULT_EVALUATE_TIMEOUT_MS,
 } from "./defaults";
 export { BoundedEvaluator } from "./evaluate";
+// The bounded wait for a paint drawn but not yet presented that finish() runs
+// before its final drain, for a driver that reads vitals itself.
+export {
+  awaitPendingPaint,
+  lightbringerAwaitPaint,
+  paintWaitRecord,
+  PAINT_WAIT_MAX_FRAMES,
+  PAINT_WAIT_TOTAL_FRAMES,
+  PAINT_WAIT_VITALS_FRAMES,
+  PAINT_WAIT_MAX_MS,
+} from "./paint-wait";
+export type {
+  AwaitPaintOptions,
+  PaintLcpImage,
+  PaintPending,
+  PaintWaitRecord,
+  PaintWaitResult,
+} from "./paint-wait";
 export { hostLocale } from "./locale";
 export type { EvaluateOutcome } from "./evaluate";
 export type { EnvSessionOptions } from "./config";

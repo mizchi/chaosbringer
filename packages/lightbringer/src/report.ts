@@ -230,6 +230,21 @@ export function logSummary(report: PerfReport, memGc: boolean = false): void {
       p.dim(`    ${report.documents.length} documents observed; vitals above are the last (${shortenUrl(report.url)})`),
     );
   }
+  // finish() waited for a paint the browser drew but had not presented, and
+  // frames stopped for longer than the wait: the vitals above miss it.
+  const pw = report.paintWait;
+  if (pw?.outcome === "timeout" && pw.stillPending && pw.stillPending.length > 0) {
+    const within = `within ${Math.round(pw.waitedMs)} ms (frames stopped)`;
+    const still = pw.stillPending;
+    if (still.includes("fcp") || still.includes("fcp-vital"))
+      lines.push(`  ${p.dim("vitals")} ${p.yellow(`FCP not presented ${within}`)}`);
+    if (still.includes("lcp-image"))
+      lines.push(
+        `  ${p.dim("vitals")} ${p.yellow(
+          `LCP may be under-read: ${pw.lcpImage ? shortenUrl(pw.lcpImage.url) : "a larger image"} loaded but was not presented ${within}`,
+        )}`,
+      );
+  }
   // LCP sub-parts (where the LCP time goes) + render-blocking resources behind it.
   const lcpAttr = v.LCP?.attribution as
     | {

@@ -609,7 +609,7 @@ tutorial; this is the lookup.
 | --- | --- |
 | `import { test, expect } from "lightbringer"` | extended Playwright fixture exposing **`perf`** (below) — you mark spans with `perf.measure`. Also re-exports everything in `lightbringer/core`. |
 | `import { test, expect } from "lightbringer/fixture"` | the same fixture on its own subpath. |
-| `import { … } from "lightbringer/core"` | the runner-agnostic core — `startSession`, `PerfController`, `buildReport`, `logSummary`, `checkBudgets`, `collectorInitScript`, `sessionOptionsFromEnv`, `withSpan` / `startSpan`, `toOtelSpans`, the median / gate / regress / drilldown functions, the report types — with **no `@playwright/test` import** (a plain `playwright` `Page` + `CDPSession` is enough; see [Core](#lightbringercore-no-test-runner)). |
+| `import { … } from "lightbringer/core"` | the runner-agnostic core — `startSession`, `PerfController`, `buildReport`, `logSummary`, `checkBudgets`, `collectorInitScript`, `sessionOptionsFromEnv`, `withSpan` / `startSpan`, `toOtelSpans`, `awaitPendingPaint`, the median / gate / regress / drilldown functions, the report types — with **no `@playwright/test` import** (a plain `playwright` `Page` + `CDPSession` is enough; see [Core](#lightbringercore-no-test-runner)). |
 | `import { test, expect } from "lightbringer/auto"` | same `test`, but every `page.goto` / Locator action becomes a span automatically — no `perf.measure` calls (see [Auto-span](#auto-span-measure-an-existing-spec-1-line-change)). |
 | `import { … } from "lightbringer/analyze"` | the pure CDP-event analysis layer — builder functions + fragment types, **no Playwright / fs dependency** (below). |
 | `npx lightbringer run <scenario.json \| spec.ts \| dir>` | the zero-install CLI (see [CLI](#cli-no-install-no-spec)). |
@@ -646,8 +646,28 @@ logSummary(report);
 `SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
 `coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`,
 `evaluateTimeoutMs`, `oopif` (count out-of-process iframes' network, default
-`true`). The fixture and CLI map the `PERF_*` env vars onto these
+`true`), `awaitPaint` (below, default `true`). The fixture and CLI map the `PERF_*` env vars onto these
 with `sessionOptionsFromEnv(env)` — the only place the environment is read.
+
+**A paint drawn but not yet presented.** Chromium reports FCP, and an image's
+LCP, only once the GPU process has presented the frame that drew it; the default
+settle (two animation frames) does not wait for that, so under a presentation
+stall the vitals were read with FCP missing or LCP on an earlier, smaller
+candidate. `finish()` first checks for such a paint — visible contentful
+content with no FCP yet, an FCP web-vitals has not delivered, or a visible image
+larger than the LCP candidate that loaded after it — and waits for it, bounded:
+5 frames at normal cadence, 8 in all, 1 s. Every span is closed by then, so no
+span's window or `durationMs` moves; only the vitals the final drain copies
+change. A page with nothing pending pays one quick in-page check. It is skipped
+when the last span's settle capped, when a read already timed out (the page
+cannot answer), and, for LCP, once the page received input (Chromium stops LCP
+there). When something was pending, `report.paintWait` records the wait
+(`outcome`: `reported`, `frames`, `timeout`, `hidden` or `error`; `pending`,
+`stillPending`, `waitedMs`, `frames`), and `logSummary` prints a line when frames
+stopped for longer than the wait (`FCP not presented within 1000 ms (frames
+stopped)`). `awaitPaint: false` opts out, for a driver that waits itself;
+`awaitPendingPaint(page, opts?)` is the same wait, exported for one. It only
+waits for the document the page is on at `finish()`.
 
 **Hung pages.** Every in-page read at a span boundary (`begin` / `end` / `drain`)
 and in `finish()` is bounded by `evaluateTimeoutMs` (default 5000 ms) and falls

@@ -4,6 +4,7 @@ import type { SpanNetwork, NetworkReport } from "./analyze/network";
 import type { SpanRender, SpanCpu } from "./analyze/render";
 import type { SpanMemory, MemoryTrend } from "./analyze/memory";
 import type { Coverage } from "./analyze/coverage";
+import type { PaintWaitRecord } from "./paint-wait";
 import type {
   VitalSample,
   SpanInteraction,
@@ -138,6 +139,14 @@ export interface PerfReport {
    * collectorInitScript() at context level before the fault's init script.
    */
   clockPatched?: boolean;
+  /**
+   * finish() found a contentful paint (or a larger image) the browser had
+   * drawn but not yet presented, and waited for it before its final drain, so
+   * `vitals` carry it. Present only when something was pending; `outcome`
+   * `reported` means it arrived, anything else that `stillPending` did not
+   * within the bound (`timeout`: frames stopped for longer than the cap).
+   */
+  paintWait?: PaintWaitRecord;
   /**
    * Per-document web-vitals, in navigation order — present only when more than
    * one document was observed (the top-level `vitals` are the last one's).

@@ -62,6 +62,17 @@ describe("BoundedEvaluator", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(await ev.attempt(() => 3)).toEqual({ kind: "ok", value: 3 });
   });
+
+  it("says it is stalled while an abandoned read pends, and not once it settles", async () => {
+    const h = hungPage();
+    const ev = new BoundedEvaluator(h.page, 30);
+    expect(ev.stalled).toBe(false);
+    expect((await ev.attempt(() => 1)).kind).toBe("timeout");
+    expect(ev.stalled).toBe(true);
+    h.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ev.stalled).toBe(false);
+  });
 });
 
 describe("PerfController on a hung page", () => {
