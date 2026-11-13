@@ -125,15 +125,32 @@ Per **span** (one `perf.measure(name, action)` region):
 
 All times are unified to epoch ms so spans correlate with network / CPU even
 across navigations. The in-page collector is **drained at every span boundary**
-(and, for a document that unloads mid-span, on `pagehide` through a CDP binding),
-so long tasks / LoAF / interactions / frames / app spans of documents you navigated
-away from stay in the report. `report.vitals` are the last document's; when a run
-visits more than one document, `report.documents[]` lists each one's
-`{ url, timeOrigin, vitals }`. A span that navigated carries `navigations`: how
-many of those documents started inside it (absent when none). Use it, not
-`memory.documentsDelta`, to tell a navigating step: under `PERF_MEM=1` the forced
-GC at span end collects the document left behind before the reading, so
-`documentsDelta` reads 0 on a navigation.
+and, once a session has installed its emit binding (it stays installed after
+`finish()`), whenever one of its observers reports an entry, through the CDP
+binding that also carries what a document unloading mid-span recorded, so long
+tasks / LoAF / interactions / frames / app spans of documents you navigated away
+from stay in the report. In-page code that wants this
+document's long tasks reads `window.__perf.longTaskLog` (the latest 10000, never
+drained) or `window.__perf.lastLongTaskEnd` (the latest end, never reset), not
+`longTasks`, which a session's emit binding keeps empty. `report.vitals` are the
+last document's; when a run visits more than one document, `report.documents[]`
+lists each one's `{ url, timeOrigin, vitals }`. A span that navigated carries
+`navigations`: how many of those documents started inside it (absent when none).
+Use it, not `memory.documentsDelta`, to tell a navigating step: under
+`PERF_MEM=1` the forced GC at span end collects the document left behind before
+the reading, so `documentsDelta` reads 0 on a navigation.
+
+> **Behaviour change:** the collector's store gained `longTaskLog` and
+> `lastLongTaskEnd`, which no drain touches. lightbringer's own reports do not
+> move: drains still move `longTasks` out, and node receives each long task
+> exactly once. chaosbringer's in-page TBT read and adaptive settle used to read
+> `longTasks`, which an open session empties as each task is observed, so under
+> `--perf` `metrics.tbt` read 0 and the settle ignored long tasks. They read the
+> new fields now: `tbt` is real with a session open, an adaptive span whose last
+> long task ends within the quiet window waits that window out, and a page whose
+> long tasks never leave one caps. Budgets and baselines emitted from such
+> crawls before the fix can shift on those steps
+> ([chaosbringer's note](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle)).
 
 ## CLI (no install, no spec)
 

@@ -84,9 +84,57 @@ describe("page-load LCP / TBT from the always-on collector", () => {
     const report = await crawlOne("/busy", { performanceBudget: { tbt: 50 } });
     const page = report.pages[0];
     expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
-    // 200 ms of blocking is 150 ms of TBT; far more means a task was counted twice.
-    expect(page.metrics?.tbt).toBeLessThan(1_000);
+    // 200 ms of blocking is 150 ms of TBT; 300 means a task was counted twice
+    // (e.g. read from both `longTasks` and `longTaskLog`, which hold the same tasks).
+    expect(page.metrics?.tbt).toBeLessThan(290);
     expect(budgetViolations(page)).toContain("perf-budget.tbt");
+  });
+
+  it("measures the same TBT with perf on, and the load span still gets the task", async () => {
+    // With perf on, the session's emit binding moves every long task out of
+    // the collector's `longTasks` as soon as it is observed; TBT reads the
+    // collector's `longTaskLog`, which no drain moves.
+    const report = await crawlOne("/busy", { perf: true, performanceBudget: { tbt: 50 } });
+    const page = report.pages[0];
+    expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
+    expect(page.metrics?.tbt).toBeLessThan(290);
+    expect(budgetViolations(page)).toContain("perf-budget.tbt");
+    // Node-side delivery is unchanged: the task reached the load span once.
+    expect(page.perf?.cpu.longTaskCount).toBe(1);
+  });
+
+  it("measures TBT with perf on under a +1 h clock-skew fault", async () => {
+    const report = await crawlOne("/busy", {
+      perf: true,
+      runtimeFaults: [{ action: { kind: "clock-skew", skewMs: SKEW_MS } }],
+    });
+    const page = report.pages[0];
+    expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
+    expect(page.metrics?.tbt).toBeLessThan(290);
+    expect(page.perf?.cpu.longTaskCount).toBe(1);
+  });
+
+  it("measures TBT with perf on, on a caller-owned page", async () => {
+    // No context-level collector here: the one the perf session installs on
+    // the page is the one whose `longTasks` its binding drains.
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const crawler = new ChaosCrawler({
+        baseUrl: origin,
+        maxActionsPerPage: 0,
+        headless: true,
+        timeout: 10_000,
+        logLevel: "error",
+        perf: true,
+      });
+      const result = await crawler.testPage(page, `${origin}/busy`);
+      expect(result.metrics?.tbt).toBeGreaterThanOrEqual(100);
+      expect(result.metrics?.tbt).toBeLessThan(290);
+      expect(result.perf?.cpu.longTaskCount).toBe(1);
+    } finally {
+      await browser.close();
+    }
   });
 
   it("measures LCP on a page with visible content, and an lcp budget fires", async () => {

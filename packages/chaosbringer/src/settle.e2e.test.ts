@@ -3,7 +3,7 @@ import { startFixtureServer } from "../fixtures/site/server.js";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { faults } from "./faults.js";
-import type { CrawlerOptions, CrawlReport } from "./types.js";
+import type { CrawlerOptions, CrawlReport, Invariant } from "./types.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
 /**
@@ -16,6 +16,11 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * `/hang`: clicking "Hang" fetches `/api/never`, which the server never
  * answers; "Noop" does nothing. Clicking "Hang" through a `hang` fault
  * instead parks the route in the crawler's held-route registry.
+ *
+ * `/busy`, `/midsettle` and `/chain` hold the settle open with long tasks
+ * alone, each run with perf off and on: with perf on, the session's emit
+ * binding moves every task out of the collector's `longTasks` as soon as it
+ * is observed, and the long-task gate used to read that array.
  *
  * Timing assertions are lower bounds from fixed wall-clock work (the server's
  * delay, the cap), never tight upper bounds: this suite runs on loaded CI.
@@ -45,6 +50,56 @@ const HANG_PAGE = `<!doctype html><title>hang</title><body>
   </script>
 </body>`;
 
+/** A 70 ms long task every 90 ms, forever: the main thread never goes quiet. */
+const BUSY_PAGE = `<!doctype html><title>busy</title><body>
+  <h1>Always busy</h1>
+  <script>
+    setInterval(() => { const t0 = performance.now(); while (performance.now() - t0 < 70) {} }, 90);
+  </script>
+</body>`;
+
+/**
+ * After load, a request answering 100 ms later, and a 70 ms long task 120 ms
+ * after load: the task ends while the settle waits out the network quiet
+ * window, so only the long-task gate keeps the settle open past it.
+ */
+const MIDSETTLE_PAGE = `<!doctype html><title>midsettle</title><body>
+  <h1>A heading large enough to be the LCP element</h1>
+  <script>
+    addEventListener("load", () => {
+      fetch("/api/slow?ms=100").then((r) => r.text());
+      setTimeout(() => { const t0 = performance.now(); while (performance.now() - t0 < 70) {} window.__taskEnd = performance.now(); }, 120);
+    });
+  </script>
+</body>`;
+
+/** "Run work" runs a 60 ms task, then 40 ms later a 120 ms one: a gap shorter than the quiet window. */
+const CHAIN_PAGE = `<!doctype html><title>chain</title><body>
+  <button id="run">Run work</button>
+  <script>
+    document.getElementById("run").addEventListener("click", () => {
+      let t0 = performance.now(); while (performance.now() - t0 < 60) {}
+      setTimeout(() => { const t1 = performance.now(); while (performance.now() - t1 < 120) {} window.__taskEnd = performance.now(); }, 40);
+    });
+  </script>
+</body>`;
+
+/**
+ * An invariant that records how long after the page's last long task
+ * (`window.__taskEnd`) it ran. `afterLoad` invariants run once the load has
+ * settled, `afterActions` once the last action has.
+ */
+function gapSince(when: "afterLoad" | "afterActions", gaps: number[]): Invariant {
+  return {
+    name: "gap",
+    when,
+    async check({ page }) {
+      gaps.push(await page.evaluate(() => performance.now() - (window as unknown as { __taskEnd: number }).__taskEnd));
+      return true;
+    },
+  };
+}
+
 /** Click the candidates whose description contains each text, in order; record what step N saw. */
 function clickInOrder(texts: string[], seen: string[][]): Driver {
   return {
@@ -68,9 +123,10 @@ describe("adaptive settle (e2e)", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
-      if (url.pathname === "/xhr" || url.pathname === "/hang") {
+      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE };
+      if (pages[url.pathname]) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
-        res.end(url.pathname === "/xhr" ? XHR_PAGE : HANG_PAGE);
+        res.end(pages[url.pathname]);
         return;
       }
       if (url.pathname === "/api/slow") {
@@ -126,6 +182,48 @@ describe("adaptive settle (e2e)", () => {
     // Recorded in the report (B5): `perf regress` refuses to compare these
     // spans with a networkidle crawl's, whose action spans exclude the settle.
     expect(report.perf?.settle).toEqual({ mode: "adaptive", quietMs: 100 });
+  }, 60_000);
+
+  it.each([false, true])("adaptive: back-to-back long tasks cap the load (perf %s)", async (perf) => {
+    // The long-task gate reads the collector's `lastLongTaskEnd`. With perf on,
+    // the session's emit binding empties `longTasks` at every observer
+    // callback, so a gate reading that saw no task and settled at once.
+    const report = await crawl("/busy", { settle: "adaptive", perf, maxActionsPerPage: 0, timeout: 3_000 });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(1);
+    // The capped settle is part of the load, so TBT counts its tasks too.
+    expect(page.metrics?.tbt).toBeGreaterThan(200);
+    if (perf) expect(page.perf!.capped).toBe(true);
+  }, 60_000);
+
+  it.each([false, true])("adaptive: the load waits out the quiet window after a long task that ends mid-settle (perf %s)", async (perf) => {
+    const gaps: number[] = [];
+    const report = await crawl("/midsettle", { settle: "adaptive", perf, maxActionsPerPage: 0, invariants: [gapSince("afterLoad", gaps)] });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(0);
+    // The settle ended at least the quiet window (100 ms) after the task.
+    expect(gaps[0]).toBeGreaterThanOrEqual(95);
+    expect(page.metrics?.tbt).toBeGreaterThan(0);
+    if (perf) expect(page.perf!.cpu.longTaskCount).toBe(1);
+  }, 60_000);
+
+  it.each([false, true])("adaptive: a click's span holds both of its chained long tasks (perf %s)", async (perf) => {
+    const gaps: number[] = [];
+    const report = await crawl("/chain", {
+      settle: "adaptive",
+      perf,
+      maxActionsPerPage: 1,
+      driver: clickInOrder(["Run work"], []),
+      invariants: [gapSince("afterActions", gaps)],
+    });
+    const click = report.actions[0]!;
+    expect(click.success).toBe(true);
+    expect(gaps[0]).toBeGreaterThanOrEqual(95);
+    if (perf) {
+      expect(click.perf!.cpu.longTaskCount).toBe(2);
+      expect(click.perf!.cpu.blockingMs).toBeGreaterThanOrEqual(170);
+      expect(click.perf!.capped).toBe(false);
+    }
   }, 60_000);
 
   it("networkidle (default): the post-click wait does not wait for the XHR", async () => {

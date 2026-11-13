@@ -30,7 +30,9 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
    slow interactions, forced layouts, style recalculation, DOM size,
    request fan-out, waterfalls, heavy pages, images and compression, memory
    that climbs, and unused JS. It settles adaptively, so a page that never
-   goes quiet (polling, a rAF loop) is counted rather than timing out.
+   goes quiet (polling, a rAF loop, long tasks less than 100 ms apart) is
+   counted rather than timing out; such a page's load waits out the crawl
+   `timeout` (30 s by default) before it is counted.
 2. **Endpoint discovery.** Every same-site `fetch` / XHR request the clean
    crawl saw is folded into an endpoint (`/api/items/42` →
    `/api/items/:id`). Third-party requests are left out: whether a

@@ -20,14 +20,16 @@ import type { PerformanceMetrics } from "./types.js";
  *     TBT stops at Time to Interactive; the crawler has no TTI, so this is
  *     "FCP to the end of load" — an approximation, and documented as one.
  *
- * The collector is read without draining it: entries stay in the store for
- * a perf session that drains them later. `flush()` first moves observer
- * records the browser has queued but not yet delivered, so a long task at
- * the very end of the load is not missed.
+ * The collector is read without draining it. Long tasks come from its
+ * `longTaskLog`, which no drain moves. With perf on, the perf session's emit
+ * binding moves each task out of `longTasks` as soon as the observer reports
+ * it, so `longTasks` alone read TBT 0. `flush()` first moves observer records
+ * the browser has queued but not yet delivered, so a long task at the very
+ * end of the load is not missed.
  *
  * A page without the collector — a caller-owned page on the `testPage()`
- * path, or `setContent` — keeps today's four fields and leaves `lcp` and
- * `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
+ * path with perf off, or `setContent` — keeps today's four fields and leaves
+ * `lcp` and `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
  * "measured, and fast".
  */
 export async function collectLoadMetrics(page: Page): Promise<PerformanceMetrics> {
@@ -69,9 +71,10 @@ export interface LoadPaintHint {
 export interface LoadMetricsRead {
   metrics: PerformanceMetrics;
   /**
-   * The long tasks TBT was computed from, so a later read that finds the FCP
-   * this one missed recomputes TBT from the same tasks: closing the load span
-   * drains the store, so they cannot be read again. Null without the collector.
+   * The long tasks TBT was computed from (the document's log at the read), so
+   * a later read that finds the FCP this one missed recomputes TBT from the
+   * same tasks, and not from tasks that ran after the load. Null without the
+   * collector.
    */
   longTasks: LoadLongTask[] | null;
   /** Null when the read failed. */
@@ -133,12 +136,14 @@ function chaosbringerLoadMetrics(): Omit<LoadMetricsRead, "paint"> & { paint: Lo
   // document's timeline, so a clock-skew fault cannot shift one
   // against the other.
   const from = fcp?.startTime ?? 0;
+  // A collector older than `longTaskLog` has only the drained `longTasks`.
+  const tasks = store.longTaskLog ?? store.longTasks;
   let tbt = 0;
-  for (const task of store.longTasks) {
+  for (const task of tasks) {
     if (task.start >= from) tbt += Math.max(0, task.duration - 50);
   }
   out.tbt = tbt;
-  return { metrics: out, longTasks: store.longTasks.map((t) => ({ start: t.start, duration: t.duration })), paint };
+  return { metrics: out, longTasks: tasks.map((t) => ({ start: t.start, duration: t.duration })), paint };
 }
 
 /** `collectLoadMetrics`, with the long tasks and the paint hint. Never throws. */
