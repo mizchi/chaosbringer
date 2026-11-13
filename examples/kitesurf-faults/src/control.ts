@@ -48,6 +48,7 @@ export function snapshot(entry: RunEntry<FaultEgressSession>) {
     runId: entry.id,
     createdAt: entry.createdAt,
     disposed: entry.disposed,
+    connected: entry.connected,
     stats: entry.session.stats(),
     upstream: { ...entry.upstream },
     inFlight: entry.inFlight,

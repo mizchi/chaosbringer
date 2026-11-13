@@ -35,6 +35,12 @@ export interface RunEntry<S> {
   readonly createdAt: number;
   session: S;
   disposed: boolean;
+  /**
+   * A CDP connection has been accepted for this run. Never cleared: a run
+   * belongs to one connection for its whole life, so a second socket, or a
+   * reconnect after the first one closed, cannot share its counters and RNG.
+   */
+  connected: boolean;
   /** Calls that reached the fixture server, by pathname, counted before any await. */
   upstream: Record<string, number>;
   /** ChaosEgress calls not yet settled. Must be 0 once a run is torn down. */
@@ -49,6 +55,8 @@ export interface RunEntry<S> {
 export type CreateResult<S> =
   | { ok: true; entry: RunEntry<S> }
   | { ok: false; status: 400 | 409 | 429; error: string };
+
+export type ConnectResult<S> = { ok: true; entry: RunEntry<S> } | { ok: false; status: 409; error: string };
 
 export interface RegistryOptions {
   maxRuns?: number;
@@ -86,6 +94,7 @@ export class RunRegistry<S extends { dispose(): Promise<void> }> {
       id,
       createdAt: this.#now(),
       disposed: false,
+      connected: false,
       upstream: {},
       inFlight: 0,
       disposedInFlight: 0,
@@ -106,6 +115,19 @@ export class RunRegistry<S extends { dispose(): Promise<void> }> {
 
   get(id: string): RunEntry<S> | undefined {
     return this.#runs.get(id);
+  }
+
+  /**
+   * Bind a new CDP connection to run `id`, at the WebSocket upgrade. A run
+   * that is unknown or disposed is run-lost; one that already has a
+   * connection is refused, so run and connection stay one to one.
+   */
+  connect(id: string): ConnectResult<S> {
+    const entry = this.#runs.get(id);
+    if (!entry || entry.disposed) return { ok: false, status: 409, error: `run-lost: ${id}` };
+    if (entry.connected) return { ok: false, status: 409, error: `run ${id} already has a connection` };
+    entry.connected = true;
+    return { ok: true, entry };
   }
 
   /** Dispose the run's session once; the entry stays readable for its stats. */

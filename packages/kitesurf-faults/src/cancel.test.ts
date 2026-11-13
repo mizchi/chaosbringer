@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { inFlightCount } from "./egress.js";
 import { createFaultEgress, KitesurfFaultsError, type FaultRule } from "./index.js";
 
 // Waits are driven by fake timers only: a delay test that sleeps for real is
@@ -231,5 +232,85 @@ describe("dispose()", () => {
     const boom = new TypeError("upstream down");
     const session = createFaultEgress({ fetch: async () => Promise.reject(boom) }, { seed: 1, rules: [] });
     await expect(session.fetch(new Request(CART))).rejects.toBe(boom);
+  });
+});
+
+// The session's own bookkeeping: one AbortController per wait or upstream
+// call, held only while that call is pending. Timers and listeners on the
+// caller's signal are checked above; these check that nothing stays in the
+// session's set either, which no caller-visible behaviour would show until
+// a long-lived run had piled them up.
+describe("in-flight bookkeeping", () => {
+  it("is empty again after a delay that ran to the end", async () => {
+    const up = recordingUpstream();
+    const session = createFaultEgress(up, { seed: 1, rules: [delay(100)] });
+    const res = track(session.fetch(new Request(CART)));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(inFlightCount(session)).toBe(1);
+    await vi.advanceTimersByTimeAsync(90);
+    expect(res.done).toBe(true);
+    expect(inFlightCount(session)).toBe(0);
+  });
+
+  it("is empty again after the caller aborts a wait", async () => {
+    const session = createFaultEgress(recordingUpstream(), { seed: 1, rules: [delay(1000)] });
+    const ctl = new AbortController();
+    const res = track(session.fetch(new Request(CART, { signal: ctl.signal })));
+    await vi.advanceTimersByTimeAsync(10);
+    ctl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(res.done).toBe(true);
+    expect(inFlightCount(session)).toBe(0);
+  });
+
+  it("is empty after dispose with a wait and an upstream call pending", async () => {
+    const up = { fetch: vi.fn(() => new Promise<Response>(() => {})) };
+    const session = createFaultEgress(up, { seed: 1, rules: [delay(1000)] });
+    track(session.fetch(new Request(CART)));
+    track(session.fetch(new Request("https://shop.invalid/other")));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inFlightCount(session)).toBe(2);
+    await session.dispose();
+    expect(inFlightCount(session)).toBe(0);
+  });
+
+  it("is empty again when upstream throws instead of rejecting", async () => {
+    const sync = new Error("sync");
+    const session = createFaultEgress(
+      {
+        fetch: () => {
+          throw sync;
+        },
+      },
+      { seed: 1, rules: [] },
+    );
+    await expect(session.fetch(new Request(CART))).rejects.toBe(sync);
+    expect(inFlightCount(session)).toBe(0);
+  });
+
+  it("is empty again when the request cannot be rebuilt for upstream", async () => {
+    const up = recordingUpstream();
+    const session = createFaultEgress(up, { seed: 1, rules: [] });
+    // A Request whose body was already read cannot be copied into a new one.
+    const used = new Request(CART, { method: "POST", body: "x" });
+    await used.text();
+    await expect(session.fetch(used)).rejects.toBeInstanceOf(TypeError);
+    expect(up.fetch).not.toHaveBeenCalled();
+    expect(inFlightCount(session)).toBe(0);
+  });
+
+  it("reports a synchronous throw during dispose as disposed, like an async one", async () => {
+    let session!: ReturnType<typeof createFaultEgress>;
+    session = createFaultEgress(
+      {
+        fetch: () => {
+          void session.dispose();
+          throw new Error("sync");
+        },
+      },
+      { seed: 1, rules: [] },
+    );
+    await expect(session.fetch(new Request(CART))).rejects.toMatchObject({ code: "disposed" });
+    expect(inFlightCount(session)).toBe(0);
   });
 });

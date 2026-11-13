@@ -16,9 +16,11 @@ They are published by `.github/workflows/publish.yml` with npm OIDC
 is stored anywhere, and every version carries provenance.
 
 `@mizchi/kitesurf-faults` (`packages/kitesurf-faults/`) is experimental and not on
-npm yet. Its package.json is not `private`, so `pending-publishes.mjs` lists it
-as soon as it reaches main: decide on its first release (or mark it `private`)
-before that merge.
+npm yet. Its package.json is `private`, so `pending-publishes.mjs` skips it and
+no merge to main publishes it. To cut its first release: remove `private`, set
+the version to release, and raise `@mizchi/playwright-faults` first if it has
+changed since its last tag (`check-publish-deps.mjs` refuses otherwise, since
+kitesurf-faults imports its `./network` entry).
 
 ## Cutting a release
 

@@ -8,7 +8,8 @@
 // could not do one of those fails the scenario (統計欠落 / 未完了の後始末).
 //
 // S2 and S3 are expected to FAIL the oracle; they pass as scenarios only when
-// the oracle rejects them for the expected reason.
+// the oracle rejects them for the expected reason and the run shows the facts
+// behind that reason (BROKEN_OWN, MISSING_URL_OWN).
 
 import { evaluate } from "../src/oracle.ts";
 import { connect, upgradeStatus } from "./cdp-client.mjs";
@@ -24,11 +25,50 @@ const CART_RULE = {
   schedule: { decisions: ["inject"] },
 };
 
-const cartExpect = (page) => ({
+export const cartExpect = (page) => ({
   dom: { attempts: "503,200", result: "ok:3" },
   stats: [{ rule: "cart-503-once", matched: 2, injected: 1 }],
   upstream: { "/api/cart": 1, [page]: 1 },
 });
+
+// What an expected failure must also show on its own, so it fails for the
+// reason its scenario names and not for some other one. A broken page whose
+// rule never fired still differs from the correct page's DOM, and lost stats
+// add a code rather than replace one, so the oracle's code alone proves little.
+
+/** S2: the broken page saw the injected 503, gave up, and never asked again. */
+export const BROKEN_OWN = {
+  dom: { attempts: "503", result: "failed" },
+  stats: [{ rule: "cart-503-once", matched: 1, injected: 1 }],
+  upstream: { "/api/cart": 0, "/broken/": 1 },
+};
+
+/** S3: the rule never matched, and the page loaded the cart normally. */
+export const MISSING_URL_OWN = {
+  dom: { attempts: "200", result: "ok:3" },
+  stats: [{ rule: "cart-503-once", matched: 0, injected: 0 }],
+  upstream: { "/api/cart": 1, "/correct/": 1 },
+};
+
+/**
+ * Judge with the oracle. Without `expected`, the oracle must pass. With
+ * `{code, own}`, it must fail with `code`, and the run must meet `own`, the
+ * facts that show why it failed.
+ */
+export const judge = (input, expected) => {
+  const verdict = evaluate(input);
+  const codes = [...new Set(verdict.reasons.map((r) => r.code))];
+  const result = verdict.ok ? "pass" : `fail:${codes.join("+")}`;
+  if (!expected) return { expected: "pass", result, matched: verdict.ok, reasons: verdict.reasons };
+  const own = evaluate({ ...input, expect: expected.own });
+  return {
+    expected: `fail:${expected.code}`,
+    result,
+    matched: !verdict.ok && codes.includes(expected.code) && own.ok,
+    reasons: verdict.reasons,
+    ownReasons: own.reasons,
+  };
+};
 
 export async function runChecks({ base, token, log = (...a) => console.error("[checks]", ...a) }) {
   const wsBase = base.replace(/^http/, "ws");
@@ -155,15 +195,6 @@ export async function runChecks({ base, token, log = (...a) => console.error("[c
     return record;
   }
 
-  /** Judge with the oracle; `expectedCode` set means the oracle must fail with it. */
-  const judge = (input, expectedCode) => {
-    const verdict = evaluate(input);
-    const codes = [...new Set(verdict.reasons.map((r) => r.code))];
-    const result = verdict.ok ? "pass" : `fail:${codes.join("+")}`;
-    if (!expectedCode) return { expected: "pass", result, matched: verdict.ok, reasons: verdict.reasons };
-    return { expected: `fail:${expectedCode}`, result, matched: !verdict.ok && codes.includes(expectedCode), reasons: verdict.reasons };
-  };
-
   // S1: the issue's first example.
   await scenario("S1 correct-recovers", async (own) => {
     await createRun("r-correct", [CART_RULE]);
@@ -182,7 +213,7 @@ export async function runChecks({ base, token, log = (...a) => console.error("[c
     const { dom } = await loadCart(cdp, sessionId, "/broken/");
     const s = await stats("r-broken");
     return {
-      ...judge({ dom, stats: s?.stats, upstream: s?.upstream, expect: cartExpect("/broken/") }, "dom-mismatch"),
+      ...judge({ dom, stats: s?.stats, upstream: s?.upstream, expect: cartExpect("/broken/") }, { code: "dom-mismatch", own: BROKEN_OWN }),
       dom,
       stats: s?.stats,
       upstream: s?.upstream,
@@ -198,7 +229,7 @@ export async function runChecks({ base, token, log = (...a) => console.error("[c
     const { dom } = await loadCart(cdp, sessionId, "/correct/");
     const s = await stats("r-missing");
     return {
-      ...judge({ dom, stats: s?.stats, upstream: s?.upstream, expect: cartExpect("/correct/") }, "not-injected"),
+      ...judge({ dom, stats: s?.stats, upstream: s?.upstream, expect: cartExpect("/correct/") }, { code: "not-injected", own: MISSING_URL_OWN }),
       dom,
       stats: s?.stats,
       upstream: s?.upstream,
@@ -215,14 +246,23 @@ export async function runChecks({ base, token, log = (...a) => console.error("[c
     own("r-b", b.cdp);
     const [la, lb] = await Promise.all([loadCart(a.cdp, a.sessionId, "/correct/"), loadCart(b.cdp, b.sessionId, "/correct/")]);
     const [sa, sb] = await Promise.all([stats("r-a"), stats("r-b")]);
+    // A run has one connection for its life: a second socket on a live run
+    // would share its counters and RNG, so the upgrade itself is refused.
+    const secondConnection = await upgradeStatus(`${base}/devtools/browser?run=r-b`);
+    const sbAfter = await stats("r-b");
+    const secondReasons = [];
+    if (secondConnection !== 409) secondReasons.push(`second connection on live r-b: ${secondConnection}, expected 409`);
+    if (JSON.stringify(sbAfter?.stats) !== JSON.stringify(sb?.stats)) secondReasons.push(`r-b stats moved after the refused connection: ${JSON.stringify(sbAfter?.stats)}`);
+    scenarios.push({ name: "S8c second-connection-refused", ok: secondReasons.length === 0, durationMs: 0, expected: "pass", result: secondReasons.length ? "fail" : "pass", matched: secondReasons.length === 0, reasons: secondReasons, secondConnection, note: "runs inside S4's r-b; teardown is S4's" });
+    log(`${secondReasons.length ? "FAIL" : "ok  "} S8c second-connection-refused ${JSON.stringify({ secondConnection })}`);
     const ja = judge({ dom: la.dom, stats: sa?.stats, upstream: sa?.upstream, expect: cartExpect("/correct/") });
     const jb = judge({ dom: lb.dom, stats: sb?.stats, upstream: sb?.upstream, expect: cartExpect("/correct/") });
     s5Page = a;
     return {
       expected: "pass",
-      result: ja.matched && jb.matched ? "pass" : "fail",
-      matched: ja.matched && jb.matched,
-      reasons: [...ja.reasons.map((r) => ({ run: "r-a", ...r })), ...jb.reasons.map((r) => ({ run: "r-b", ...r }))],
+      result: ja.matched && jb.matched && secondReasons.length === 0 ? "pass" : "fail",
+      matched: ja.matched && jb.matched && secondReasons.length === 0,
+      reasons: [...ja.reasons.map((r) => ({ run: "r-a", ...r })), ...jb.reasons.map((r) => ({ run: "r-b", ...r })), ...secondReasons],
       dom: { "r-a": la.dom, "r-b": lb.dom },
       stats: { "r-a": sa?.stats, "r-b": sb?.stats },
       upstream: { "r-a": sa?.upstream, "r-b": sb?.upstream },

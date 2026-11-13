@@ -1,6 +1,7 @@
 {
   "name": "@mizchi/kitesurf-faults",
   "version": "0.0.0",
+  "private": true,
   "description": "Run chaosbringer FaultRules on a fetch(request) transport such as Kitesurf's EngineHost.egress: HTTP error responses, failed requests and bounded delays.",
   "license": "MIT",
   "author": "mizchi",

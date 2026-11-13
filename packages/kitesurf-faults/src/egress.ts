@@ -32,6 +32,16 @@ const disposedError = () =>
 const abortReason = (signal: AbortSignal): unknown =>
   signal.reason ?? new DOMException("The request was aborted", "AbortError");
 
+// Test-only view of each session's in-flight set, kept off the session object
+// and out of index.ts so it is not part of the public API. A controller left
+// in the set is invisible to callers until a long-lived run has piled them up.
+const inFlightOf = new WeakMap<FaultEgressSession, Set<AbortController>>();
+
+/** @internal Pending waits and upstream calls of `session`. */
+export function inFlightCount(session: FaultEgressSession): number {
+  return inFlightOf.get(session)?.size ?? 0;
+}
+
 /**
  * Wrap `upstream` so the rules in `options` decide what each request gets.
  *
@@ -59,13 +69,23 @@ export function createFaultEgress(upstream: FetchTransport, options: FaultEgress
   function forward(request: Request): Promise<Response> {
     const call = new AbortController();
     inFlight.add(call);
-    const signal = request.signal ? AbortSignal.any([request.signal, call.signal]) : call.signal;
-    // A new Request only to attach the signal: URL, method, headers, body,
-    // credentials and redirect are carried over from the original.
-    const forwarded = new Request(request, { signal });
+    let pending: Promise<Response>;
+    try {
+      const signal = request.signal ? AbortSignal.any([request.signal, call.signal]) : call.signal;
+      // A new Request only to attach the signal: URL, method, headers, body,
+      // credentials and redirect are carried over from the original.
+      const forwarded = new Request(request, { signal });
+      pending = upstream.fetch(forwarded);
+    } catch (error) {
+      // A synchronous throw (a Request whose body was already used, or an
+      // upstream `fetch` that throws instead of rejecting) never reaches the
+      // callbacks below, so the controller has to leave the set here.
+      inFlight.delete(call);
+      return Promise.reject(disposed ? disposedError() : error);
+    }
     // Settled in the callbacks themselves, not in a `finally`: workerd can
     // cancel a call's context without running anything after the await.
-    return upstream.fetch(forwarded).then(
+    return pending.then(
       (res) => {
         inFlight.delete(call);
         if (disposed) {
@@ -109,7 +129,7 @@ export function createFaultEgress(upstream: FetchTransport, options: FaultEgress
     });
   }
 
-  return {
+  const session: FaultEgressSession = {
     // `async`, but nothing before the first `await` is: the rule is picked and
     // the counters advanced at call time, so concurrent requests take their
     // occurrence numbers in arrival order whatever their delays.
@@ -156,4 +176,6 @@ export function createFaultEgress(upstream: FetchTransport, options: FaultEgress
       inFlight.clear();
     },
   };
+  inFlightOf.set(session, inFlight);
+  return session;
 }

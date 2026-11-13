@@ -240,7 +240,7 @@ Kitesurf の `Performance / Tracing` は未実装で、PerformanceObserver も�
 7. 利用者のレビュー前に deploy・publish・PR 作成は行わない。実装と検証の結果を、レビューできる差分と実行記録として残す。
 ## 差分（2026-11-13）
 
-上の本文は Issue #216 の本文をそのまま写したものです（「状態: 実装待ち」も当時の記述のままです）。実装は作業ブランチ `kitesurf-faults` の5コミットで行いました。本文と実装が違う点、本文に書かれていなかった判断を、ここに理由と影響する受け入れ条件とともに記録します。
+上の本文は Issue #216 の本文をそのまま写したものです（「状態: 実装待ち」も当時の記述のままです）。実装は作業ブランチ `kitesurf-faults` の5コミットと、レビュー修正の1コミットで行いました。本文と実装が違う点、本文に書かれていなかった判断を、ここに理由と影響する受け入れ条件とともに記録します。
 
 証拠に挙げる `result-default.json`・`result-reqsignal.json`・`result-ctl.json`・`wrangler-*.log` は、実装前の接続検証（spike、リポジトリ外の作業記録）の成果物です。`kitesurf-integration.json` は統合テストの成果物で、`examples/kitesurf-faults/artifacts/` に書かれます（git 管理外）。
 
@@ -407,8 +407,30 @@ Kitesurf の `Performance / Tracing` は未実装で、PerformanceObserver も�
 
 35. **publish への影響**
     - 何が違うか: 本文は npm publish を範囲外としています。新パッケージの `package.json` は `private` ではなく version は `0.0.0` なので、main に入ると `publish.yml`（`packages/*/package.json` の変更で起動）の `pending-publishes.mjs` が公開対象に挙げます。
-    - 判断: この作業では変更せず、`docs/RELEASING.md` に「main に入れる前に初回リリースを決めるか `private` にする」と書きました。マージ前にレビューで決める必要があります。
-    - 影響する受け入れ条件: なし（実装完了条件の外。マージ時の注意点）。
+    - 判断: レビュー修正で `"private": true` を付けました（差分36）。`pending-publishes.mjs` は private のパッケージを飛ばすので、main に入っても公開されません。`docs/RELEASING.md` には初回リリースの手順（`private` を外し、先に `@mizchi/playwright-faults` を上げる）を書きました。
+    - 影響する受け入れ条件: なし（実装完了条件の外）。
+
+### レビュー修正
+
+36. **新パッケージは `private`**
+    - 何が違うか: 差分35の時点では `private` を付けず、RELEASING.md の注意書きだけでした。そのままだと main への merge で `publish.yml` が `@mizchi/kitesurf-faults@0.0.0` を公開対象に挙げ、`check-publish-deps.mjs` が拒否して publish ジョブが失敗します。後で `@mizchi/playwright-faults` の version が上がると、誰も決めないまま公開されます。本文は npm publish を範囲外とし、引き継ぎ7はレビュー前の公開を禁じています。
+    - 判断: `packages/kitesurf-faults/package.json` に `"private": true` を付けました。version は `0.0.0` のままです。`check-engines.mjs` の対象（公開パッケージ）からも外れます。
+    - 影響する受け入れ条件: なし（範囲外の npm publish を機械的に防ぐため）。
+
+37. **run と CDP 接続を1対1にする（S8c、新規シナリオ）**
+    - 何が違うか: 以前のホストは、run が存在して dispose されていなければ、同じ `?run=<id>` への upgrade を何度でも受け付けていました。2本目の接続の egress は同じ registry の行と同じセッションを引くので、カウンターと RNG を共有します。本文の「状態の寿命」4 に反します。
+    - 判断: `RunRegistry.connect(id)` を追加し、upgrade の時点で行に `connected` を立てます。2本目の upgrade は409（`run <id> already has a connection`）で拒否します。`connected` は戻しません。最初のソケットが閉じた後の再接続も、前の接続のカウンターを引き継がないよう409にしています。統合では S4 の中で live な r-b に2本目の upgrade を送り、409 と r-b の stats が動かないことを確認します（S8c）。
+    - 影響する受け入れ条件: 「同時に二つの run を起動しても…」、状態の寿命 4。
+
+38. **S2・S3 は失敗の理由そのものも確かめる**
+    - 何が違うか: 以前の判定は「oracle が失敗し、その理由コードに期待のコードが含まれる」だけでした。S2 では、ルールが発火しなくても壊れた fixture は `200`・`ok:3` を出して正しい fixture の DOM と食い違い、stats が欠けてもコードが1つ増えるだけなので、どちらでも S2 は pass になっていました。
+    - 判断: 期待失敗のシナリオは、それぞれの run が自分の事実を満たすことも要求します。S2 は attempts `503`・`failed`・matched 1 / injected 1・上流 `/api/cart` 0回・`/broken/` 1回（`BROKEN_OWN`）、S3 は attempts `200`・`ok:3`・matched 0 / injected 0・上流 `/api/cart` 1回（`MISSING_URL_OWN`）です。`judge` を `scripts/checks.mjs` の top level に出し、`scripts/checks.test.ts` で、ルール不発・stats 欠落・上流呼び出しのある場合に一致しないことを単体テストしています。
+    - 影響する受け入れ条件: 「壊れた fixture が同じ oracle で失敗する」「存在しない URL のルールは未注入として失敗する」。
+
+39. **セッションの in-flight 集合が空に戻ることをテストする**
+    - 何が違うか: `forward()` は `inFlight.add` の後の `new Request(...)` と `upstream.fetch(...)` が同期的に throw すると、controller を集合から外していませんでした（使用済み body の Request、reject せず throw する upstream）。また、`wait()` の settle から `inFlight.delete` を消しても単体テストはすべて通っていました。
+    - 判断: `forward()` の同期部分を try/catch で囲み、throw したら集合から外して reject します（dispose 後なら `disposed`）。集合の大きさは `src/egress.ts` の `inFlightCount(session)` で読めます。WeakMap 経由で、セッションのオブジェクトにも `index.ts` にも出していないので、公開 API ではありません。`cancel.test.ts` で、遅延の完了後・呼び出し側の中断後・dispose 後・同期 throw の後に0になることを確かめています。
+    - 影響する受け入れ条件: 「待機中の abort・dispose で…timer と listener が残らない」。
 
 ## 接続検証の結果
 
@@ -433,18 +455,19 @@ Kitesurf の `Performance / Tracing` は未実装で、PerformanceObserver も�
 
 ### 統合テスト（`KITESURF_DIR=... just kitesurf-faults-integration`）
 
-12件のシナリオがすべて期待どおりで、log gate も問題なし、所要時間は約22秒でした。
+13件のシナリオがすべて期待どおりで、log gate も問題なし、所要時間は約22秒でした（レビュー修正後の再実行）。
 
 | シナリオ | 期待 | 結果 |
 | --- | --- | --- |
 | S1 正しい fixture | pass | attempts `503,200`・`ok:3`、matched=2 / injected=1、上流の `/api/cart` 1回 |
-| S2 壊れた fixture | 同じ oracle で失敗 | dom-mismatch（`failed`、attempts `503`）、stats・上流回数も不一致 |
-| S3 存在しない URL のルール | 未注入として失敗 | not-injected |
+| S2 壊れた fixture | 同じ oracle で失敗 | dom-mismatch（`failed`、attempts `503`）、stats・上流回数も不一致。run 自身は injected=1・上流の `/api/cart` 0回（差分38） |
+| S3 存在しない URL のルール | 未注入として失敗 | not-injected。run 自身は matched=0・上流の `/api/cart` 1回（差分38） |
 | S4 同時2 run | pass | 両方の初回が503、両方 matched=2 / injected=1 |
 | S5 再ナビゲーションと経路 | pass | 同じ run で matched=4 / injected=1、WebSocket `msg:echo:ping`、dedicated worker が `/api/from-worker` に到達 |
 | S6 abort 障害 | pass | ページは `rejected TypeError`、上流0回、injected=1 |
 | S7 URL フィルター | pass | 451、matched=0、上流0回、次の許可された URL は200 |
 | S8a dispose 後の再接続 | pass | dispose 後の upgrade は409、run 未指定は400、2回目の dispose は200 |
+| S8c 同じ run への2本目の接続 | pass | live な run への2本目の upgrade は409、stats は変わらない（差分37） |
 | S8b run-lost | pass | ページは TypeError、ナビゲーションは `run-lost: r-lost` |
 | S9a delay | pass | 300 ms の遅延後に200、上流1回 |
 | S9b 遅延中のソケット切断 | pass | 待機は中断され、上流0回、後始末で inFlight=0 |

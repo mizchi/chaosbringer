@@ -116,4 +116,42 @@ describe("RunRegistry", () => {
     expect(reg.create("c", () => fakeSession()).ok).toBe(true);
     expect(reg.size).toBe(1);
   });
+
+  // A run and a CDP connection are one to one: a second connection on the
+  // same run would share its occurrence counters and RNG with the first.
+  describe("connect()", () => {
+    it("binds the first connection and refuses a second one with 409", () => {
+      const reg = new RunRegistry();
+      reg.create("r1", () => fakeSession());
+      const first = reg.connect("r1");
+      expect(first).toMatchObject({ ok: true });
+      expect(reg.get("r1")?.connected).toBe(true);
+      expect(reg.connect("r1")).toMatchObject({ ok: false, status: 409, error: "run r1 already has a connection" });
+    });
+
+    it("stays bound after the connection ends, so a reconnect cannot pick up the old counters", () => {
+      const reg = new RunRegistry();
+      reg.create("r1", () => fakeSession());
+      reg.connect("r1");
+      reg.get("r1")?.sessionEnds.push({ connectionId: "c1", at: 0 });
+      expect(reg.connect("r1")).toMatchObject({ ok: false, status: 409 });
+    });
+
+    it("refuses an unknown or disposed run as run-lost, and binds nothing", async () => {
+      const reg = new RunRegistry();
+      expect(reg.connect("nope")).toMatchObject({ ok: false, status: 409, error: "run-lost: nope" });
+      reg.create("r1", () => fakeSession());
+      await reg.dispose("r1");
+      expect(reg.connect("r1")).toMatchObject({ ok: false, status: 409, error: "run-lost: r1" });
+      expect(reg.get("r1")?.connected).toBe(false);
+    });
+
+    it("keeps runs independent: binding one does not bind another", () => {
+      const reg = new RunRegistry();
+      reg.create("a", () => fakeSession());
+      reg.create("b", () => fakeSession());
+      reg.connect("a");
+      expect(reg.connect("b")).toMatchObject({ ok: true });
+    });
+  });
 });

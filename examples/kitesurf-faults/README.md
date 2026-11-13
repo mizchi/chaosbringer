@@ -82,13 +82,14 @@ The exit code is 0 only when all of these hold:
 | | What it shows | Expected |
 | --- | --- | --- |
 | S1 | `/correct/` recovers from the injected 503: `503,200`, `ok:3`, matched 2 / injected 1, upstream cart 1 | pass |
-| S2 | `/broken/` under the same rules and oracle | oracle fails with `dom-mismatch` |
-| S3 | a rule for `/api/does-not-exist`: the page shows `ok:3`, yet no fault fired | oracle fails with `not-injected` |
+| S2 | `/broken/` under the same rules and oracle; the run must also show why: attempts `503`, `failed`, injected 1, upstream cart 0 | oracle fails with `dom-mismatch` |
+| S3 | a rule for `/api/does-not-exist`: the page shows `ok:3`, yet no fault fired (matched 0, upstream cart 1) | oracle fails with `not-injected` |
 | S4 | two runs at once: each one's first cart call gets the 503, and their counters stay apart | pass |
 | S5 | in the same run: a `Runtime.evaluate` fetch, a re-navigation (the counts continue, no new 503), a page WebSocket (the loaded worker's `globalOutbound` path) and a dedicated worker's fetch | pass |
 | S6 | an `abort` fault: the page's fetch rejects with `TypeError` (not an HTTP 503) and upstream is never called | pass |
 | S7 | a URL rejected by `Kitesurf.setOutboundFilters` gets 451 and never reaches egress, even though a rule would fault it every time | pass |
 | S8a | after dispose: reconnecting gets 409, connecting without a run gets 400, and a second dispose gets 200 | pass |
+| S8c | a second socket on a live run gets 409, and the run's counters do not move | pass |
 | S8b | the run is deleted while its socket is open: the page's fetch fails and the navigation's `errorText` says `run-lost` | pass |
 | S9a | a 300 ms delay: the page waits at least 300 ms, then upstream is called once | pass |
 | S9b | a 4 s delay, and the CDP socket closes at 0.8 s: `Request.signal` fires, the wait ends, and upstream is still 0 after 5 s | pass |
@@ -107,6 +108,9 @@ The exit code is 0 only when all of these hold:
   receives neither the request nor the connection id, so `ChaosHost` reads
   `?run=<id>` from `/devtools/browser?run=<id>`. The engine creates egress
   once per connection, so a run spans every navigation of its connection.
+  A run accepts one connection for its whole life: a second upgrade, or a
+  reconnect after the first socket closed, gets 409, so two connections never
+  share a run's counters and RNG.
   Only the harness ends a run, in its `finally`; the host only records
   `session_end` from telemetry.
 - **`enable_request_signal` is required.** Without it, a Service Binding call

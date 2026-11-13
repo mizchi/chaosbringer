@@ -13,8 +13,9 @@
  *   and the binding carries only the run id.
  * - `egress(env, ctx)` is told neither the request nor the connection, so the
  *   run is chosen at the WebSocket upgrade: `/devtools/browser?run=<id>`. No
- *   run, no connection (400); an unknown or disposed run is refused (409).
- *   There is no path where a connection runs without a session.
+ *   run, no connection (400); an unknown or disposed run, or one that
+ *   already had a connection, is refused (409). There is no path where a
+ *   connection runs without a session, or shares one with another.
  * - The engine creates egress once per connection and keeps it across
  *   navigations, so one run's counters span every page of its connection,
  *   and two connections never share counters or an RNG.
@@ -133,8 +134,8 @@ export default class ChaosHost extends KitesurfEngine {
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const runId = url.searchParams.get("run");
       if (!runId) return new Response("kitesurf-faults example: ?run=<id> is required", { status: 400 });
-      const entry = registry.get(runId);
-      if (!entry || entry.disposed) return new Response(`run-lost: ${runId}`, { status: 409 });
+      const bound = registry.connect(runId);
+      if (!bound.ok) return new Response(bound.error, { status: bound.status });
       this.#runId = runId;
     }
     return super.fetch(request);
