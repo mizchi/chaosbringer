@@ -410,11 +410,21 @@ export async function startSession(
     // A paint drawn but not yet presented is reported a few frames late; wait
     // for it here, after every span closed and before the drain that copies
     // the vitals. Not on a page whose reads time out (it cannot answer), nor
-    // after a capped settle (the paint then waits on the network).
+    // after a capped settle (the paint then waits on the network). A page
+    // that started hanging after the last span leaves the check unanswered:
+    // the evaluator takes it over, so the reads below wait out the rest of one
+    // bounded wait in all instead of one more each.
+    let unanswered: Promise<unknown> | undefined;
     const paint =
       opts.awaitPaint !== false && !evaluator.stalled && !controller.spans.at(-1)?.capped
-        ? await awaitPendingPaint(page, { maxMs: Math.min(PAINT_WAIT_MAX_MS, evaluator.timeoutMs) })
+        ? await awaitPendingPaint(page, {
+            maxMs: Math.min(PAINT_WAIT_MAX_MS, evaluator.timeoutMs),
+            onUnanswered: (p) => {
+              unanswered = p;
+            },
+          })
         : undefined;
+    if (unanswered && paint) await evaluator.adopt(unanswered, paint.waitedMs);
     // Final drain of the current document (flushes pending observer records).
     await controller.drain();
     client.off("Runtime.bindingCalled", onBinding);

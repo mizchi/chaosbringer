@@ -675,7 +675,10 @@ back (no frames, node clock, no page extras) when the page cannot answer —
 typically a navigation whose document request is never answered, which makes
 Playwright hold every `page.evaluate` for minutes. After one read times out, the
 rest return at once until that read settles, so a hung page costs one bounded
-wait, not one per read.
+wait, not one per read. That holds when the page starts hanging after the last
+span too: `finish()`'s paint check then goes unanswered for its 1 s cap, and the
+reads after it wait only for the rest of `evaluateTimeoutMs`, not a whole one
+more.
 
 **Statistics, gates and drilldown.** The logic behind `scripts/*.mjs` and
 `lightbringer run --emit-budgets/--gate` is exported as pure functions, for a

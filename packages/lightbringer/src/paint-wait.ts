@@ -347,6 +347,13 @@ export async function lightbringerAwaitPaint(o: InPageOptions): Promise<InPagePa
     return out;
   };
 
+  // The deadline's origin is read now, not at the baseline frame: when frames
+  // have already stopped as the wait begins (the usual case behind a pending
+  // paint), the baseline frame itself comes only after the stall, and a
+  // deadline counted from it would let an abandoned loop keep walking the DOM
+  // for its whole frame budget. An event's timeStamp shares rAF's timebase,
+  // advances while frames are stopped, and is not what clock faults patch.
+  const origin = new Event("lightbringer-paint-wait").timeStamp;
   let s = check();
   let frames = 0;
   let flowing = 0;
@@ -355,11 +362,15 @@ export async function lightbringerAwaitPaint(o: InPageOptions): Promise<InPagePa
   // comes late (a stall, or a long task) is no chance for the paint to have
   // been reported, so it does not count, and the total-frame cap bounds a page
   // whose frames are all late.
-  const start = await new Promise<number>((r) => requestAnimationFrame(r));
-  let prev = start;
+  let prev = await new Promise<number>((r) => requestAnimationFrame(r));
   frames++;
   let fcpAt = -1;
   for (;;) {
+    // The caller's wall cap has passed (frames stopped for longer than it):
+    // nothing reads this result any more, so stop without walking the DOM
+    // again, which would land in whatever the caller measures next. Checked
+    // on every frame, the baseline included.
+    if (prev - origin > o.maxMs) break;
     s = check();
     if (!s.visible || s.pending.length === 0) break;
     if (s.fcp !== null && fcpAt < 0) fcpAt = frames;
@@ -368,10 +379,6 @@ export async function lightbringerAwaitPaint(o: InPageOptions): Promise<InPagePa
     if (flowing >= o.maxFrames || frames - 1 >= o.totalFrames) break;
     const ts = await new Promise<number>((r) => requestAnimationFrame(r));
     frames++;
-    // The caller's wall cap has passed (frames stopped for longer than it):
-    // nothing reads this result any more, so stop without walking the DOM
-    // again, which would land in whatever the caller measures next.
-    if (ts - start > o.maxMs) break;
     if (ts - prev < FLOWING_GAP_MS) flowing++;
     prev = ts;
   }
@@ -421,6 +428,12 @@ export interface AwaitPaintOptions {
   vitalsFrames?: number;
   /** Wall-clock cap, check included (default {@link PAINT_WAIT_MAX_MS}). */
   maxMs?: number;
+  /**
+   * Called with the first check's evaluate when the cap abandoned it: the
+   * page did not answer at all (a hung document), so a caller that reads the
+   * page next can wait on this instead of issuing a read that queues behind it.
+   */
+  onUnanswered?: (pending: Promise<unknown>) => void;
 }
 
 const TIMED_OUT = Symbol("timed out");
@@ -442,9 +455,11 @@ export async function awaitPendingPaint(page: Page, options: AwaitPaintOptions =
   const unread = { collector: null, timeOrigin: null, fcp: null, lcp: null } as const;
   // Issued evaluates are never cancelled: one the cap abandons settles later,
   // and its rejection must not surface as unhandled.
+  let issued: Promise<unknown> | undefined;
   const evaluate = (args: InPageOptions, ms: number): Promise<InPagePaint | typeof TIMED_OUT> => {
     const p = page.evaluate(lightbringerAwaitPaint, args);
     p.catch(() => {});
+    issued = p;
     return raceTimeout(p, Math.max(0, ms), (): typeof TIMED_OUT => TIMED_OUT);
   };
   const quickArgs = { maxFrames: 0, totalFrames: 0, vitalsFrames, maxMs: 0 };
@@ -452,8 +467,10 @@ export async function awaitPendingPaint(page: Page, options: AwaitPaintOptions =
   let first: InPagePaint;
   try {
     const quick = await evaluate(quickArgs, maxMs);
-    if (quick === TIMED_OUT)
+    if (quick === TIMED_OUT) {
+      if (issued) options.onUnanswered?.(issued);
       return { outcome: "timeout", ...unread, waitedMs: elapsed(), frames: 0, initial: [], final: [] };
+    }
     first = quick;
   } catch {
     return { outcome: "error", ...unread, waitedMs: elapsed(), frames: 0, initial: [], final: [] };

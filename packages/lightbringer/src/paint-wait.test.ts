@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
 import { awaitPendingPaint, lightbringerAwaitPaint, paintWaitRecord, type PaintWaitResult } from "./paint-wait";
 import { logSummary } from "./report";
@@ -145,9 +145,83 @@ describe("awaitPendingPaint", () => {
     expect((await awaitPendingPaint(page)).outcome).toBe("hidden");
   });
 
-  it("times out a quick check that never answers within the cap", async () => {
-    const r = await awaitPendingPaint(scriptedPage(["hang"]).page, { maxMs: 30 });
+  it("times out a quick check that never answers within the cap, and hands its evaluate to onUnanswered", async () => {
+    const abandoned: Array<Promise<unknown>> = [];
+    const r = await awaitPendingPaint(scriptedPage(["hang"]).page, { maxMs: 30, onUnanswered: (p) => abandoned.push(p) });
     expect(r).toMatchObject({ outcome: "timeout", collector: null, initial: [], final: [] });
+    expect(abandoned).toHaveLength(1);
+  });
+
+  it("does not call onUnanswered when the page answered the check (a stalled frame wait is not a hung page)", async () => {
+    const abandoned: Array<Promise<unknown>> = [];
+    const { page } = scriptedPage([check({ pending: ["fcp"] }), "hang", check({ pending: ["fcp"] })]);
+    const r = await awaitPendingPaint(page, { maxMs: 30, onUnanswered: (p) => abandoned.push(p) });
+    expect(r.outcome).toBe("timeout");
+    expect(abandoned).toEqual([]);
+  });
+});
+
+// The in-page loop's own deadline, with a scripted rAF: a wait that frames
+// stopped under must not keep walking the DOM once frames resume.
+describe("lightbringerAwaitPaint's in-page deadline", () => {
+  /**
+   * A document whose raw FCP entry exists and whose web-vitals FCP never comes
+   * (`fcp-vital` stays pending), with rAF timestamps from `frames` and the
+   * clock at entry at 0. Counts the in-page checks by their paint-entry reads.
+   */
+  function stubPage(frames: number[]) {
+    let checks = 0;
+    vi.stubGlobal("window", { __perf: { __lb: true, vitals: {} }, webVitals: {} });
+    vi.stubGlobal("document", { visibilityState: "visible", createRange: () => ({}) });
+    vi.stubGlobal("Event", class {
+      readonly timeStamp = 0;
+    });
+    vi.stubGlobal("performance", {
+      timeOrigin: 1,
+      getEntriesByType: (type: string) => {
+        if (type !== "paint") return [];
+        checks++;
+        return [{ name: "first-contentful-paint", startTime: 20 }];
+      },
+    });
+    vi.stubGlobal("requestAnimationFrame", (cb: (ts: number) => void) => {
+      const ts = frames.shift();
+      if (ts === undefined) throw new Error("unexpected frame");
+      queueMicrotask(() => cb(ts));
+      return 1;
+    });
+    return { checks: () => checks };
+  }
+  const opts = { maxFrames: 5, totalFrames: 8, vitalsFrames: 3, maxMs: 300 };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("stops without another check when the baseline frame itself comes after the deadline", async () => {
+    // Frames had stopped before the wait began: the baseline frame is the
+    // first one after the stall, 900 ms after entry.
+    const page = stubPage([900]);
+    const r = await lightbringerAwaitPaint(opts);
+    expect(page.checks()).toBe(1);
+    expect(r.frames).toBe(1);
+    expect(r.pending).toEqual(["fcp-vital"]);
+  });
+
+  it("stops at the first frame past the deadline when frames stop during the wait", async () => {
+    const page = stubPage([16, 33, 700]);
+    const r = await lightbringerAwaitPaint(opts);
+    // The quick check, then the baseline and one more frame's checks.
+    expect(page.checks()).toBe(3);
+    expect(r.frames).toBe(3);
+  });
+
+  it("runs its frame budget when frames keep their cadence", async () => {
+    const page = stubPage([16, 33, 50, 66, 83]);
+    const r = await lightbringerAwaitPaint(opts);
+    // FCP's vital is given vitalsFrames frames after the raw entry was seen.
+    expect(r.frames).toBe(4);
+    expect(page.checks()).toBe(5);
   });
 });
 

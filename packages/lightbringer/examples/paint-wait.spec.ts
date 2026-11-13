@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
 import { test, expect, type Browser, type Page } from "@playwright/test";
-import { startSession, type SessionOptions } from "../src/core";
+import { awaitPendingPaint, startSession, type SessionOptions } from "../src/core";
 
 // finish() waits, bounded, for a contentful paint the browser has drawn but
 // not yet presented, so report.vitals carry it. A real presentation stall needs
@@ -56,13 +56,21 @@ const PAGES: Record<string, string> = {
   "/text": `<!doctype html><title>t</title><body>${H1}</body>`,
   "/blank": `<!doctype html><title>t</title><body></body>`,
   "/input": `<!doctype html><title>t</title><body style="margin:0">${H1}<button id="b">ok</button><img src="/hero.png" width="400" height="400"></body>`,
+  // Every frame comes late: the page's own rAF loop holds each one ~60 ms.
+  "/slow-frames": `<!doctype html><title>t</title><body>${H1}<script>
+    (function f() { const t = performance.now(); while (performance.now() - t < 60); requestAnimationFrame(f); })();
+  </script></body>`,
 };
 const HERO = noisePng(400);
 
-/** Hides the paint entries from page script, so FCP reads as never presented. */
+/**
+ * Hides the paint entries from page script, so FCP reads as never presented.
+ * Counts the reads in `__paintReads`: one per in-page check.
+ */
 const HIDE_PAINT = `(() => {
   const orig = performance.getEntriesByType.bind(performance);
-  performance.getEntriesByType = (t) => (t === "paint" ? [] : orig(t));
+  window.__paintReads = 0;
+  performance.getEntriesByType = (t) => (t === "paint" ? (window.__paintReads++, []) : orig(t));
 })();`;
 
 async function servePages(page: Page) {
@@ -136,5 +144,60 @@ test.describe("finish() waits for a paint not yet presented", () => {
       },
     });
     expect(report.paintWait).toBeUndefined();
+  });
+
+  test("a capped last span is not waited after: the paint then waits on the network", async ({ browser }) => {
+    const { report } = await loadAndFinish(browser, "/text", {
+      initScript: HIDE_PAINT,
+      settle: () => new Promise(() => {}),
+      settleTimeoutMs: 200,
+    });
+    expect(report.spans[0]!.capped).toBe(true);
+    expect(report.paintWait).toBeUndefined();
+  });
+});
+
+// The wait's own bounds, on a page whose frames all come late: no frame
+// counts as normal cadence, so only the total-frame cap ends the wait before
+// the wall cap, and a wait the wall cap abandoned stops its in-page loop.
+test.describe("awaitPendingPaint on slow frames", () => {
+  async function slowFramesPage(browser: Browser) {
+    const page = await browser.newPage();
+    await servePages(page);
+    await page.addInitScript({ content: HIDE_PAINT });
+    await page.goto(`${ORIGIN}/slow-frames`, { waitUntil: "load" });
+    return page;
+  }
+
+  test("ends at the total-frame cap, well before the wall cap", async ({ browser }) => {
+    const page = await slowFramesPage(browser);
+    try {
+      const r = await awaitPendingPaint(page);
+      expect(r).toMatchObject({ outcome: "frames", initial: ["fcp"], final: ["fcp"] });
+      // Fewer than 5 frames came at normal cadence, so the total-frame cap
+      // ended it: the baseline frame and 8 more.
+      expect(r.flowing).toBeLessThan(5);
+      expect(r.frames).toBe(9);
+      expect(r.waitedMs).toBeLessThan(900);
+    } finally {
+      await page.close();
+    }
+  });
+
+  test("a wait the wall cap abandoned stops checking the page", async ({ browser }) => {
+    const page = await slowFramesPage(browser);
+    try {
+      const r = await awaitPendingPaint(page, { maxMs: 150 });
+      expect(r.outcome).toBe("timeout");
+      // At most one more frame (~60 ms) runs a check after the deadline.
+      await page.waitForTimeout(150);
+      const settled = await page.evaluate(() => (window as unknown as { __paintReads: number }).__paintReads);
+      // Without the deadline the loop would run on to its 8 frames (~500 ms).
+      await page.waitForTimeout(500);
+      const later = await page.evaluate(() => (window as unknown as { __paintReads: number }).__paintReads);
+      expect(later).toBe(settled);
+    } finally {
+      await page.close();
+    }
   });
 });
