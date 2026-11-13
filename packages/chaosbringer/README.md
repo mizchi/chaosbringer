@@ -1134,7 +1134,18 @@ await chaos({
 });
 ```
 
-Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Each value is a number of ms above 0; anything else exits 2 naming the metric (`chaosbringer: --budget lcp must be a finite number (got "abc")`), as does an unknown key. Metrics that weren't captured (e.g. `lcp` on a page that didn't render anything large) don't produce violations — only observed-and-over-limit cases do.
+Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted keys are not enforced. Each value is a number of ms above 0; anything else exits 2 naming the metric (`chaosbringer: --budget lcp must be a finite number (got "abc")`), as does an unknown key. A metric that wasn't captured (e.g. `fcp` on a blank shell) still produces no violation — only observed-and-over-limit cases do — but it is not passed over in silence either: `PageResult.budgetUnmeasured` names it with a reason, `summary.budgetUnmeasured` counts the pages per metric, the report prints a `Performance budget not measured:` block (`fcp on 3 pages (no-content 2, stalled 1), e.g. <url>`; compact: `Budget not measured: fcp x3`), and the crawler logs `perf_budget_unmeasured` (at warn for `capped`, `stalled` and `under-read`, at info otherwise). It is no run warning: the exit code and `--fail-on-warnings` are unchanged.
+
+| `reason` | Why the budget was not checked |
+| --- | --- |
+| `capped` | the load settle hit its cap, so no paint was awaited (the page was still waiting on the network) |
+| `hidden` | the document was hidden or prerendering, and reports no paint |
+| `stalled` | content was visible, but frames stopped for longer than the 1 s paint wait (a presentation stall) |
+| `not-presented` | content was visible and frames ran, but the browser reported no first contentful paint |
+| `no-content` | the page showed nothing that paints contentfully (or reported no LCP candidate) |
+| `no-collector` | `lcp` / `tbt` on a page without the lightbringer collector (`testPage()` on your page, `setContent`) |
+| `not-reported` | the browser did not report it (`ttfb`, `domContentLoaded`, `load`), or the page could not be read |
+| `under-read` | `lcp` was measured, but a larger image loaded and was not presented before frames stopped: the value is an earlier candidate |
 
 Where the numbers come from, measured once the page load has settled:
 
@@ -1142,7 +1153,9 @@ Where the numbers come from, measured once the page load has settled:
 - `lcp` — the latest Largest Contentful Paint candidate reported by [web-vitals](https://github.com/GoogleChrome/web-vitals), through the [lightbringer](https://github.com/mizchi/chaosbringer/tree/main/packages/lightbringer) collector the crawler installs on every page.
 - `tbt` — the sum of `duration − 50 ms` over long tasks that started at or after FCP. This is an **approximation**: real Total Blocking Time runs from FCP to Time to Interactive, and the crawler has no TTI, so `tbt` covers FCP to the end of the load instead.
 
-The collector is installed before every other init script, so a `clock-skew` runtime fault cannot shift `lcp` or `tbt`. On a page the crawler does not own (`testPage()` on a page opened elsewhere), `lcp` and `tbt` are absent rather than 0, and their budgets are not enforced.
+When the numbers are read: after the load settles and the load span (`--perf`) closes. Chromium reports FCP, and an image's LCP, only once the GPU process has presented the frame that drew it, which can lag the settle. So when that first read shows FCP absent, web-vitals' FCP not yet delivered, or an image response that finished after the LCP candidate, the crawler waits for a paint the browser drew but has not presented — up to 5 frames at normal cadence, 8 in all, and 1 s — then reads FCP and LCP again (both are the browser's own entry timestamps, so a later read can only find an entry, never move one). It is skipped after a capped settle, on a hidden page, and, for LCP, once the page received input. A normal load pays nothing: its first read already has everything. When the wait ran, `PageResult.paintWait` records it (`outcome` `reported`: the late value is in `metrics` and `perfPage.vitals`; `frames` or `timeout`: `stillPending` did not come; `changed`: what the wait changed, as `[first read, final]`), and a wait that hit the 1 s cap logs `load_paint_pending` at warn. It runs after the load span closed, so no span's duration or window moves. Only the load's own document is waited for: one a chaos action navigated to keeps the vitals the page's last drain read.
+
+The collector is installed before every other init script, so a `clock-skew` runtime fault cannot shift `lcp` or `tbt`. On a page the crawler does not own (`testPage()` on a page opened elsewhere), `lcp` and `tbt` are absent rather than 0, their budgets are not enforced, and `budgetUnmeasured` lists them as `no-collector`.
 
 Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
 
