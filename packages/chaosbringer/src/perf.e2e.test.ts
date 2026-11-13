@@ -511,6 +511,29 @@ describe("per-step perf spans (perf option)", () => {
     }
   });
 
+  it("keeps the document a hash-only testPage() goto stays in", async () => {
+    // `/perf` to `/perf#x` is a fragment navigation: no new document loads,
+    // so the one already loaded is this visit's and keeps its vitals.
+    const crawler = new ChaosCrawler({
+      baseUrl: origin,
+      maxActionsPerPage: 0,
+      headless: true,
+      timeout: 10_000,
+      logLevel: "error",
+      perf: true,
+    });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await crawler.testPage(page, `${origin}/perf`);
+      const second = await crawler.testPage(page, `${origin}/perf#x`);
+      expect(page.url()).toBe(`${origin}/perf#x`);
+      expect(second.perfPage?.vitals?.TTFB).toBeDefined();
+    } finally {
+      await browser.close();
+    }
+  });
+
   it("gives each crawler its own sidecar files in a shared outDir (one crawler per fixture test)", async () => {
     const shared = mkdtempSync(join(tmpdir(), "chaosbringer-perf-shared-"));
     const browser = await chromium.launch({ headless: true });

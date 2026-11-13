@@ -137,10 +137,10 @@ export class PagePerf {
 
   /**
    * Open a lightbringer session on `page`. `installCollector` is false when
-   * the crawler already installed the collector at context level — ahead of
-   * the runtime-fault script, which is what keeps a `clock-skew` fault from
-   * reaching the clock it captures. On the `testPage()` path the crawler owns
-   * no context, so the collector goes onto the page instead.
+   * the crawler already installed the collector itself — ahead of the
+   * runtime-fault script, which is what keeps a `clock-skew` fault from
+   * reaching the clock it captures: at context level on a crawl, on the page
+   * on the `testPage()` path (the crawler owns no context there).
    *
    * CPU and network throttling are never passed: the crawler owns both
    * (`faults.cpu()`, `network`), and lightbringer applying its own would

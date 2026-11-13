@@ -192,6 +192,48 @@ describe("page-load LCP / TBT from the always-on collector", () => {
     expect(page.metrics?.tbt).toBeLessThan(60_000);
   });
 
+  it("keeps the collector ahead of a clock-skew fault on every testPage() of one caller page", async () => {
+    // The fault scripts go on a caller's page once, at its first visit. A
+    // collector added again by a later visit's session would run after them
+    // and capture the skewed clock.
+    const offsets: number[] = [];
+    const crawler = new ChaosCrawler({
+      baseUrl: origin,
+      maxActionsPerPage: 0,
+      headless: true,
+      timeout: 10_000,
+      logLevel: "error",
+      perf: true,
+      runtimeFaults: [{ action: { kind: "clock-skew", skewMs: SKEW_MS } }],
+      invariants: [
+        {
+          name: "collector-clock",
+          when: "afterLoad",
+          async check({ page }) {
+            // biome-ignore lint/suspicious/noExplicitAny: the collector's in-page store
+            const collector = await page.evaluate(() => (window as any).__perf.now() as number);
+            offsets.push(collector - Date.now());
+            return true;
+          },
+        },
+      ],
+    });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const results = [];
+      for (let i = 0; i < 3; i++) results.push(await crawler.testPage(page, `${origin}/busy`));
+      expect(offsets).toHaveLength(3);
+      for (const offset of offsets) expect(Math.abs(offset)).toBeLessThan(60_000);
+      for (const result of results) {
+        expect(result.perfPage?.clockPatched).toBeUndefined();
+        expect(result.perf?.cpu.longTaskCount).toBe(1);
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
   it("leaves LCP / TBT absent on a caller-owned page without the collector", async () => {
     const browser = await chromium.launch({ headless: true });
     try {

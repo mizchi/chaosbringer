@@ -2384,15 +2384,18 @@ export class ChaosCrawler {
   /**
    * A caller's page on the `testPage()` path is in a context `start()` never
    * saw, so it has none of the init scripts `start()` put on the crawl's own:
-   * without these its runtime and iframe faults silently never ran. Added
-   * after `beginLoadSpan`, which installs the perf collector on such a page,
-   * so the collector still runs first and keeps the clock a `clock-skew`
-   * fault replaces, as on the crawl's own pages. Once per page: init scripts
-   * stay on it for every later navigation.
+   * without these its runtime and iframe faults silently never ran. Under
+   * perf the collector goes first, as on the crawl's own pages, so it keeps
+   * the clock a `clock-skew` fault replaces. The crawler adds it, not the
+   * perf session (`installCollector: false` in `beginLoadSpan`): the last
+   * session to finish removes the script it added, and the next visit's
+   * session would add it again after these fault scripts. Once per page:
+   * init scripts stay on it for every later navigation.
    */
   private async installCallerPageFaultScripts(page: Page): Promise<void> {
     if (page === this.cdpPage || page.context() === this.context || this.faultScriptPages.has(page)) return;
     this.faultScriptPages.add(page);
+    if (this.perf.enabled) await page.addInitScript({ content: collectorInitScript({ frames: true }) });
     await this.addFaultInitScripts(page);
   }
 
@@ -2460,8 +2463,8 @@ export class ChaosCrawler {
       // The load span opens after the beforeNavigation faults, so it
       // measures the navigation under them rather than the faults' own
       // setup, and closes after `readLoadMetrics` below.
-      await this.beginLoadSpan(page, url);
       await this.installCallerPageFaultScripts(page);
+      await this.beginLoadSpan(page, url);
 
       navigating = true;
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
@@ -2715,11 +2718,10 @@ export class ChaosCrawler {
    */
   private async beginLoadSpan(page: Page, url: string): Promise<void> {
     await this.perf.beginPage(page, url, {
-      // Decided per page, not per crawler: only a page in the context
-      // `start()` created has the collector already. A caller's page on the
-      // `testPage()` path belongs to a context the crawler never touched,
-      // even when this same crawler ran `start()` before.
-      installCollector: page.context() !== this.context,
+      // Every page has the collector already: the crawl's from its context
+      // (or `start()`'s CDP page), a caller's from
+      // `installCallerPageFaultScripts`, ahead of its fault scripts.
+      installCollector: false,
       // The runtime-fault script is on every page: the crawl's from its
       // context, a caller's from `installCallerPageFaultScripts`.
       pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
