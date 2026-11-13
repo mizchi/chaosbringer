@@ -192,6 +192,19 @@ describe("unmeasuredBudget", () => {
     ).toEqual([["fcp", "not-reported"]]);
   });
 
+  it("says not-reported, not not-presented, when the page navigated during a wait for a pending FCP", () => {
+    // An error keeps what was pending at the start as `final`, with no frames.
+    const out = unmeasuredBudget({}, { fcp: 1000, lcp: 1000 }, {
+      capped: false,
+      read: read(),
+      paint: wait({ outcome: "error", collector: null, timeOrigin: null, waitedMs: 40, frames: 0, initial: ["fcp"], final: ["fcp"] }),
+    });
+    expect(out).toEqual([
+      { metric: "fcp", reason: "not-reported", message: "the page navigated or closed during the paint check" },
+      { metric: "lcp", reason: "not-reported", message: "the page navigated or closed during the paint check" },
+    ]);
+  });
+
   it("flags a measured LCP as under-read only when frames stopped with a larger image unpresented", () => {
     const lcpImage = { url: "http://x/img/hero.png", area: 360000, candidateSize: 9000, bpp: 22 };
     const timeout = wait({ outcome: "timeout", waitedMs: 1000, frames: null, initial: ["lcp-image"], final: ["lcp-image"], lcpImage });

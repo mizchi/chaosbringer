@@ -1107,7 +1107,8 @@ export interface PerformanceBudget extends Partial<Record<PerfBudgetKey, number>
  * - `no-collector`: LCP / TBT need lightbringer's collector, which a
  *   caller-owned page (`testPage()`) or `setContent` does not have;
  * - `not-reported`: the browser did not report it (TTFB, DOMContentLoaded,
- *   load), or the page could not be read;
+ *   load), or the page could not be read (it did not answer, or navigated
+ *   during the paint check);
  * - `under-read`: measured, but a larger image loaded and was not presented
  *   before frames stopped, so `lcp` is an earlier, smaller candidate.
  */

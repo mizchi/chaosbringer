@@ -1144,7 +1144,7 @@ Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted
 | `not-presented` | content was visible and frames ran, but the browser reported no first contentful paint |
 | `no-content` | the page showed nothing that paints contentfully (or reported no LCP candidate) |
 | `no-collector` | `lcp` / `tbt` on a page without the lightbringer collector (`testPage()` on your page, `setContent`) |
-| `not-reported` | the browser did not report it (`ttfb`, `domContentLoaded`, `load`), or the page could not be read |
+| `not-reported` | the browser did not report it (`ttfb`, `domContentLoaded`, `load`), or the page could not be read (it did not answer, or navigated during the paint check) |
 | `under-read` | `lcp` was measured, but a larger image loaded and was not presented before frames stopped: the value is an earlier candidate |
 
 Where the numbers come from, measured once the page load has settled:

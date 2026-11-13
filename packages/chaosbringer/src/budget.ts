@@ -112,15 +112,18 @@ function unmeasuredReason(
     return ["no-collector", "no lightbringer collector on this page (a caller-owned page, or setContent)"];
   if (capped) return ["capped", "the load settle capped, so the paint was not awaited"];
   if (!hint.visible || paint?.outcome === "hidden") return ["hidden", "the document was hidden, so it reports no paint"];
+  // The check never answered (the page hung), or the page navigated or
+  // closed during it: nothing says whether the paint came. Before the pending
+  // branch, which an error's `final` (what was pending at the start) would
+  // otherwise take for frames that ran.
+  if (paint?.outcome === "error") return ["not-reported", "the page navigated or closed during the paint check"];
+  if (paint?.outcome === "timeout" && paint.initial.length === 0)
+    return ["not-reported", "the page did not answer the paint check"];
   if (paint?.final.includes("fcp")) {
     return paint.outcome === "timeout"
       ? ["stalled", `content was visible but no first contentful paint was reported within ${Math.round(paint.waitedMs)} ms: frames stopped`]
       : ["not-presented", `content was visible but no first contentful paint was reported within ${paint.frames ?? 0} frames`];
   }
-  // The check itself never answered (the page hung or went away): nothing
-  // says whether there was content to paint.
-  if (paint && (paint.outcome === "error" || (paint.outcome === "timeout" && paint.initial.length === 0)))
-    return ["not-reported", "the page did not answer the paint check"];
   return key === "fcp"
     ? ["no-content", "the page showed no contentful content"]
     : ["no-content", "the browser reported no largest contentful paint candidate"];
