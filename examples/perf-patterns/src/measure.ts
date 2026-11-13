@@ -170,9 +170,19 @@ export function missingValueReason(report: CrawlReport, keyGlob: string, metric:
       } else if (p.perfPage.collectorMissing) {
         reasons.add("collectorMissing");
       } else if (readPath(p.perfPage, path) === undefined) {
+        // A load paint the crawler waited for and did not get (a presentation
+        // stall longer than its wait) names itself here, so a CI log says so.
+        const paintWait = p.paintWait
+          ? `; paintWait=${p.paintWait.outcome}[${(p.paintWait.stillPending ?? []).join(",")}]`
+          : "";
+        const unmeasured = p.budgetUnmeasured?.length
+          ? `; budgetUnmeasured=${p.budgetUnmeasured.map((u) => `${u.metric}:${u.reason}`).join(",")}`
+          : "";
         reasons.add(
           `${path} absent; vitals has [${Object.keys(p.perfPage.vitals ?? {}).join(",")}]; ` +
-            `raw metrics fcp=${dash(p.metrics?.fcp)} lcp=${dash(p.metrics?.lcp)}; settleCapped=${dash(p.settleCapped)}`,
+            `raw metrics fcp=${dash(p.metrics?.fcp)} lcp=${dash(p.metrics?.lcp)}; settleCapped=${dash(p.settleCapped)}` +
+            paintWait +
+            unmeasured,
         );
       }
     }
