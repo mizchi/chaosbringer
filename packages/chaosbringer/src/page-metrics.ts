@@ -28,8 +28,8 @@ import type { PerformanceMetrics } from "./types.js";
  * end of the load is not missed.
  *
  * A page without the collector — a caller-owned page on the `testPage()`
- * path, or `setContent` — keeps today's four fields and leaves `lcp` and
- * `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
+ * path with perf off, or `setContent` — keeps today's four fields and leaves
+ * `lcp` and `tbt` absent. Absent, never 0: a 0 would pass every budget and read as
  * "measured, and fast".
  */
 export async function collectLoadMetrics(page: Page): Promise<PerformanceMetrics> {

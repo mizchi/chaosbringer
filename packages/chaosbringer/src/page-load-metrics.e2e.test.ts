@@ -84,8 +84,9 @@ describe("page-load LCP / TBT from the always-on collector", () => {
     const report = await crawlOne("/busy", { performanceBudget: { tbt: 50 } });
     const page = report.pages[0];
     expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
-    // 200 ms of blocking is 150 ms of TBT; far more means a task was counted twice.
-    expect(page.metrics?.tbt).toBeLessThan(1_000);
+    // 200 ms of blocking is 150 ms of TBT; 300 means a task was counted twice
+    // (e.g. read from both `longTasks` and `longTaskLog`, which hold the same tasks).
+    expect(page.metrics?.tbt).toBeLessThan(290);
     expect(budgetViolations(page)).toContain("perf-budget.tbt");
   });
 
@@ -96,7 +97,7 @@ describe("page-load LCP / TBT from the always-on collector", () => {
     const report = await crawlOne("/busy", { perf: true, performanceBudget: { tbt: 50 } });
     const page = report.pages[0];
     expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
-    expect(page.metrics?.tbt).toBeLessThan(1_000);
+    expect(page.metrics?.tbt).toBeLessThan(290);
     expect(budgetViolations(page)).toContain("perf-budget.tbt");
     // Node-side delivery is unchanged: the task reached the load span once.
     expect(page.perf?.cpu.longTaskCount).toBe(1);
@@ -109,7 +110,7 @@ describe("page-load LCP / TBT from the always-on collector", () => {
     });
     const page = report.pages[0];
     expect(page.metrics?.tbt).toBeGreaterThanOrEqual(100);
-    expect(page.metrics?.tbt).toBeLessThan(1_000);
+    expect(page.metrics?.tbt).toBeLessThan(290);
     expect(page.perf?.cpu.longTaskCount).toBe(1);
   });
 
@@ -129,7 +130,7 @@ describe("page-load LCP / TBT from the always-on collector", () => {
       });
       const result = await crawler.testPage(page, `${origin}/busy`);
       expect(result.metrics?.tbt).toBeGreaterThanOrEqual(100);
-      expect(result.metrics?.tbt).toBeLessThan(1_000);
+      expect(result.metrics?.tbt).toBeLessThan(290);
       expect(result.perf?.cpu.longTaskCount).toBe(1);
     } finally {
       await browser.close();

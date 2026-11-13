@@ -185,7 +185,7 @@ describe("adaptive settle (e2e)", () => {
   }, 60_000);
 
   it.each([false, true])("adaptive: back-to-back long tasks cap the load (perf %s)", async (perf) => {
-    // The long-task gate reads the collector's `longTaskLog`. With perf on,
+    // The long-task gate reads the collector's `lastLongTaskEnd`. With perf on,
     // the session's emit binding empties `longTasks` at every observer
     // callback, so a gate reading that saw no task and settled at once.
     const report = await crawl("/busy", { settle: "adaptive", perf, maxActionsPerPage: 0, timeout: 3_000 });
