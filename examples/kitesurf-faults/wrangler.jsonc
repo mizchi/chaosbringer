@@ -1,0 +1,35 @@
+// Local-only host Worker for the kitesurf-faults integration (never deployed).
+// Mirrors Kitesurf's own packages/engine/wrangler.jsonc at the pinned revision
+// (kitesurf-revision.json), with the engine embedded from src/host.ts.
+{
+  "name": "kitesurf-faults-example",
+  "main": "src/host.ts",
+  "compatibility_date": "2026-09-11",
+  // enable_request_signal is required, not optional: without it a cancelled
+  // Service Binding call (the engine's 10 s egress deadline, a closed CDP
+  // socket) gets a Request.signal that never fires, its context is dropped
+  // silently, and a pending delay can neither be cleaned up nor reached by a
+  // host-side dispose. scripts/run-integration.mjs refuses to start without it.
+  "compatibility_flags": ["global_fetch_strictly_public", "enable_request_signal"],
+  "rules": [{ "type": "Text", "globs": ["**/*.glue.js", "**/*.css", "**/*.dat"], "fallthrough": true }],
+  "limits": { "cpu_ms": 300000, "subrequests": 1000000 },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  // .kitesurf/public is a link to $KITESURF_DIR/packages/engine/public, made by
+  // scripts/setup-kitesurf.mjs.
+  "assets": { "directory": "./.kitesurf/public", "binding": "FONT_ASSETS", "run_worker_first": ["/", "/rbi/*"] },
+  "vars": {
+    "KITESURF_ENV": "local",
+    "KITESURF_VERSION": "dev",
+    "KITESURF_RESOURCE_DRAIN_QUIET_TURNS": "5",
+    "KITESURF_LAG_WATCHDOG": "",
+    // Empty keeps the engine's private-network check on, so a page cannot
+    // reach this Worker's control plane on 127.0.0.1.
+    "KITESURF_ALLOW_PRIVATE_NETWORK": "",
+    "KITESURF_INSPECTOR_BASE_URL": "",
+    "KITESURF_INSPECTOR_FALLBACK_URL": "",
+    "WEB_BOT_AUTH_SIGNATURE_AGENT": "",
+    // Empty disables the control plane; the runner passes a random token per
+    // run with --var CHAOS_CONTROL_TOKEN:<hex>.
+    "CHAOS_CONTROL_TOKEN": ""
+  }
+}

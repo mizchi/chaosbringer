@@ -1,0 +1,6 @@
+# Links into $KITESURF_DIR, made by scripts/setup-kitesurf.mjs on every run.
+.kitesurf/
+node_modules/
+# wrangler dev state and the integration run's log + artifact.
+.wrangler/
+artifacts/

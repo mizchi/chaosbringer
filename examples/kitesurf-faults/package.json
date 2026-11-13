@@ -1,0 +1,18 @@
+{
+  "name": "@mizchi/chaosbringer-example-kitesurf-faults",
+  "private": true,
+  "type": "module",
+  "description": "@mizchi/kitesurf-faults on a real workerd + Kitesurf: a host Worker hands the engine a per-run ChaosEgress Service Binding, and a correct and a broken fixture face the same oracle.",
+  "scripts": {
+    "test": "vp test run",
+    "test:integration": "node scripts/run-integration.mjs",
+    "lint:nul": "node ../../packages/chaosbringer/scripts/check-no-nul.mjs src scripts"
+  },
+  "dependencies": {
+    "@mizchi/kitesurf-faults": "workspace:*"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}
