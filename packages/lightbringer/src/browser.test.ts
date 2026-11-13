@@ -94,7 +94,7 @@ function installObservers(emit?: (payload: string) => void) {
     observers.get("longtask")?.queued.push({ entryType: "longtask", startTime, duration });
   const loaf = (startTime: number, duration: number) =>
     deliver("long-animation-frame", { entryType: "long-animation-frame", startTime, duration });
-  return { win, longTask, queueLongTask, loaf };
+  return { win, deliver, longTask, queueLongTask, loaf };
 }
 
 describe("browserCollector longTaskLog / lastLongTaskEnd", () => {
@@ -190,6 +190,76 @@ describe("browserCollector longTaskLog / lastLongTaskEnd", () => {
     longTask(100, 400);
     longTask(200, 60);
     expect(win.__perf!.lastLongTaskEnd).toBe(500);
+  });
+});
+
+describe("browserCollector detach / attach", () => {
+  it("a detached store keeps its records for the next drain instead of emitting them", () => {
+    const sent: Payload[] = [];
+    const { win, longTask } = installObservers((p) => sent.push(JSON.parse(p)));
+    browserCollector({ frames: false });
+    const store = win.__perf!;
+    longTask(100, 200);
+    expect(sent).toHaveLength(1);
+    store.detach!();
+    longTask(400, 70);
+    // The binding function is still there (removeBinding cannot take it away),
+    // but nothing went through it and nothing was moved out.
+    expect(sent).toHaveLength(1);
+    expect(store.longTasks).toEqual([{ start: 400, duration: 70 }]);
+    store.attach!();
+    longTask(600, 80);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].longTasks).toEqual([
+      { start: 400, duration: 70 },
+      { start: 600, duration: 80 },
+    ]);
+  });
+
+  it("detach stops the frame probe; startFrames restarts it", () => {
+    const { win, rafCallbacks } = installGlobals();
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    browserCollector();
+    const store = win.__perf!;
+    rafCallbacks[0](16);
+    store.detach!();
+    // The callback already scheduled sees the probe stopped and records nothing.
+    rafCallbacks[1](32);
+    expect(store.frames).toEqual([16]);
+    expect(rafCallbacks).toHaveLength(2);
+    store.startFrames!();
+    expect(rafCallbacks).toHaveLength(3);
+    rafCallbacks[2](48);
+    expect(store.frames).toEqual([16, 48]);
+  });
+
+  it("bounds the buffers nothing drains", () => {
+    const { win, rafCallbacks } = installGlobals();
+    browserCollector();
+    for (let i = 0; i < 36_005; i++) rafCallbacks[i](i);
+    expect(win.__perf!.frames).toHaveLength(36_000);
+    expect(win.__perf!.frames[0]).toBe(5);
+  });
+
+  it("bounds an undrained long-task buffer to the latest 10000", () => {
+    const { win, longTask } = installObservers();
+    browserCollector({ frames: false });
+    for (let i = 0; i < 10_003; i++) longTask(i * 100, 60);
+    expect(win.__perf!.longTasks).toHaveLength(10_000);
+    expect(win.__perf!.longTasks[0]).toEqual({ start: 300, duration: 60 });
+  });
+
+  it.each([
+    ["long-animation-frame", "loaf", {}],
+    ["measure", "measures", { name: "m", detail: { __lbSpan: true } }],
+    ["event", "events", { name: "click", interactionId: 1, processingStart: 0, processingEnd: 0 }],
+  ] as const)("bounds an undrained %s buffer to the latest 10000", (type, key, extra) => {
+    const { win, deliver } = installObservers();
+    browserCollector({ frames: false });
+    for (let i = 0; i < 10_003; i++) deliver(type, { entryType: type, startTime: i * 100, duration: 60, ...extra });
+    const buffer = win.__perf![key] as Array<{ start: number }>;
+    expect(buffer).toHaveLength(10_000);
+    expect(buffer[0].start).toBe(300);
   });
 });
 

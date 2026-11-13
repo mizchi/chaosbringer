@@ -184,6 +184,13 @@ import { joinAriaTargets, matchAriaTargets } from "./aria-targets.js";
 /** Distinct WebSocket URLs a run remembers for `CrawlFaultInjectionStats.webSocket`. */
 const MAX_WEBSOCKET_URLS = 200;
 
+/**
+ * Longest a step waits for the browser's error page of a navigation the
+ * guard blocked during it (`urlAfterStep`). It commits within milliseconds;
+ * the cap is for a blocked navigation another one replaced.
+ */
+const BLOCKED_NAVIGATION_COMMIT_CAP_MS = 5000;
+
 /** Structural type-guard for the opaque `driver` option. */
 function isDriver(v: unknown): v is Driver {
   return (
@@ -2384,15 +2391,18 @@ export class ChaosCrawler {
   /**
    * A caller's page on the `testPage()` path is in a context `start()` never
    * saw, so it has none of the init scripts `start()` put on the crawl's own:
-   * without these its runtime and iframe faults silently never ran. Added
-   * after `beginLoadSpan`, which installs the perf collector on such a page,
-   * so the collector still runs first and keeps the clock a `clock-skew`
-   * fault replaces, as on the crawl's own pages. Once per page: init scripts
-   * stay on it for every later navigation.
+   * without these its runtime and iframe faults silently never ran. Under
+   * perf the collector goes first, as on the crawl's own pages, so it keeps
+   * the clock a `clock-skew` fault replaces. The crawler adds it, not the
+   * perf session (`installCollector: false` in `beginLoadSpan`): the last
+   * session to finish removes the script it added, and the next visit's
+   * session would add it again after these fault scripts. Once per page:
+   * init scripts stay on it for every later navigation.
    */
   private async installCallerPageFaultScripts(page: Page): Promise<void> {
     if (page === this.cdpPage || page.context() === this.context || this.faultScriptPages.has(page)) return;
     this.faultScriptPages.add(page);
+    if (this.perf.enabled) await page.addInitScript({ content: collectorInitScript({ frames: true }) });
     await this.addFaultInitScripts(page);
   }
 
@@ -2460,8 +2470,8 @@ export class ChaosCrawler {
       // The load span opens after the beforeNavigation faults, so it
       // measures the navigation under them rather than the faults' own
       // setup, and closes after `readLoadMetrics` below.
-      await this.beginLoadSpan(page, url);
       await this.installCallerPageFaultScripts(page);
+      await this.beginLoadSpan(page, url);
 
       navigating = true;
       const { response, capped: loadCapped } = await this.gotoAndSettle(page, url);
@@ -2715,11 +2725,10 @@ export class ChaosCrawler {
    */
   private async beginLoadSpan(page: Page, url: string): Promise<void> {
     await this.perf.beginPage(page, url, {
-      // Decided per page, not per crawler: only a page in the context
-      // `start()` created has the collector already. A caller's page on the
-      // `testPage()` path belongs to a context the crawler never touched,
-      // even when this same crawler ran `start()` before.
-      installCollector: page.context() !== this.context,
+      // Every page has the collector already: the crawl's from its context
+      // (or `start()`'s CDP page), a caller's from
+      // `installCallerPageFaultScripts`, ahead of its fault scripts.
+      installCollector: false,
       // The runtime-fault script is on every page: the crawl's from its
       // context, a caller's from `installCallerPageFaultScripts`.
       pageFaults: this.compiledRuntimeFaults.map((c) => c.name),
@@ -2873,6 +2882,31 @@ export class ChaosCrawler {
   }
 
   /**
+   * Where the step left the page. When the guard blocked a navigation of the
+   * page's own frame during the step and the page still shows `urlBefore`,
+   * the browser's error page for it has not committed yet: the step's wait
+   * does not cover it (a click returns once the navigation failed, or without
+   * waiting for one it saw requested only afterwards, and `networkidle` is the
+   * current document's, reached at load). Read then, the page looked like it
+   * stayed, the step lost its `leftSiteTo`, and the next steps acted on the
+   * error page once it committed. So wait for the commit, capped: a blocked
+   * navigation another one replaced commits nothing.
+   */
+  private async urlAfterStep(page: Page, urlBefore: string, navigationsBefore: number): Promise<string> {
+    if (page.url() !== urlBefore || this.lastBlockedPageNavigation(navigationsBefore) === undefined) return page.url();
+    // Not `waitForURL`: it gives up on the failed navigation's own event,
+    // which can still be on its way. The listener is in place before the
+    // next event is read, so the commit cannot slip past it.
+    await page
+      .waitForEvent("framenavigated", {
+        predicate: (frame) => frame === page.mainFrame() && page.url() !== urlBefore,
+        timeout: BLOCKED_NAVIGATION_COMMIT_CAP_MS,
+      })
+      .catch(() => this.logger.debug("blocked_navigation_no_commit", { url: urlBefore, capMs: BLOCKED_NAVIGATION_COMMIT_CAP_MS }));
+    return page.url();
+  }
+
+  /**
    * Back out of a step that left the page somewhere the crawl must not act:
    * - another site (`leftSiteTo`): a same-site link that redirected off-site
    *   (Wikipedia's "Create account" to auth.wikimedia.org), counted as a
@@ -2891,7 +2925,7 @@ export class ChaosCrawler {
     result: ActionResult,
     navigationsBefore: number,
   ): Promise<void> {
-    const landed = page.url();
+    const landed = await this.urlAfterStep(page, urlBefore, navigationsBefore);
     if (!this.isForbiddenUrl(landed)) {
       // A link to a feed or a JSON file opens the browser's viewer for it;
       // the steps after it would measure and click the viewer.

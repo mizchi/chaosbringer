@@ -115,6 +115,15 @@ describe("PerfAccumulator", () => {
     expect(acc.frames).toEqual([2, 3]);
   });
 
+  it("drops every payload of an ignored document", () => {
+    const acc = new PerfAccumulator();
+    acc.ignoreDocument(1_000_000);
+    acc.add(payload({ longTasks: [{ start: 1, duration: 60 }], vitals: { TTFB: vital("TTFB", 9) } }));
+    acc.add(payload({ timeOrigin: 2_000_000, url: "http://x.test/b" }));
+    expect(acc.longTasks).toEqual([]);
+    expect(acc.documents.map((d) => d.url)).toEqual(["http://x.test/b"]);
+  });
+
   it("ignores empty / malformed payloads and tracks sawDocument", () => {
     const acc = new PerfAccumulator();
     acc.add(null);

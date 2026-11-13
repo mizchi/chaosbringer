@@ -480,6 +480,60 @@ describe("per-step perf spans (perf option)", () => {
     }
   });
 
+  it("measures each testPage() on one caller page by its own document, and leaves the page quiet after", async () => {
+    const crawler = new ChaosCrawler({
+      baseUrl: origin,
+      maxActionsPerPage: 0,
+      headless: true,
+      timeout: 10_000,
+      logLevel: "error",
+      perf: true,
+    });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const first = await crawler.testPage(page, `${origin}/quiet`);
+      const second = await crawler.testPage(page, `${origin}/perf`);
+      expect(first.perfPage?.vitals?.TTFB).toBeDefined();
+      // The page visited before is not this visit's document.
+      expect(second.perfPage?.documents).toBeUndefined();
+      expect(second.perfPage?.vitals?.TTFB).toBeDefined();
+      // Nothing is pushed into a binding nobody reads once the visit is over.
+      expect(await page.evaluate(() => typeof (window as unknown as { __lbEmit?: unknown }).__lbEmit)).toBe(
+        "function",
+      );
+      await page.reload();
+      expect(await page.evaluate(() => typeof (window as unknown as { __lbEmit?: unknown }).__lbEmit)).toBe(
+        "undefined",
+      );
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("keeps the document a hash-only testPage() goto stays in", async () => {
+    // `/perf` to `/perf#x` is a fragment navigation: no new document loads,
+    // so the one already loaded is this visit's and keeps its vitals.
+    const crawler = new ChaosCrawler({
+      baseUrl: origin,
+      maxActionsPerPage: 0,
+      headless: true,
+      timeout: 10_000,
+      logLevel: "error",
+      perf: true,
+    });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await crawler.testPage(page, `${origin}/perf`);
+      const second = await crawler.testPage(page, `${origin}/perf#x`);
+      expect(page.url()).toBe(`${origin}/perf#x`);
+      expect(second.perfPage?.vitals?.TTFB).toBeDefined();
+    } finally {
+      await browser.close();
+    }
+  });
+
   it("gives each crawler its own sidecar files in a shared outDir (one crawler per fixture test)", async () => {
     const shared = mkdtempSync(join(tmpdir(), "chaosbringer-perf-shared-"));
     const browser = await chromium.launch({ headless: true });

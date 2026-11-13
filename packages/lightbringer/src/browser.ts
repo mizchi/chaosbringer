@@ -96,6 +96,14 @@ export interface PerfStore {
    * reads it in O(1). Absent on collectors older than this field.
    */
   lastLongTaskEnd?: number | null;
+  /**
+   * Long animation frames since the previous drain(). This, `longTasks`,
+   * `measures` and `events` are each bounded to the latest 10000 entries (as
+   * many as `longTaskLog` keeps), and `frames` to the latest 36000 (about 10
+   * minutes at 60 Hz). A session's drains keep them short; the bounds only
+   * matter while nothing drains them (no session is open, or the store is
+   * detached).
+   */
   loaf: LoafEntry[];
   measures: MeasureEntry[];
   /** Event Timing entries for real interactions (interactionId > 0) */
@@ -112,6 +120,16 @@ export interface PerfStore {
    * PerfController.begin() calls this so a span always gets frame cadence.
    */
   startFrames?: () => void;
+  /**
+   * Stop pushing this document's records to node (the emit binding) and stop
+   * the rAF frame probe; records keep accumulating in the store, bounded, for
+   * a later drain(). `finish()` of the last session on a page calls it, so
+   * a page that outlives its sessions no longer has its records moved out
+   * into a binding nobody reads. Absent on collectors older than this field.
+   */
+  detach?: () => void;
+  /** Undo detach(): emit again (the frame probe restarts at the next span). */
+  attach?: () => void;
   /**
    * Epoch ms from the performance.now / timeOrigin captured when the collector
    * was installed — immune to later monkey-patching of performance.now / Date
@@ -163,6 +181,13 @@ export function browserCollector(opts?: CollectorOptions) {
 
   // Inside the function, not at module scope: it is serialized into the page.
   const LONG_TASK_LOG_MAX = 10000;
+  // See PerfStore.frames / loaf for these bounds.
+  const FRAMES_MAX = 36000;
+  const BUFFER_MAX = 10000;
+  const bound = (a: unknown[], max: number) => {
+    if (a.length > max) a.splice(0, a.length - max);
+  };
+  let detached = false;
   const longTaskLog: LongTaskEntry[] = [];
   const store: PerfStore = {
     __lb: true,
@@ -180,17 +205,29 @@ export function browserCollector(opts?: CollectorOptions) {
 
   // Record frame cadence with a self-rescheduling rAF. Each callback just pushes
   // a timestamp (negligible work), so the gap between frames reflects the page's
-  // own jank, not the probe. A gap >> 16.7ms means dropped frames. The buffer is
-  // bounded by drain(), which moves the frames out at every span boundary.
-  const onFrame = (t: number) => {
-    store.frames.push(t);
-    requestAnimationFrame(onFrame);
-  };
+  // own jank, not the probe. A gap >> 16.7ms means dropped frames. drain()
+  // moves the frames out at every span boundary; detach() stops the probe.
   let framesStarted = false;
+  let frameHandle = 0;
+  const onFrame = (t: number) => {
+    if (!framesStarted) return;
+    if (store.frames.push(t) > FRAMES_MAX) store.frames.shift();
+    frameHandle = requestAnimationFrame(onFrame);
+  };
   store.startFrames = () => {
     if (framesStarted) return;
     framesStarted = true;
-    requestAnimationFrame(onFrame);
+    frameHandle = requestAnimationFrame(onFrame);
+  };
+  store.detach = () => {
+    detached = true;
+    if (framesStarted) {
+      framesStarted = false;
+      cancelAnimationFrame(frameHandle);
+    }
+  };
+  store.attach = () => {
+    detached = false;
   };
   if (!opts || opts.frames !== false) store.startFrames();
 
@@ -223,6 +260,7 @@ export function browserCollector(opts?: CollectorOptions) {
       const last = store.lastLongTaskEnd;
       if (last === null || last === undefined || end > last) store.lastLongTaskEnd = end;
     }
+    bound(store.longTasks, BUFFER_MAX);
   };
   const drainLoaf = (entries: PerformanceEntryList) => {
     for (const e of entries) {
@@ -233,6 +271,7 @@ export function browserCollector(opts?: CollectorOptions) {
         blocking: loaf.blockingDuration ?? 0,
       });
     }
+    bound(store.loaf, BUFFER_MAX);
   };
   const drainMeasure = (entries: PerformanceEntryList) => {
     for (const e of entries) {
@@ -254,6 +293,7 @@ export function browserCollector(opts?: CollectorOptions) {
         detail,
       });
     }
+    bound(store.measures, BUFFER_MAX);
   };
 
   // Event Timing: only interactionId>0 entries are real interactions (click,
@@ -276,6 +316,7 @@ export function browserCollector(opts?: CollectorOptions) {
         processingEnd: pe.processingEnd,
       });
     }
+    bound(store.events, BUFFER_MAX);
   };
 
   // Set below, in the top-level document with the emit binding: push what an
@@ -378,7 +419,9 @@ export function browserCollector(opts?: CollectorOptions) {
     /* cross-origin top access: we are not the top */
   }
   if (!isTop) return;
+  // Gated on detach(): Runtime.removeBinding leaves __lbEmit a function here.
   const emit = () => {
+    if (detached) return;
     const send = w.__lbEmit;
     if (typeof send !== "function" || !store.drain) return;
     try {

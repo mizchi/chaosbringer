@@ -37,6 +37,27 @@ import type {
 } from "./types.js";
 
 /**
+ * Whether `page.goto(target)` on a page at `current` stays in the current
+ * document: the target is the current URL with a fragment (`#`, even an
+ * empty one), which the browser handles as a fragment navigation rather than
+ * a load. `/a#x` to `/a` is a load; so is anything that does not parse.
+ */
+export function sameDocumentTarget(current: string, target: string): boolean {
+  let from: URL;
+  let to: URL;
+  try {
+    from = new URL(current);
+    to = new URL(target);
+  } catch {
+    return false;
+  }
+  if (!to.href.includes("#")) return false;
+  from.hash = "";
+  to.hash = "";
+  return from.href === to.href;
+}
+
+/**
  * Who a recorded span belongs to, in the order the spans were recorded.
  * `settleCapped`: the crawler's own settle for this step hit its cap (adaptive
  * settle only). lightbringer's `capped` means *its* settle capped, which never
@@ -116,10 +137,10 @@ export class PagePerf {
 
   /**
    * Open a lightbringer session on `page`. `installCollector` is false when
-   * the crawler already installed the collector at context level — ahead of
-   * the runtime-fault script, which is what keeps a `clock-skew` fault from
-   * reaching the clock it captures. On the `testPage()` path the crawler owns
-   * no context, so the collector goes onto the page instead.
+   * the crawler already installed the collector itself — ahead of the
+   * runtime-fault script, which is what keeps a `clock-skew` fault from
+   * reaching the clock it captures: at context level on a crawl, on the page
+   * on the `testPage()` path (the crawler owns no context there).
    *
    * CPU and network throttling are never passed: the crawler owns both
    * (`faults.cpu()`, `network`), and lightbringer applying its own would
@@ -157,6 +178,13 @@ export class PagePerf {
       // and only when its settle did not cap (`awaitLoadPaint`). A document an
       // action navigated to is not waited for at finish (see the README).
       awaitPaint: false,
+      // The session opens before the page's goto: on a reused page (CDP
+      // attach, a caller's page on testPage) the document still loaded is the
+      // page visited before, whose vitals that page already reported. Not
+      // for a goto that only changes the hash: that loads no new document,
+      // and leaving the current one out would leave the load span without
+      // vitals.
+      excludeCurrentDocument: !sameDocumentTarget(page.url(), url),
       trace: tracePath !== undefined,
       ...(tracePath !== undefined ? { tracePath } : {}),
       memGc: opts.memGc,

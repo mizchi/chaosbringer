@@ -131,7 +131,10 @@ export interface PerfReport {
   glRenderer?: string;
   /** uncaught page errors during measurement; non-empty means results are suspect */
   pageErrors?: string[];
-  /** true if the in-page collector never ran (e.g. page.setContent without a goto) */
+  /**
+   * true if the in-page collector never ran (e.g. page.setContent without a
+   * goto, or a document loaded after the page's last session finished)
+   */
   collectorMissing?: boolean;
   /**
    * true if performance.now was already patched by page JS (e.g. a clock-skew

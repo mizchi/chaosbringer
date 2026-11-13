@@ -125,11 +125,24 @@ Per **span** (one `perf.measure(name, action)` region):
 
 All times are unified to epoch ms so spans correlate with network / CPU even
 across navigations. The in-page collector is **drained at every span boundary**
-and, once a session has installed its emit binding (it stays installed after
-`finish()`), whenever one of its observers reports an entry, through the CDP
-binding that also carries what a document unloading mid-span recorded, so long
-tasks / LoAF / interactions / frames / app spans of documents you navigated away
-from stay in the report. In-page code that wants this
+and, while a session is open, whenever one of its observers reports an entry,
+through the CDP binding that also carries what a document unloading mid-span
+recorded, so long tasks / LoAF / interactions / frames / app spans of documents
+you navigated away from stay in the report. `finish()` takes that down again.
+The last session on a CDP session to finish removes the binding (later
+documents do not get it). The last session on a page to finish detaches the
+current document's collector (it stops emitting and stops its frame probe,
+keeping its records, bounded, in the store) and removes the page-level init
+script `installCollector` added (the page's sessions share one), so a document
+loaded after that has no collector unless a new session starts first (Playwright
+1.63 or later; on older versions the script stays on the page, so later
+documents still get a collector); a context-level `collectorInitScript()` is
+yours and stays. A later `startSession` on the same
+page re-attaches the current document, so what it recorded between the two
+sessions reaches the new one; pass `excludeCurrentDocument: true` to leave that
+document out instead (a session opened right before the navigation it
+measures, on a page an earlier session already measured). `Runtime` stays
+enabled on the CDP session. In-page code that wants this
 document's long tasks reads `window.__perf.longTaskLog` (the latest 10000, never
 drained) or `window.__perf.lastLongTaskEnd` (the latest end, never reset), not
 `longTasks`, which a session's emit binding keeps empty. `report.vitals` are the
@@ -139,6 +152,15 @@ lists each one's `{ url, timeOrigin, vitals }`. A span that navigated carries
 Use it, not `memory.documentsDelta`, to tell a navigating step: under
 `PERF_MEM=1` the forced GC at span end collects the document left behind before
 the reading, so `documentsDelta` reads 0 on a navigation.
+
+> **Behaviour change:** `finish()` used to leave the binding, the collector and
+> its init script on the page, so the page kept moving its records into a
+> binding nobody read, and every session added one more collector script.
+> Code that finishes one session, navigates, and only then starts the next
+> session on the same page used to get that document measured; it now gets
+> `collectorMissing`. Start the session before the `goto`, or install
+> `collectorInitScript()` at context level yourself and pass
+> `installCollector: false`.
 
 > **Behaviour change:** the collector's store gained `longTaskLog` and
 > `lastLongTaskEnd`, which no drain touches. lightbringer's own reports do not
@@ -663,7 +685,8 @@ logSummary(report);
 `SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
 `coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`,
 `evaluateTimeoutMs`, `oopif` (count out-of-process iframes' network, default
-`true`), `awaitPaint` (below, default `true`). The fixture and CLI map the `PERF_*` env vars onto these
+`true`), `awaitPaint` (below, default `true`), `excludeCurrentDocument` (above,
+default `false`). The fixture and CLI map the `PERF_*` env vars onto these
 with `sessionOptionsFromEnv(env)` — the only place the environment is read.
 
 **A paint drawn but not yet presented.** Chromium reports FCP, and an image's
@@ -686,8 +709,9 @@ stopped)`). `awaitPaint: false` opts out, for a driver that waits itself;
 `awaitPendingPaint(page, opts?)` is the same wait, exported for one. It only
 waits for the document the page is on at `finish()`.
 
-**Hung pages.** Every in-page read at a span boundary (`begin` / `end` / `drain`)
-and in `finish()` is bounded by `evaluateTimeoutMs` (default 5000 ms) and falls
+**Hung pages.** Every in-page read at session start, at a span boundary
+(`begin` / `end` / `drain`) and in `finish()` is bounded by `evaluateTimeoutMs`
+(default 5000 ms) and falls
 back (no frames, node clock, no page extras) when the page cannot answer —
 typically a navigation whose document request is never answered, which makes
 Playwright hold every `page.evaluate` for minutes. After one read times out, the
@@ -695,7 +719,9 @@ rest return at once until that read settles, so a hung page costs one bounded
 wait, not one per read. That holds when the page starts hanging after the last
 span too: `finish()`'s paint check then goes unanswered for its 1 s cap, and the
 reads after it wait only for the rest of `evaluateTimeoutMs`, not a whole one
-more.
+more. `finish()`'s teardown (`Runtime.removeBinding`, removing the init script)
+is not waited for on a page whose reads timed out, and otherwise waits at most
+one more `evaluateTimeoutMs`.
 
 **Statistics, gates and drilldown.** The logic behind `scripts/*.mjs` and
 `lightbringer run --emit-budgets/--gate` is exported as pure functions, for a
@@ -828,7 +854,9 @@ Things that bite, learned from the accuracy probe:
   collector never initializes and vitals / cpu / render silently vanish (only
   `scriptMs` survives via CDP). Always reach the page with `page.goto` (a
   `data:text/html,...` URL works). The harness warns (`collectorMissing`) when it
-  detects this.
+  detects this. The same warning comes from a document loaded after the page's
+  last session finished (see [What it measures](#what-it-measures)): start the
+  session before the `goto`.
 - **PerformanceObserver callbacks are async**, so a long task at the very end of a
   span would be missed; the collector drains `takeRecords()` (`flush`) before
   reading, which fixes per-span attribution retroactively.
