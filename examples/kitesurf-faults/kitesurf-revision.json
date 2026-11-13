@@ -1,0 +1,19 @@
+{
+  "repo": "https://github.com/mizchi/kitesurf",
+  "revision": "58d10e608692f20de9cd2ae3c05d8f7a082aecae",
+  "wranglerBin": "packages/engine/node_modules/.bin/wrangler",
+  "buildCommand": "pnpm install --frozen-lockfile && pnpm run build  (bazel run //packages/engine:dev_build)",
+  "requiredAssets": [
+    "packages/core/pkg/kitesurf_core_bg.wasm",
+    "packages/core/pkg/kitesurf_core.glue.js",
+    "packages/renderer-core/pkg/renderer_core_bg.wasm",
+    "packages/renderer-core/pkg/renderer_core.glue.js",
+    "packages/page-script/dist/index.js",
+    "packages/dom-shim/dist/index.js",
+    "packages/page-renderer/dist/index.js",
+    "packages/worker-script/dist/index.js",
+    "packages/engine/public/rbi/scene_host.wasm",
+    "packages/engine/src/embed.ts",
+    "packages/engine/node_modules/.bin/wrangler"
+  ]
+}

@@ -40,6 +40,14 @@ clean:
 pkg name *args:
     pnpm -F {{name}} {{args}}
 
+# @mizchi/kitesurf-faults on a real workerd + Kitesurf. Needs KITESURF_DIR: a Kitesurf
+# checkout at the revision in examples/kitesurf-faults/kitesurf-revision.json, with its
+# assets built (see examples/kitesurf-faults/README.md). Fails, never skips, without it.
+# Not run by CI: it needs that checkout and about half a minute of workerd.
+kitesurf-faults-integration:
+    pnpm -F "@mizchi/kitesurf-faults..." build
+    pnpm -F @mizchi/chaosbringer-example-kitesurf-faults test:integration
+
 # run the fixture site standalone (chaosbringer dev loop)
 fixture-serve:
     pnpm -F chaosbringer fixture:serve

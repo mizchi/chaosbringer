@@ -26,6 +26,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./network": {
+      "types": "./dist/network.d.ts",
+      "import": "./dist/network.js"
     }
   },
   "scripts": {

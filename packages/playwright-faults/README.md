@@ -35,6 +35,31 @@ const rules = [
 //   new ChaosCrawler({ baseUrl, faultInjection: rules })
 ```
 
+## Rule decision without a transport (`./network`)
+
+`@mizchi/playwright-faults/network` is the part of a `FaultRule` run that does
+not depend on how the request travels. It imports nothing from Playwright or
+`node:*`, so a Worker bundle can load it.
+
+```ts
+import {
+  compileFaultRules,
+  createRng,
+  faultStatsOf,
+  pickFaultRule,
+} from "@mizchi/playwright-faults/network";
+
+const compiled = compileFaultRules(rules, "my-adapter"); // prefix for the invalid-urlPattern error
+const rng = createRng(seed); // same mulberry32 sequence as chaosbringer
+const winner = pickFaultRule(compiled, request.url, request.method.toUpperCase(), rng);
+// winner?.rule.fault is yours to realise; faultStatsOf(compiled) reports the counters.
+```
+
+This is the same decision chaosbringer's route handler makes (same two-pass
+loop, occurrence numbering and RNG draws). `faultStatusBody`,
+`DEFAULT_STATUS_CONTENT_TYPE` and `DEFAULT_ABORT_ERROR_CODE` are the defaults a
+`status` / `abort` fault uses when the rule leaves them out.
+
 ## Page-lifecycle faults
 
 ```ts

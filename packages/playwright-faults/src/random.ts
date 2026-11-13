@@ -1,8 +1,11 @@
 /**
- * Tiny seeded RNG used by the package's own unit tests so they don't have
- * to depend on chaosbringer. Not part of the public surface — only re-export
- * from `index.ts` if a downstream legitimately needs the same generator
- * function (most won't; they'll bring their own RNG).
+ * Seeded mulberry32 RNG — the same sequence as chaosbringer's `createRng`.
+ *
+ * Started as a test helper so this package's unit tests did not depend on
+ * chaosbringer. It is now re-exported from `@mizchi/playwright-faults/network`
+ * because an adapter that runs `FaultRule`s outside chaosbringer has to draw
+ * the same numbers for a seed to mean the same run. It is still not on the
+ * root entry: most consumers bring their own RNG.
  */
 
 import type { Rng } from "./types.js";

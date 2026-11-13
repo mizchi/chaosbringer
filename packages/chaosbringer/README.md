@@ -13,6 +13,7 @@ Playwright-based chaos testing for web apps. Crawls the pages you point it at, p
 | **Page lifecycle / runtime** | `chaosbringer` `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/server-faults) | Inside the server process, before the handler runs | "Do the server's own OTel traces / metrics show the fault, and does the handler degrade gracefully" |
 | **Cloudflare bindings** | [`@mizchi/cf-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
+| **Kitesurf egress** (experimental) | [`@mizchi/kitesurf-faults`](https://github.com/mizchi/chaosbringer/tree/main/packages/kitesurf-faults) | The same network `FaultRule`s on the `fetch(request)` transport behind Kitesurf's `EngineHost.egress` | "Does the page recover from a 503 when it runs in Kitesurf instead of Chromium" |
 
 **Common confusion:** `faults.status(500, ...)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` (or run both layers together).
 

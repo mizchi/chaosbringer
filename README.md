@@ -13,6 +13,7 @@ Chaos testing toolkit for web apps. A Playwright-based crawler injects faults at
 | **Page lifecycle / runtime** | [`chaosbringer`](packages/chaosbringer) `lifecycleFaults` / `runtimeFaults` | Browser DOM, storage wipe, CPU throttle, `fetch` / clock monkey-patches | "Does the SPA recover when localStorage gets wiped mid-action" |
 | **Server-side** | [`@mizchi/server-faults`](packages/server-faults) | Inside the server process, before the handler runs | "Do the server's OTel traces / metrics show the fault, and does the handler degrade gracefully" |
 | **Cloudflare bindings** | [`@mizchi/cf-faults`](packages/cf-faults) | KV / Service Binding wrappers | "How does the Worker behave when its KV throws" |
+| **Kitesurf egress** (experimental) | [`@mizchi/kitesurf-faults`](packages/kitesurf-faults) | The same network `FaultRule`s, run on the `fetch(request)` transport behind Kitesurf's `EngineHost.egress`, after the engine's own request policy | "Does the page recover from a 503 when it runs in Kitesurf instead of Chromium" |
 
 **Common confusion:** `faults.status(500, …)` from chaosbringer **does not produce server-side telemetry** — the route is intercepted in the browser, the server is never called. To see a fault inside the server's OTel trace, mount `@mizchi/server-faults` *and* run both layers together. See [`docs/recipes/server-side-correlation.md`](docs/recipes/server-side-correlation.md).
 
@@ -25,6 +26,7 @@ Chaos testing toolkit for web apps. A Playwright-based crawler injects faults at
 | [`@mizchi/playwright-faults`](packages/playwright-faults) | Playwright fault-injection primitives (network route, page lifecycle, JS runtime monkey-patch) — extracted from chaosbringer for direct Playwright Test use |
 | [`@mizchi/playwright-v8-coverage`](packages/playwright-v8-coverage) | V8 precise-coverage collector for Playwright (CDP `Profiler.takePreciseCoverage`) with novelty-scoring helpers |
 | [`@mizchi/cf-faults`](packages/cf-faults) | Cloudflare Worker binding wrappers (KV / Service Binding) for chaos injection |
+| [`@mizchi/kitesurf-faults`](packages/kitesurf-faults) | Experimental, not on npm yet. Runs network `FaultRule`s (status / abort / bounded delay) on a `fetch(request)` transport such as Kitesurf's `EngineHost.egress`. Integration example: [`examples/kitesurf-faults`](examples/kitesurf-faults) |
 
 ## 30-second tour
 
@@ -144,7 +146,8 @@ chaosbringer/
 │   ├── server-faults/            # `@mizchi/server-faults`
 │   ├── playwright-faults/        # `@mizchi/playwright-faults`
 │   ├── playwright-v8-coverage/   # `@mizchi/playwright-v8-coverage`
-│   └── cf-faults/                # `@mizchi/cf-faults`
+│   ├── cf-faults/                # `@mizchi/cf-faults`
+│   └── kitesurf-faults/          # `@mizchi/kitesurf-faults` (experimental)
 ├── examples/                     # runnable demos (workspace-linked to packages/*)
 ├── docs/
 │   ├── recipes/                  # task-oriented user docs

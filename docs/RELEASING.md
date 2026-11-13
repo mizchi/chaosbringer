@@ -15,6 +15,13 @@ They are published by `.github/workflows/publish.yml` with npm OIDC
 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers): no npm token
 is stored anywhere, and every version carries provenance.
 
+`@mizchi/kitesurf-faults` (`packages/kitesurf-faults/`) is experimental and not on
+npm yet. Its package.json is `private`, so `pending-publishes.mjs` skips it and
+no merge to main publishes it. To cut its first release: remove `private`, set
+the version to release, and raise `@mizchi/playwright-faults` first if it has
+changed since its last tag (`check-publish-deps.mjs` refuses otherwise, since
+kitesurf-faults imports its `./network` entry).
+
 ## Cutting a release
 
 1. In a PR, raise `version` in the package.json of each package to release,
