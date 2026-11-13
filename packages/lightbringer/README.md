@@ -125,11 +125,22 @@ Per **span** (one `perf.measure(name, action)` region):
 
 All times are unified to epoch ms so spans correlate with network / CPU even
 across navigations. The in-page collector is **drained at every span boundary**
-and, once a session has installed its emit binding (it stays installed after
-`finish()`), whenever one of its observers reports an entry, through the CDP
-binding that also carries what a document unloading mid-span recorded, so long
-tasks / LoAF / interactions / frames / app spans of documents you navigated away
-from stay in the report. In-page code that wants this
+and, while a session is open, whenever one of its observers reports an entry,
+through the CDP binding that also carries what a document unloading mid-span
+recorded, so long tasks / LoAF / interactions / frames / app spans of documents
+you navigated away from stay in the report. `finish()` takes that down again.
+The last session on a CDP session to finish removes the binding (later
+documents do not get it). The last session on a page to finish detaches the
+current document's collector (it stops emitting and stops its frame probe,
+keeping its records, bounded, in the store) and removes the page-level init
+script `installCollector` added (the page's sessions share one), so a document
+loaded after that has no collector unless a new session starts first; a
+context-level `collectorInitScript()` is yours and stays. A later `startSession` on the same
+page re-attaches the current document, so what it recorded between the two
+sessions reaches the new one; pass `excludeCurrentDocument: true` to leave that
+document out instead (a session opened right before the navigation it
+measures, on a page an earlier session already measured). `Runtime` stays
+enabled on the CDP session. In-page code that wants this
 document's long tasks reads `window.__perf.longTaskLog` (the latest 10000, never
 drained) or `window.__perf.lastLongTaskEnd` (the latest end, never reset), not
 `longTasks`, which a session's emit binding keeps empty. `report.vitals` are the
@@ -663,7 +674,8 @@ logSummary(report);
 `SessionOptions`: `cpuRate`, `netProfile`, `trace` + `tracePath`, `cssStats`,
 `coverage`, `memGc`, `settleTimeoutMs`, `settle`, `installCollector`,
 `evaluateTimeoutMs`, `oopif` (count out-of-process iframes' network, default
-`true`), `awaitPaint` (below, default `true`). The fixture and CLI map the `PERF_*` env vars onto these
+`true`), `awaitPaint` (below, default `true`), `excludeCurrentDocument` (above,
+default `false`). The fixture and CLI map the `PERF_*` env vars onto these
 with `sessionOptionsFromEnv(env)` — the only place the environment is read.
 
 **A paint drawn but not yet presented.** Chromium reports FCP, and an image's

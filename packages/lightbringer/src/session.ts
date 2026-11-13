@@ -1,12 +1,13 @@
 import type { CDPSession, Page } from "playwright";
 import { webVitalsIife } from "./config";
 import { DEFAULT_EVALUATE_TIMEOUT_MS, type NetProfile } from "./defaults";
-import { BoundedEvaluator } from "./evaluate";
+import { BoundedEvaluator, raceTimeout } from "./evaluate";
 import { awaitPendingPaint, PAINT_WAIT_MAX_MS, paintWaitRecord } from "./paint-wait";
 import {
   browserCollector,
   type CollectorOptions,
   type DrainPayload,
+  type PerfWindow,
 } from "./browser";
 import { PerfController } from "./controller";
 import { PerfAccumulator } from "./accumulator";
@@ -64,7 +65,9 @@ export interface SessionOptions {
    * Install the in-page collector with page.addInitScript (default true). Pass
    * false when the caller already installed collectorInitScript() at CONTEXT
    * level — before its own init scripts, so the collector captures the unpatched
-   * clock (e.g. ahead of a clock-skew runtime fault).
+   * clock (e.g. ahead of a clock-skew runtime fault). The page's sessions
+   * share one such script, and the last of them to finish removes it: a
+   * document loaded after that has no collector unless a session starts first.
    */
   installCollector?: boolean;
   /**
@@ -89,10 +92,37 @@ export interface SessionOptions {
    * does).
    */
   awaitPaint?: boolean;
+  /**
+   * Leave out the document that is loaded when the session starts: its
+   * records and vitals never reach this session's report. For a session
+   * opened right before the navigation it measures (a crawler's load span),
+   * on a page an earlier session already measured: that page's document is
+   * still loaded, and would otherwise be counted again. Default false: the
+   * session adopts the current document, including whatever it recorded
+   * since an earlier session's finish().
+   */
+  excludeCurrentDocument?: boolean;
 }
 
 /** Name of the CDP binding the collector pushes an unloading document's data through. */
 export const EMIT_BINDING = "__lbEmit";
+
+/**
+ * Open sessions per CDP session. The binding is one per client in Chromium
+ * (no reference count of its own: one Runtime.removeBinding silences it for
+ * every listener), so only the last session to finish removes it.
+ */
+const bindingUsers = new WeakMap<CDPSession, number>();
+
+/**
+ * Open sessions per page, and the page-level collector init script the first
+ * of them that installs one added (`installCollector`). The script is shared:
+ * a session starting while one is open does not inject the collector a second
+ * time, and only the page's last session to finish removes it, so a session
+ * finishing earlier does not leave a concurrent one (whichever installed the
+ * script) without a collector on the next document.
+ */
+const pageSessions = new WeakMap<Page, { users: number; script?: Promise<unknown> }>();
 
 const collectorScriptCache = new Map<boolean, string>();
 
@@ -333,9 +363,6 @@ export async function startSession(
   const cpuRate = opts.cpuRate ?? 1;
   const memGc = opts.memGc ?? false;
 
-  if (opts.installCollector !== false)
-    await page.addInitScript({ content: collectorInitScript() });
-
   const accumulator = new PerfAccumulator();
   // An unloading document pushes its undrained remainder through this binding
   // (pagehide / visibilitychange→hidden), so navigating mid-span loses nothing.
@@ -348,63 +375,153 @@ export async function startSession(
       /* malformed payload: ignore */
     }
   };
-  client.on("Runtime.bindingCalled", onBinding);
-  // The binding is only exposed to (and reported from) pages while this
-  // session's Runtime domain is enabled.
-  await client.send("Runtime.enable").catch(() => {});
-  await client.send("Runtime.addBinding", { name: EMIT_BINDING }).catch(() => {});
-
-  // A broken / stale build typically throws; capture it so the report can warn.
-  const pageErrors: string[] = [];
-  page.on("pageerror", (e) => pageErrors.push(String(e)));
-
-  await client.send("Performance.enable");
-  if (cpuRate > 1)
-    await client.send("Emulation.setCPUThrottlingRate", { rate: cpuRate });
-  const netConditions = opts.netProfile
-    ? { offline: false, ...opts.netProfile }
-    : undefined;
-  const network = await startNetworkCapture(client, {
-    childTargets: opts.oopif !== false,
-    // An OOPIF runs in its own renderer and its requests on its own target:
-    // throttling set on the page's session does not reach it.
-    onChild: async (child) => {
-      if (cpuRate > 1)
-        await child.send("Emulation.setCPUThrottlingRate", { rate: cpuRate }).catch(() => {});
-      if (netConditions)
-        await child.send("Network.emulateNetworkConditions", netConditions).catch(() => {});
-    },
-  });
-  const finishNetwork = network.requests;
-  if (netConditions) {
-    await client.send("Network.emulateNetworkConditions", netConditions);
-  }
-  const finishTrace =
-    opts.trace && opts.tracePath
-      ? await startTrace(client, opts.tracePath, opts.cssStats ?? false)
-      : undefined;
-  // Coverage spans the whole scenario (resetOnNavigation:false). Chromium-only.
-  if (opts.coverage && page.coverage) {
-    await page.coverage.startJSCoverage({
-      resetOnNavigation: false,
-      reportAnonymousScripts: false,
-    });
-    await page.coverage.startCSSCoverage({ resetOnNavigation: false });
-  }
-
   // One evaluator for the controller and finish(): a read that timed out in
   // end() makes finish()'s reads return at once while the page is still hung.
   const evaluator = new BoundedEvaluator(
     page,
     opts.evaluateTimeoutMs ?? DEFAULT_EVALUATE_TIMEOUT_MS,
   );
-  const controller = new PerfController(page, client, {
-    settle: opts.settle,
-    memGc,
-    settleTimeoutMs: opts.settleTimeoutMs,
-    accumulator,
-    evaluator,
+
+  // Counted before anything below can throw, and uncounted by release() if it
+  // does: a count left behind would keep this client's binding (or this
+  // page's init script) installed for good.
+  const shared = pageSessions.get(page) ?? { users: 0 };
+  shared.users++;
+  pageSessions.set(page, shared);
+  if (opts.installCollector !== false && !shared.script)
+    shared.script = page.addInitScript({ content: collectorInitScript() });
+  bindingUsers.set(client, (bindingUsers.get(client) ?? 0) + 1);
+  client.on("Runtime.bindingCalled", onBinding);
+
+  // Teardown of what this session installed, at finish() or when startSession
+  // throws. The binding goes with the client's last session (a concurrent one
+  // still reads it); the current document's collector is detached, and the
+  // init script removed, with the page's last. Detach first, so no emit races
+  // the final drain: an emit sent before the detach arrives ahead of its
+  // reply, while still listened to. CDP's Runtime.removeBinding keeps future
+  // documents from getting the binding but leaves the function in existing
+  // ones (calling it just stops reaching node), hence detach(). Runtime stays
+  // enabled: the client may be the caller's, using it too. Both teardown
+  // commands are answered on the renderer's main thread, so on a page whose
+  // reads time out they wait as long as the page hangs: they are sent there
+  // without waiting, and elsewhere waited for one bounded read at most
+  // (commands on one client run in order, so a later session's addBinding
+  // still lands after the removal).
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    const teardown: Promise<unknown>[] = [];
+    const clientUsers = (bindingUsers.get(client) ?? 1) - 1;
+    if (clientUsers > 0) bindingUsers.set(client, clientUsers);
+    else bindingUsers.delete(client);
+    const lastOnPage = --shared.users === 0;
+    if (lastOnPage) {
+      if (pageSessions.get(page) === shared) pageSessions.delete(page);
+      // The document's collector is the page's, whichever client reads it.
+      await evaluator.evaluate<null>(
+        () => {
+          (window as unknown as PerfWindow).__perf?.detach?.();
+          return null;
+        },
+        () => null,
+      );
+    }
+    if (clientUsers <= 0)
+      teardown.push(
+        client.send("Runtime.removeBinding", { name: EMIT_BINDING }).catch(() => {}),
+      );
+    // Playwright 1.63+ returns a Disposable; older versions return nothing,
+    // and their script stays.
+    if (lastOnPage && shared.script)
+      teardown.push(
+        shared.script
+          .then((s) => {
+            const d = s as { dispose?: () => Promise<void> } | undefined;
+            return typeof d?.dispose === "function" ? d.dispose() : undefined;
+          })
+          .catch(() => {}),
+      );
+    if (!evaluator.stalled)
+      await raceTimeout(Promise.all(teardown), evaluator.timeoutMs, () => undefined);
+  };
+
+  // A broken / stale build typically throws; capture it so the report can warn.
+  const pageErrors: string[] = [];
+  page.on("pageerror", (e) => pageErrors.push(String(e)));
+
+  const setUp = async () => {
+    if (opts.installCollector !== false) await shared.script;
+    // The binding is only exposed to (and reported from) pages while this
+    // session's Runtime domain is enabled.
+    await client.send("Runtime.enable").catch(() => {});
+    await client.send("Runtime.addBinding", { name: EMIT_BINDING }).catch(() => {});
+
+    // An earlier session's finish() detached the current document's collector:
+    // re-attach it, so what it recorded since then (and records from now on)
+    // reach this session. Or, with excludeCurrentDocument, leave it detached
+    // and drop whatever of it reaches the accumulator (begin()'s drain, an
+    // emit of a collector no session detached).
+    const exclude = opts.excludeCurrentDocument === true;
+    const currentOrigin = await evaluator.evaluate<number | null>(
+      exclude
+        ? () => performance.timeOrigin
+        : () => {
+            (window as unknown as PerfWindow).__perf?.attach?.();
+            return performance.timeOrigin;
+          },
+      () => null,
+    );
+    if (exclude && currentOrigin !== null) accumulator.ignoreDocument(currentOrigin);
+
+    await client.send("Performance.enable");
+    if (cpuRate > 1)
+      await client.send("Emulation.setCPUThrottlingRate", { rate: cpuRate });
+    const netConditions = opts.netProfile
+      ? { offline: false, ...opts.netProfile }
+      : undefined;
+    const network = await startNetworkCapture(client, {
+      childTargets: opts.oopif !== false,
+      // An OOPIF runs in its own renderer and its requests on its own target:
+      // throttling set on the page's session does not reach it.
+      onChild: async (child) => {
+        if (cpuRate > 1)
+          await child.send("Emulation.setCPUThrottlingRate", { rate: cpuRate }).catch(() => {});
+        if (netConditions)
+          await child.send("Network.emulateNetworkConditions", netConditions).catch(() => {});
+      },
+    });
+    if (netConditions) {
+      await client.send("Network.emulateNetworkConditions", netConditions);
+    }
+    const finishTrace =
+      opts.trace && opts.tracePath
+        ? await startTrace(client, opts.tracePath, opts.cssStats ?? false)
+        : undefined;
+    // Coverage spans the whole scenario (resetOnNavigation:false). Chromium-only.
+    if (opts.coverage && page.coverage) {
+      await page.coverage.startJSCoverage({
+        resetOnNavigation: false,
+        reportAnonymousScripts: false,
+      });
+      await page.coverage.startCSSCoverage({ resetOnNavigation: false });
+    }
+
+    const controller = new PerfController(page, client, {
+      settle: opts.settle,
+      memGc,
+      settleTimeoutMs: opts.settleTimeoutMs,
+      accumulator,
+      evaluator,
+    });
+    return { network, finishTrace, controller };
+  };
+  const { network, finishTrace, controller } = await setUp().catch(async (e: unknown) => {
+    client.off("Runtime.bindingCalled", onBinding);
+    await release();
+    throw e;
   });
+  const finishNetwork = network.requests;
 
   const finish = async (title: string) => {
     // A paint drawn but not yet presented is reported a few frames late; wait
@@ -425,6 +542,7 @@ export async function startSession(
           })
         : undefined;
     if (unanswered && paint) await evaluator.adopt(unanswered, paint.waitedMs);
+    await release();
     // Final drain of the current document (flushes pending observer records).
     await controller.drain();
     client.off("Runtime.bindingCalled", onBinding);

@@ -60,6 +60,8 @@ export class PerfAccumulator implements AccumulatedEntries {
   /** true once any document reported a non-native performance.now (see DrainPayload.clockPatched) */
   clockPatched = false;
   private keepFramesFrom: () => number;
+  /** timeOrigins of the documents ignoreDocument() left out */
+  private readonly ignored = new Set<number>();
 
   constructor(opts: AccumulatorOptions = {}) {
     this.keepFramesFrom = opts.keepFramesFrom ?? (() => -Infinity);
@@ -75,9 +77,18 @@ export class PerfAccumulator implements AccumulatedEntries {
     return this.documents.length > 0;
   }
 
+  /**
+   * Drop every later payload of the document with this timeOrigin (see
+   * SessionOptions.excludeCurrentDocument).
+   */
+  ignoreDocument(timeOrigin: number): void {
+    this.ignored.add(timeOrigin);
+  }
+
   /** Merge one drain. Tolerates missing arrays (older / partial payloads). */
   add(p: DrainPayload | null | undefined): void {
     if (!p || typeof p.timeOrigin !== "number") return;
+    if (this.ignored.has(p.timeOrigin)) return;
     // The initial about:blank document of a new page (reached by a context-level
     // collectorInitScript) emits on its pagehide at the first goto. With nothing
     // but rAF frames in it, it is not a document the test observed.
