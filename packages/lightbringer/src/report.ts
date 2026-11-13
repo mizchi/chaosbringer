@@ -484,7 +484,11 @@ export function logSummary(report: PerfReport, memGc: boolean = false): void {
   if (report.collectorMissing) {
     lines.push(
       `  ${p.red("! in-page collector did not run — vitals / cpu / render are missing.")}` +
-        p.red(" Navigate with page.goto (page.setContent does not trigger init scripts)."),
+        p.red(
+          " Navigate with page.goto while a session is open: page.setContent does not trigger init scripts," +
+            " and a document loaded after the page's last session finished has no collector" +
+            " (or install collectorInitScript() at context level with installCollector: false).",
+        ),
     );
   }
   if (report.clockPatched) {

@@ -68,6 +68,27 @@ test.describe("session reuse on one page", () => {
     expect(report.appSpans.map((s) => s.name)).toContain("between");
   });
 
+  test("the next session re-attaches the document: a navigation inside its span loses nothing", async ({ page }) => {
+    await servePages(page);
+    const client = await page.context().newCDPSession(page);
+    const s1 = await startSession(page, client, { awaitPaint: false });
+    await page.goto(`${ORIGIN}/a`);
+    await s1.controller.measure("first", async () => {});
+    await s1.finish("s1");
+
+    // s1 detached /a's collector. Its work in s2's span is pushed on record
+    // or on /a's pagehide, never by a drain (begin()'s ran before it), so it
+    // reaches s2 only if s2 attached the document again.
+    const s2 = await startSession(page, client, { awaitPaint: false });
+    await s2.controller.measure("nav", async () => {
+      await page.locator("#b").click();
+      await page.goto(`${ORIGIN}/b`);
+    });
+    const { report } = await s2.finish("s2");
+    expect(report.spans[0].cpu.longTaskCount).toBe(1);
+    expect(report.appSpans.map((s) => s.name)).toContain("between");
+  });
+
   test("finish removes the binding: a later document has none and nothing is reported", async ({ page }) => {
     await servePages(page);
     const client = await page.context().newCDPSession(page);

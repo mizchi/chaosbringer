@@ -94,7 +94,7 @@ function installObservers(emit?: (payload: string) => void) {
     observers.get("longtask")?.queued.push({ entryType: "longtask", startTime, duration });
   const loaf = (startTime: number, duration: number) =>
     deliver("long-animation-frame", { entryType: "long-animation-frame", startTime, duration });
-  return { win, longTask, queueLongTask, loaf };
+  return { win, deliver, longTask, queueLongTask, loaf };
 }
 
 describe("browserCollector longTaskLog / lastLongTaskEnd", () => {
@@ -247,6 +247,19 @@ describe("browserCollector detach / attach", () => {
     for (let i = 0; i < 10_003; i++) longTask(i * 100, 60);
     expect(win.__perf!.longTasks).toHaveLength(10_000);
     expect(win.__perf!.longTasks[0]).toEqual({ start: 300, duration: 60 });
+  });
+
+  it.each([
+    ["long-animation-frame", "loaf", {}],
+    ["measure", "measures", { name: "m", detail: { __lbSpan: true } }],
+    ["event", "events", { name: "click", interactionId: 1, processingStart: 0, processingEnd: 0 }],
+  ] as const)("bounds an undrained %s buffer to the latest 10000", (type, key, extra) => {
+    const { win, deliver } = installObservers();
+    browserCollector({ frames: false });
+    for (let i = 0; i < 10_003; i++) deliver(type, { entryType: type, startTime: i * 100, duration: 60, ...extra });
+    const buffer = win.__perf![key] as Array<{ start: number }>;
+    expect(buffer).toHaveLength(10_000);
+    expect(buffer[0].start).toBe(300);
   });
 });
 
