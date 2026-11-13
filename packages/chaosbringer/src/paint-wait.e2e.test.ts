@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "playwright";
 import { awaitPendingPaint, collectorInitScript } from "lightbringer/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -58,6 +61,9 @@ const PAGES: Record<string, string> = {
   shadow: `<script>customElements.define("my-el", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<h1 style='font:32px system-ui'>Hello from a shadow root</h1>"; } });</script><body><my-el></my-el></body>`,
   // Visible only once a request the crawl hangs answers: the settle caps.
   capped: `<style>body{opacity:0}</style><body><h1>Hello</h1><script>fetch("/api/slow").then(()=>{document.body.style.opacity=1})</script></body>`,
+  // Visible from the start, with a request the crawl hangs: the settle caps,
+  // and with the paint entries hidden a wait would find the text pending.
+  "capped-visible": `<body>${H1}<script>fetch("/api/slow")</script></body>`,
   // For the input latch: a button to click while the image is in flight.
   input: `<body style="margin:0"><h1 style="margin:0;font:32px system-ui">Sea view</h1><button id="b">ok</button><img src="/img/noise400.png?slow" width="400" height="400"></body>`,
 };
@@ -179,17 +185,38 @@ describe("the load path's wait for a paint not yet presented", () => {
   }, 60_000);
 
   it("does not wait on late images Chromium does not make the LCP", async () => {
+    // The solid image is under Chromium's 0.05 bits per pixel at 600x600.
+    expect((IMAGES["solid600.png"]!.length * 8) / (600 * 600)).toBeLessThan(0.05);
     const results = await crawlPages(Object.keys(DECOYS));
     for (const [name, page] of Object.entries(results)) {
       expect(page.metrics?.lcp, name).toBeGreaterThan(0);
+      // The heading stayed the LCP: a decoy Chromium did count would make
+      // this test pass without the check ever judging it.
+      expect(page.perfPage?.vitals.LCP?.value, name).toBeGreaterThan(0);
+      expect(page.perfPage?.vitals.LCP?.attribution?.url, name).toBeUndefined();
       expect(page, name).not.toHaveProperty("paintWait");
     }
   }, 60_000);
 
   it("bounds a pending FCP that never comes to a few frames, outside the load span", async () => {
     const clean = await crawlPages(["text"]);
-    const forced = await crawlPages(["text", "shadow"], { initScripts: [HIDE_PAINT], performanceBudget: { fcp: 5000 } });
+    const outDir = mkdtempSync(join(tmpdir(), "cb-paint-wait-"));
+    let forced: Record<string, PageResult>;
+    let sidecar: Record<string, unknown>;
+    try {
+      forced = await crawlPages(["text", "shadow"], {
+        initScripts: [HIDE_PAINT],
+        performanceBudget: { fcp: 5000 },
+        perf: { outDir },
+      });
+      sidecar = JSON.parse(readFileSync(join(outDir, forced.text!.perfPage!.reportPath!), "utf8"));
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
     const page = forced.text!;
+    // The crawler waited; lightbringer's finish() did not wait again (its
+    // report, the sidecar, would then carry a paintWait of its own).
+    expect(sidecar).not.toHaveProperty("paintWait");
     expect(page.metrics?.fcp).toBeUndefined();
     expect(page.paintWait).toMatchObject({ outcome: "frames", pending: ["fcp"], stillPending: ["fcp"], content: "text" });
     // The baseline frame, then at most 8 more.
@@ -223,6 +250,19 @@ describe("the load path's wait for a paint not yet presented", () => {
       ["lcp", "capped"],
     ]);
     expect(violations(page)).toEqual([]);
+  }, 60_000);
+
+  it("does not wait after a capped load settle even with a paint pending", async () => {
+    const page = await crawlOne("capped-visible", {
+      timeout: 3000,
+      initScripts: [HIDE_PAINT],
+      faultInjection: [faults.hang({ urlPattern: "/api/slow" })],
+      performanceBudget: { fcp: 1000 },
+    });
+    expect(page.settleCapped).toBe(1);
+    // A wait that ignored the cap would record outcome "frames" here.
+    expect(page).not.toHaveProperty("paintWait");
+    expect(page.budgetUnmeasured?.map((u) => [u.metric, u.reason])).toEqual([["fcp", "capped"]]);
   }, 60_000);
 
   it("does not wait for an image LCP after the first input: Chromium reports no candidate then", async () => {

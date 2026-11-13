@@ -1,4 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
+import { startSession } from "lightbringer/core";
+import type { PerfReport } from "lightbringer/core";
+import { chromium } from "playwright";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ChaosCrawler } from "./crawler.js";
 import type { PageResult } from "./types.js";
@@ -13,7 +16,8 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * holds the entry back while the load settle (two frames and a quiet
  * network) ends a few frames after the GPU process resumes. Read then, LCP
  * was the earlier text candidate in most runs; the wait after the load span
- * must read the hero.
+ * must read the hero. The same holds for lightbringer's own finish(), whose
+ * wait must run before the drain that copies report.vitals.
  *
  * Only GPU processes this test file's own browser started are stopped (the
  * parent chain of each reaches this process), so a browser of another test
@@ -206,10 +210,54 @@ describe.skipIf(process.platform !== "linux")("load LCP after a GPU presentation
           expect(String(page.perfPage?.vitals.LCP?.attribution?.url), detail).toMatch(/\/img\/hero\.png$/);
         }
         // A first read that already had the hero needs no wait; one that
-        // waited saw the hero presented.
-        if (page.paintWait) expect(page.paintWait.outcome, detail).toBe("reported");
+        // waited saw the hero presented. When the hero's entry landed between
+        // the first read and the check (closing the span takes a few ms),
+        // nothing was pending any more and the record is there for the merge.
+        if (page.paintWait?.outcome === "none") {
+          expect(page.paintWait.changed?.lcp?.[1], detail).toBeGreaterThanOrEqual(500);
+        } else if (page.paintWait) {
+          expect(page.paintWait.outcome, detail).toBe("reported");
+        }
       }, 30_000);
     }
+  }
+
+  const lbReports: PerfReport[] = [];
+  for (let run = 1; run <= 3; run++) {
+    it(`lightbringer finish() puts the hero into report.vitals after a 300 ms stall, run ${run}`, async (ctx) => {
+      const armed: Stall = { pids: [], ms: 300 };
+      stall = armed;
+      const browser = await chromium.launch({ headless: true });
+      let report: PerfReport;
+      try {
+        const page = await browser.newPage();
+        const client = await page.context().newCDPSession(page);
+        // The default awaitPaint, which chaosbringer turns off for its own wait.
+        const session = await startSession(page, client);
+        await session.controller.measure("load", async () => {
+          // The hero is requested only after the load event (its stylesheet
+          // is injected by a deferred script): end the span after it, so the
+          // span's settle runs into the stall it starts.
+          const served = page.waitForResponse((r) => r.url().endsWith("/img/hero.png")).then((r) => r.finished());
+          await page.goto(`${origin}/`, { waitUntil: "load" });
+          await served;
+        });
+        report = (await session.finish("stall")).report;
+      } finally {
+        await browser.close();
+      }
+      if (armed.pids.length === 0) {
+        ctx.skip("no GPU process of this test's own browser was found in /proc, so no presentation stall can be staged");
+        return;
+      }
+      expect(armed.stoppedAt, "the GPU process was stopped").toBeTypeOf("number");
+      expect(armed.resumedAt, "the GPU process was resumed").toBeTypeOf("number");
+      lbReports.push(report);
+      const detail = JSON.stringify({ LCP: report.vitals.LCP, paintWait: report.paintWait });
+      expect(report.vitals.LCP?.value, detail).toBeGreaterThanOrEqual(500);
+      expect(String(report.vitals.LCP?.attribution?.url), detail).toMatch(/\/img\/hero\.png$/);
+      if (report.paintWait) expect(report.paintWait.outcome, detail).toBe("reported");
+    }, 30_000);
   }
 
   it("waited at least once: the stall held the hero back from the first read", (ctx) => {
@@ -220,5 +268,13 @@ describe.skipIf(process.platform !== "linux")("load LCP after a GPU presentation
     // Before the wait existed, the first read missed the hero in ~8 of 10
     // runs; all of them missing it here would mean the stall staged nothing.
     expect(results.some((r) => r.page.paintWait?.outcome === "reported")).toBe(true);
+  });
+
+  it("lightbringer's finish() waited at least once", (ctx) => {
+    if (lbReports.length === 0) {
+      ctx.skip("no stall was staged");
+      return;
+    }
+    expect(lbReports.some((r) => r.paintWait?.outcome === "reported")).toBe(true);
   });
 });

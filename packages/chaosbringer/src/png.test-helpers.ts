@@ -1,8 +1,9 @@
 /**
  * Real PNGs for e2e pages whose images the browser must decode and paint:
  * seeded noise (it does not compress, so its bytes per pixel are a photo's,
- * never an image LCP skips as low-entropy) and a solid colour (it compresses
- * to almost nothing, so LCP skips it).
+ * never an image LCP skips as low-entropy) and a solid colour (compressed
+ * at the highest level it falls under Chromium's 0.05 bits per displayed
+ * pixel at its natural size, so LCP skips it).
  */
 import { deflateSync } from "node:zlib";
 
@@ -23,7 +24,7 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([len, td, crc]);
 }
 
-function rgbPng(size: number, pixel: (x: number, y: number) => [number, number, number]): Buffer {
+function rgbPng(size: number, pixel: (x: number, y: number) => [number, number, number], level?: number): Buffer {
   const row = size * 3 + 1;
   const raw = Buffer.alloc(row * size);
   for (let y = 0; y < size; y++) {
@@ -44,7 +45,7 @@ function rgbPng(size: number, pixel: (x: number, y: number) => [number, number, 
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(raw)),
+    chunk("IDAT", deflateSync(raw, level === undefined ? {} : { level })),
     chunk("IEND", Buffer.alloc(0)),
   ]);
 }
@@ -65,7 +66,10 @@ export function noisePng(size: number, seed: number): Buffer {
   ]);
 }
 
-/** A `size`×`size` PNG of one colour. */
+/**
+ * A `size`×`size` PNG of one colour. At the default deflate level a 600 px
+ * one is 0.052 bits per pixel, just over the cutoff, and Chromium counts it.
+ */
 export function solidPng(size: number): Buffer {
-  return rgbPng(size, () => [200, 120, 40]);
+  return rgbPng(size, () => [200, 120, 40], 9);
 }
