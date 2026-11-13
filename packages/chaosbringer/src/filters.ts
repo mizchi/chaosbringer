@@ -4,7 +4,14 @@
  */
 
 import { isFaultEcho } from "./resource-outcomes.js";
-import type { CrawlSummary, DiscoveryMetrics, HttpErrorSummary, PageError, PageResult } from "./types.js";
+import type {
+  CrawlSummary,
+  DiscoveryMetrics,
+  HttpErrorSummary,
+  PageError,
+  PageResult,
+  PerfBudgetKey,
+} from "./types.js";
 
 /** True if any pattern (regex string) matches `value`. Invalid regex is skipped. */
 export function matchesAnyPattern(
@@ -149,6 +156,13 @@ export function summarizePages(
     }
   }
 
+  // Pages per budgeted metric the budget could not be checked on.
+  const budgetUnmeasured: Partial<Record<PerfBudgetKey, number>> = {};
+  for (const r of results) {
+    for (const metric of new Set((r.budgetUnmeasured ?? []).map((u) => u.metric)))
+      budgetUnmeasured[metric] = (budgetUnmeasured[metric] ?? 0) + 1;
+  }
+
   return {
     successPages,
     errorPages,
@@ -165,6 +179,7 @@ export function summarizePages(
     faultEchoes,
     avgLoadTime,
     avgMetrics,
+    ...(Object.keys(budgetUnmeasured).length > 0 ? { budgetUnmeasured } : {}),
     discovery,
   };
 }

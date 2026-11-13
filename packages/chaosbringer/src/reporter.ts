@@ -90,6 +90,7 @@ export function formatReport(report: CrawlReport): string {
       lines.push(...entries);
     }
   }
+  lines.push(...budgetUnmeasuredLines(report));
 
   lines.push(...formatPerfSection(report));
 
@@ -333,6 +334,37 @@ export function formatReport(report: CrawlReport): string {
   return lines.join("\n");
 }
 
+/**
+ * The `performanceBudget` metrics pages did not measure, per metric: how many
+ * pages, why, and an example. A budget that held on them held unchecked, so
+ * this is said, but it is no failure and no run warning.
+ */
+function budgetUnmeasuredLines(report: CrawlReport): string[] {
+  const byMetric = new Map<string, { pages: number; reasons: Map<string, number>; example: string }>();
+  for (const page of report.pages) {
+    for (const u of page.budgetUnmeasured ?? []) {
+      const m = byMetric.get(u.metric) ?? { pages: 0, reasons: new Map<string, number>(), example: page.url };
+      m.pages++;
+      m.reasons.set(u.reason, (m.reasons.get(u.reason) ?? 0) + 1);
+      byMetric.set(u.metric, m);
+    }
+  }
+  if (byMetric.size === 0) return [];
+  const lines = ["", "Performance budget not measured:"];
+  for (const [metric, m] of byMetric) {
+    const reasons = [...m.reasons].map(([reason, n]) => `${reason} ${n}`).join(", ");
+    lines.push(`  ${metric} on ${m.pages} page${m.pages === 1 ? "" : "s"} (${reasons}), e.g. ${m.example}`);
+  }
+  return lines;
+}
+
+/** The compact report's one line for `summary.budgetUnmeasured`, or "". */
+function budgetUnmeasuredLine(report: CrawlReport): string {
+  const counts = Object.entries(report.summary.budgetUnmeasured ?? {});
+  if (counts.length === 0) return "";
+  return `  Budget not measured: ${counts.map(([metric, n]) => `${metric} x${n}`).join(", ")}`;
+}
+
 export function formatCompactReport(report: CrawlReport, strict: boolean | ExitCodeOptions = false): string {
   const reasons = exitReasons(report, strict);
   const lines = [
@@ -340,6 +372,7 @@ export function formatCompactReport(report: CrawlReport, strict: boolean | ExitC
     report.summary.avgMetrics
       ? `  Metrics: TTFB=${report.summary.avgMetrics.ttfb.toFixed(0)}ms, FCP=${report.summary.avgMetrics.fcp.toFixed(0)}ms`
       : "",
+    budgetUnmeasuredLine(report),
     deadLinksLine(report),
     offsiteRedirectsLine(report),
     warningsLine(report),

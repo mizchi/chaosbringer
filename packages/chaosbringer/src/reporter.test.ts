@@ -441,6 +441,49 @@ describe("formatReport", () => {
   });
 });
 
+describe("budgeted metrics that were not measured", () => {
+  const report = () =>
+    makeReport({
+      pages: [
+        fakePage("http://localhost:3000/a", undefined, {
+          budgetUnmeasured: [{ metric: "fcp", reason: "no-content", message: "the page showed no contentful content" }],
+        }),
+        fakePage("http://localhost:3000/b", undefined, {
+          budgetUnmeasured: [
+            { metric: "fcp", reason: "stalled", message: "frames stopped" },
+            { metric: "lcp", reason: "stalled", message: "frames stopped" },
+          ],
+        }),
+        fakePage("http://localhost:3000/c", undefined, {
+          budgetUnmeasured: [{ metric: "fcp", reason: "no-content", message: "the page showed no contentful content" }],
+        }),
+      ],
+      summary: makeSummary({ successPages: 3, budgetUnmeasured: { fcp: 3, lcp: 1 } }),
+    });
+
+  it("lists them per metric, with reasons and an example, in the full report", () => {
+    const lines = formatReport(report()).split("\n");
+    const at = lines.indexOf("Performance budget not measured:");
+    expect(at).toBeGreaterThan(-1);
+    expect(lines.slice(at + 1, at + 3)).toEqual([
+      "  fcp on 3 pages (no-content 2, stalled 1), e.g. http://localhost:3000/a",
+      "  lcp on 1 page (stalled 1), e.g. http://localhost:3000/b",
+    ]);
+  });
+
+  it("counts them in the compact report, without failing the run", () => {
+    const out = formatCompactReport(report());
+    expect(out).toContain("  Budget not measured: fcp x3, lcp x1");
+    expect(out).toContain("[PASS]");
+    expect(getExitCode(report())).toBe(0);
+  });
+
+  it("prints nothing when every budgeted metric was measured", () => {
+    expect(formatReport(makeReport())).not.toContain("Performance budget not measured");
+    expect(formatCompactReport(makeReport())).not.toContain("Budget not measured");
+  });
+});
+
 describe("off-site navigations in the reports", () => {
   const U = "http://localhost:3000";
   const nav = (from: string, to: string, trigger: "script" | "click" | "server-redirect") => ({ from, to, trigger });

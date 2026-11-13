@@ -852,6 +852,9 @@ export const CHAOSBRINGER_HARNESS_FRAMES: readonly string[] = [
   "collectRawTargets",
   "installRejectionCapture",
   "chaosbringerSettleProbe",
+  // the load metrics read (page-metrics.ts); the paint wait after it is
+  // lightbringer's `lightbringerAwaitPaint`, labelled by its own markers
+  "chaosbringerLoadMetrics",
 ];
 
 /**

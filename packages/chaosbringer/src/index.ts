@@ -189,10 +189,13 @@ export {
 } from "./parity.js";
 export {
   checkPerformanceBudget,
+  unmeasuredBudget,
   checkPerfBudgets,
   perfBudgetRulesFromJson,
   type PerfBudgetsFile,
+  type UnmeasuredContext,
 } from "./budget.js";
+export type { LoadMetricsRead, LoadPaintHint, LoadLongTask } from "./page-metrics.js";
 export { buildCrawlPerfSummary, buildCoverageSummary, buildPerfTrends } from "./perf-summary.js";
 export { buildDegradation, serverFaultName } from "./perf-faults.js";
 export { candidatePerfKey, compilePerfKeyGlob } from "./perf-key.js";
@@ -648,6 +651,8 @@ export type {
   SettleMode,
   PerformanceBudget,
   PerfBudgetKey,
+  BudgetUnmeasured,
+  BudgetUnmeasuredReason,
   PerfOptions,
   PerfSpanReport,
   LastActionPerf,

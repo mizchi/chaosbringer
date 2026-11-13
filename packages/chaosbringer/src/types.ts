@@ -6,6 +6,7 @@ import type {
   BudgetMetric,
   DocumentReport,
   MemoryTrend,
+  PaintWaitRecord,
   SpanReport,
   VitalSample,
 } from "lightbringer/core";
@@ -1092,6 +1093,42 @@ export type PerfBudgetKey = (typeof PERF_BUDGET_KEYS)[number];
 // biome-ignore lint/suspicious/noEmptyInterface: extends the derived record on purpose
 export interface PerformanceBudget extends Partial<Record<PerfBudgetKey, number>> {}
 
+/**
+ * Why a budgeted metric was not measured on a page (`BudgetUnmeasured.reason`):
+ * - `capped`: the load settle hit its cap, so no paint was awaited (the page
+ *   was still waiting on the network);
+ * - `hidden`: the document was hidden or prerendering, and reports no paint;
+ * - `stalled`: content was visible, and frames stopped for longer than the
+ *   wait for its first contentful paint (a presentation stall over 1 s);
+ * - `not-presented`: content was visible, frames ran, and the browser still
+ *   reported no first contentful paint (it did not count what was expected);
+ * - `no-content`: the page showed nothing that paints contentfully (a blank
+ *   shell, content clipped or off-screen), or reported no LCP candidate;
+ * - `no-collector`: LCP / TBT need lightbringer's collector, which a
+ *   caller-owned page (`testPage()`) or `setContent` does not have;
+ * - `not-reported`: the browser did not report it (TTFB, DOMContentLoaded,
+ *   load), or the page could not be read;
+ * - `under-read`: measured, but a larger image loaded and was not presented
+ *   before frames stopped, so `lcp` is an earlier, smaller candidate.
+ */
+export type BudgetUnmeasuredReason =
+  | "capped"
+  | "hidden"
+  | "stalled"
+  | "not-presented"
+  | "no-content"
+  | "no-collector"
+  | "not-reported"
+  | "under-read";
+
+/** A `performanceBudget` metric this page did not measure (`PageResult.budgetUnmeasured`). */
+export interface BudgetUnmeasured {
+  metric: PerfBudgetKey;
+  reason: BudgetUnmeasuredReason;
+  /** The reason, for a reader. */
+  message: string;
+}
+
 /** Supported network throttling presets applied via CDP. */
 export type NetworkProfile = "slow-3g" | "fast-3g" | "offline";
 
@@ -1204,6 +1241,27 @@ export interface PageResult {
    * measurement; under `networkidle` there is nothing to count.
    */
   settleCapped?: number;
+  /**
+   * The load's first contentful paint, its FCP vital or a larger LCP image
+   * was still unreported after the load, and the crawler waited for the
+   * browser to present it: after the load span closed (no span window moves),
+   * before the budget check and the first action. Present only when something
+   * was pending or the wait changed a metric. `outcome` `reported` means the
+   * late value is in `metrics` (and `perfPage.vitals`); `frames` and
+   * `timeout` mean `stillPending` did not come within the bound (5 frames at
+   * normal cadence, 8 in all, 1 s; `timeout`: frames stopped for longer).
+   * `changed` gives each metric the wait changed as [first read, final].
+   */
+  paintWait?: PaintWaitRecord & {
+    changed?: Partial<Record<"fcp" | "lcp" | "tbt", [number | null, number | null]>>;
+  };
+  /**
+   * Metrics `performanceBudget` names that this load did not measure, or
+   * measured as an earlier LCP candidate (`under-read`), each with why. A
+   * note, never a violation: the budget was not checked for them, and the
+   * exit code does not change. Present only when there is one.
+   */
+  budgetUnmeasured?: BudgetUnmeasured[];
   /**
    * A service worker controlled the page when its visit ended. Recorded only
    * when `faultInjection` rules are configured, because it is what decides
@@ -1714,6 +1772,11 @@ export interface CrawlSummary {
     fcp: number;
     lcp: number;
   };
+  /**
+   * Pages per `performanceBudget` metric that the budget could not be checked
+   * on (`PageResult.budgetUnmeasured`). Present only when a page has one.
+   */
+  budgetUnmeasured?: Partial<Record<PerfBudgetKey, number>>;
   /** Discovery metrics - how links were found */
   discovery?: DiscoveryMetrics;
 }
