@@ -258,6 +258,22 @@ importers:
         specifier: 'catalog:'
         version: 5.0.5(@types/node@26.6.4)(@vitest/browser-preview@5.0.5)(@vitest/ui@5.0.5(vitest@5.0.5))(@voidzero-dev/vite-plus-core@1.3.0(@types/node@26.6.4)(esbuild@0.28.2)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1))
 
+  packages/kitesurf-faults:
+    dependencies:
+      '@mizchi/playwright-faults':
+        specifier: workspace:^
+        version: link:../playwright-faults
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vite-plus:
+        specifier: 'catalog:'
+        version: 1.3.0(@types/node@26.6.4)(@vitest/ui@5.0.5(vitest@5.0.5))(esbuild@0.28.2)(playwright@1.63.0)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1)
+      vitest:
+        specifier: 'catalog:'
+        version: 5.0.5(@types/node@26.6.4)(@vitest/browser-preview@5.0.5)(@vitest/ui@5.0.5(vitest@5.0.5))(@voidzero-dev/vite-plus-core@1.3.0(@types/node@26.6.4)(esbuild@0.28.2)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1))
+
   packages/lightbringer:
     dependencies:
       playwright:

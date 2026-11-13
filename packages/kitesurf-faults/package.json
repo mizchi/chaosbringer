@@ -1,0 +1,57 @@
+{
+  "name": "@mizchi/kitesurf-faults",
+  "version": "0.0.0",
+  "description": "Run chaosbringer FaultRules on a fetch(request) transport such as Kitesurf's EngineHost.egress: HTTP error responses, failed requests and bounded delays.",
+  "license": "MIT",
+  "author": "mizchi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mizchi/chaosbringer.git",
+    "directory": "packages/kitesurf-faults"
+  },
+  "homepage": "https://github.com/mizchi/chaosbringer/tree/main/packages/kitesurf-faults#readme",
+  "bugs": {
+    "url": "https://github.com/mizchi/chaosbringer/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "vp test run",
+    "lint:nul": "node ../chaosbringer/scripts/check-no-nul.mjs src"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
+  "keywords": [
+    "fault-injection",
+    "chaos-engineering",
+    "kitesurf",
+    "egress",
+    "cloudflare-workers",
+    "testing"
+  ],
+  "dependencies": {
+    "@mizchi/playwright-faults": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}
