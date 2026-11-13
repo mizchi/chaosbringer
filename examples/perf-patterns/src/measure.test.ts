@@ -100,6 +100,22 @@ describe("missingValueReason", () => {
     );
   });
 
+  it("names a paint wait that did not get its paint, and the budgets left unmeasured", () => {
+    const r = report([
+      {
+        perf: load("/", 10) as never,
+        perfPage: { vitals: { TTFB: { value: 80 } }, network: {} } as never,
+        metrics: { lcp: 24 },
+        settleCapped: 0,
+        paintWait: { outcome: "timeout", waitedMs: 1000, pending: ["fcp"], stillPending: ["fcp"] },
+        budgetUnmeasured: [{ metric: "fcp", reason: "stalled", message: "frames stopped" }],
+      },
+    ]);
+    expect(missingValueReason(r, "/ :: load", "page.vitals.FCP.value")).toBe(
+      "vitals.FCP.value absent; vitals has [TTFB]; raw metrics fcp=– lcp=24; settleCapped=0; paintWait=timeout[fcp]; budgetUnmeasured=fcp:stalled",
+    );
+  });
+
   it("names the keys when no page's load key matched", () => {
     const r = report([{ perf: load("/about", 10) as never }, { perf: load("/docs", 10) as never }, {}]);
     expect(missingValueReason(r, "/ :: load", "page.vitals.FCP.value")).toBe(

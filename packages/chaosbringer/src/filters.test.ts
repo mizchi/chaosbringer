@@ -254,4 +254,19 @@ describe("summarizePages", () => {
     const s = summarizePages([], discovery);
     expect(s.discovery).toBe(discovery);
   });
+
+  it("counts the pages each budgeted metric went unmeasured on, only when there are any", () => {
+    expect(summarizePages([makeResult()])).not.toHaveProperty("budgetUnmeasured");
+    const s = summarizePages([
+      makeResult({ budgetUnmeasured: [{ metric: "fcp", reason: "no-content", message: "x" }] }),
+      makeResult({
+        budgetUnmeasured: [
+          { metric: "fcp", reason: "stalled", message: "x" },
+          { metric: "lcp", reason: "stalled", message: "x" },
+        ],
+      }),
+      makeResult(),
+    ]);
+    expect(s.budgetUnmeasured).toEqual({ fcp: 2, lcp: 1 });
+  });
 });

@@ -167,6 +167,7 @@ export const HARNESS_SCRIPT_MARKERS: ReadonlySet<string> = new Set([
   "drainEvent",
   "readGlRenderer",
   "readCssProfile",
+  "lightbringerAwaitPaint",
   // Playwright's injected and utility scripts
   "InjectedScript",
   "UtilityScript",

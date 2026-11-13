@@ -2,6 +2,7 @@ import type { CDPSession, Page } from "playwright";
 import { webVitalsIife } from "./config";
 import { DEFAULT_EVALUATE_TIMEOUT_MS, type NetProfile } from "./defaults";
 import { BoundedEvaluator } from "./evaluate";
+import { awaitPendingPaint, PAINT_WAIT_MAX_MS, paintWaitRecord } from "./paint-wait";
 import {
   browserCollector,
   type CollectorOptions,
@@ -77,6 +78,17 @@ export interface SessionOptions {
    * too. Their long tasks, render metrics and web-vitals are not collected.
    */
   oopif?: boolean;
+  /**
+   * Before its final drain, finish() waits — bounded: 5 frames at normal
+   * cadence, 8 in all, 1 s — for a contentful paint or a larger image the
+   * browser has drawn but not yet presented, so `report.vitals` carry it
+   * (Chromium reports FCP and an image's LCP only once the frame is
+   * presented). All spans are closed by then, so no span's window or duration
+   * moves. Skipped when the last span's settle capped or a read timed out.
+   * Default true; false skips it (a driver that waits itself, as chaosbringer
+   * does).
+   */
+  awaitPaint?: boolean;
 }
 
 /** Name of the CDP binding the collector pushes an unloading document's data through. */
@@ -395,6 +407,24 @@ export async function startSession(
   });
 
   const finish = async (title: string) => {
+    // A paint drawn but not yet presented is reported a few frames late; wait
+    // for it here, after every span closed and before the drain that copies
+    // the vitals. Not on a page whose reads time out (it cannot answer), nor
+    // after a capped settle (the paint then waits on the network). A page
+    // that started hanging after the last span leaves the check unanswered:
+    // the evaluator takes it over, so the reads below wait out the rest of one
+    // bounded wait in all instead of one more each.
+    let unanswered: Promise<unknown> | undefined;
+    const paint =
+      opts.awaitPaint !== false && !evaluator.stalled && !controller.spans.at(-1)?.capped
+        ? await awaitPendingPaint(page, {
+            maxMs: Math.min(PAINT_WAIT_MAX_MS, evaluator.timeoutMs),
+            onUnanswered: (p) => {
+              unanswered = p;
+            },
+          })
+        : undefined;
+    if (unanswered && paint) await evaluator.adopt(unanswered, paint.waitedMs);
     // Final drain of the current document (flushes pending observer records).
     await controller.drain();
     client.off("Runtime.bindingCalled", onBinding);
@@ -465,6 +495,7 @@ export async function startSession(
     if (!accumulator.sawDocument) report.collectorMissing = true;
     if (accumulator.clockPatched) report.clockPatched = true;
     if (opts.trace && opts.tracePath) report.tracePath = opts.tracePath;
+    if (paint && paint.initial.length > 0) report.paintWait = paintWaitRecord(paint);
 
     return { report, covArtifact };
   };

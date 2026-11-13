@@ -52,8 +52,35 @@ test.describe("evaluate timeout", () => {
     // One bounded wait each at most: after the first read times out, the rest
     // short-circuit while it is still pending (they would queue behind it).
     expect(endMs).toBeLessThan(EVALUATE_TIMEOUT_MS * 3);
-    expect(finishMs).toBeLessThan(EVALUATE_TIMEOUT_MS * 3);
+    // end() already waited out the bound: finish() returns at once, its paint
+    // check skipped too (the page cannot answer it).
+    expect(finishMs).toBeLessThan(EVALUATE_TIMEOUT_MS / 2);
+    expect(report.paintWait).toBeUndefined();
     // The span is still recorded, with the fallbacks.
     expect(report.spans.map((s) => s.name)).toEqual(["goto-hang"]);
+  });
+
+  test("finish() on a page that hung after the last span costs one bounded wait", async ({ page }) => {
+    test.setTimeout(60_000);
+    await servePages(page);
+    const client = await page.context().newCDPSession(page);
+    const session = await startSession(page, client, {
+      evaluateTimeoutMs: EVALUATE_TIMEOUT_MS,
+    });
+    await session.controller.measure("load", async () => {
+      await page.goto(`${ORIGIN}/a`);
+    });
+    // Outside any span: nothing has timed out yet when finish() starts.
+    await page.goto(`${ORIGIN}/hang`, { timeout: 500 }).catch(() => {});
+
+    const t0 = Date.now();
+    const { report } = await session.finish("hang-after");
+    const finishMs = Date.now() - t0;
+
+    // The paint check's unanswered read is the one bounded wait; the drain
+    // and the reads after it do not wait again.
+    expect(finishMs).toBeGreaterThanOrEqual(EVALUATE_TIMEOUT_MS - 50);
+    expect(finishMs).toBeLessThan(EVALUATE_TIMEOUT_MS * 1.5);
+    expect(report.spans.map((s) => s.name)).toEqual(["load"]);
   });
 });

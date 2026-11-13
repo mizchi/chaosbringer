@@ -42,16 +42,52 @@ export class BoundedEvaluator {
    * turns N reads on a hung page into one bounded wait instead of N. Cleared
    * as soon as it settles, i.e. when the page can answer again.
    */
-  private stalled: Promise<void> | undefined;
+  private pendingStall: Promise<void> | undefined;
 
   constructor(
     private readonly page: Page,
     readonly timeoutMs: number,
   ) {}
 
+  /**
+   * A read timed out and is still pending: the page cannot answer now, and
+   * every attempt() returns a timeout at once until it does. A caller about to
+   * issue its own evaluate outside this evaluator (finish()'s paint wait)
+   * checks this first.
+   */
+  get stalled(): boolean {
+    return this.pendingStall !== undefined;
+  }
+
+  /**
+   * Take over an evaluate issued outside this evaluator that has not answered
+   * for `spentMs` (finish()'s paint check on a hung page). Waits for it for the
+   * rest of one timeout; when it still has not settled, it becomes the pending
+   * stall, as if attempt() had issued it, so the reads after it return at once
+   * and the hung page costs one bounded wait in all, not one more.
+   */
+  async adopt(pending: Promise<unknown>, spentMs: number): Promise<void> {
+    if (this.pendingStall) return;
+    const settled = pending.then(
+      () => {},
+      () => {},
+    );
+    const r = await raceTimeout(settled, Math.max(0, this.timeoutMs - spentMs), (): typeof TIMED_OUT => TIMED_OUT);
+    if (r !== TIMED_OUT) return;
+    this.track(settled);
+  }
+
+  /** Remember an abandoned evaluate as the pending stall until it settles. */
+  private track(settled: Promise<void>): void {
+    this.pendingStall = settled;
+    void settled.then(() => {
+      if (this.pendingStall === settled) this.pendingStall = undefined;
+    });
+  }
+
   /** page.evaluate(fn) that resolves within timeoutMs and never rejects. */
   async attempt<R>(fn: () => R | Promise<R>): Promise<EvaluateOutcome<R>> {
-    if (this.stalled) return { kind: "timeout" };
+    if (this.pendingStall) return { kind: "timeout" };
     const pending = this.page.evaluate(fn) as Promise<R>;
     const result = await raceTimeout(
       pending.then(
@@ -64,14 +100,12 @@ export class BoundedEvaluator {
     if (result !== TIMED_OUT) return result;
     // Keep the abandoned evaluate observed (its eventual rejection must not
     // surface as unhandled) and remember it until it settles.
-    const stalled = pending.then(
-      () => {},
-      () => {},
+    this.track(
+      pending.then(
+        () => {},
+        () => {},
+      ),
     );
-    this.stalled = stalled;
-    void stalled.then(() => {
-      if (this.stalled === stalled) this.stalled = undefined;
-    });
     return { kind: "timeout" };
   }
 

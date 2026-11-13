@@ -62,6 +62,41 @@ describe("BoundedEvaluator", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(await ev.attempt(() => 3)).toEqual({ kind: "ok", value: 3 });
   });
+
+  it("says it is stalled while an abandoned read pends, and not once it settles", async () => {
+    const h = hungPage();
+    const ev = new BoundedEvaluator(h.page, 30);
+    expect(ev.stalled).toBe(false);
+    expect((await ev.attempt(() => 1)).kind).toBe("timeout");
+    expect(ev.stalled).toBe(true);
+    h.release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ev.stalled).toBe(false);
+  });
+
+  it("adopts an outside evaluate that never answers as the stall, within one bound in all", async () => {
+    const h = hungPage();
+    const ev = new BoundedEvaluator(h.page, 80);
+    const outside = new Promise(() => {});
+    const t0 = Date.now();
+    // 50 ms of the bound were already spent waiting on it outside.
+    await ev.adopt(outside, 50);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(20);
+    expect(took).toBeLessThan(80);
+    expect(ev.stalled).toBe(true);
+    // The reads after it return at once and issue nothing.
+    expect((await ev.attempt(() => 1)).kind).toBe("timeout");
+    expect(h.calls()).toBe(0);
+  });
+
+  it("does not adopt an outside evaluate that answers within the rest of the bound", async () => {
+    const page = { evaluate: async (fn: () => unknown) => fn() } as unknown as Page;
+    const ev = new BoundedEvaluator(page, 200);
+    await ev.adopt(new Promise((r) => setTimeout(r, 20)), 50);
+    expect(ev.stalled).toBe(false);
+    expect(await ev.attempt(() => 2)).toEqual({ kind: "ok", value: 2 });
+  });
 });
 
 describe("PerfController on a hung page", () => {

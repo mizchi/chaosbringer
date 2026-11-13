@@ -160,8 +160,13 @@ describe("page-load LCP / TBT from the always-on collector", () => {
       expect(result.metrics?.fcp).toBeGreaterThan(0);
       expect(result.metrics).not.toHaveProperty("lcp");
       expect(result.metrics).not.toHaveProperty("tbt");
-      // Absent metrics are not enforced, so neither budget can fire.
+      // Absent metrics are not enforced, so neither budget can fire…
       expect(budgetViolations(result)).toEqual([]);
+      // …but neither held in silence: the page says why it went unmeasured.
+      expect(result.budgetUnmeasured?.map((u) => [u.metric, u.reason])).toEqual([
+        ["lcp", "no-collector"],
+        ["tbt", "no-collector"],
+      ]);
     } finally {
       await browser.close();
     }

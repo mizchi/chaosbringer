@@ -14,6 +14,7 @@ import {
 import { cdpEndpointUrl, selectCdpPage } from "./cdp.js";
 import { resolveTerminalBrowserTarget } from "./terminal-browser.js";
 import type {
+  BudgetUnmeasured,
   CrawlerOptions,
   CrawlerEvents,
   PageResult,
@@ -79,7 +80,15 @@ import {
   installSpaNavigationHook,
   resolveSpaNavigationUrls,
 } from "./spa-navigation.js";
-import { collectLoadMetrics } from "./page-metrics.js";
+import {
+  latePaintChanges,
+  paintCheckNeeded,
+  readLoadMetrics,
+  withLatePaint,
+  type LatePaintChanges,
+  type LoadMetricsRead,
+} from "./page-metrics.js";
+import { awaitPendingPaint, paintWaitRecord, type PaintWaitResult } from "lightbringer/core";
 import { Logger, createNullLogger } from "./logger.js";
 import {
   matchesAnyPattern,
@@ -101,7 +110,7 @@ import {
   weighActionTargets,
   type RawActionTarget,
 } from "./action-targets.js";
-import { checkPerformanceBudget } from "./budget.js";
+import { checkPerformanceBudget, unmeasuredBudget } from "./budget.js";
 import { networkConditionsFor } from "./network.js";
 import { shardOwns } from "./shard.js";
 import { fetchSitemapUrls } from "./sitemap.js";
@@ -2450,7 +2459,7 @@ export class ChaosCrawler {
 
       // The load span opens after the beforeNavigation faults, so it
       // measures the navigation under them rather than the faults' own
-      // setup, and closes after `collectLoadMetrics` below.
+      // setup, and closes after `readLoadMetrics` below.
       await this.beginLoadSpan(page, url);
       await this.installCallerPageFaultScripts(page);
 
@@ -2485,11 +2494,19 @@ export class ChaosCrawler {
       await this.runInvariants("afterLoad", page, url, errors);
 
       const loadTime = Date.now() - startTime;
-      const metrics = await collectLoadMetrics(page);
-      // Strictly after `collectLoadMetrics`: it reads the collector's store
+      const firstRead = await readLoadMetrics(page);
+      // Strictly after `readLoadMetrics`: it reads the collector's store
       // without draining it, and closing a span drains the store. The other
       // order would take LCP and TBT's long tasks away before they are read.
       await this.perf.endLoad({ settleCapped: loadCapped });
+      const loadPaint = await this.awaitLoadPaint(page, url, firstRead, loadCapped);
+      const metrics = loadPaint.metrics;
+      const budgetUnmeasured = unmeasuredBudget(metrics, this.options.performanceBudget, {
+        capped: loadCapped,
+        read: firstRead,
+        paint: loadPaint.wait,
+      });
+      this.logBudgetUnmeasured(url, budgetUnmeasured);
       this.enforcePerformanceBudget(metrics, url, errors);
       const links = await this.extractLinks(page);
       // History-API navigations that fired during page load (auto-routing
@@ -2538,6 +2555,8 @@ export class ChaosCrawler {
         hasErrors: hasCountedErrors(errors),
         warnings,
         metrics,
+        ...(loadPaint.record ? { paintWait: loadPaint.record } : {}),
+        ...(budgetUnmeasured.length > 0 ? { budgetUnmeasured } : {}),
         links,
         screenshot,
         ...(serviceWorker ? { serviceWorker } : {}),
@@ -3034,6 +3053,66 @@ export class ChaosCrawler {
     errors.push(error);
     this.events.onError?.(error);
     this.logger.logPageError(error);
+  }
+
+  /**
+   * Wait for a load paint the browser drew but has not presented, then
+   * re-read FCP / LCP. Chromium creates the FCP entry and an image's LCP
+   * entry only once the GPU process reports the frame presented, and the
+   * load settle does not wait for that: under a presentation stall the first
+   * read finds FCP absent or LCP on an earlier, smaller candidate.
+   *
+   * After the load span closed, so its windows and duration stay as they
+   * were; before the budget check, the first action (a trusted click ends
+   * LCP) and `finishPagePerf`'s drain (so `perfPage.vitals` get the late value
+   * too). Only when the first read says a paint can still arrive
+   * (`paintCheckNeeded`), so a normal load issues no extra evaluate; never
+   * after a capped settle, whose paint waits on the network.
+   */
+  private async awaitLoadPaint(
+    page: Page,
+    url: string,
+    first: LoadMetricsRead,
+    capped: boolean,
+  ): Promise<{
+    metrics: PerformanceMetrics;
+    wait: PaintWaitResult | null;
+    record: NonNullable<PageResult["paintWait"]> | null;
+  }> {
+    if (capped || !paintCheckNeeded(first)) return { metrics: first.metrics, wait: null, record: null };
+    const wait = await awaitPendingPaint(page);
+    // Merged even when nothing was pending: an entry can land between the
+    // first read and the check (closing the span takes a few ms). An error's
+    // values are null, so the first read stands.
+    const metrics = withLatePaint(first, wait);
+    const changed: LatePaintChanges | null = latePaintChanges(first.metrics, metrics);
+    if (wait.initial.length > 0 && (wait.outcome === "timeout" || wait.outcome === "frames")) {
+      // `timeout`: frames stopped for longer than the wait, a presentation
+      // stall. `frames`: frames ran and nothing came, so the browser did not
+      // count what the check expected (a background smaller than its box):
+      // a debug note, not a warning.
+      this.logger[wait.outcome === "timeout" ? "warn" : "debug"]("load_paint_pending", {
+        url,
+        pending: wait.final,
+        outcome: wait.outcome,
+        waitedMs: Math.round(wait.waitedMs),
+      });
+    }
+    const record =
+      wait.initial.length > 0 || changed ? { ...paintWaitRecord(wait), ...(changed ? { changed } : {}) } : null;
+    return { metrics, wait, record };
+  }
+
+  /**
+   * Log the budgeted metrics this load did not measure. A warning only for
+   * the reasons that say the measurement fell short (a capped settle, a
+   * presentation stall, an under-read LCP); a blank shell's absent FCP is
+   * common under faults and must not flood the warnings.
+   */
+  private logBudgetUnmeasured(url: string, unmeasured: readonly BudgetUnmeasured[]): void {
+    if (unmeasured.length === 0) return;
+    const warn = unmeasured.some((u) => u.reason === "capped" || u.reason === "stalled" || u.reason === "under-read");
+    this.logger[warn ? "warn" : "info"]("perf_budget_unmeasured", { url, unmeasured });
   }
 
   /**

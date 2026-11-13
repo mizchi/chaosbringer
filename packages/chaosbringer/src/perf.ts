@@ -153,6 +153,10 @@ export class PagePerf {
     }
     const { client, session } = await openPerfSession(page, {
       installCollector,
+      // The crawler waits for a late load paint itself, after the load span
+      // and only when its settle did not cap (`awaitLoadPaint`). A document an
+      // action navigated to is not waited for at finish (see the README).
+      awaitPaint: false,
       trace: tracePath !== undefined,
       ...(tracePath !== undefined ? { tracePath } : {}),
       memGc: opts.memGc,

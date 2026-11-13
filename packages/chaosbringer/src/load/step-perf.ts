@@ -35,7 +35,9 @@ export class StepPerf {
    * the run's faults, not to measurement.
    */
   static async open(page: Page): Promise<StepPerf> {
-    const { session } = await openPerfSession(page, { installCollector: false });
+    // `awaitPaint: false`: the load runner records no web-vitals, so a wait
+    // for a late paint at finish would only cost time.
+    const { session } = await openPerfSession(page, { installCollector: false, awaitPaint: false });
     return new StepPerf(session);
   }
 
