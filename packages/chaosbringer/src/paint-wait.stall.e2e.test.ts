@@ -234,14 +234,30 @@ describe.skipIf(process.platform !== "linux")("load LCP after a GPU presentation
         const client = await page.context().newCDPSession(page);
         // The default awaitPaint, which chaosbringer turns off for its own wait.
         const session = await startSession(page, client);
-        await session.controller.measure("load", async () => {
-          // The hero is requested only after the load event (its stylesheet
-          // is injected by a deferred script): end the span after it, so the
-          // span's settle runs into the stall it starts.
-          const served = page.waitForResponse((r) => r.url().endsWith("/img/hero.png")).then((r) => r.finished());
-          await page.goto(`${origin}/`, { waitUntil: "load" });
-          await served;
-        });
+        // The span ends, and finish() starts, inside the stall, so the hero
+        // has loaded and is not yet presented when finish() checks, in every
+        // run. With the default two-frame settle the span's end would wait the
+        // stall out first, and whether the hero's entry already exists by the
+        // time finish() checks is then a race (about half the runs), which a
+        // run that has it passes without finish() waiting at all.
+        await session.controller.measure(
+          "load",
+          async () => {
+            // The hero is requested only after the load event (its stylesheet
+            // is injected by a deferred script): end the span after it.
+            const served = page.waitForResponse((r) => r.url().endsWith("/img/hero.png")).then((r) => r.finished());
+            await page.goto(`${origin}/`, { waitUntil: "load" });
+            await served;
+            // The renderer has the hero's resource entry, which finish()'s
+            // check looks for. Polled on a timer: frames are stopped.
+            await page.waitForFunction(
+              () => performance.getEntriesByType("resource").some((e) => e.name.endsWith("/img/hero.png")),
+              undefined,
+              { polling: 10 },
+            );
+          },
+          { settle: async () => {} },
+        );
         report = (await session.finish("stall")).report;
       } finally {
         await browser.close();
