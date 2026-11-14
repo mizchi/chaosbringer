@@ -21,9 +21,10 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * alone, each run with perf off and on: with perf on, the session's emit
  * binding moves every task out of the collector's `longTasks` as soon as it
  * is observed, and the long-task gate used to read that array. `/busy` under
- * the default 30 s timeout and `/burst` (busy for 3 s, then quiet) pin the
- * never-idle early stop: the first stops after the 5 s streak, the second
- * still waits for its last task.
+ * the default 30 s timeout, `/burst` (busy for 3 s, then quiet) and
+ * `/busy-slow` (busy through a 6.5 s request, then quiet) pin the never-idle
+ * early stop: the first stops after the 5 s streak, the others still wait
+ * for their last task.
  *
  * Timing assertions are lower bounds from fixed wall-clock work (the server's
  * delay, the cap), never tight upper bounds: this suite runs on loaded CI.
@@ -102,6 +103,24 @@ const BURST_PAGE = `<!doctype html><title>burst</title><body>
   </script>
 </body>`;
 
+/**
+ * Busy with a 60 ms task every 90 ms while a 6.5 s request is open and for
+ * 400 ms after it answers, then quiet: the streak only counts the time with
+ * nothing in flight, so the load still waits for the page to go quiet.
+ */
+const BUSY_SLOW_PAGE = `<!doctype html><title>busy-slow</title><body>
+  <h1>Busy while waiting, then quiet</h1>
+  <script>
+    let until = Infinity;
+    fetch("/api/slow?ms=6500").then((r) => r.text()).then(() => { until = performance.now() + 400; });
+    const id = setInterval(() => {
+      const t0 = performance.now(); while (performance.now() - t0 < 60) {}
+      window.__taskEnd = performance.now();
+      if (performance.now() >= until) clearInterval(id);
+    }, 90);
+  </script>
+</body>`;
+
 /** "Run work" runs a 60 ms task, then 40 ms later a 120 ms one: a gap shorter than the quiet window. */
 const CHAIN_PAGE = `<!doctype html><title>chain</title><body>
   <button id="run">Run work</button>
@@ -152,7 +171,7 @@ describe("adaptive settle (e2e)", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
-      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE };
+      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE };
       if (pages[url.pathname]) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(pages[url.pathname]);
@@ -247,6 +266,17 @@ describe("adaptive settle (e2e)", () => {
     expect(page.perf!.capped).toBe(true);
     // The hung request holds the load past the 5 s never-idle streak, to the timeout.
     expect(page.perf!.durationMs).toBeGreaterThanOrEqual(8000);
+  }, 60_000);
+
+  it("adaptive: a load busy through a slow request settles once the page goes quiet after the response", async () => {
+    const gaps: number[] = [];
+    const report = await crawl("/busy-slow", { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 30_000, invariants: [gapSince("afterLoad", gaps)] });
+    const page = report.pages[0]!;
+    // Busy for over 5 s, but nearly all of it with the request open.
+    expect(page.settleCapped).toBe(0);
+    expect(page.perf!.capped).toBe(false);
+    expect(page.loadTime).toBeGreaterThanOrEqual(6_500);
+    expect(gaps[0]).toBeGreaterThanOrEqual(95);
   }, 60_000);
 
   it.each([false, true])("adaptive: a load that is busy for 3 s, then quiet, still settles after its last task (perf %s)", async (perf) => {

@@ -136,7 +136,8 @@ OPTIONS:
   --timeout <ms>        Page load timeout (default: 30000)
   --settle <mode>       How each load and action settles: networkidle (default), adaptive
                         (no requests / long tasks for 100 ms + 2 frames, capped at the old
-                        timeouts), or <ms> — adaptive with that quiet window
+                        timeouts, or after 5 s of long tasks alone on a load that is never
+                        idle), or <ms> — adaptive with that quiet window
   --no-headless         Show the browser window (headless is the default)
   --cdp <port|url>      Crawl in an existing Chromium tab over CDP
   --cdp-target <id>     Select a tab by its CDP target id

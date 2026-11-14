@@ -164,7 +164,11 @@ export interface DriveOptions {
   actionTimeoutMs?: number;
   /** Timeout of a navigation: the start page's load, and one a step starts (the crawl's `--timeout`). Default 30 s. */
   navigationTimeoutMs?: number;
-  /** Settle cap after each action. Default 3000 ms. */
+  /**
+   * Settle cap after each action. Default 3000 ms. Even under a higher cap,
+   * a page kept busy by long tasks alone, with nothing in flight, stops
+   * after max(5 s, ten quiet windows) of that.
+   */
   settleCapMs?: number;
   /**
    * Quiet window of the adaptive settle after each step: no request in

@@ -24,16 +24,17 @@
  * load, 2000 ms after an action. Hitting the cap is not an error. It is
  * reported (`capped`), because a step that never quiesces is itself a finding.
  *
- * It also gives up early on a page that is never idle: when, for
- * `neverIdleMs` on end, long tasks kept the quiet window from opening and
- * nothing is in flight, the settle caps with reason `never-idle` instead of
- * waiting out the rest of the cap. A page whose long tasks come less than a
- * quiet window apart forever would otherwise hold every load for the whole
- * navigation `timeout` (30 s by default) while measuring nothing the first
- * seconds do not already show. It never gives up with a request in flight,
- * so a hung or slow request is still waited on up to the cap; and the streak
- * is longer than the 2 s action cap and drive's default 3 s cap, so in a
- * crawl it only ever shortens a load (a drive given a `settleCapMs` above
+ * It also gives up early on a page that is never idle: when long tasks have
+ * kept the quiet window from opening for `neverIdleMs` of time with nothing
+ * in flight, the settle caps with reason `never-idle` instead of waiting out
+ * the rest of the cap. A page whose long tasks come less than a quiet window
+ * apart forever would otherwise hold every load for the whole navigation
+ * `timeout` (30 s by default) while measuring nothing the first seconds do
+ * not already show. Time with a request in flight does not count, so a hung
+ * request is still waited on up to the cap, and the time a slow one is open
+ * is not taken from the page's chance to handle the response and go quiet.
+ * The streak is longer than the 2 s action cap and drive's default 3 s cap, so in
+ * a crawl it only ever shortens a load (a drive given a `settleCapMs` above
  * the streak stops there too).
  *
  * Opt-in, permanently (§10): the default stays `networkidle`, so existing
@@ -61,9 +62,10 @@ export const ACTION_SETTLE_CAP_MS = 2000;
 /**
  * How long a settle waits on long tasks alone — nothing in flight, but a long
  * task ending inside every quiet window — before it calls the page never idle
- * and caps. Longer than `ACTION_SETTLE_CAP_MS`, so it only bounds a load;
- * `neverIdleMs` stretches it for a long quiet window (`NEVER_IDLE_WINDOWS`
- * windows at least), so a slow but finite burst of work is not cut short.
+ * and caps; time with a request in flight does not count towards it. Longer
+ * than `ACTION_SETTLE_CAP_MS`, so it only bounds a load; `neverIdleMs`
+ * stretches it for a long quiet window (`NEVER_IDLE_WINDOWS` windows at
+ * least), so a slow but finite burst of work is not cut short.
  */
 export const NEVER_IDLE_MS = 5000;
 /** The never-idle streak spans at least this many quiet windows. */
@@ -346,12 +348,16 @@ export async function settleAdaptive(
   const capAt = start + Math.max(0, capMs);
   const neverIdleAfterMs = neverIdleMs(quietMs);
   let framesDone = false;
-  // Since when long tasks have kept the quiet window shut without a break;
-  // null once they leave one. Requests do not reset it — a beacon or a poll
-  // between long tasks leaves the page just as busy — but the settle only
-  // gives up on it with nothing in flight, so a request is always waited on
-  // up to the cap.
-  let longTaskOnlySince: number | null = null;
+  // How long long tasks alone have kept the quiet window shut: only time
+  // with nothing in flight counts, so the streak pauses while a request is
+  // open and goes on after it ends. A beacon or a poll between long tasks
+  // leaves the page just as busy, and only pauses the streak for about its
+  // own length; a slow request's wait is not counted against the page, which
+  // still gets the rest of the streak to handle the response and go quiet.
+  // A quiet window resets it. `streakProbeAt`: the previous probe inside the
+  // streak, null outside one.
+  let neverIdleStreakMs = 0;
+  let streakProbeAt: number | null = null;
   let lastLongTaskEnd = Number.NEGATIVE_INFINITY;
   let lastNavigation = Number.NEGATIVE_INFINITY;
 
@@ -389,12 +395,16 @@ export async function settleAdaptive(
     if (decision.kind === "settled") return { capped: false, elapsedMs: probedAt - start };
     if (decision.kind === "capped") return capped(decision.reason);
     if (probedAt < lastLongTaskEnd + quietMs) {
-      longTaskOnlySince ??= probedAt;
-      if (net.count === 0 && probedAt - longTaskOnlySince >= neverIdleAfterMs) {
-        return capped("never-idle");
+      if (streakProbeAt !== null && net.count === 0) {
+        // Nothing in flight now; credit the time since the later of the last
+        // probe and the network's last change (the end of whatever was open).
+        neverIdleStreakMs += Math.max(0, probedAt - Math.max(streakProbeAt, net.lastActivity, lastNavigation));
       }
+      streakProbeAt = probedAt;
+      if (net.count === 0 && neverIdleStreakMs >= neverIdleAfterMs) return capped("never-idle");
     } else {
-      longTaskOnlySince = null;
+      neverIdleStreakMs = 0;
+      streakProbeAt = null;
     }
     await env.wait(decision.ms);
   }

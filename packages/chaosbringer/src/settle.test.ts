@@ -228,9 +228,9 @@ describe("settleAdaptive", () => {
     p.advance(0);
     const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
     expect(out.reason).toBe("never-idle");
-    // Past the 5 s streak, but not before the request ended at 7000.
-    expect(out.elapsedMs).toBeGreaterThanOrEqual(7000);
-    expect(out.elapsedMs).toBeLessThan(7300);
+    // The streak paused while the request was open: 3 s before it, 2 s after.
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(9000);
+    expect(out.elapsedMs).toBeLessThan(9300);
 
     const hung = fakePage();
     busyLoop(hung, 0, 60_000);
@@ -242,6 +242,44 @@ describe("settleAdaptive", () => {
     expect(capped.elapsedMs).toBeGreaterThanOrEqual(12_000);
   });
 
+  it("a page busy through a slow request settles once it goes quiet after the response", async () => {
+    // Busy for 7.4 s, all but the first 10 ms with a request in flight: the
+    // streak only starts counting at 7000, so the page goes quiet first.
+    const p = fakePage();
+    busyLoop(p, 0, 7400);
+    p.request("slow", 10, 7000);
+    p.advance(0);
+    const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+    expect(out.capped).toBe(false);
+    // The last task ends at 7350; settled a quiet window after it.
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(7450);
+    expect(out.elapsedMs).toBeLessThan(7600);
+
+    // Busy only while the request is open, then one render task for its response.
+    const r = fakePage();
+    busyLoop(r, 0, 7000);
+    r.request("slow", 10, 7000);
+    r.longTask(7010, 80);
+    r.advance(0);
+    const rendered = await settleAdaptive(r.tracker, r.env, { quietMs: 100, capMs: 29_700 });
+    expect(rendered.capped).toBe(false);
+    expect(rendered.elapsedMs).toBeGreaterThanOrEqual(7190);
+  });
+
+  it("a quiet window restarts the streak, even with a request in flight", async () => {
+    // The request keeps the 3000-3600 quiet gap from settling the load, but
+    // the gap still resets the streak, which starts over at 3600.
+    const p = fakePage();
+    busyLoop(p, 0, 3000);
+    p.request("xhr", 2900, 3600);
+    busyLoop(p, 3600, 60_000);
+    p.advance(0);
+    const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+    expect(out.reason).toBe("never-idle");
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(3600 + NEVER_IDLE_MS);
+    expect(out.elapsedMs).toBeLessThan(8900);
+  });
+
   it("a short request between long tasks does not reset the streak", async () => {
     const p = fakePage();
     busyLoop(p, 0, 60_000);
@@ -250,7 +288,9 @@ describe("settleAdaptive", () => {
     p.advance(0);
     const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
     expect(out.reason).toBe("never-idle");
-    expect(out.elapsedMs).toBeLessThan(5300);
+    // Each beacon pauses the streak for its own 8 ms plus at most one probe
+    // interval; a reset at each one would never let it reach 5 s.
+    expect(out.elapsedMs).toBeLessThan(5600);
   });
 
   it("an action's 2 s cap comes first: a busy action still caps on long-task", async () => {
