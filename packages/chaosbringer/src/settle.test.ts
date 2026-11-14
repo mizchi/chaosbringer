@@ -308,6 +308,20 @@ describe("settleAdaptive", () => {
     expect(out.capped).toBe(false);
   });
 
+  it("gaps just under the quiet window between in-flight probes do not restart the streak", async () => {
+    // Every task-free gap is 99 ms, one short of the 100 ms window: the page
+    // is never idle, so a slow request early on only pauses the streak:
+    // 0.5 s before it and 4.5 s after it reach the 5 s cap.
+    const p = fakePage();
+    busyLoop(p, 0, 60_000, 159, 60);
+    p.request("slow", 500, 2500);
+    p.advance(0);
+    const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+    expect(out.reason).toBe("never-idle");
+    expect(out.elapsedMs).toBeGreaterThanOrEqual(7000);
+    expect(out.elapsedMs).toBeLessThan(7400);
+  });
+
   it("a quiet window between two idle probes still restarts the streak", async () => {
     const p = fakePage();
     busyLoop(p, 0, 4500);
