@@ -1139,7 +1139,7 @@ Supported keys: `ttfb`, `fcp`, `lcp`, `tbt`, `domContentLoaded`, `load`. Omitted
 
 | `reason` | Why the budget was not checked |
 | --- | --- |
-| `capped` | the load settle hit its cap, so no paint was awaited (the page was still waiting on the network) |
+| `capped` | the load settle hit its cap, so no paint was awaited (the page was still waiting on the network, or [never went idle](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle)) |
 | `hidden` | the document was hidden or prerendering, and reports no paint |
 | `stalled` | content was visible, but frames stopped for longer than the 1 s paint wait (a presentation stall) |
 | `not-presented` | content was visible and frames ran, but the browser reported no first contentful paint |
@@ -1159,6 +1159,8 @@ When the numbers are read: after the load settles and the load span (`--perf`) c
 The collector is installed before every other init script, so a `clock-skew` runtime fault cannot shift `lcp` or `tbt`. On a page the crawler does not own (`testPage()` on a page opened elsewhere) and without `--perf`, `lcp` and `tbt` are absent rather than 0, their budgets are not enforced, and `budgetUnmeasured` lists them as `no-collector` (with `--perf` the crawler installs the collector on that page, ahead of its fault scripts, so they are measured).
 
 > **Behaviour change:** with `--perf` (and so in `chaosbringer scan`), `metrics.tbt` used to read 0: the perf session moved each long task out of the collector before the crawler read it. It now reads what a crawl without `--perf` reads, so a `tbt` budget can fail a page it used to pass. The same bug made `--settle adaptive` ignore long tasks under `--perf`; spans that end on a long task are now up to the quiet window longer, and budgets or baselines emitted before the fix can shift on them. See [Settling between steps](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle).
+
+> **Behaviour change:** under `--settle adaptive` (and so in `chaosbringer scan`), a load whose long tasks never leave a quiet window, with nothing in flight, used to wait out the whole `timeout`; it now stops after 5 s of that (time with a request in flight does not count) and counts as capped. Such a page's `loadTime` and `tbt` (and, with `--perf`, its load span's `durationMs` and `cpu.blockingMs`) read about 5 s worth instead of about 30 s, so budgets and baselines recorded on it before should be re-emitted or re-crawled. See [Settling between steps](https://github.com/mizchi/chaosbringer/blob/main/docs/recipes/perf.md#settling-between-steps---settle).
 
 Budget violations are clustered by metric name, so `perf-budget.lcp` firing on 20 pages shows up as one cluster with `count: 20` in the report and the baseline diff.
 

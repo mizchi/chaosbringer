@@ -68,7 +68,11 @@ export interface RecipeChaosOptions {
   goalTimeoutMs?: number;
   /** Timeout of the opening navigation. Default 30 s. */
   navigationTimeoutMs?: number;
-  /** Settle cap after the replay. Default 3000 ms. */
+  /**
+   * Settle cap after the replay. Default 3000 ms. Even under a higher cap,
+   * a page kept busy by long tasks alone, with nothing in flight, stops
+   * after max(5 s, ten quiet windows) of that.
+   */
   settleCapMs?: number;
   browser?: Browser;
   headless?: boolean;

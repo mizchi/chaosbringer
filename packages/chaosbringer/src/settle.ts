@@ -24,6 +24,19 @@
  * load, 2000 ms after an action. Hitting the cap is not an error. It is
  * reported (`capped`), because a step that never quiesces is itself a finding.
  *
+ * It also gives up early on a page that is never idle: when long tasks have
+ * kept the quiet window from opening for `neverIdleMs` of time with nothing
+ * in flight, the settle caps with reason `never-idle` instead of waiting out
+ * the rest of the cap. A page whose long tasks come less than a quiet window
+ * apart forever would otherwise hold every load for the whole navigation
+ * `timeout` (30 s by default) while measuring nothing the first seconds do
+ * not already show. Time with a request in flight does not count, so a hung
+ * request is still waited on up to the cap, and the time a slow one is open
+ * is not taken from the page's chance to handle the response and go quiet.
+ * The streak is longer than the 2 s action cap and drive's default 3 s cap, so in
+ * a crawl it only ever shortens a load (a drive given a `settleCapMs` above
+ * the streak stops there too).
+ *
  * Opt-in, permanently (§10): the default stays `networkidle`, so existing
  * crawls, recorded traces and calibrated `TimingProfile`s keep their timing.
  *
@@ -46,6 +59,22 @@ export const DEFAULT_SETTLE_QUIET_MS = 100;
  * `waitForLoadState("networkidle", { timeout: 2000 })`.
  */
 export const ACTION_SETTLE_CAP_MS = 2000;
+/**
+ * How long a settle waits on long tasks alone — nothing in flight, but a long
+ * task ending inside every quiet window — before it calls the page never idle
+ * and caps; time with a request in flight does not count towards it. Longer
+ * than `ACTION_SETTLE_CAP_MS`, so it only bounds a load; `neverIdleMs`
+ * stretches it for a long quiet window (`NEVER_IDLE_WINDOWS` windows at
+ * least), so a slow but finite burst of work is not cut short.
+ */
+export const NEVER_IDLE_MS = 5000;
+/** The never-idle streak spans at least this many quiet windows. */
+const NEVER_IDLE_WINDOWS = 10;
+
+/** The never-idle streak for a quiet window of `quietMs`. */
+export function neverIdleMs(quietMs: number): number {
+  return Math.max(NEVER_IDLE_MS, quietMs * NEVER_IDLE_WINDOWS);
+}
 /** Animation frames that must run after the step before it counts as settled. */
 export const SETTLE_MIN_FRAMES = 2;
 /**
@@ -238,7 +267,17 @@ export function trackPageRequests(
 /** What one in-page probe saw. */
 export type SettleProbe =
   /** `longTaskAgeMs`: ms since the latest long task ended; null when none is known. */
-  | { kind: "ok"; longTaskAgeMs: number | null }
+  | {
+      kind: "ok";
+      longTaskAgeMs: number | null;
+      /**
+       * The longest long-task-free stretch that ended between the previous
+       * probe and this one (its start may precede the previous probe).
+       * Absent when unknown: the first probe, or an older collector without
+       * `longTaskLog`.
+       */
+      maxGapMs?: number;
+    }
   /** The main thread did not answer in time. */
   | { kind: "timeout" }
   /** The document was replaced mid-probe; a navigation is under way. */
@@ -263,8 +302,11 @@ export type SettleDecision =
   /** Probe again after `ms` (a network event may wake the loop sooner). */
   | { kind: "wait"; ms: number };
 
-/** What was still going on when a settle hit its cap. */
-export type SettleCapReason = "inflight" | "long-task" | "frames" | "busy";
+/**
+ * What was still going on when a settle hit its cap. `never-idle`: it stopped
+ * before the cap, after long tasks alone kept it open for `neverIdleMs`.
+ */
+export type SettleCapReason = "inflight" | "long-task" | "frames" | "busy" | "never-idle";
 
 /** The settle state machine: one decision from one snapshot. */
 export function decideSettle(s: SettleSnapshot): SettleDecision {
@@ -314,7 +356,18 @@ export async function settleAdaptive(
 ): Promise<SettleOutcome> {
   const start = env.now();
   const capAt = start + Math.max(0, capMs);
+  const neverIdleAfterMs = neverIdleMs(quietMs);
   let framesDone = false;
+  // How long long tasks alone have kept the quiet window shut: only time
+  // with nothing in flight counts, so the streak pauses while a request is
+  // open and goes on after it ends. A beacon or a poll between long tasks
+  // leaves the page just as busy, and only pauses the streak for about its
+  // own length; a slow request's wait is not counted against the page, which
+  // still gets the rest of the streak to handle the response and go quiet.
+  // A quiet window resets it. `streakProbeAt`: the previous probe inside the
+  // streak, null outside one.
+  let neverIdleStreakMs = 0;
+  let streakProbeAt: number | null = null;
   let lastLongTaskEnd = Number.NEGATIVE_INFINITY;
   let lastNavigation = Number.NEGATIVE_INFINITY;
 
@@ -351,6 +404,23 @@ export async function settleAdaptive(
     });
     if (decision.kind === "settled") return { capped: false, elapsedMs: probedAt - start };
     if (decision.kind === "capped") return capped(decision.reason);
+    if (probe.maxGapMs !== undefined && probe.maxGapMs >= quietMs) {
+      // A quiet window opened and closed again between two probes.
+      neverIdleStreakMs = 0;
+      streakProbeAt = null;
+    }
+    if (probedAt < lastLongTaskEnd + quietMs) {
+      if (streakProbeAt !== null && net.count === 0) {
+        // Nothing in flight now; credit the time since the later of the last
+        // probe and the network's last change (the end of whatever was open).
+        neverIdleStreakMs += Math.max(0, probedAt - Math.max(streakProbeAt, net.lastActivity, lastNavigation));
+      }
+      streakProbeAt = probedAt;
+      if (net.count === 0 && neverIdleStreakMs >= neverIdleAfterMs) return capped("never-idle");
+    } else {
+      neverIdleStreakMs = 0;
+      streakProbeAt = null;
+    }
     await env.wait(decision.ms);
   }
 
@@ -382,6 +452,8 @@ export async function settleAdaptive(
  * animation frames at all and waiting for them would cap every step.
  */
 export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
+  // The previous probe's time on the document's native timeline.
+  let sinceRel: number | null = null;
   return {
     now: () => performance.now(),
     wait: (ms) => tracker.wait(ms),
@@ -390,14 +462,14 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
       const read = page
         // Named so `perf drilldown` can label its CPU samples harness, not
         // native: this probe runs inside every adaptive action span.
-        .evaluate(async function chaosbringerSettleProbe(minFrames: number) {
+        .evaluate(async function chaosbringerSettleProbe([minFrames, since]: [number, number | null]) {
           if (minFrames > 0 && document.visibilityState !== "hidden") {
             for (let i = 0; i < minFrames; i++) {
               await new Promise((r) => requestAnimationFrame(() => r(null)));
             }
           }
           const store = (window as unknown as PerfWindow).__perf;
-          if (!store || store.__lb !== true) return null;
+          if (!store || store.__lb !== true) return { age: null, nowRel: null, maxGap: null };
           store.flush?.();
           let lastEnd = store.lastLongTaskEnd;
           if (lastEnd === undefined) {
@@ -405,17 +477,47 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
             lastEnd = null;
             for (const t of store.longTasks) lastEnd = Math.max(lastEnd ?? Number.NEGATIVE_INFINITY, t.start + t.duration);
           }
-          if (lastEnd === null) return null;
           // Long-task times are on this document's native timeline;
           // `store.now()` is native epoch ms, so subtract the origin.
           const nowRel = store.now
             ? store.now() - performance.timeOrigin
             : performance.now();
-          return Math.max(0, nowRel - lastEnd);
-        }, frames ? SETTLE_MIN_FRAMES : 0)
+          if (lastEnd === null) return { age: null, nowRel, maxGap: null };
+          // The largest gap between long tasks that ended after `since`,
+          // walking back from the log's tail: O(tasks since the last probe).
+          let maxGap: number | null = null;
+          const log = store.longTaskLog;
+          if (log && since !== null && since <= nowRel) {
+            const recent: { start: number; end: number }[] = [];
+            let prevEnd = Number.NEGATIVE_INFINITY;
+            for (let i = log.length - 1; i >= 0; i--) {
+              const end = log[i]!.start + log[i]!.duration;
+              if (end <= since) {
+                prevEnd = end;
+                break;
+              }
+              recent.push({ start: log[i]!.start, end });
+            }
+            recent.sort((a, b) => a.start - b.start);
+            maxGap = 0;
+            for (const t of recent) {
+              if (prevEnd !== Number.NEGATIVE_INFINITY) maxGap = Math.max(maxGap, t.start - prevEnd);
+              prevEnd = Math.max(prevEnd, t.end);
+            }
+          }
+          return { age: Math.max(0, nowRel - lastEnd), nowRel, maxGap };
+        }, [frames ? SETTLE_MIN_FRAMES : 0, sinceRel] as [number, number | null])
         .then(
-          (age): SettleProbe => ({ kind: "ok", longTaskAgeMs: age }),
-          (): SettleProbe => (page.isClosed() ? { kind: "gone" } : { kind: "navigated" }),
+          (r): SettleProbe => {
+            sinceRel = r.nowRel;
+            return r.maxGap === null
+              ? { kind: "ok", longTaskAgeMs: r.age }
+              : { kind: "ok", longTaskAgeMs: r.age, maxGapMs: r.maxGap };
+          },
+          (): SettleProbe => {
+            sinceRel = null;
+            return page.isClosed() ? { kind: "gone" } : { kind: "navigated" };
+          },
         );
       const outcome = await raceTimeout(read, Math.max(0, timeoutMs));
       return outcome === TIMED_OUT ? { kind: "timeout" } : outcome;

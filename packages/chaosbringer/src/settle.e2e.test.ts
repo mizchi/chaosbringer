@@ -1,8 +1,10 @@
+import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startFixtureServer } from "../fixtures/site/server.js";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { faults } from "./faults.js";
+import { pageSettleEnv, RequestTracker } from "./settle.js";
 import type { CrawlerOptions, CrawlReport, Invariant } from "./types.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
@@ -20,7 +22,11 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * `/busy`, `/midsettle` and `/chain` hold the settle open with long tasks
  * alone, each run with perf off and on: with perf on, the session's emit
  * binding moves every task out of the collector's `longTasks` as soon as it
- * is observed, and the long-task gate used to read that array.
+ * is observed, and the long-task gate used to read that array. `/busy` under
+ * the default 30 s timeout, `/burst` (busy for 3 s, then quiet) and
+ * `/busy-slow` (busy through a 6.5 s request, then quiet) pin the never-idle
+ * early stop: the first stops after the 5 s streak, the others still wait
+ * for their last task.
  *
  * Timing assertions are lower bounds from fixed wall-clock work (the server's
  * delay, the cap), never tight upper bounds: this suite runs on loaded CI.
@@ -70,6 +76,50 @@ const MIDSETTLE_PAGE = `<!doctype html><title>midsettle</title><body>
       fetch("/api/slow?ms=100").then((r) => r.text());
       setTimeout(() => { const t0 = performance.now(); while (performance.now() - t0 < 70) {} window.__taskEnd = performance.now(); }, 120);
     });
+  </script>
+</body>`;
+
+const BUSY_HUNG_PAGE = `<!doctype html><title>busy-hung</title><body>
+  <h1>Always busy, and waiting</h1>
+  <script>
+    fetch("/api/never").catch(() => {});
+    setInterval(() => { const t0 = performance.now(); while (performance.now() - t0 < 70) {} }, 90);
+  </script>
+</body>`;
+
+/**
+ * A 60 ms long task every 90 ms for 3 s after load, then nothing: busy for
+ * less than the never-idle streak, so the load still waits it out.
+ */
+const BURST_PAGE = `<!doctype html><title>burst</title><body>
+  <h1>Busy, then quiet</h1>
+  <script>
+    addEventListener("load", () => {
+      const until = performance.now() + 3000;
+      const id = setInterval(() => {
+        const t0 = performance.now(); while (performance.now() - t0 < 60) {}
+        window.__taskEnd = performance.now();
+        if (performance.now() >= until) clearInterval(id);
+      }, 90);
+    });
+  </script>
+</body>`;
+
+/**
+ * Busy with a 60 ms task every 90 ms while a 6.5 s request is open and for
+ * 400 ms after it answers, then quiet: the streak only counts the time with
+ * nothing in flight, so the load still waits for the page to go quiet.
+ */
+const BUSY_SLOW_PAGE = `<!doctype html><title>busy-slow</title><body>
+  <h1>Busy while waiting, then quiet</h1>
+  <script>
+    let until = Infinity;
+    fetch("/api/slow?ms=6500").then((r) => r.text()).then(() => { until = performance.now() + 400; });
+    const id = setInterval(() => {
+      const t0 = performance.now(); while (performance.now() - t0 < 60) {}
+      window.__taskEnd = performance.now();
+      if (performance.now() >= until) clearInterval(id);
+    }, 90);
   </script>
 </body>`;
 
@@ -123,7 +173,7 @@ describe("adaptive settle (e2e)", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
-      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE };
+      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE };
       if (pages[url.pathname]) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(pages[url.pathname]);
@@ -194,6 +244,51 @@ describe("adaptive settle (e2e)", () => {
     // The capped settle is part of the load, so TBT counts its tasks too.
     expect(page.metrics?.tbt).toBeGreaterThan(200);
     if (perf) expect(page.perf!.capped).toBe(true);
+  }, 60_000);
+
+  it.each([false, true])("adaptive: a never-idle load stops at the never-idle streak, not the 30 s timeout (perf %s)", async (perf) => {
+    const report = await crawl("/busy", { settle: "adaptive", perf, maxActionsPerPage: 0, timeout: 30_000 });
+    const page = report.pages[0]!;
+    expect(page.status).toBe("success");
+    expect(page.settleCapped).toBe(1);
+    // Waited out the 5 s streak; nowhere near the 30 s navigation timeout.
+    expect(page.loadTime).toBeGreaterThanOrEqual(5_000);
+    expect(page.loadTime).toBeLessThan(15_000);
+    expect(page.metrics?.tbt).toBeGreaterThan(200);
+    if (perf) {
+      expect(page.perf!.capped).toBe(true);
+      expect(page.perf!.durationMs).toBeGreaterThanOrEqual(5_000);
+    }
+  }, 60_000);
+
+  it("adaptive: a never-idle load with a request in flight still waits up to the timeout", async () => {
+    const report = await crawl("/busy-hung", { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 9000 });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(1);
+    expect(page.perf!.capped).toBe(true);
+    // The hung request holds the load past the 5 s never-idle streak, to the timeout.
+    expect(page.perf!.durationMs).toBeGreaterThanOrEqual(8000);
+  }, 60_000);
+
+  it("adaptive: a load busy through a slow request settles once the page goes quiet after the response", async () => {
+    const gaps: number[] = [];
+    const report = await crawl("/busy-slow", { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 30_000, invariants: [gapSince("afterLoad", gaps)] });
+    const page = report.pages[0]!;
+    // Busy for over 5 s, but nearly all of it with the request open.
+    expect(page.settleCapped).toBe(0);
+    expect(page.perf!.capped).toBe(false);
+    expect(page.loadTime).toBeGreaterThanOrEqual(6_500);
+    expect(gaps[0]).toBeGreaterThanOrEqual(95);
+  }, 60_000);
+
+  it.each([false, true])("adaptive: a load that is busy for 3 s, then quiet, still settles after its last task (perf %s)", async (perf) => {
+    const gaps: number[] = [];
+    const report = await crawl("/burst", { settle: "adaptive", perf, maxActionsPerPage: 0, timeout: 30_000, invariants: [gapSince("afterLoad", gaps)] });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(0);
+    expect(gaps[0]).toBeGreaterThanOrEqual(95);
+    expect(page.loadTime).toBeGreaterThanOrEqual(3_000);
+    if (perf) expect(page.perf!.capped).toBe(false);
   }, 60_000);
 
   it.each([false, true])("adaptive: the load waits out the quiet window after a long task that ends mid-settle (perf %s)", async (perf) => {
@@ -286,6 +381,42 @@ describe("adaptive settle (e2e)", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(2000);
     expect(report.pages[0]!.status).toBe("success");
   }, 60_000);
+});
+
+describe("pageSettleEnv probe (e2e)", () => {
+  it("reports the largest long-task-free gap since the previous probe", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      // A stub collector on a clock the test sets: `now()` is native epoch ms.
+      await page.setContent(`<script>
+        window.__t = 1000;
+        window.__perf = {
+          __lb: true, longTasks: [], longTaskLog: [{ start: 900, duration: 50 }], lastLongTaskEnd: 950,
+          now: () => performance.timeOrigin + window.__t,
+        };
+      </script>`);
+      const env = pageSettleEnv(page, new RequestTracker(() => performance.now()));
+      // First probe: nothing to compare with yet.
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 50 });
+      await page.evaluate(() => {
+        const s = (window as unknown as { __perf: { longTaskLog: { start: number; duration: number }[]; lastLongTaskEnd: number } }).__perf;
+        // Gaps 950-1050 (100 ms, straddling the first probe) and 1110-1260 (150 ms).
+        s.longTaskLog.push({ start: 1050, duration: 60 }, { start: 1260, duration: 60 });
+        s.lastLongTaskEnd = 1320;
+        (window as unknown as { __t: number }).__t = 1400;
+      });
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 80, maxGapMs: 150 });
+      // An older collector without `longTaskLog`: the gap is unknown.
+      await page.evaluate(() => {
+        const s = (window as unknown as { __perf: { longTaskLog?: unknown } }).__perf;
+        delete s.longTaskLog;
+      });
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 80 });
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 describe("adaptive settle parity with networkidle (fixture site)", () => {

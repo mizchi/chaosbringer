@@ -3053,6 +3053,7 @@ export class ChaosCrawler {
       stage,
       url: page.url(),
       capMs,
+      elapsedMs: Math.round(outcome.elapsedMs),
       reason: outcome.reason,
     });
     return true;
