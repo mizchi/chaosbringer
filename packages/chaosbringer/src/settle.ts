@@ -267,7 +267,17 @@ export function trackPageRequests(
 /** What one in-page probe saw. */
 export type SettleProbe =
   /** `longTaskAgeMs`: ms since the latest long task ended; null when none is known. */
-  | { kind: "ok"; longTaskAgeMs: number | null }
+  | {
+      kind: "ok";
+      longTaskAgeMs: number | null;
+      /**
+       * The longest long-task-free stretch that ended between the previous
+       * probe and this one (its start may precede the previous probe).
+       * Absent when unknown: the first probe, or an older collector without
+       * `longTaskLog`.
+       */
+      maxGapMs?: number;
+    }
   /** The main thread did not answer in time. */
   | { kind: "timeout" }
   /** The document was replaced mid-probe; a navigation is under way. */
@@ -394,6 +404,11 @@ export async function settleAdaptive(
     });
     if (decision.kind === "settled") return { capped: false, elapsedMs: probedAt - start };
     if (decision.kind === "capped") return capped(decision.reason);
+    if (probe.maxGapMs !== undefined && probe.maxGapMs >= quietMs) {
+      // A quiet window opened and closed again between two probes.
+      neverIdleStreakMs = 0;
+      streakProbeAt = null;
+    }
     if (probedAt < lastLongTaskEnd + quietMs) {
       if (streakProbeAt !== null && net.count === 0) {
         // Nothing in flight now; credit the time since the later of the last
@@ -437,6 +452,8 @@ export async function settleAdaptive(
  * animation frames at all and waiting for them would cap every step.
  */
 export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
+  // The previous probe's time on the document's native timeline.
+  let sinceRel: number | null = null;
   return {
     now: () => performance.now(),
     wait: (ms) => tracker.wait(ms),
@@ -445,14 +462,14 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
       const read = page
         // Named so `perf drilldown` can label its CPU samples harness, not
         // native: this probe runs inside every adaptive action span.
-        .evaluate(async function chaosbringerSettleProbe(minFrames: number) {
+        .evaluate(async function chaosbringerSettleProbe([minFrames, since]: [number, number | null]) {
           if (minFrames > 0 && document.visibilityState !== "hidden") {
             for (let i = 0; i < minFrames; i++) {
               await new Promise((r) => requestAnimationFrame(() => r(null)));
             }
           }
           const store = (window as unknown as PerfWindow).__perf;
-          if (!store || store.__lb !== true) return null;
+          if (!store || store.__lb !== true) return { age: null, nowRel: null, maxGap: null };
           store.flush?.();
           let lastEnd = store.lastLongTaskEnd;
           if (lastEnd === undefined) {
@@ -460,17 +477,47 @@ export function pageSettleEnv(page: Page, tracker: RequestTracker): SettleEnv {
             lastEnd = null;
             for (const t of store.longTasks) lastEnd = Math.max(lastEnd ?? Number.NEGATIVE_INFINITY, t.start + t.duration);
           }
-          if (lastEnd === null) return null;
           // Long-task times are on this document's native timeline;
           // `store.now()` is native epoch ms, so subtract the origin.
           const nowRel = store.now
             ? store.now() - performance.timeOrigin
             : performance.now();
-          return Math.max(0, nowRel - lastEnd);
-        }, frames ? SETTLE_MIN_FRAMES : 0)
+          if (lastEnd === null) return { age: null, nowRel, maxGap: null };
+          // The largest gap between long tasks that ended after `since`,
+          // walking back from the log's tail: O(tasks since the last probe).
+          let maxGap: number | null = null;
+          const log = store.longTaskLog;
+          if (log && since !== null && since <= nowRel) {
+            const recent: { start: number; end: number }[] = [];
+            let prevEnd = Number.NEGATIVE_INFINITY;
+            for (let i = log.length - 1; i >= 0; i--) {
+              const end = log[i]!.start + log[i]!.duration;
+              if (end <= since) {
+                prevEnd = end;
+                break;
+              }
+              recent.push({ start: log[i]!.start, end });
+            }
+            recent.sort((a, b) => a.start - b.start);
+            maxGap = 0;
+            for (const t of recent) {
+              if (prevEnd !== Number.NEGATIVE_INFINITY) maxGap = Math.max(maxGap, t.start - prevEnd);
+              prevEnd = Math.max(prevEnd, t.end);
+            }
+          }
+          return { age: Math.max(0, nowRel - lastEnd), nowRel, maxGap };
+        }, [frames ? SETTLE_MIN_FRAMES : 0, sinceRel] as [number, number | null])
         .then(
-          (age): SettleProbe => ({ kind: "ok", longTaskAgeMs: age }),
-          (): SettleProbe => (page.isClosed() ? { kind: "gone" } : { kind: "navigated" }),
+          (r): SettleProbe => {
+            sinceRel = r.nowRel;
+            return r.maxGap === null
+              ? { kind: "ok", longTaskAgeMs: r.age }
+              : { kind: "ok", longTaskAgeMs: r.age, maxGapMs: r.maxGap };
+          },
+          (): SettleProbe => {
+            sinceRel = null;
+            return page.isClosed() ? { kind: "gone" } : { kind: "navigated" };
+          },
         );
       const outcome = await raceTimeout(read, Math.max(0, timeoutMs));
       return outcome === TIMED_OUT ? { kind: "timeout" } : outcome;

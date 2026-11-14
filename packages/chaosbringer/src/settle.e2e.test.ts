@@ -1,8 +1,10 @@
+import { chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startFixtureServer } from "../fixtures/site/server.js";
 import { ChaosCrawler } from "./crawler.js";
 import type { Driver, DriverPick, DriverStep } from "./drivers/types.js";
 import { faults } from "./faults.js";
+import { pageSettleEnv, RequestTracker } from "./settle.js";
 import type { CrawlerOptions, CrawlReport, Invariant } from "./types.js";
 import { startTestServer, type TestServer } from "./test-server.test-helpers.js";
 
@@ -379,6 +381,42 @@ describe("adaptive settle (e2e)", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(2000);
     expect(report.pages[0]!.status).toBe("success");
   }, 60_000);
+});
+
+describe("pageSettleEnv probe (e2e)", () => {
+  it("reports the largest long-task-free gap since the previous probe", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      // A stub collector on a clock the test sets: `now()` is native epoch ms.
+      await page.setContent(`<script>
+        window.__t = 1000;
+        window.__perf = {
+          __lb: true, longTasks: [], longTaskLog: [{ start: 900, duration: 50 }], lastLongTaskEnd: 950,
+          now: () => performance.timeOrigin + window.__t,
+        };
+      </script>`);
+      const env = pageSettleEnv(page, new RequestTracker(() => performance.now()));
+      // First probe: nothing to compare with yet.
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 50 });
+      await page.evaluate(() => {
+        const s = (window as unknown as { __perf: { longTaskLog: { start: number; duration: number }[]; lastLongTaskEnd: number } }).__perf;
+        // Gaps 950-1050 (100 ms, straddling the first probe) and 1110-1260 (150 ms).
+        s.longTaskLog.push({ start: 1050, duration: 60 }, { start: 1260, duration: 60 });
+        s.lastLongTaskEnd = 1320;
+        (window as unknown as { __t: number }).__t = 1400;
+      });
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 80, maxGapMs: 150 });
+      // An older collector without `longTaskLog`: the gap is unknown.
+      await page.evaluate(() => {
+        const s = (window as unknown as { __perf: { longTaskLog?: unknown } }).__perf;
+        delete s.longTaskLog;
+      });
+      expect(await env.probe(false, 5000)).toEqual({ kind: "ok", longTaskAgeMs: 80 });
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 describe("adaptive settle parity with networkidle (fixture site)", () => {

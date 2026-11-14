@@ -28,6 +28,7 @@ function fakePage() {
   const events: { at: number; run: () => void }[] = [];
   const longTasks: { start: number; end: number }[] = [];
   const probes: number[] = [];
+  let lastProbeAt: number | null = null;
   let navigateAt: number | null = null;
 
   const runDue = (until: number): boolean => {
@@ -72,9 +73,18 @@ function fakePage() {
       }
       t += frames ? 32 : 1;
       runDue(t);
+      const since = lastProbeAt;
+      lastProbeAt = t;
       const ended = longTasks.filter((lt) => lt.end <= t);
       if (ended.length === 0) return { kind: "ok", longTaskAgeMs: null };
-      return { kind: "ok", longTaskAgeMs: t - Math.max(...ended.map((lt) => lt.end)) };
+      const age = t - Math.max(...ended.map((lt) => lt.end));
+      if (since === null) return { kind: "ok", longTaskAgeMs: age };
+      const sorted = [...ended].sort((a, b) => a.start - b.start);
+      let maxGapMs = 0;
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i]!.end > since) maxGapMs = Math.max(maxGapMs, sorted[i]!.start - sorted[i - 1]!.end);
+      }
+      return { kind: "ok", longTaskAgeMs: age, maxGapMs };
     },
   };
 
@@ -278,6 +288,33 @@ describe("settleAdaptive", () => {
     expect(out.reason).toBe("never-idle");
     expect(out.elapsedMs).toBeGreaterThanOrEqual(3600 + NEVER_IDLE_MS);
     expect(out.elapsedMs).toBeLessThan(8900);
+  });
+
+  it("a quiet window between two in-flight probes still restarts the streak", async () => {
+    // ~4 s of streak, then a slow request; while it is open the probe runs
+    // only every 250 ms. A 150 ms task-free gap (above the 100 ms window)
+    // falls between two of those probes. After the response, a finite 1.5 s
+    // burst: with the gap counted it never reaches the 5 s streak.
+    const p = fakePage();
+    busyLoop(p, 0, 4500);
+    // Last loop task: 4410-4470. Gap 4470-4620 (150 ms), then busy again.
+    busyLoop(p, 4620, 7500);
+    p.request("slow", 4000, 6000);
+    p.advance(0);
+    const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+    // No probe landed in the detectable part of the gap [4570, 4620).
+    expect(p.probes.some((t) => t >= 4570 && t < 4620)).toBe(false);
+    expect(out.reason).toBeUndefined();
+    expect(out.capped).toBe(false);
+  });
+
+  it("a quiet window between two idle probes still restarts the streak", async () => {
+    const p = fakePage();
+    busyLoop(p, 0, 4500);
+    busyLoop(p, 4620, 7500);
+    p.advance(0);
+    const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+    expect(out.capped).toBe(false);
   });
 
   it("a short request between long tasks does not reset the streak", async () => {
