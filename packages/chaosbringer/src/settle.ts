@@ -216,12 +216,14 @@ export class RequestTracker {
    * request start closed after `since`. The settle loop probes on every
    * network event, but a probe held up by a long task can miss a quiet
    * network stretch that this still reports. Ignores staleness: a stretch
-   * with only an aged-out request open does not count.
+   * with only an aged-out request open does not count. `null` when there was
+   * no such stretch at all, so that under a zero quiet window the absence of
+   * a gap does not read as a quiet one.
    */
-  quietGapSince(since: number): number {
-    let max = 0;
+  quietGapSince(since: number): number | null {
+    let max: number | null = null;
     for (let i = this.gaps.length - 1; i >= 0 && this.gaps[i]!.end > since; i--) {
-      max = Math.max(max, this.gaps[i]!.ms);
+      max = Math.max(max ?? 0, this.gaps[i]!.ms);
     }
     return max;
   }
@@ -497,7 +499,7 @@ export async function settleAdaptive(
     const lastNet = Math.max(net.lastActivity, lastNavigation);
     if (
       (net.count === 0 && probedAt >= lastNet + quietMs) ||
-      (churnProbeAt !== null && tracker.quietGapSince(churnProbeAt) >= quietMs)
+      (churnProbeAt !== null && (tracker.quietGapSince(churnProbeAt) ?? -1) >= quietMs)
     ) {
       // The network has been quiet for a window: whatever holds the settle
       // now is not churn.

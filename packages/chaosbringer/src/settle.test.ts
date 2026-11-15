@@ -239,6 +239,18 @@ describe("settleAdaptive", () => {
       expect(l.elapsedMs).toBeLessThan(6300);
     });
 
+    it("counts overlapping polls under a zero quiet window", async () => {
+      // `settle: 0` is valid. With a request always open there is no idle
+      // stretch at all, and that absence must not read as a quiet window.
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 50, 150);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 0, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(NEVER_IDLE_MS);
+      expect(out.elapsedMs).toBeLessThan(5400);
+    });
+
     it("stretches with the quiet window", async () => {
       const p = fakePage();
       pollLoop(p, 0, 60_000, 300, 5);
