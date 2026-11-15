@@ -30,9 +30,14 @@
  * the rest of the cap. A page whose long tasks come less than a quiet window
  * apart forever would otherwise hold every load for the whole navigation
  * `timeout` (30 s by default) while measuring nothing the first seconds do
- * not already show. Time with a request in flight does not count, so a hung
- * request is still waited on up to the cap, and the time a slow one is open
- * is not taken from the page's chance to handle the response and go quiet.
+ * not already show. For that long-task streak, time with a request in flight
+ * does not count, so a hung request is still waited on up to the cap, and
+ * the time a slow one is open is not taken from the page's chance to handle
+ * the response and go quiet. Request churn alone — requests that keep
+ * finishing, none open longer than half the streak (`churnMaxRequestAgeMs`)
+ * — has a never-idle streak of its own, of the same length. An older open
+ * request restarts it, and the stop still waits for every request open when
+ * the streak completed, so a hung request is still waited on up to the cap.
  * The streak is longer than the 2 s action cap and drive's default 3 s cap, so in
  * a crawl it only ever shortens a load (a drive given a `settleCapMs` above
  * the streak stops there too).
@@ -80,16 +85,15 @@ export function neverIdleMs(quietMs: number): number {
 /**
  * Request churn — requests that keep starting and finishing, none of them
  * open for long — counts towards a never-idle streak of its own. "Long" is
- * this share of the streak: a request open longer pauses the churn streak,
- * so the streak gathers at most this much while one stays open, short of
- * `neverIdleMs`. That keeps a request that never ends holding the settle to
- * its cap, with or without polling around it, while back-to-back polls or
- * long-polls of up to this age are churn. It cannot be the whole streak: a
- * hung load request would then cap at `neverIdleMs` like a poll.
+ * this share of the streak: a request open longer restarts the churn streak,
+ * so a slow but finite request, or a long-poll held open that long, is not
+ * churn and the page gets a whole streak after it. What holds a request that
+ * never ends to the cap is the deferred stop (see `settleAdaptive`); this
+ * bound only decides which requests count as churn.
  */
 const CHURN_MAX_REQUEST_AGE_SHARE = 0.5;
 
-/** The age past which an open request pauses the churn streak. */
+/** The age past which an open request restarts the churn streak. */
 function churnMaxRequestAgeMs(quietMs: number): number {
   return neverIdleMs(quietMs) * CHURN_MAX_REQUEST_AGE_SHARE;
 }
@@ -188,6 +192,7 @@ export class RequestTracker {
   private readonly open = new Map<unknown, number>();
   private lastActivity = Number.NEGATIVE_INFINITY;
   private lastEnded = Number.NEGATIVE_INFINITY;
+  private lastStarted = Number.NEGATIVE_INFINITY;
   /** Recent idle stretches (nothing open), newest last: `end` is the start that closed one. */
   private gaps: { end: number; ms: number }[] = [];
   private waiters: Array<() => void> = [];
@@ -202,6 +207,7 @@ export class RequestTracker {
       if (this.gaps.length > MAX_TRACKED_GAPS) this.gaps.shift();
     }
     this.open.set(key, now);
+    this.lastStarted = now;
     this.touch();
   }
 
@@ -245,13 +251,14 @@ export class RequestTracker {
    *
    * `oldestStart`: when the oldest counted request started (+Infinity with
    * none). `lastEnded`: when a request last finished or failed — an age-out
-   * is not an end. Together they tell churn from one long-lived request.
+   * is not an end. `lastStarted`: when a request last started. Together they
+   * tell churn from one long-lived request.
    */
   inflight(
     now: number,
     maxAgeMs: number,
     settle?: { start: number; capAt: number },
-  ): { count: number; lastActivity: number; oldestStart: number; lastEnded: number } {
+  ): { count: number; lastActivity: number; oldestStart: number; lastEnded: number; lastStarted: number } {
     let count = 0;
     let lastActivity = this.lastActivity;
     let oldestStart = Number.POSITIVE_INFINITY;
@@ -263,7 +270,7 @@ export class RequestTracker {
         if (startedAt < oldestStart) oldestStart = startedAt;
       } else if (agedOutAt > lastActivity) lastActivity = agedOutAt;
     }
-    return { count, lastActivity, oldestStart, lastEnded: this.lastEnded };
+    return { count, lastActivity, oldestStart, lastEnded: this.lastEnded, lastStarted: this.lastStarted };
   }
 
   /** Resolve after `ms`, or earlier on the next network event. */
@@ -422,13 +429,14 @@ export async function settleAdaptive(
   let streakProbeAt: number | null = null;
   // The same, for request churn: time the network alone keeps the quiet
   // window shut while requests keep finishing and none has been open longer
-  // than `churnMaxAgeMs`. Such a request pauses it, so one that never ends
-  // holds the settle to its cap even with polling around it; a stretch with
-  // the network quiet for a whole window resets it. A request still young
-  // looks like one more poll, so a complete streak stops the settle only
-  // once every request open when it completed (`churnDoneAt`) has ended:
-  // one that hangs from late in the streak turns long-lived before that,
-  // and holds the settle like the rest.
+  // than `churnMaxAgeMs`. Such a request restarts it, so a slow one, or a
+  // long-poll held open that long, is not churn; a stretch with the network
+  // quiet for a whole window resets it too. A request still young looks like
+  // one more poll, so a complete streak stops the settle only once every
+  // request open when it completed (`churnDoneAt`) has ended and another
+  // has started since: a request that never ends holds the settle to its
+  // cap even with polling around it, and a finite chain whose last request
+  // was open then gets its quiet window to settle in.
   const churnMaxAgeMs = churnMaxRequestAgeMs(quietMs);
   let churnStreakMs = 0;
   let churnProbeAt: number | null = null;
@@ -497,17 +505,20 @@ export async function settleAdaptive(
       churnProbeAt = null;
       churnDoneAt = null;
     } else {
-      if (
-        churnProbeAt !== null &&
-        probedAt - net.oldestStart < churnMaxAgeMs &&
-        probedAt - net.lastEnded < churnMaxAgeMs
-      ) {
+      if (probedAt - net.oldestStart >= churnMaxAgeMs) {
+        // A long-lived request is open: not churn, whatever goes on around it.
+        churnStreakMs = 0;
+        churnDoneAt = null;
+      } else if (churnProbeAt !== null && probedAt - net.lastEnded < churnMaxAgeMs) {
         churnStreakMs += Math.max(0, probedAt - Math.max(churnProbeAt, lastNavigation));
       }
       churnProbeAt = probedAt;
       if (churnStreakMs >= neverIdleAfterMs) {
         churnDoneAt ??= probedAt;
-        if (net.oldestStart >= churnDoneAt) return capped("never-idle");
+        // With nothing open, wait for the next request to start: a chain
+        // that stopped with the request open at `churnDoneAt` settles.
+        const replaced = net.count > 0 ? net.oldestStart >= churnDoneAt : net.lastStarted > churnDoneAt;
+        if (replaced) return capped("never-idle");
       }
     }
     await env.wait(decision.ms);

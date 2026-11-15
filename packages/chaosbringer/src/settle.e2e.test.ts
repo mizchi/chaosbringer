@@ -32,9 +32,10 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * alone — no long tasks: a fetch every 50 ms, overlapping 150 ms fetches
  * (three always in flight), and back-to-back 1 s long-polls. They stop at the
  * same streak. `/poll-hung` (polling around a fetch that is never answered),
- * `/slow-fetch` (one 6.5 s fetch) and `/poll-burst` (polling for 3 s, then
- * quiet) are the counter-cases: the first waits to the timeout, the others
- * settle uncapped.
+ * `/longpoll-slow` (back-to-back 3 s long-polls), `/slow-fetch` (one 6.5 s
+ * fetch), `/fetch-chain` (three dependent 2 s fetches) and `/poll-burst`
+ * (polling for 3 s, then quiet) are the counter-cases: the first two wait to
+ * the timeout, the others settle uncapped.
  *
  * Timing assertions are lower bounds from fixed wall-clock work (the server's
  * delay, the cap), never tight upper bounds: this suite runs on loaded CI.
@@ -155,6 +156,25 @@ const LONGPOLL_PAGE = `<!doctype html><title>longpoll</title><body>
   </script>
 </body>`;
 
+/** Each long-poll is held open longer than half the streak. */
+const LONGPOLL_SLOW_PAGE = `<!doctype html><title>longpoll-slow</title><body>
+  <h1>Slow long-polling</h1>
+  <script>
+    const next = () => fetch("/api/poll?ms=3000").then((r) => r.text()).then(next, next);
+    next();
+  </script>
+</body>`;
+
+/** Three dependent requests, each started when the one before is answered, then quiet. */
+const FETCH_CHAIN_PAGE = `<!doctype html><title>fetch-chain</title><body>
+  <h1>Dependent requests</h1>
+  <script>
+    (async () => {
+      for (let i = 0; i < 3; i++) await fetch("/api/poll?ms=2000&i=" + i).then((r) => r.text());
+    })();
+  </script>
+</body>`;
+
 const BEACON_PAGE = `<!doctype html><title>beacon</title><body>
   <h1>Beacons</h1>
   <script>setInterval(() => navigator.sendBeacon("/api/poll", "x"), 30);</script>
@@ -242,7 +262,7 @@ describe("adaptive settle (e2e)", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
-      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE, "/poll": POLL_PAGE, "/overlap": OVERLAP_PAGE, "/longpoll": LONGPOLL_PAGE, "/poll-hung": POLL_HUNG_PAGE, "/slow-fetch": SLOW_FETCH_PAGE, "/poll-burst": POLL_BURST_PAGE, "/beacon": BEACON_PAGE, "/retry": RETRY_PAGE };
+      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE, "/poll": POLL_PAGE, "/overlap": OVERLAP_PAGE, "/longpoll": LONGPOLL_PAGE, "/poll-hung": POLL_HUNG_PAGE, "/slow-fetch": SLOW_FETCH_PAGE, "/poll-burst": POLL_BURST_PAGE, "/beacon": BEACON_PAGE, "/retry": RETRY_PAGE, "/longpoll-slow": LONGPOLL_SLOW_PAGE, "/fetch-chain": FETCH_CHAIN_PAGE };
       if (pages[url.pathname]) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(pages[url.pathname]);
@@ -371,8 +391,8 @@ describe("adaptive settle (e2e)", () => {
     }
   }, 60_000);
 
-  it("adaptive: polling around a hung request still waits up to the timeout", async () => {
-    const report = await crawl("/poll-hung", { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 12_000 });
+  it.each(["/poll-hung", "/longpoll-slow"])("adaptive: polling around a hung request, or long-polls held open for long, still wait up to the timeout (%s)", async (path) => {
+    const report = await crawl(path, { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 12_000 });
     const page = report.pages[0]!;
     expect(page.settleCapped).toBe(1);
     expect(page.perf!.capped).toBe(true);
@@ -382,6 +402,7 @@ describe("adaptive settle (e2e)", () => {
 
   it.each([
     ["/slow-fetch", 6_500],
+    ["/fetch-chain", 6_000],
     ["/poll-burst", 3_000],
   ] as const)("adaptive: a slow but finite network load settles uncapped (%s)", async (path, atLeast) => {
     const report = await crawl(path, { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 30_000 });

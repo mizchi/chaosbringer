@@ -233,7 +233,8 @@ describe("settleAdaptive", () => {
       longPoll.advance(0);
       const l = await settleAdaptive(longPoll.tracker, longPoll.env, { quietMs: 100, capMs: 29_700 });
       expect(l.reason).toBe("never-idle");
-      // Nothing has finished during the first long-poll.
+      // The streak completes inside the fifth long-poll, and the stop waits
+      // for the long-poll open at that moment to be replaced.
       expect(l.elapsedMs).toBeGreaterThanOrEqual(6000);
       expect(l.elapsedMs).toBeLessThan(6300);
     });
@@ -245,7 +246,9 @@ describe("settleAdaptive", () => {
       const out = await settleAdaptive(p.tracker, p.env, { quietMs: 1000, capMs: 29_700 });
       expect(out.reason).toBe("never-idle");
       expect(out.elapsedMs).toBeGreaterThanOrEqual(neverIdleMs(1000));
-      expect(out.elapsedMs).toBeLessThan(neverIdleMs(1000) + 400);
+      // The stop waits for a poll to start after the poll open when the
+      // streak completed: up to two poll intervals.
+      expect(out.elapsedMs).toBeLessThan(neverIdleMs(1000) + 700);
     });
 
     it("still waits out a finite burst of requests shorter than the streak", async () => {
@@ -267,8 +270,8 @@ describe("settleAdaptive", () => {
       const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
       expect(out).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
 
-      // Started mid-streak: the streak gathers what it can before the request
-      // turns long-lived, short of `neverIdleMs`.
+      // Started mid-streak: the streak restarts when the request turns
+      // long-lived, short of `neverIdleMs`.
       const late = fakePage();
       pollLoop(late, 0, 60_000, 50, 5);
       late.request("hung", 2000, null);
@@ -286,7 +289,7 @@ describe("settleAdaptive", () => {
       expect(laterOut).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
     });
 
-    it("a slow request alone is waited for; with polling it pauses the streak", async () => {
+    it("a slow request alone is waited for; with polling it restarts the streak", async () => {
       const slow = fakePage();
       slow.request("slow", 0, 6500);
       slow.advance(0);
@@ -301,9 +304,62 @@ describe("settleAdaptive", () => {
       polled.advance(0);
       const out = await settleAdaptive(polled.tracker, polled.env, { quietMs: 100, capMs: 29_700 });
       expect(out.reason).toBe("never-idle");
-      // 2.5 s of streak before the request turned long-lived, 2.5 s after it.
-      expect(out.elapsedMs).toBeGreaterThanOrEqual(9000);
-      expect(out.elapsedMs).toBeLessThan(9300);
+      // The streak restarts when the request turns long-lived, so the page
+      // gets a whole streak after the response.
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(11_500);
+      expect(out.elapsedMs).toBeLessThan(11_800);
+    });
+
+    it("back-to-back long-polls held open longer than half the streak wait to the cap", async () => {
+      // Each one turns long-lived before the next, and restarts the streak:
+      // from the outside it is a hung request that keeps being replaced.
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 3001, 3000);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
+    });
+
+    it("a finite chain of dependent requests open when the streak completes still settles", async () => {
+      // Three requests of 2 s, each started as the one before ends: the
+      // streak completes inside the third, and nothing starts after it.
+      const p = fakePage();
+      p.request("doc", 0, 50);
+      for (let i = 0; i < 3; i++) p.request(`step-${i}`, 50 + i * 2000, 50 + (i + 1) * 2000);
+      p.advance(50);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.capped).toBe(false);
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(6100);
+      expect(out.elapsedMs).toBeLessThan(6200);
+    });
+
+    it("slow overlapping requests only count once one of them has finished", async () => {
+      // Nothing finishes in the first 2.4 s, which do not count: the streak
+      // completes inside the last request, not the third, and nothing
+      // starts after it.
+      const p = fakePage();
+      p.request("a", 0, 2400);
+      p.request("b", 2300, 4700);
+      p.request("c", 4600, 7000);
+      p.request("d", 6900, 9300);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.capped).toBe(false);
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(9400);
+      expect(out.elapsedMs).toBeLessThan(9500);
+    });
+
+    it("a quiet gap before the polling starts does not reset the streak later", async () => {
+      // The gap after the document is hidden from the probe by a long task;
+      // only gaps since the previous probe reset the streak.
+      const p = fakePage();
+      p.request("doc", 0, 50);
+      p.longTask(60, 500);
+      pollLoop(p, 500, 60_000, 50, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      expect(out.elapsedMs).toBeLessThan(6000);
     });
 
     it("a quiet network window resets the churn streak", async () => {
