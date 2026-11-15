@@ -28,6 +28,14 @@ import { startTestServer, type TestServer } from "./test-server.test-helpers.js"
  * early stop: the first stops after the 5 s streak, the others still wait
  * for their last task.
  *
+ * `/poll`, `/overlap` and `/longpoll` hold the load open with request churn
+ * alone — no long tasks: a fetch every 50 ms, overlapping 150 ms fetches
+ * (three always in flight), and back-to-back 1 s long-polls. They stop at the
+ * same streak. `/poll-hung` (polling around a fetch that is never answered),
+ * `/slow-fetch` (one 6.5 s fetch) and `/poll-burst` (polling for 3 s, then
+ * quiet) are the counter-cases: the first waits to the timeout, the others
+ * settle uncapped.
+ *
  * Timing assertions are lower bounds from fixed wall-clock work (the server's
  * delay, the cap), never tight upper bounds: this suite runs on loaded CI.
  */
@@ -123,6 +131,67 @@ const BUSY_SLOW_PAGE = `<!doctype html><title>busy-slow</title><body>
   </script>
 </body>`;
 
+/** `/api/poll?ms=N` answers after N ms (0 by default). */
+const POLL_PAGE = `<!doctype html><title>poll</title><body>
+  <h1>Polling</h1>
+  <script>setInterval(() => { fetch("/api/poll").then((r) => r.text()); }, 50);</script>
+</body>`;
+
+const OVERLAP_PAGE = `<!doctype html><title>overlap</title><body>
+  <h1>Overlapping polls</h1>
+  <script>
+    // Distinct URLs: the HTTP cache lock serializes same-URL requests, which
+    // would make each wait on the one before and queue up ever older.
+    let n = 0;
+    setInterval(() => { fetch("/api/poll?ms=150&n=" + n++).then((r) => r.text()); }, 50);
+  </script>
+</body>`;
+
+const LONGPOLL_PAGE = `<!doctype html><title>longpoll</title><body>
+  <h1>Long-polling</h1>
+  <script>
+    const next = () => fetch("/api/poll?ms=1000").then((r) => r.text()).then(next, next);
+    next();
+  </script>
+</body>`;
+
+const BEACON_PAGE = `<!doctype html><title>beacon</title><body>
+  <h1>Beacons</h1>
+  <script>setInterval(() => navigator.sendBeacon("/api/poll", "x"), 30);</script>
+</body>`;
+
+/** `/api/fail` answers 503; the page retries 40 ms after each failure. */
+const RETRY_PAGE = `<!doctype html><title>retry</title><body>
+  <h1>Retry loop</h1>
+  <script>(function go() { fetch("/api/fail").then((r) => r.text()).then(() => setTimeout(go, 40)); })();</script>
+</body>`;
+
+const POLL_HUNG_PAGE = `<!doctype html><title>poll-hung</title><body>
+  <h1>Polling, and waiting</h1>
+  <script>
+    fetch("/api/never").catch(() => {});
+    setInterval(() => { fetch("/api/poll").then((r) => r.text()); }, 50);
+  </script>
+</body>`;
+
+const SLOW_FETCH_PAGE = `<!doctype html><title>slow-fetch</title><body>
+  <h1>One slow request</h1>
+  <script>fetch("/api/poll?ms=6500").then((r) => r.text());</script>
+</body>`;
+
+const POLL_BURST_PAGE = `<!doctype html><title>poll-burst</title><body>
+  <h1>Polling for 3 s, then quiet</h1>
+  <script>
+    addEventListener("load", () => {
+      const until = performance.now() + 3000;
+      const id = setInterval(() => {
+        if (performance.now() >= until) { clearInterval(id); return; }
+        fetch("/api/poll").then((r) => r.text());
+      }, 50);
+    });
+  </script>
+</body>`;
+
 /** "Run work" runs a 60 ms task, then 40 ms later a 120 ms one: a gap shorter than the quiet window. */
 const CHAIN_PAGE = `<!doctype html><title>chain</title><body>
   <button id="run">Run work</button>
@@ -173,7 +242,7 @@ describe("adaptive settle (e2e)", () => {
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://x");
-      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE };
+      const pages: Record<string, string> = { "/xhr": XHR_PAGE, "/hang": HANG_PAGE, "/busy": BUSY_PAGE, "/midsettle": MIDSETTLE_PAGE, "/chain": CHAIN_PAGE, "/burst": BURST_PAGE, "/busy-hung": BUSY_HUNG_PAGE, "/busy-slow": BUSY_SLOW_PAGE, "/poll": POLL_PAGE, "/overlap": OVERLAP_PAGE, "/longpoll": LONGPOLL_PAGE, "/poll-hung": POLL_HUNG_PAGE, "/slow-fetch": SLOW_FETCH_PAGE, "/poll-burst": POLL_BURST_PAGE, "/beacon": BEACON_PAGE, "/retry": RETRY_PAGE };
       if (pages[url.pathname]) {
         res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
         res.end(pages[url.pathname]);
@@ -186,6 +255,18 @@ describe("adaptive settle (e2e)", () => {
           res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
           res.end("ok");
         }, ms);
+        return;
+      }
+      if (url.pathname === "/api/poll") {
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
+          res.end("ok");
+        }, Number(url.searchParams.get("ms") ?? "0"));
+        return;
+      }
+      if (url.pathname === "/api/fail") {
+        res.writeHead(503, { "content-type": "text/plain", "cache-control": "no-store" });
+        res.end("unavailable");
         return;
       }
       if (url.pathname === "/api/never") return; // never answered
@@ -268,6 +349,47 @@ describe("adaptive settle (e2e)", () => {
     expect(page.perf!.capped).toBe(true);
     // The hung request holds the load past the 5 s never-idle streak, to the timeout.
     expect(page.perf!.durationMs).toBeGreaterThanOrEqual(8000);
+  }, 60_000);
+
+  it.each([
+    ["/poll", false],
+    ["/poll", true],
+    ["/overlap", true],
+    ["/longpoll", true],
+    ["/beacon", true],
+    ["/retry", true],
+  ] as const)("adaptive: a load held open by request churn alone stops at the never-idle streak (%s, perf %s)", async (path, perf) => {
+    const report = await crawl(path, { settle: "adaptive", perf, maxActionsPerPage: 0, timeout: 30_000 });
+    const page = report.pages[0]!;
+    expect(page.status).toBe("success");
+    expect(page.settleCapped).toBe(1);
+    expect(page.loadTime).toBeGreaterThanOrEqual(5_000);
+    expect(page.loadTime).toBeLessThan(15_000);
+    if (perf) {
+      expect(page.perf!.capped).toBe(true);
+      expect(page.perf!.durationMs).toBeGreaterThanOrEqual(5_000);
+    }
+  }, 60_000);
+
+  it("adaptive: polling around a hung request still waits up to the timeout", async () => {
+    const report = await crawl("/poll-hung", { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 12_000 });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(1);
+    expect(page.perf!.capped).toBe(true);
+    // Past the 5 s streak, to the timeout.
+    expect(page.perf!.durationMs).toBeGreaterThanOrEqual(11_000);
+  }, 60_000);
+
+  it.each([
+    ["/slow-fetch", 6_500],
+    ["/poll-burst", 3_000],
+  ] as const)("adaptive: a slow but finite network load settles uncapped (%s)", async (path, atLeast) => {
+    const report = await crawl(path, { settle: "adaptive", perf: true, maxActionsPerPage: 0, timeout: 30_000 });
+    const page = report.pages[0]!;
+    expect(page.settleCapped).toBe(0);
+    expect(page.perf!.capped).toBe(false);
+    expect(page.loadTime).toBeGreaterThanOrEqual(atLeast);
+    expect(page.loadTime).toBeLessThan(15_000);
   }, 60_000);
 
   it("adaptive: a load busy through a slow request settles once the page goes quiet after the response", async () => {

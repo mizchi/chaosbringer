@@ -62,10 +62,12 @@ export const ACTION_SETTLE_CAP_MS = 2000;
 /**
  * How long a settle waits on long tasks alone — nothing in flight, but a long
  * task ending inside every quiet window — before it calls the page never idle
- * and caps; time with a request in flight does not count towards it. Longer
- * than `ACTION_SETTLE_CAP_MS`, so it only bounds a load; `neverIdleMs`
- * stretches it for a long quiet window (`NEVER_IDLE_WINDOWS` windows at
- * least), so a slow but finite burst of work is not cut short.
+ * and caps; time with a request in flight does not count towards it. Request
+ * churn alone has a streak of its own of the same length (see
+ * `churnMaxRequestAgeMs`). Longer than `ACTION_SETTLE_CAP_MS`, so it only
+ * bounds a load; `neverIdleMs` stretches it for a long quiet window
+ * (`NEVER_IDLE_WINDOWS` windows at least), so a slow but finite burst of work
+ * is not cut short.
  */
 export const NEVER_IDLE_MS = 5000;
 /** The never-idle streak spans at least this many quiet windows. */
@@ -75,6 +77,22 @@ const NEVER_IDLE_WINDOWS = 10;
 export function neverIdleMs(quietMs: number): number {
   return Math.max(NEVER_IDLE_MS, quietMs * NEVER_IDLE_WINDOWS);
 }
+/**
+ * Request churn — requests that keep starting and finishing, none of them
+ * open for long — counts towards a never-idle streak of its own. "Long" is
+ * this share of the streak: a request open longer pauses the churn streak,
+ * so the streak gathers at most this much while one stays open, short of
+ * `neverIdleMs`. That keeps a request that never ends holding the settle to
+ * its cap, with or without polling around it, while back-to-back polls or
+ * long-polls of up to this age are churn. It cannot be the whole streak: a
+ * hung load request would then cap at `neverIdleMs` like a poll.
+ */
+const CHURN_MAX_REQUEST_AGE_SHARE = 0.5;
+
+/** The age past which an open request pauses the churn streak. */
+function churnMaxRequestAgeMs(quietMs: number): number {
+  return neverIdleMs(quietMs) * CHURN_MAX_REQUEST_AGE_SHARE;
+}
 /** Animation frames that must run after the step before it counts as settled. */
 export const SETTLE_MIN_FRAMES = 2;
 /**
@@ -83,6 +101,8 @@ export const SETTLE_MIN_FRAMES = 2;
  * crossed its staleness age (see `RequestTracker.inflight`) is noticed.
  */
 const MAX_IDLE_WAIT_MS = 250;
+/** Idle stretches `RequestTracker` remembers for `quietGapSince`. */
+const MAX_TRACKED_GAPS = 256;
 /** Back-off after a probe hit a document that was being replaced. */
 const NAVIGATION_RETRY_MS = 16;
 
@@ -167,20 +187,44 @@ export function settleReproArg(value: SettleMode | undefined): string | null {
 export class RequestTracker {
   private readonly open = new Map<unknown, number>();
   private lastActivity = Number.NEGATIVE_INFINITY;
+  private lastEnded = Number.NEGATIVE_INFINITY;
+  /** Recent idle stretches (nothing open), newest last: `end` is the start that closed one. */
+  private gaps: { end: number; ms: number }[] = [];
   private waiters: Array<() => void> = [];
 
   constructor(private readonly now: () => number) {}
 
   /** A request of this page started. `key` is anything unique per request. */
   started(key: unknown): void {
-    this.open.set(key, this.now());
+    const now = this.now();
+    if (this.open.size === 0 && Number.isFinite(this.lastActivity)) {
+      this.gaps.push({ end: now, ms: now - this.lastActivity });
+      if (this.gaps.length > MAX_TRACKED_GAPS) this.gaps.shift();
+    }
+    this.open.set(key, now);
     this.touch();
+  }
+
+  /**
+   * The longest stretch with no request open and no network event that a
+   * request start closed after `since`. The settle loop probes on every
+   * network event, but a probe held up by a long task can miss a quiet
+   * network stretch that this still reports. Ignores staleness: a stretch
+   * with only an aged-out request open does not count.
+   */
+  quietGapSince(since: number): number {
+    let max = 0;
+    for (let i = this.gaps.length - 1; i >= 0 && this.gaps[i]!.end > since; i--) {
+      max = Math.max(max, this.gaps[i]!.ms);
+    }
+    return max;
   }
 
   /** A request finished or failed. Unknown keys still count as activity. */
   ended(key: unknown): void {
     this.open.delete(key);
     this.touch();
+    this.lastEnded = this.lastActivity;
   }
 
   /**
@@ -198,21 +242,28 @@ export class RequestTracker {
    * request report itself as not capped. A request already stale at the
    * settle's start stays excluded, which is what keeps one hung request from
    * capping every later step.
+   *
+   * `oldestStart`: when the oldest counted request started (+Infinity with
+   * none). `lastEnded`: when a request last finished or failed — an age-out
+   * is not an end. Together they tell churn from one long-lived request.
    */
   inflight(
     now: number,
     maxAgeMs: number,
     settle?: { start: number; capAt: number },
-  ): { count: number; lastActivity: number } {
+  ): { count: number; lastActivity: number; oldestStart: number; lastEnded: number } {
     let count = 0;
     let lastActivity = this.lastActivity;
+    let oldestStart = Number.POSITIVE_INFINITY;
     for (const startedAt of this.open.values()) {
       let agedOutAt = startedAt + maxAgeMs;
       if (settle && agedOutAt > settle.start) agedOutAt = Math.max(agedOutAt, settle.capAt);
-      if (now < agedOutAt) count++;
-      else if (agedOutAt > lastActivity) lastActivity = agedOutAt;
+      if (now < agedOutAt) {
+        count++;
+        if (startedAt < oldestStart) oldestStart = startedAt;
+      } else if (agedOutAt > lastActivity) lastActivity = agedOutAt;
     }
-    return { count, lastActivity };
+    return { count, lastActivity, oldestStart, lastEnded: this.lastEnded };
   }
 
   /** Resolve after `ms`, or earlier on the next network event. */
@@ -304,7 +355,8 @@ export type SettleDecision =
 
 /**
  * What was still going on when a settle hit its cap. `never-idle`: it stopped
- * before the cap, after long tasks alone kept it open for `neverIdleMs`.
+ * before the cap, after long tasks alone, or request churn, kept it open for
+ * `neverIdleMs`.
  */
 export type SettleCapReason = "inflight" | "long-task" | "frames" | "busy" | "never-idle";
 
@@ -368,6 +420,19 @@ export async function settleAdaptive(
   // streak, null outside one.
   let neverIdleStreakMs = 0;
   let streakProbeAt: number | null = null;
+  // The same, for request churn: time the network alone keeps the quiet
+  // window shut while requests keep finishing and none has been open longer
+  // than `churnMaxAgeMs`. Such a request pauses it, so one that never ends
+  // holds the settle to its cap even with polling around it; a stretch with
+  // the network quiet for a whole window resets it. A request still young
+  // looks like one more poll, so a complete streak stops the settle only
+  // once every request open when it completed (`churnDoneAt`) has ended:
+  // one that hangs from late in the streak turns long-lived before that,
+  // and holds the settle like the rest.
+  const churnMaxAgeMs = churnMaxRequestAgeMs(quietMs);
+  let churnStreakMs = 0;
+  let churnProbeAt: number | null = null;
+  let churnDoneAt: number | null = null;
   let lastLongTaskEnd = Number.NEGATIVE_INFINITY;
   let lastNavigation = Number.NEGATIVE_INFINITY;
 
@@ -420,6 +485,30 @@ export async function settleAdaptive(
     } else {
       neverIdleStreakMs = 0;
       streakProbeAt = null;
+    }
+    const lastNet = Math.max(net.lastActivity, lastNavigation);
+    if (
+      (net.count === 0 && probedAt >= lastNet + quietMs) ||
+      (churnProbeAt !== null && tracker.quietGapSince(churnProbeAt) >= quietMs)
+    ) {
+      // The network has been quiet for a window: whatever holds the settle
+      // now is not churn.
+      churnStreakMs = 0;
+      churnProbeAt = null;
+      churnDoneAt = null;
+    } else {
+      if (
+        churnProbeAt !== null &&
+        probedAt - net.oldestStart < churnMaxAgeMs &&
+        probedAt - net.lastEnded < churnMaxAgeMs
+      ) {
+        churnStreakMs += Math.max(0, probedAt - Math.max(churnProbeAt, lastNavigation));
+      }
+      churnProbeAt = probedAt;
+      if (churnStreakMs >= neverIdleAfterMs) {
+        churnDoneAt ??= probedAt;
+        if (net.oldestStart >= churnDoneAt) return capped("never-idle");
+      }
     }
     await env.wait(decision.ms);
   }

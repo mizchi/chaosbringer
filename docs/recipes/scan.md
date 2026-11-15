@@ -35,7 +35,13 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
    (nothing in flight, a long task in every quiet window) gives up after
    5 s of that and is counted as never idle; time spent waiting on a
    request does not count towards the 5 s, and a load still waiting on one
-   waits up to the crawl `timeout` (30 s by default).
+   waits up to the crawl `timeout` (30 s by default). A load that only
+   request churn keeps busy (polling, back-to-back long-polls, a beacon or
+   retry loop: requests that keep finishing, none open for over 2.5 s)
+   gives up after 5 s the same way; a request open longer, such as a hung
+   one or a request the `hang` crawl parks, still holds the load up to the
+   `timeout`. See
+   [Settling between steps](./perf.md#settling-between-steps---settle).
 2. **Endpoint discovery.** Every same-site `fetch` / XHR request the clean
    crawl saw is folded into an endpoint (`/api/items/42` →
    `/api/items/:id`). Third-party requests are left out: whether a

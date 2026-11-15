@@ -204,6 +204,142 @@ describe("settleAdaptive", () => {
     expect(out.elapsedMs).toBeLessThan(2100);
   });
 
+  /** A request of `duration` ms every `every` ms in [from, until). */
+  function pollLoop(p: ReturnType<typeof fakePage>, from: number, until: number, every: number, duration: number) {
+    for (let at = from; at < until; at += every) p.request(`poll-${at}`, at, at + duration);
+  }
+
+  describe("request churn", () => {
+    it("stops waiting on a page that polls forever, with no long tasks", async () => {
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 50, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(NEVER_IDLE_MS);
+      expect(out.elapsedMs).toBeLessThan(5200);
+    });
+
+    it("counts overlapping polls (always one in flight) and back-to-back long-polls", async () => {
+      const overlap = fakePage();
+      pollLoop(overlap, 0, 60_000, 50, 150);
+      overlap.advance(0);
+      const o = await settleAdaptive(overlap.tracker, overlap.env, { quietMs: 100, capMs: 29_700 });
+      expect(o.reason).toBe("never-idle");
+      expect(o.elapsedMs).toBeLessThan(5400);
+
+      const longPoll = fakePage();
+      pollLoop(longPoll, 0, 60_000, 1001, 1000);
+      longPoll.advance(0);
+      const l = await settleAdaptive(longPoll.tracker, longPoll.env, { quietMs: 100, capMs: 29_700 });
+      expect(l.reason).toBe("never-idle");
+      // Nothing has finished during the first long-poll.
+      expect(l.elapsedMs).toBeGreaterThanOrEqual(6000);
+      expect(l.elapsedMs).toBeLessThan(6300);
+    });
+
+    it("stretches with the quiet window", async () => {
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 300, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 1000, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(neverIdleMs(1000));
+      expect(out.elapsedMs).toBeLessThan(neverIdleMs(1000) + 400);
+    });
+
+    it("still waits out a finite burst of requests shorter than the streak", async () => {
+      const p = fakePage();
+      pollLoop(p, 0, 4500, 50, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.capped).toBe(false);
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(4555);
+      expect(out.elapsedMs).toBeLessThan(4600);
+    });
+
+    it("a hung request holds the settle to its cap, even with polling around it", async () => {
+      // The load settle: the hung request started during `goto`.
+      const p = fakePage();
+      p.request("hung", 50, null);
+      pollLoop(p, 100, 60_000, 50, 5);
+      p.advance(300);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
+
+      // Started mid-streak: the streak gathers what it can before the request
+      // turns long-lived, short of `neverIdleMs`.
+      const late = fakePage();
+      pollLoop(late, 0, 60_000, 50, 5);
+      late.request("hung", 2000, null);
+      late.advance(0);
+      const lateOut = await settleAdaptive(late.tracker, late.env, { quietMs: 100, capMs: 29_700 });
+      expect(lateOut).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
+
+      // Started after more than half the streak: it is still open, and young,
+      // when the streak is complete, so the stop waits for it to end.
+      const later = fakePage();
+      pollLoop(later, 0, 60_000, 50, 5);
+      later.request("hung", 3500, null);
+      later.advance(0);
+      const laterOut = await settleAdaptive(later.tracker, later.env, { quietMs: 100, capMs: 29_700 });
+      expect(laterOut).toEqual({ capped: true, reason: "inflight", elapsedMs: 29_700 });
+    });
+
+    it("a slow request alone is waited for; with polling it pauses the streak", async () => {
+      const slow = fakePage();
+      slow.request("slow", 0, 6500);
+      slow.advance(0);
+      const s = await settleAdaptive(slow.tracker, slow.env, { quietMs: 100, capMs: 29_700 });
+      expect(s.capped).toBe(false);
+      expect(s.elapsedMs).toBeGreaterThanOrEqual(6600);
+      expect(s.elapsedMs).toBeLessThan(6700);
+
+      const polled = fakePage();
+      polled.request("slow", 0, 6500);
+      pollLoop(polled, 0, 60_000, 50, 5);
+      polled.advance(0);
+      const out = await settleAdaptive(polled.tracker, polled.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      // 2.5 s of streak before the request turned long-lived, 2.5 s after it.
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(9000);
+      expect(out.elapsedMs).toBeLessThan(9300);
+    });
+
+    it("a quiet network window resets the churn streak", async () => {
+      // 4 s of polling, a 300 ms pause held shut by one long task, 4 s more:
+      // neither stretch reaches the streak, so the page settles.
+      const p = fakePage();
+      pollLoop(p, 0, 4000, 50, 5);
+      p.longTask(4000, 300);
+      pollLoop(p, 4300, 8300, 50, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.capped).toBe(false);
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(8350);
+    });
+
+    it("polling between long tasks stops at the never-idle streak", async () => {
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 50, 5);
+      for (let at = 20; at < 60_000; at += 90) p.longTask(at, 60);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 29_700 });
+      expect(out.reason).toBe("never-idle");
+      expect(out.elapsedMs).toBeLessThan(5400);
+    });
+
+    it("an action settle still caps at its own cap", async () => {
+      const p = fakePage();
+      pollLoop(p, 0, 60_000, 50, 5);
+      p.advance(0);
+      const out = await settleAdaptive(p.tracker, p.env, { quietMs: 100, capMs: 2000 });
+      expect(out.capped).toBe(true);
+      expect(out.reason).not.toBe("never-idle");
+      expect(out.elapsedMs).toBeGreaterThanOrEqual(2000);
+    });
+  });
+
   /** A 60 ms long task every 90 ms in [from, until): never a 100 ms quiet window. */
   function busyLoop(p: ReturnType<typeof fakePage>, from: number, until: number, every = 90, duration = 60) {
     for (let at = from; at < until; at += every) p.longTask(at, duration);
@@ -454,7 +590,7 @@ describe("RequestTracker", () => {
     const tracker = new RequestTracker(() => t);
     tracker.started("r");
     t = 5000;
-    expect(tracker.inflight(5000, 2000)).toEqual({ count: 0, lastActivity: 2000 });
+    expect(tracker.inflight(5000, 2000)).toMatchObject({ count: 0, lastActivity: 2000 });
   });
 });
 
