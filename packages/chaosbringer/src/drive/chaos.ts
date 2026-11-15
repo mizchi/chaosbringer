@@ -70,8 +70,9 @@ export interface RecipeChaosOptions {
   navigationTimeoutMs?: number;
   /**
    * Settle cap after the replay. Default 3000 ms. Even under a higher cap,
-   * a page kept busy by long tasks alone, with nothing in flight, stops
-   * after max(5 s, ten quiet windows) of that.
+   * a page kept busy by long tasks alone with nothing in flight, or by
+   * requests that keep finishing with none open for long, stops after
+   * max(5 s, ten quiet windows) of that.
    */
   settleCapMs?: number;
   browser?: Browser;

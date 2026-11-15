@@ -391,8 +391,10 @@ export interface CrawlerOptions {
    * two animation frames since the step, capped at the old timeouts (the
    * navigation `timeout` after a load, 2000 ms after an action). A load that
    * long tasks alone keep busy, a long task in every quiet window with
-   * nothing in flight, stops earlier, after max(5 s, ten quiet windows) of
-   * that, and counts as capped (never idle). A number is
+   * nothing in flight, or request churn alone — requests that keep starting
+   * and finishing, none open for over half that streak — stops earlier,
+   * after max(5 s, ten quiet windows) of that, and counts as capped (never
+   * idle). A number is
    * `"adaptive"` with that quiet window in ms — e.g. a `quiescenceMs` solved
    * from a calibrated `TimingProfile`. A settle that hits its cap sets
    * `capped` on the step's perf span and counts in `PageResult.settleCapped`.
@@ -1099,8 +1101,8 @@ export interface PerformanceBudget extends Partial<Record<PerfBudgetKey, number>
 /**
  * Why a budgeted metric was not measured on a page (`BudgetUnmeasured.reason`):
  * - `capped`: the load settle hit its cap, so no paint was awaited (the page
- *   was still waiting on the network, or long tasks alone kept it busy for
- *   5 s: never idle);
+ *   was still waiting on the network, or long tasks alone or request churn
+ *   kept it busy for 5 s: never idle);
  * - `hidden`: the document was hidden or prerendering, and reports no paint;
  * - `stalled`: content was visible, and frames stopped for longer than the
  *   wait for its first contentful paint (a presentation stall over 1 s);
