@@ -251,6 +251,66 @@ describe("buildSpanNetwork: background polling", () => {
   });
 });
 
+// A poll repeats within one step; a fetch that every step fires again, or a
+// burst fired before the step, only looks like one when the steps are not
+// told apart. Pages with no timer must keep their findings.
+describe("buildSpanNetwork: a page that does not poll", () => {
+  const O = "http://127.0.0.1";
+  const req = (url: string, start: number, ms = 2): NetReq => ({
+    url, type: "Fetch", startMono: 0, startEpochMs: start, endEpochMs: start + ms, encoded: 100,
+  });
+  const burst = (url: (i: number) => string, at: number, n: number): NetReq[] =>
+    Array.from({ length: n }, (_, i) => req(url(i), at, 20));
+  // A load at 0, then a click every 300 ms, each 200 ms long.
+  const load = { startEpochMs: 0, endEpochMs: 400 };
+  const stepStarts = [0, 700, 1000, 1300, 1600];
+
+  it("does not read a fetch that each step fires again as a poll", () => {
+    // Each step runs the same 6-endpoint chain, and fetches /api/user twice at once.
+    const step = (t: number) => [
+      ...["a", "b", "c", "d", "e", "f"].map((p, i) => req(`${O}/api/chain/${p}`, t + 10 + i * 50, 45)),
+      req(`${O}/api/user`, t + 10, 20),
+      req(`${O}/api/user`, t + 10, 20),
+    ];
+    const reqs = [req(`${O}/`, 0, 5), ...stepStarts.flatMap(step)];
+    const net = buildSpanNetwork(load, reqs, "127.0.0.1", [0], stepStarts);
+    expect(net.waves).toBe(7);
+    expect(net.foregroundWaves).toBeUndefined();
+    expect(net.requests.some((r) => r.polled)).toBe(false);
+    // Without the step starts, the steps' refetches are one stretch: a poll.
+    expect(buildSpanNetwork(load, reqs, "127.0.0.1", [0]).foregroundWaves).toBe(1);
+  });
+
+  it("does not count a burst before the span to the same endpoint as background", () => {
+    // The same 40 queries, at a load or an earlier click, then in the span.
+    const same = [...burst((i) => `${O}/api/chat?q=${i}`, 8000, 40), ...burst((i) => `${O}/api/chat?q=${i}`, 10_000, 40)];
+    const span = { startEpochMs: 10_000, endEpochMs: 12_000 };
+    const net = buildSpanNetwork(span, same, "127.0.0.1", [0], [0, 8000, 10_000]);
+    expect(net.requestCount).toBe(40);
+    expect(net.backgroundRequests).toBeUndefined();
+    // Even with no step starts but the span's own (a single-endpoint API: GraphQL).
+    const gql = [...burst(() => `${O}/graphql`, 200, 10), ...burst(() => `${O}/graphql`, 3000, 40)];
+    expect(buildSpanNetwork({ startEpochMs: 3000, endEpochMs: 5000 }, gql, "127.0.0.1", [0]).backgroundRequests).toBeUndefined();
+    // Two clicks 2.1 s apart, each firing 20 events at a collector.
+    const collect = [...burst((i) => `${O}/api/collect?i=${i}`, 0, 20), ...burst((i) => `${O}/api/collect?i=${i}`, 2100, 20)];
+    expect(buildSpanNetwork({ startEpochMs: 2100, endEpochMs: 4100 }, collect, "127.0.0.1").backgroundRequests).toBeUndefined();
+  });
+
+  it("still finds a poll with the step starts given, at its rate only", () => {
+    const span = { startEpochMs: 10_000, endEpochMs: 12_000 };
+    const steps = [0, 4000, 6000, 8000, 10_000];
+    const poll = Array.from({ length: 120 }, (_, i) => req(`${O}/graphql`, i * 100));
+    const pollNet = buildSpanNetwork(span, poll, "127.0.0.1", [0], steps);
+    expect(pollNet.backgroundRequests).toBe(20);
+    expect(pollNet.requests.every((r) => r.polled)).toBe(true);
+    // A burst before the span to the polled endpoint does not raise the poll's rate:
+    // (50 + 1) / 5 s × 2 s + 1 = 22 of the span's 50 (the next poll repeats the
+    // burst's last request), not (50 + 30) / 5 s × 2 s + 1 = 33.
+    const reqs = [...poll, ...burst(() => `${O}/graphql`, 7000, 30), ...burst(() => `${O}/graphql`, 10_500, 30)];
+    expect(buildSpanNetwork(span, reqs, "127.0.0.1", [0], steps).backgroundRequests).toBe(22);
+  });
+});
+
 describe("buildSpanNetwork: polling stops at a navigation", () => {
   const O = "http://127.0.0.1";
   const req = (url: string, start: number, ms = 2): NetReq => ({

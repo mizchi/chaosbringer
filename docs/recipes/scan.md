@@ -46,18 +46,20 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
    the `hang` crawl parks, still holds the load up to the `timeout`. See
    [Settling between steps](./perf.md#settling-between-steps---settle).
    A poll's requests are graded as `never-idle`, not as the steps they
-   land in. `chatty-action` leaves out the requests to an endpoint the
-   page was already polling when the step began (3 or more fetch / XHR /
-   beacon requests to it in the 5 s before; query strings ignored), up to
-   the poll's rate, so a step that fires the polled endpoint faster than
-   the poll keeps the excess as its own. `request-waterfall` and
-   `duplicate-request` leave out the requests to an endpoint the page
-   polls around the step (at least 3 requests to it that each follow the
-   one before as a timer, a retry or a long-poll reconnect does, not as a
-   chain that fetches the next page as soon as the last one answered). A
-   click that starts a poll still counts it, and a click that fires 40
-   requests, or a 6-step chain, on a page that polls is graded as on one
-   that does not.
+   land in. An endpoint (query strings ignored) is polled when, within
+   5 s of the step, at least 3 of its fetch / XHR / beacon / EventSource
+   requests each follow the one before inside one step, as a timer, a
+   retry or a long-poll reconnect does, and not as a chain that fetches
+   the next page as soon as the last one answered. A fetch that each of
+   the crawler's clicks runs again repeats only across steps, so it is
+   not a poll. `chatty-action` leaves out the requests to an endpoint the
+   page was already polling when the step began (3 or more of the poll's
+   requests in the 5 s before), up to the poll's rate, so a step that
+   fires the polled endpoint faster than the poll keeps the excess as its
+   own. `request-waterfall` and `duplicate-request` leave out the
+   requests to an endpoint polled around the step. A click that starts a
+   poll still counts it, and a click that fires 40 requests, or a 6-step
+   chain, on a page that polls is graded as on one that does not.
 
    > **Behaviour change:** on a page that polls, every action used to be a
    > `chatty-action` (medium at a 100 ms poll, high at 50 ms), every load a
@@ -70,7 +72,11 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
    > still a `chatty-action`. CPU, render and frame rules (`span-script`,
    > `span-layout`, `span-blocking`, `dropped-frames`) still count the work
    > a poll's handler does in a capped window. Pages that do not poll are
-   > graded as before.
+   > graded as before, except that 4 or more back-to-back requests to one
+   > fetch endpoint inside one step (same URL, 30 ms or more apart, or
+   > each held 1 s or more) read as a poll: they are not a
+   > `duplicate-request` or waterfall waves, and a later step's requests
+   > to that endpoint, up to the loop's rate, are not its `chatty-action`.
 2. **Endpoint discovery.** Every same-site `fetch` / XHR request the clean
    crawl saw is folded into an endpoint (`/api/items/42` →
    `/api/items/:id`). Third-party requests are left out: whether a

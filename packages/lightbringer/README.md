@@ -73,17 +73,22 @@ Per **span** (one `perf.measure(name, action)` region):
   and holds it until its Network domain is on, so an iframe's requests read
   the same as when it shares the page's process (see [Caveats](#caveats)).
   A page that polls puts a request in every span. To tell a span's own
-  requests from the poll's, an endpoint (origin + path, query dropped) with
-  at least 3 fetch / XHR / beacon / EventSource requests started in the 5 s
-  before the span counts as polling: `backgroundRequests` is how many of
-  the span's requests went to it, at most what its rate before the span
-  accounts for over the span (rate × duration, rounded up, + 1). A span
-  that starts a poll counts none, as nothing polled before it.
+  requests from the poll's, an endpoint (origin + path, query dropped) is
+  polled around a span when, from 5 s before the span to 5 s after it, at
+  least 3 of its fetch / XHR / beacon / EventSource requests each repeat
+  the one before within one span (no span started between them): each
+  started after the one before was over, and either 30 ms or more after
+  it, for the same URL, or after one held open 1 s or more (a long-poll).
+  A timer repeats many times inside a span; a fetch that each step runs
+  again repeats only across steps, so it is not a poll.
+  `backgroundRequests` is how many of the span's requests went to an
+  endpoint polled with at least 3 of its poll's requests in the 5 s before
+  the span, at most what that poll's rate accounts for over the span (rate
+  × duration, rounded up, + 1). A span that starts a poll counts none, as
+  nothing polled before it, and neither does a span after a burst to the
+  same endpoint (a load's 10 GraphQL queries), as a burst is not a poll.
   `foregroundWaves` is `waves` without the requests of endpoints polled
-  around the span: from 5 s before the span to 5 s after it, at least 3 of
-  their requests each started after the one before was over, and either
-  30 ms or more after it, for the same URL, or after one held open 1 s or
-  more (a long-poll). A load that starts a 100 ms poll then reads its real
+  around the span. A load that starts a 100 ms poll then reads its real
   chain depth rather than one wave per poll, while a chain of pages of one
   endpoint, each fetched as the last one answers, keeps its waves. Absent
   when no such request started in the span; the requests to such an

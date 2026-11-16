@@ -12,7 +12,8 @@ import { startTestServer, type TestServer } from "../test-server.test-helpers.js
  * read one waterfall wave per poll. The scan grades a step on what it fired
  * itself, so a polling page gets only `never-idle`, while a click that fires
  * 40 requests and a 6-step chain on the same page are still found, as on a
- * page that does not poll.
+ * page that does not poll. A page with no timer whose every step refetches
+ * the same endpoints is not polling: its findings stay.
  */
 describe("runScan on a page that polls", () => {
   let server: TestServer;
@@ -20,12 +21,24 @@ describe("runScan on a page that polls", () => {
   let outDir: string;
 
   const POLL = `setInterval(() => fetch("/api/tick?" + Math.random()).then((r) => r.text()), 50);`;
+  // A fixed URL: on base, a high duplicate-request on every step.
+  const POLL_FIXED = `setInterval(() => fetch("/api/status").then((r) => r.text()), 50);`;
   const CHAT = `document.getElementById("chat").onclick = () => { for (let i = 0; i < 40; i++) fetch("/api/chat?q=" + i); };`;
   const CHAIN = `(async () => { for (const s of ["a", "b", "c", "d", "e", "f"]) await (await fetch("/api/chain/" + s)).text(); })();`;
   const page = (buttons: string, script: string) =>
     `<!doctype html><title>t</title><body>${buttons}<p id="o">x</p><script>${script}</script></body>`;
   const NOOP = `<button id="noop" onclick="document.getElementById('o').textContent='ok'">noop</button>`;
   const CHAT_BUTTON = `<button id="chat">chat</button>`;
+  // No timer: the load and two refresh buttons each run the chain and fetch
+  // /api/user twice at once (a double-fetch bug), and the load fires 10
+  // queries at the one /graphql endpoint the chat button fires 40 at.
+  const GQL = (n: number) =>
+    `for (let i = 0; i < ${n}; i++) fetch("/graphql", { method: "POST", body: String(i) }).then((r) => r.text());`;
+  const REFETCH = `const refresh = async () => { fetch("/api/user").then((r) => r.text()); fetch("/api/user").then((r) => r.text()); for (const s of ["a", "b", "c", "d", "e", "f"]) await (await fetch("/api/chain/" + s)).text(); };
+refresh(); ${GQL(10)}
+document.getElementById("refresh").onclick = refresh; document.getElementById("again").onclick = refresh;
+document.getElementById("chat").onclick = () => { ${GQL(40)} };`;
+  const REFETCH_BUTTONS = `<button id="refresh">refresh</button><button id="again">again</button>${CHAT_BUTTON}`;
 
   beforeAll(async () => {
     server = await startTestServer((req, res) => {
@@ -37,13 +50,20 @@ describe("runScan on a page that polls", () => {
         }, 40);
         return;
       }
-      if (path.startsWith("/api/")) {
+      if (path === "/api/status" || path === "/api/user") {
+        // A body that is transferred: duplicate-request skips a 0 KB response.
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(`{"v":"${"x".repeat(2000)}"}`);
+        return;
+      }
+      if (path.startsWith("/api/") || path === "/graphql") {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end('{"ok":true}');
         return;
       }
       const html: Record<string, string> = {
-        "/poll": page(NOOP, POLL),
+        "/poll": page(NOOP, POLL_FIXED),
+        "/quiet-refetch": page(REFETCH_BUTTONS, REFETCH),
         "/poll-chatty": page(NOOP + CHAT_BUTTON, POLL + CHAT + CHAIN),
         "/quiet-chatty": page(NOOP + CHAT_BUTTON, CHAT + CHAIN),
       };
@@ -59,11 +79,11 @@ describe("runScan on a page that polls", () => {
     rmSync(outDir, { recursive: true, force: true });
   });
 
-  const scan = async (path: string): Promise<Map<string, ScanFinding>> => {
+  const scan = async (path: string, maxActionsPerPage = 4): Promise<Map<string, ScanFinding>> => {
     const result = await runScan({
       url: `${base}${path}`,
       maxPages: 1,
-      maxActionsPerPage: 4,
+      maxActionsPerPage,
       seed: 3,
       outDir: join(outDir, path.slice(1)),
       coverage: false,
@@ -102,5 +122,20 @@ describe("runScan on a page that polls", () => {
     expect(byRule.get("chatty-action")?.severity).toBe("high");
     expect(byRule.get("chatty-action")?.evidence[0]).toMatch(/: 40 requests, [\d.]+ KB$/);
     expect(byRule.get("request-waterfall")?.evidence[0]).toMatch(/: 7 serial request waves$/);
+  }, 120_000);
+
+  it("keeps the findings of a page whose every step refetches the same endpoints", async () => {
+    const byRule = await scan("/quiet-refetch", 6);
+    expect(byRule.has("never-idle")).toBe(false);
+    // The crawler's clicks, 200 to 450 ms apart, are not a poll's timer.
+    expect(byRule.get("request-waterfall")?.evidence).toContain("/quiet-refetch :: load: 7 serial request waves");
+    const dup = byRule.get("duplicate-request");
+    expect(dup?.where).toContain("/quiet-refetch :: load");
+    expect(dup?.where.length).toBeGreaterThan(1);
+    // The load's 10 queries to /graphql are no poll to subtract from the chat click's 40.
+    const chatty = byRule.get("chatty-action");
+    expect(chatty?.severity).toBe("high");
+    expect(chatty?.where).toContain('/quiet-refetch :: click button:has-text("chat")');
+    for (const line of chatty?.evidence ?? []) expect(line).toMatch(/: 40 requests, [\d.]+ KB$/);
   }, 120_000);
 });
