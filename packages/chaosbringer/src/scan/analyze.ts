@@ -1315,8 +1315,20 @@ const SPAN_RULES: SpanRule[] = [
     thresholds: SCAN_THRESHOLDS.actionRequests,
     warnSeverity: "medium",
     // A click that navigated loaded a page: its requests are that page's.
-    value: (s, ctx) => (isLoad(s) || ctx.navigated(s) ? undefined : s.network.requestCount),
-    line: (s, v) => `${s.key}: ${fmt(v)} requests, ${fmt(s.network.encodedKB)} KB`,
+    // Requests to an endpoint the page was already polling when the step
+    // began are the poll's, not the step's (`backgroundRequests`): on a page
+    // that polls every 100 ms every 2 s step saw ~20 of them. A step that
+    // starts a poll still counts it, as nothing was polling before it.
+    value: (s, ctx) =>
+      isLoad(s) || ctx.navigated(s)
+        ? undefined
+        : s.network.requestCount - (s.network.backgroundRequests ?? 0),
+    line: (s, v) =>
+      `${s.key}: ${fmt(v)} requests, ${fmt(s.network.encodedKB)} KB${
+        s.network.backgroundRequests
+          ? ` (plus ${fmt(s.network.backgroundRequests)} to endpoints already polling before it)`
+          : ""
+      }`,
   },
   {
     rule: "slow-action",
@@ -1335,8 +1347,15 @@ const SPAN_RULES: SpanRule[] = [
     hint: "Requests that are only discovered after an earlier one finishes (script → fetch → fetch, CSS @import, module imports). Each wave adds a round trip; preload, flatten imports, or fetch in parallel.",
     thresholds: SCAN_THRESHOLDS.loadWaves,
     warnSeverity: "low",
-    value: (s) => (isLoad(s) ? s.network.waves : undefined),
-    line: (s, v) => `${s.key}: ${fmt(v)} serial request waves`,
+    // Without a background poll's requests (`foregroundWaves`): each poll
+    // is its own wave, so a load that polls every 100 ms read 50 waves.
+    value: (s) => (isLoad(s) ? (s.network.foregroundWaves ?? s.network.waves) : undefined),
+    line: (s, v) =>
+      `${s.key}: ${fmt(v)} serial request waves${
+        s.network.foregroundWaves != null && s.network.foregroundWaves !== s.network.waves
+          ? ` (${fmt(s.network.waves)} with the requests of endpoints polled around it)`
+          : ""
+      }`,
   },
   {
     rule: "dropped-frames",
@@ -1388,7 +1407,9 @@ function spanFindings(spans: readonly PerfSpanReport[], moved: ReadonlySet<PerfS
       // business), and only responses that were transferred: a second request
       // answered from cache costs nothing.
       if (isOwnApiRequest(q)) {
-        if (q.kb > 0) exact.set(q.url, (exact.get(q.url) ?? 0) + 1);
+        // A poll repeats its URL by design (`polled`): that is
+        // `never-idle`'s finding, not a duplicate fetch.
+        if (q.kb > 0 && !q.polled) exact.set(q.url, (exact.get(q.url) ?? 0) + 1);
         const label = endpointLabel(q.url);
         if (label?.includes(":id")) byEndpoint.set(label, (byEndpoint.get(label) ?? new Set()).add(q.url));
       }

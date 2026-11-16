@@ -643,7 +643,14 @@ export async function startSession(
       // A closed page: every request counts as first-party, as with no host.
     }
     // `finishNetwork` only snapshots the capture; it stops nothing.
-    return buildSpanReport(raw, accumulator, finishNetwork(), firstPartyDomainOf(url));
+    return buildSpanReport(
+      raw,
+      accumulator,
+      finishNetwork(),
+      firstPartyDomainOf(url),
+      undefined,
+      controller.spans.map((s) => s.startEpochMs),
+    );
   };
 
   return { controller, pageErrors, peekSpan, requests: () => finishNetwork(), finish };

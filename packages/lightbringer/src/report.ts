@@ -64,6 +64,8 @@ export function buildSpanReport(
   reqs: NetReq[],
   firstPartyDomain: string,
   renderEvents?: TraceEvent[],
+  /** every recorded span's start (epoch ms): a poll repeats within a step, see `buildSpanNetwork` */
+  stepStarts: readonly number[] = [s.startEpochMs],
 ): SpanReport {
   const render = renderEvents
     ? {
@@ -80,7 +82,7 @@ export function buildSpanReport(
     name: s.name,
     durationMs: round(s.endEpochMs - s.startEpochMs),
     capped: s.capped,
-    network: buildSpanNetwork(s, reqs, firstPartyDomain),
+    network: buildSpanNetwork(s, reqs, firstPartyDomain, entries.documents.map((d) => d.timeOrigin), stepStarts),
     cpu: buildSpanCpu(s, entries.longTasks, entries.loaf),
     render,
     memory: s.memory,
@@ -151,9 +153,11 @@ export function buildReport(
   const vitals = toVitalSamples(last?.vitals ?? {});
 
   const { longTasks, loaf } = entries;
+  const documentStarts = entries.documents.map((d) => d.timeOrigin);
+  const stepStarts = spans.map((s) => s.startEpochMs);
 
   const spanReports: SpanReport[] = spans.map((s) =>
-    buildSpanReport(s, entries, reqs, firstPartyDomain, renderEvents),
+    buildSpanReport(s, entries, reqs, firstPartyDomain, renderEvents, stepStarts),
   );
 
   // app measures -> OTel spans -> network/CPU correlation. Measures were shifted
@@ -167,7 +171,7 @@ export function buildReport(
       };
       return {
         ...s,
-        network: buildSpanNetwork(win, reqs, firstPartyDomain),
+        network: buildSpanNetwork(win, reqs, firstPartyDomain, documentStarts, stepStarts),
         cpu: buildSpanCpu(win, longTasks, loaf),
       };
     },
