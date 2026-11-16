@@ -165,3 +165,114 @@ describe("buildSpanNetwork settledMs", () => {
     expect(net.requests[0]).toMatchObject({ url: "https://example.com/api/hung", durationMs: 8000, failed: true });
   });
 });
+
+// A page that polls an endpoint keeps a request in every step: each span
+// counted the polls as its own requests and, on a load, each poll as its own
+// waterfall wave. `backgroundRequests` / `foregroundWaves` set them apart.
+describe("buildSpanNetwork: background polling", () => {
+  const O = "http://127.0.0.1";
+  const req = (url: string, start: number, ms = 2): NetReq => ({
+    url,
+    type: "Fetch",
+    startMono: 0,
+    startEpochMs: start,
+    endEpochMs: start + ms,
+    encoded: 100,
+  });
+  // One request every `every` ms on [from, to).
+  const poll = (url: (i: number) => string, from: number, to: number, every: number): NetReq[] =>
+    Array.from({ length: Math.ceil((to - from) / every) }, (_, i) => req(url(i), from + i * every));
+
+  it("counts the requests of a poll that ran before the span as background", () => {
+    const reqs = poll(() => `${O}/api/status`, 0, 12_000, 100);
+    const net = buildSpanNetwork({ startEpochMs: 10_000, endEpochMs: 12_000 }, reqs, "127.0.0.1");
+    expect(net.requestCount).toBe(20);
+    expect(net.backgroundRequests).toBe(20);
+    expect(net.requests.every((r) => r.polled)).toBe(true);
+  });
+
+  it("drops a cache-busting query from the endpoint", () => {
+    const reqs = poll((i) => `${O}/api/tick?${i}`, 0, 12_000, 50);
+    const net = buildSpanNetwork({ startEpochMs: 10_000, endEpochMs: 12_000 }, reqs, "127.0.0.1");
+    expect(net.backgroundRequests).toBe(40);
+  });
+
+  it("keeps a step's own burst on top of the poll as its own", () => {
+    const reqs = [
+      ...poll(() => `${O}/api/status`, 0, 12_000, 100),
+      ...Array.from({ length: 40 }, (_, i) => req(`${O}/api/chat?q=${i}`, 10_050 + i)),
+      // A burst to the polled endpoint itself: only the poll's rate is background.
+      ...Array.from({ length: 30 }, () => req(`${O}/api/status`, 10_500)),
+    ];
+    const net = buildSpanNetwork({ startEpochMs: 10_000, endEpochMs: 12_000 }, reqs, "127.0.0.1");
+    expect(net.requestCount).toBe(90);
+    // rate 10/s × 2 s + 1 = 21 of the 50 /api/status requests.
+    expect(net.backgroundRequests).toBe(21);
+  });
+
+  it("does not count a poll the span started, or a slow one", () => {
+    const started = poll(() => `${O}/api/status`, 10_000, 14_000, 50);
+    expect(
+      buildSpanNetwork({ startEpochMs: 10_000, endEpochMs: 12_000 }, started, "127.0.0.1").backgroundRequests,
+    ).toBeUndefined();
+    // Every 2.5 s: two in the 5 s before the span, not a poll that keeps the page busy.
+    const slow = poll(() => `${O}/api/status`, 0, 12_000, 2500);
+    expect(
+      buildSpanNetwork({ startEpochMs: 10_000, endEpochMs: 12_000 }, slow, "127.0.0.1").backgroundRequests,
+    ).toBeUndefined();
+  });
+
+  it("leaves a poll that runs on after the span out of foregroundWaves", () => {
+    const load = { startEpochMs: 0, endEpochMs: 5000 };
+    const chain = ["a", "b", "c", "d", "e", "f"].map((p, i) => req(`${O}/api/chain/${p}`, 20 + i * 50, 45));
+    const reqs = [req(`${O}/`, 0, 15), ...chain, ...poll(() => `${O}/api/status`, 100, 9000, 100)];
+    const net = buildSpanNetwork(load, reqs, "127.0.0.1");
+    expect(net.waves).toBeGreaterThan(40);
+    expect(net.foregroundWaves).toBe(7);
+    // Nothing polled before the load: none of its requests is background.
+    expect(net.backgroundRequests).toBeUndefined();
+    // A click navigated right after the load: the poll in the load is still one.
+    expect(buildSpanNetwork(load, reqs, "127.0.0.1", [0, 5050]).foregroundWaves).toBe(7);
+    // Back-to-back long-polls, each with a new cursor: one wave each, still a poll.
+    const lp = [req(`${O}/`, 0, 15), ...[0, 1, 2, 3].map((i) => req(`${O}/api/lp?c=${i}`, 20 + i * 1201, 1200))];
+    expect(buildSpanNetwork(load, lp, "127.0.0.1", [0]).waves).toBe(5);
+    expect(buildSpanNetwork(load, lp, "127.0.0.1", [0]).foregroundWaves).toBe(1);
+    // A chain of pages of one endpoint, each fetched as the last one answers: all its waves stay.
+    const pages = [1, 2, 3, 4, 5, 6].map((n) => req(`${O}/api/items?page=${n}`, n * 50, 48));
+    const paged = buildSpanNetwork(load, [req(`${O}/`, 0, 15), ...pages], "127.0.0.1");
+    expect(paged.waves).toBe(7);
+    expect(paged.foregroundWaves).toBeUndefined();
+    expect(paged.requests.some((r) => r.polled)).toBe(false);
+    // Scripts of one path queued behind each other are not a poll, gaps or not.
+    const scripts = [1, 2, 3, 4, 5].map((n) => ({ ...req(`${O}/embed/player.js?v=${n}`, n * 100, 40), type: "Script" }));
+    const queued = buildSpanNetwork(load, [req(`${O}/`, 0, 15), ...scripts], "127.0.0.1");
+    expect(queued.waves).toBe(6);
+    expect(queued.foregroundWaves).toBeUndefined();
+  });
+});
+
+describe("buildSpanNetwork: polling stops at a navigation", () => {
+  const O = "http://127.0.0.1";
+  const req = (url: string, start: number, ms = 2): NetReq => ({
+    url, type: "Fetch", startMono: 0, startEpochMs: start, endEpochMs: start + ms, encoded: 100,
+  });
+  it("does not count the next pages' loads as a poll of this load", () => {
+    // Three quick navigations after the load, each running the same chain once.
+    const chain = (t: number) => ["a", "b", "c"].map((p, i) => req(`${O}/api/chain/${p}`, t + 10 + i * 50, 45));
+    const reqs = [0, 400, 800, 1200].flatMap((t) => [req(`${O}/`, t, 5), ...chain(t)]);
+    const load = { startEpochMs: 0, endEpochMs: 300 };
+    expect(buildSpanNetwork(load, reqs, "127.0.0.1").foregroundWaves).toBeDefined();
+    const net = buildSpanNetwork(load, reqs, "127.0.0.1", [1, 401, 801, 1201]);
+    expect(net.waves).toBe(4);
+    expect(net.foregroundWaves).toBeUndefined();
+  });
+  it("does not count the previous page's poll as this document's", () => {
+    const reqs = Array.from({ length: 50 }, (_, i) => req(`${O}/api/status`, i * 100));
+    // A document started at 4000 (a click navigated); the span at 4100 sees one poll before it.
+    const net = buildSpanNetwork({ startEpochMs: 4100, endEpochMs: 4900 }, reqs, "127.0.0.1", [0, 4000]);
+    expect(net.backgroundRequests).toBeUndefined();
+    // A span that loaded the document has no before.
+    expect(buildSpanNetwork({ startEpochMs: 3950, endEpochMs: 4900 }, reqs, "127.0.0.1", [0, 4000]).backgroundRequests).toBeUndefined();
+    expect(buildSpanNetwork({ startEpochMs: 3950, endEpochMs: 4900 }, reqs, "127.0.0.1", [0]).backgroundRequests).toBe(10);
+  });
+});

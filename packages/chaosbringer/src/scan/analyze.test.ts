@@ -411,6 +411,73 @@ describe("analyzeScan: perf", () => {
     expect(r.findings.find((f) => f.rule === "request-waterfall")!.where).toEqual(["/ :: load"]);
   });
 
+  // A page that polls keeps a request in every step: 20 in each 2 s capped
+  // action at a 100 ms poll, and one waterfall wave per poll on its load.
+  // lightbringer marks the poll's requests (`backgroundRequests`,
+  // `foregroundWaves`, `polled`); the step is graded on the rest.
+  it("does not grade a background poll's requests as the step's", () => {
+    const poll = (n: number) =>
+      Array.from({ length: n }, () => fakeRequest(`${U}/api/status`, { durationMs: 2, polled: true }));
+    const load = span("/ :: load", (s) => {
+      s.capped = true;
+      s.network.requestCount = 54;
+      s.network.waves = 54;
+      s.network.foregroundWaves = 1;
+    });
+    const noop = span("/ :: click #noop", (s) => {
+      s.capped = true;
+      s.network.requestCount = 20;
+      s.network.backgroundRequests = 20;
+      s.network.requests = poll(20);
+    });
+    expect(analyzeScan(fakeReport([fakePage(`${U}/`, load)], [fakeAction(noop)])).findings).toEqual([]);
+  });
+
+  it("still grades a chatty action and a load's waterfall on a page that polls", () => {
+    const load = span("/ :: load", (s) => {
+      s.capped = true;
+      s.network.waves = 57;
+      s.network.foregroundWaves = 7;
+    });
+    const chat = span("/ :: click #chat", (s) => {
+      s.capped = true;
+      s.network.requestCount = 61;
+      s.network.backgroundRequests = 21;
+    });
+    const r = analyzeScan(fakeReport([fakePage(`${U}/`, load)], [fakeAction(chat)]));
+    const chatty = r.findings.find((f) => f.rule === "chatty-action")!;
+    expect(chatty.severity).toBe("high");
+    expect(chatty.evidence[0]).toMatch(/^\/ :: click #chat: 40 requests, .* \(plus 21 to endpoints already polling before it\)$/);
+    const waterfall = r.findings.find((f) => f.rule === "request-waterfall")!;
+    expect(waterfall.severity).toBe("high");
+    expect(waterfall.evidence[0]).toBe("/ :: load: 7 serial request waves (57 with the requests of endpoints polled around it)");
+  });
+
+  it("still finds a duplicate the step made itself on a page that polls", () => {
+    const save = span("/ :: click #save", (s) => {
+      s.capped = true;
+      s.network.requestCount = 23;
+      s.network.backgroundRequests = 20;
+      s.network.requests = [
+        ...Array.from({ length: 20 }, () => fakeRequest(`${U}/api/status`, { polled: true })),
+        ...Array.from({ length: 3 }, () => fakeRequest(`${U}/api/save`)),
+      ];
+    });
+    const r = analyzeScan(fakeReport([], [fakeAction(save)]));
+    expect(r.findings.find((f) => f.rule === "duplicate-request")!.evidence).toEqual([`/ :: click #save: ${U}/api/save requested 3×`]);
+    // Its 3 own requests are not a chatty action either.
+    expect(rules(r)).not.toContain("chatty-action");
+  });
+
+  it("grades a step that settled on its own exactly as before", () => {
+    // No poll around them: lightbringer leaves the new fields out.
+    const load = span("/ :: load", (s) => (s.network.waves = 5));
+    const more = span("/ :: click #more", (s) => (s.network.requestCount = 20));
+    const r = analyzeScan(fakeReport([fakePage(`${U}/`, load)], [fakeAction(more)]));
+    expect(r.findings.find((f) => f.rule === "chatty-action")!.evidence).toEqual(["/ :: click #more: 20 requests, 0 KB"]);
+    expect(r.findings.find((f) => f.rule === "request-waterfall")!.evidence).toEqual(["/ :: load: 5 serial request waves"]);
+  });
+
   it("reads layout, style, DOM size, frames and slow requests off spans", () => {
     const s = span("/ :: click #go", (x) => {
       x.render.layoutCount = SCAN_THRESHOLDS.layoutCount.warn;

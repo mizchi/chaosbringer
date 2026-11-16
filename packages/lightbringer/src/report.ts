@@ -80,7 +80,7 @@ export function buildSpanReport(
     name: s.name,
     durationMs: round(s.endEpochMs - s.startEpochMs),
     capped: s.capped,
-    network: buildSpanNetwork(s, reqs, firstPartyDomain),
+    network: buildSpanNetwork(s, reqs, firstPartyDomain, entries.documents.map((d) => d.timeOrigin)),
     cpu: buildSpanCpu(s, entries.longTasks, entries.loaf),
     render,
     memory: s.memory,
@@ -151,6 +151,7 @@ export function buildReport(
   const vitals = toVitalSamples(last?.vitals ?? {});
 
   const { longTasks, loaf } = entries;
+  const documentStarts = entries.documents.map((d) => d.timeOrigin);
 
   const spanReports: SpanReport[] = spans.map((s) =>
     buildSpanReport(s, entries, reqs, firstPartyDomain, renderEvents),
@@ -167,7 +168,7 @@ export function buildReport(
       };
       return {
         ...s,
-        network: buildSpanNetwork(win, reqs, firstPartyDomain),
+        network: buildSpanNetwork(win, reqs, firstPartyDomain, documentStarts),
         cpu: buildSpanCpu(win, longTasks, loaf),
       };
     },

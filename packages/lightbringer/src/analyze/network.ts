@@ -67,6 +67,30 @@ export interface SpanNetwork {
   busyMs: number;
   /** Waterfall waves = approximate depth of serial dependency. 1 = one parallel wave. Over the span's own requests. */
   waves: number;
+  /**
+   * How many of the span's own requests went to an endpoint (origin + path,
+   * query dropped) the page was already polling when the span began: one
+   * with at least 3 fetch / XHR / beacon / EventSource requests started in
+   * the 5 s before the span's start, within its document. At most the share
+   * that endpoint's rate before the span accounts for over the span (rate ×
+   * duration, rounded up, + 1) is counted, so a step that fires an endpoint
+   * far faster than it was being polled keeps the excess as its own. A step
+   * that starts a poll does not count it: nothing was polling before it.
+   * Absent when 0.
+   */
+  backgroundRequests?: number;
+  /**
+   * `waves` without the requests to endpoints polled around the span: ones
+   * with at least 3 requests that each repeat the previous one as a poll
+   * does (each started after the one before was over, and either 30 ms or
+   * more after it, for the same URL, or after one held open 1 s or more),
+   * counted from 5 s before the span to 5 s after it, within its document.
+   * It is the dependency depth of what the span itself fetched, with a
+   * poll's requests (each its own wave) left out; a chain of pages of one
+   * endpoint, each fetched as the last one answers, stays in. Absent when
+   * no such request started in the span (it would equal `waves`).
+   */
+  foregroundWaves?: number;
   /** subset of this span's network attributable to third-party origins */
   thirdParty: ThirdPartyBreakdown;
   /** requests grouped by what issued them (top issuers first); over ALL requests */
@@ -119,6 +143,11 @@ export interface SpanNetwork {
     thirdParty: boolean;
     /** what triggered the request (code / parser), best-effort */
     initiator?: Initiator;
+    /**
+     * true when the request went to an endpoint polled around the span (see
+     * `foregroundWaves`): a poll repeating its URL, not a duplicate fetch
+     */
+    polled?: true;
   }>;
 }
 
@@ -419,10 +448,117 @@ export function buildGlobalNetwork(
   };
 }
 
+/**
+ * The look-around window and request count that make an endpoint a
+ * background poll for a span: this many requests to it started within this
+ * long before the span (or, for `foregroundWaves`, after it). 5 s matches the
+ * crawler's never-idle streak; 3 requests in it is a poll every 2.5 s or
+ * faster, the rate that keeps a page from ever going quiet.
+ */
+const POLL_WINDOW_MS = 5000;
+const POLL_MIN_REQUESTS = 3;
+
+const endpointCache = new WeakMap<NetReq, string>();
+/** origin + path, query and hash dropped: a poll's cache-buster still names one endpoint. */
+function endpointOf(r: NetReq): string {
+  let key = endpointCache.get(r);
+  if (key == null) {
+    key = r.url.split(/[?#]/, 1)[0] ?? r.url;
+    endpointCache.set(r, key);
+  }
+  return key;
+}
+
+/**
+ * A request repeats the endpoint's previous one, the way a poll does, when it
+ * started after that one was over and: at least {@link POLL_GAP_MS} after it
+ * (a timer between them, not a chain that fetches the next page as soon as
+ * the last one answers), or for the same URL (a retry loop, a long-poll that
+ * reconnects at once), or after one held open {@link LONG_POLL_MS} or more (a
+ * long-poll with a new cursor each time).
+ */
+const POLL_GAP_MS = 30;
+const LONG_POLL_MS = 1000;
+/**
+ * What a poll is made of: the requests a script issues (CDP resource types
+ * of fetch, XHR, `sendBeacon` and EventSource). A page's scripts, images or
+ * iframes of one path with different queries (`?v=1`, `?v=2`) queue behind
+ * each other on load and are not one.
+ */
+const POLL_TYPES = new Set(["Fetch", "XHR", "Ping", "EventSource"]);
+
+/**
+ * The span's look-around: per endpoint, requests started in the window
+ * before the span (with the earliest of them), and the endpoints polled
+ * around it — {@link POLL_MIN_REQUESTS} or more requests that each repeat
+ * the previous one (see {@link POLL_GAP_MS}), from the window before the span
+ * to the window after it. The windows stop at a navigation: a poll belongs to
+ * its document, and the requests of the page before a load, or of the next
+ * page a click loaded, are not this one's. A span that loaded a document has
+ * no "before" of its own.
+ */
+function pollingAround(
+  span: EpochWindow,
+  reqs: NetReq[],
+  documentStarts: readonly number[],
+): { before: Map<string, { count: number; first: number }>; polled: Set<string> } {
+  let from = span.startEpochMs - POLL_WINDOW_MS;
+  let to = span.endEpochMs + POLL_WINDOW_MS;
+  for (const t of documentStarts) {
+    if (t <= span.startEpochMs) from = Math.max(from, t);
+    else if (t <= span.endEpochMs) from = span.startEpochMs;
+    else to = Math.min(to, t);
+  }
+  const before = new Map<string, { count: number; first: number }>();
+  const byEndpoint = new Map<string, NetReq[]>();
+  for (const r of reqs) {
+    const t = r.startEpochMs;
+    if (t < from || t >= to || !POLL_TYPES.has(r.type)) continue;
+    const k = endpointOf(r);
+    if (t < span.startEpochMs) {
+      const b = before.get(k);
+      if (b) {
+        b.count += 1;
+        b.first = Math.min(b.first, t);
+      } else before.set(k, { count: 1, first: t });
+    }
+    const list = byEndpoint.get(k);
+    if (list) list.push(r);
+    else byEndpoint.set(k, [r]);
+  }
+  const polled = new Set<string>();
+  for (const [k, list] of byEndpoint) {
+    if (list.length <= POLL_MIN_REQUESTS) continue;
+    list.sort((a, b) => a.startEpochMs - b.startEpochMs);
+    let repeats = 0;
+    for (let i = 1; i < list.length && repeats < POLL_MIN_REQUESTS; i++) {
+      const prev = list[i - 1]!;
+      const r = list[i]!;
+      const prevOver = prev.endEpochMs ?? prev.failedEpochMs;
+      if (prevOver == null || r.startEpochMs < prevOver) continue;
+      if (
+        r.startEpochMs - prevOver >= POLL_GAP_MS ||
+        r.url === prev.url ||
+        prevOver - prev.startEpochMs >= LONG_POLL_MS
+      ) {
+        repeats += 1;
+      }
+    }
+    if (repeats >= POLL_MIN_REQUESTS) polled.add(k);
+  }
+  return { before, polled };
+}
+
 export function buildSpanNetwork(
   span: EpochWindow,
   reqs: NetReq[],
   firstPartyDomain: string,
+  /**
+   * When each document of the page started (epoch ms, its `timeOrigin`): the
+   * look-around windows of `backgroundRequests` / `foregroundWaves` stop at
+   * them. Without them, requests of other documents can count as a poll.
+   */
+  documentStarts: readonly number[] = [],
 ): SpanNetwork {
   const intervals: Array<[number, number]> = [];
   const requests: SpanNetwork["requests"] = [];
@@ -441,6 +577,23 @@ export function buildSpanNetwork(
   // `unsettled` instead of being given an invented end.
   let settledEnd: number | undefined;
   let unsettled = false;
+  const around = pollingAround(span, reqs, documentStarts);
+  // Endpoint → how many of the span's requests to it its rate before the
+  // span accounts for. The rate is over the stretch the window saw (from its
+  // first request), so a poll that began 1 s before the span is not diluted
+  // over the full window.
+  const durationMs = Math.max(0, span.endEpochMs - span.startEpochMs);
+  const backgroundBudget = new Map<string, number>();
+  for (const [k, b] of around.before) {
+    if (b.count < POLL_MIN_REQUESTS) continue;
+    const seenMs = Math.max(1, span.startEpochMs - b.first);
+    backgroundBudget.set(k, Math.ceil((b.count / seenMs) * durationMs) + 1);
+  }
+  // Spent as the span's requests to each endpoint are seen: a step that fires
+  // a burst on top of the poll keeps what exceeds the poll's rate as its own.
+  let backgroundRequests = 0;
+  const foregroundIntervals: Array<[number, number]> = [];
+  let polledOwn = 0;
   for (const r of reqs) {
     // A request with no response yet (still in flight, or failed / aborted:
     // capture only records `loadingFinished`) has no known end; it is a point.
@@ -461,6 +614,15 @@ export function buildSpanNetwork(
     // broke, and a delay fault's cost landed on the clean spans after it.
     if (r.startEpochMs < span.startEpochMs) continue;
     if (interval) ownIntervals.push(interval);
+    const endpoint = endpointOf(r);
+    const polled = around.polled.has(endpoint);
+    if (polled) polledOwn += 1;
+    else if (interval) foregroundIntervals.push(interval);
+    const left = backgroundBudget.get(endpoint) ?? 0;
+    if (left > 0) {
+      backgroundBudget.set(endpoint, left - 1);
+      backgroundRequests += 1;
+    }
     const over = r.endEpochMs ?? r.failedEpochMs;
     if (over == null) unsettled = true;
     else settledEnd = Math.max(settledEnd ?? over, over);
@@ -477,6 +639,7 @@ export function buildSpanNetwork(
       // durationMs 0 here is "no response recorded", not "instant".
       ...(r.endEpochMs == null && r.failedEpochMs == null ? { unfinished: true as const } : {}),
       ...(r.endEpochMs == null && r.failedEpochMs != null ? { failed: true as const } : {}),
+      ...(polled ? { polled: true as const } : {}),
     });
     tpRecords.push({
       url: r.url,
@@ -495,6 +658,8 @@ export function buildSpanNetwork(
     encodedKB: round(encoded / 1024),
     busyMs: round(unionLength(intervals)),
     waves: countWaves(ownIntervals),
+    ...(backgroundRequests > 0 ? { backgroundRequests } : {}),
+    ...(polledOwn > 0 ? { foregroundWaves: countWaves(foregroundIntervals) } : {}),
     thirdParty: buildThirdParty(tpRecords, firstPartyDomain),
     byInitiator: buildInitiators(tpRecords),
     // Over every own request, before the detail list below is capped.

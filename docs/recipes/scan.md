@@ -45,6 +45,32 @@ chaosbringer scan --url https://staging.example.com --max-pages 30 \
    longer, such as a hung one, a long-poll held open over 2.5 s or a request
    the `hang` crawl parks, still holds the load up to the `timeout`. See
    [Settling between steps](./perf.md#settling-between-steps---settle).
+   A poll's requests are graded as `never-idle`, not as the steps they
+   land in. `chatty-action` leaves out the requests to an endpoint the
+   page was already polling when the step began (3 or more fetch / XHR /
+   beacon requests to it in the 5 s before; query strings ignored), up to
+   the poll's rate, so a step that fires the polled endpoint faster than
+   the poll keeps the excess as its own. `request-waterfall` and
+   `duplicate-request` leave out the requests to an endpoint the page
+   polls around the step (at least 3 requests to it that each follow the
+   one before as a timer, a retry or a long-poll reconnect does, not as a
+   chain that fetches the next page as soon as the last one answered). A
+   click that starts a poll still counts it, and a click that fires 40
+   requests, or a 6-step chain, on a page that polls is graded as on one
+   that does not.
+
+   > **Behaviour change:** on a page that polls, every action used to be a
+   > `chatty-action` (medium at a 100 ms poll, high at 50 ms), every load a
+   > high `request-waterfall` (50 to 100 waves, one per poll), and a
+   > fixed-URL poll a high `duplicate-request` on each step. They now go
+   > away (a poll that keeps the page from going quiet is its `never-idle`
+   > finding); a genuinely chatty action or a deep chain on such a page
+   > reads its own count, and the evidence adds how many requests went to
+   > the poll. A click that starts the polling is
+   > still a `chatty-action`. CPU, render and frame rules (`span-script`,
+   > `span-layout`, `span-blocking`, `dropped-frames`) still count the work
+   > a poll's handler does in a capped window. Pages that do not poll are
+   > graded as before.
 2. **Endpoint discovery.** Every same-site `fetch` / XHR request the clean
    crawl saw is folded into an endpoint (`/api/items/42` →
    `/api/items/:id`). Third-party requests are left out: whether a

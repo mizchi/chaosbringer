@@ -222,7 +222,7 @@ Measured by `pnpm scan-check` on 2026-10-01: one scan per variant at the pattern
 | [offscreen-render-cost](src/patterns/offscreen-render-cost.ts) | `span-layout-time` | – | `dom-size`, `dropped-frames`, `span-blocking`, `span-layout-time`, `span-style` |
 | [over-fetching-api](src/patterns/over-fetching-api.ts) | `heavy-resource`, `page-weight` | – | `heavy-resource`, `page-weight`, `uncompressed-text` |
 | [oversized-image](src/patterns/oversized-image.ts) | `heavy-resource`, `oversized-image`, `page-weight` | – | `heavy-resource`, `oversized-image`, `page-weight` |
-| [polling-spam](src/patterns/polling-spam.ts) | `chatty-action`, `never-idle` | – | `chatty-action`, `duplicate-request`, `never-idle`, `span-layout` |
+| [polling-spam](src/patterns/polling-spam.ts) | `chatty-action`, `never-idle` | – | `chatty-action`, `never-idle`, `span-layout` |
 | [print-stylesheet-blocking](src/patterns/print-stylesheet-blocking.ts) | – | – | – |
 | [quadratic-dedupe](src/patterns/quadratic-dedupe.ts) | `span-blocking`, `span-script` | – | `dropped-frames`, `span-blocking`, `span-interaction`, `span-script`, `vital-inp` |
 | [redirect-chain](src/patterns/redirect-chain.ts) | – | – | – |
