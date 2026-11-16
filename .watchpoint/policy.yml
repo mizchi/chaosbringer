@@ -1,0 +1,122 @@
+# watchpoint policy for this repository — https://github.com/mizchi/watchpoint
+#
+# mode: observe — decisions are recorded in the ledger (branch `watchpoint-ledger`)
+# and nothing is posted on PRs. Move to `advise` (risk labels + a verdict comment,
+# still never blocking or merging) once enough decisions have been compared with
+# what reviewers actually did. `enforce` (auto-merge) is a later step.
+#
+# The thresholds are the defaults validated across the watchpoint benchmark repos.
+# This repo has no reverts in its history, so `bench run --sweep` has nothing to
+# tune them against yet; revisit once the ledger has real outcomes.
+version: 1
+
+mode: observe
+
+gate:
+  max_auto_surface: S1
+  max_auto_reversibility: R0
+  max_auto_diff:
+    files: 20
+    changed_lines: 400
+  max_auto_reach:
+    modules: 1000000000
+    hops: 1000000000
+  block_at: high
+  evidence:
+    S1: E1
+    S2: E2
+    S3: E3
+
+# Vetoes evaluated before any axis: a change that can loosen the gate itself
+# never gets through the gate. This file is in here on purpose.
+authority:
+  - ".watchpoint/**"
+  # The pre-rename config dir is still read when .watchpoint/ is missing.
+  - ".ai-review/**"
+  - "**/.env*"
+  - ".github/workflows/**"
+  - ".github/CODEOWNERS"
+  - "**/*.tf"
+  - "Dockerfile"
+
+# Rules can only raise Surface / Reversibility (monotonic escalation).
+# Unclassified files fall to S2 with low confidence; only S0/S1 rules move the
+# auto-merge rate.
+surface_rules:
+  # S0: never executed
+  - paths:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - "**/*.txt"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".editorconfig"
+      - "**/*.{png,jpg,jpeg,gif,ico,webp,avif}"
+      - "**/*.map"
+    surface: S0
+
+  # S1: test assets that change no runtime behaviour by themselves
+  - paths:
+      - "**/*.snap"
+      - "**/__snapshots__/**"
+      - "**/*.svg"
+    surface: S1
+
+  # S2: observable at runtime, not an external contract
+  - paths:
+      - "**/*.{json,json5,jsonc}"
+      - "**/*.{yaml,yml}"
+      - "**/*.toml"
+      - "**/*.{css,scss,sass,less,styl}"
+      - "**/*.{html,htm,ejs,hbs,mustache,pug,jade,njk,liquid}"
+      - "**/*.{vue,svelte,astro}"
+    surface: S2
+
+  # S3: contracts observed outside the repository
+  - paths: ["**/migrations/**", "**/*.sql"]
+    surface: S3
+    reversibility: R2
+  - paths: ["**/*.proto", "**/*.{graphql,gql}", "openapi.{yaml,yml,json}", "**/public/**"]
+    surface: S3
+
+  # S4: build and release infrastructure, which code tests cannot verify
+  - paths:
+      - "package.json"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - "justfile"
+      - "**/tsconfig*.json"
+      - "**/.eslintrc*"
+      - "eslint.config.{js,mjs,cjs,ts}"
+      - "biome.json"
+      - ".github/actions/**"
+      - ".github/dependabot.yml"
+      - "**/*.{sh,bash,zsh}"
+    surface: S4
+
+mechanical:
+  - paths: ["pnpm-lock.yaml"]
+    verify: "pnpm install --frozen-lockfile"
+
+# Evidence comes from check runs recorded by GitHub, never from anything the PR
+# writes. Verified against the check runs of #211 (14 runs, all github-actions):
+#   build  <- build-and-test (node 22, node 24)
+#   tests  <- build-and-test (both legs), example-tests (7 matrix jobs)
+# A pattern that matches nothing does not error; the signal just becomes unknown
+# and every code change falls to HUMAN, so re-check with `signals inspect` when
+# CI job names change.
+signals:
+  build: ["build", "typecheck", "tsc", "compile", "lint"]
+  tests: ["test", "spec", "unit", "e2e", "ci"]
+  trusted_apps: ["github-actions"]
+
+escalation:
+  target_human_rate: 0.35
+  max_auto_rate: 0.60
+
+override:
+  allowed_by: ["CODEOWNERS"]
+  require_reason: true
